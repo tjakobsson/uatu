@@ -1313,7 +1313,11 @@ paths:
         Uatu sessions first, if it is running — there is no `stop: false`
         variant, and activity Uatu does not own is never claimed to have
         been stopped. A main workspace with registered linked worktrees is
-        refused; remove those first.
+        refused; remove those first. A workspace id registered to this
+        repository is resolved without reading the repository, so a
+        registration whose files were deleted outside Uatu can still be
+        removed; a branch name, a checkout id, or another repository's
+        workspace id is resolved against the inventory.
       requestBody:
         required: true
         content:
@@ -1638,7 +1642,7 @@ components:
         detached: { type: boolean, const: true, description: "Present when the checkout's HEAD is detached." }
         sourceRef: { type: string, minLength: 1, description: "Linked worktrees only. The recorded ref the branch was created from, when Uatu created it. Never inferred from upstream or history; absent means origin unknown." }
         ownership: { type: string, enum: [uatu, external, uncertain], description: "Linked worktrees only. `uatu` for a checkout with verified Uatu creation provenance, which alone can be deleted through Uatu." }
-        availability: { type: string, enum: [missing, replaced], description: "Linked worktrees only, present when the registered checkout is not at its path (`missing`) or the path holds a different checkout (`replaced`). Such a workspace cannot start until resolved outside Uatu." }
+        availability: { type: string, enum: [missing, replaced], description: "Present when the registered folder is gone (`missing`), for any workspace, or, for a linked worktree, when its path holds a different checkout (`replaced`). A main workspace whose folder is gone no longer reports `createWorktree` or a branch. Such a workspace cannot start until resolved outside Uatu; it can still be removed from Uatu." }
         createWorktree: { type: boolean, const: true, description: "Present and true for a main checkout that can host linked worktrees. Construct the fork's create request against worktreeApi (mode: new-branch or existing-local/remote-tracking) with sourceWorkspaceId set to this workspace's id; no URL is published here." }
       additionalProperties: false
     WorkspaceCredentialAssignmentSummary:

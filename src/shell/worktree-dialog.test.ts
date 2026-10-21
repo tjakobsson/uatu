@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { dashboardPage } from "../hub/pages";
 
-import { bindWorktreeBranches, openWorktreeDialog, openWorktreeFork, worktreeProvenanceLabel, worktreeRowFrom, type WorktreeDialogOptions } from "./worktree-dialog";
+import { bindWorktreeBranches, openWorktreeDialog, openWorktreeFork, worktreeDialogStyle, worktreeProvenanceLabel, worktreeRowFrom, type WorktreeDialogOptions } from "./worktree-dialog";
 
 const API = "/api/hub/worktrees";
 
@@ -1148,7 +1148,12 @@ describe("registration and forgetting", () => {
     expect(h.text()).toContain("Remove from Uatu");
     expect(h.text()).toContain("Checkout, branch, files and creation provenance remain.");
     expect([...h.main().querySelectorAll("button")].map(node => (node.textContent ?? "").trim()))
-      .toEqual(["Remove from Uatu", "Keep registration"]);
+      .toEqual(["Keep registration", "Remove from Uatu"]);
+    // The confirming action is styled as the destructive one, like Delete.
+    expect(h.button("Remove from Uatu")!.classList.contains("danger")).toBe(true);
+    expect(h.button("Keep registration")!.classList.contains("danger")).toBe(false);
+    // The dashboard's own danger style: red text as well as a red border.
+    expect(worktreeDialogStyle()).toContain(".wt-content .danger{border-color:var(--danger);color:var(--danger)}");
     h.submit();
     await settle();
     expect(h.requests.some(request => request.path === "/forget")).toBe(false);
@@ -1356,6 +1361,187 @@ describe("W5 a failed inventory read disables destructive compact views instead 
       .toBe("Request failed. Nothing was retried automatically.");
     expect([...h.main().querySelectorAll("button")].map(node => (node.textContent ?? "").trim())).toEqual(["Cancel"]);
     expect(h.main().querySelector("form")).toBeNull();
+  });
+});
+
+// Issue #504: a repository deleted outside Uatu answers its inventory with
+// an error and no rows. Removing a registration touches no files, so the
+// forget view must still let the user finish it, named by the row they
+// clicked, rather than dead-ending in "could not be found".
+describe("#504 Remove from Uatu when the repository can no longer be read", () => {
+  const reason = "This workspace's folder no longer exists, so Uatu cannot read it.";
+  const unreadable = () => inventory([], { local: [], remote: [] }, {
+    repositoryId: "unknown",
+    status: "error",
+    error: { code: "not-found", message: reason, retry: "none" },
+  });
+  const forgotten = () => ({ ok: true, operationId: "op", kind: "forget", phase: "complete", registered: false, started: false });
+  const occurrences = (text: string, needle: string) => text.split(needle).length - 1;
+
+  test("a worktree is removed from Uatu by the id and name its row showed", async () => {
+    const h = harness({ "/": unreadable, "/forget": forgotten });
+    await open(h, { view: "forget", id: "atlas-child", label: "feature/a" });
+    expect(h.text()).toContain("Atlas / feature/a");
+    expect(h.text()).toContain("folder no longer exists");
+    expect(h.text()).toContain("No files are changed.");
+    expect(h.text()).not.toContain("files and creation provenance remain");
+    h.main().querySelector<HTMLInputElement>("[name=confirm]")!.checked = true;
+    h.submit();
+    await settle();
+    expect(h.requests.find(request => request.path === "/forget")!.body)
+      .toEqual({ sourceWorkspaceId: "atlas", reference: "atlas-child" });
+    expect(h.document.querySelector("[data-worktree-confirmation]")!.textContent)
+      .toContain("Removed from Uatu. No files were changed.");
+  });
+
+  // Demo 04b/05a: the inventory's error used to sit in a red box ABOVE the
+  // title, and the body then said the same thing again.
+  test("the unreadable repository is one message in the body, after the title, with no error box", async () => {
+    const h = harness({ "/": unreadable, "/forget": forgotten });
+    await open(h, { view: "forget", id: "atlas", label: "Atlas" });
+    const content = h.main().querySelector(".wt-content")!;
+    const visible = [...content.children].filter(node => !node.hasAttribute("hidden") && node.tagName !== "STYLE");
+    expect(visible[0]!.matches("section")).toBe(true);
+    expect(visible[0]!.firstElementChild!.matches("h2")).toBe(true);
+    expect(h.main().querySelector(".wt-notice:not([hidden])")).toBeNull();
+    expect(h.main().querySelector("[role=alert]")).toBeNull();
+    expect(occurrences(h.text(), "folder no longer exists")).toBe(1);
+    expect(occurrences(h.text(), "no files") + occurrences(h.text(), "No files")).toBe(1);
+    expect(h.main().querySelector("form p")!.textContent).toContain(reason);
+  });
+
+  test("the repository itself is named by its own title, and a server refusal stays in the form", async () => {
+    const h = harness({
+      "/": unreadable,
+      "/forget": () => ({ ok: false, operationId: "op", kind: "forget", error: { code: "conflict", message: "Remove this repository's worktrees from Uatu first; they inherit its settings.", retry: "none" } }),
+    });
+    // The opener knew of no worktrees, so only the Hub's own guard can refuse.
+    await open(h, { view: "forget", id: "atlas", dependents: 0 });
+    expect(h.main().querySelector("p strong")!.textContent).toBe("Atlas");
+    h.main().querySelector<HTMLInputElement>("[name=confirm]")!.checked = true;
+    h.submit();
+    await settle();
+    expect(h.main().querySelector("[role=alert]")!.textContent).toContain("worktrees from Uatu first");
+    expect(h.button("Remove from Uatu")).toBeTruthy();
+    // The refusal is part of the form, below the title.
+    expect(h.main().querySelector("section [role=alert]")).toBeTruthy();
+  });
+
+  test("a readable inventory without the row still refuses rather than guessing", async () => {
+    const h = harness({ "/": () => inventory([mainCheckout()]) });
+    await open(h, { view: "forget", id: "atlas-child", label: "feature/a" });
+    expect([...h.main().querySelectorAll("button")].map(node => (node.textContent ?? "").trim())).toEqual(["Cancel"]);
+    expect(h.main().querySelector("form")).toBeNull();
+  });
+
+  test("a stand-in the opener reports missing says its folder was already gone", async () => {
+    const h = harness({ "/": unreadable, "/forget": forgotten });
+    await open(h, { view: "forget", id: "atlas-child", label: "feature/a", availability: "missing" });
+    h.main().querySelector<HTMLInputElement>("[name=confirm]")!.checked = true;
+    h.submit();
+    await settle();
+    expect(h.document.querySelector("[data-worktree-confirmation]")!.textContent)
+      .toContain("Removed from Uatu. Its folder was already gone; nothing on disk was changed.");
+  });
+
+  // PR #515 review: the Hub cannot tell a deleted repository from a deleted
+  // docs folder, so the dialog names the stand-in by the opener's own
+  // classification — the dashboard row's "Missing folder" / "Missing
+  // checkout" — and never calls an ordinary workspace a repository.
+  test("a missing plain folder is named a folder, never a repository", async () => {
+    const h = harness({ "/": unreadable, "/forget": forgotten });
+    await open(h, { view: "forget", id: "atlas", label: "Atlas", availability: "missing", dependents: 0, checkout: false });
+    const body = h.main().querySelector("form p")!.textContent!;
+    expect(body).toBe("This workspace's folder is already gone. Stop this workspace and remove Hub registration, assignments and personal state. Uatu changes nothing on disk.");
+    expect(h.text()).not.toContain("repository");
+    expect(h.text()).not.toContain("checkout's");
+  });
+
+  test("a missing checkout is named a checkout, and its running workspace is stopped by the removal", async () => {
+    for (const [id, extra] of [["atlas", { dependents: 0 }], ["atlas-child", { label: "feature/a" }]] as const) {
+      const h = harness({ "/": unreadable, "/forget": forgotten });
+      await open(h, { view: "forget", id, availability: "missing", checkout: true, ...extra });
+      expect(h.main().querySelector("form p")!.textContent)
+        .toBe("This checkout's folder is already gone. Stop this workspace and remove Hub registration, assignments and personal state. Uatu changes nothing on disk.");
+      expect(h.main().querySelector("label.check")!.textContent).toBe("Stop Uatu activity and remove only the Hub registration.");
+      expect(h.text()).not.toContain("folder no longer exists");
+      for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
+      savedGlobals.clear();
+    }
+  });
+});
+
+// Demo 04c: removing a repository whose worktrees are still registered could
+// be ticked and confirmed, only to be refused. The dialog knows the worktrees
+// exist, so it says so up front and offers no confirmation that would fail.
+// The Hub's own guard is unchanged (worktree-api.integration.test.ts).
+describe("#504 a repository with registered worktrees explains that they go first", () => {
+  const unreadable = () => inventory([], { local: [], remote: [] }, {
+    repositoryId: "unknown",
+    status: "error",
+    error: { code: "not-found", message: "This workspace's folder no longer exists, so Uatu cannot read it.", retry: "none" },
+  });
+
+  test("an unreadable repository uses the worktrees its opener's rows showed", async () => {
+    const h = harness({ "/": unreadable });
+    await open(h, { view: "forget", id: "atlas", dependents: 2 });
+    expect(h.heading().textContent).toBe("Remove from Uatu");
+    expect(h.main().querySelector("[role=alert]")!.textContent)
+      .toBe("This repository still has 2 worktrees registered in Uatu. Remove them from Uatu first; they inherit this repository's settings.");
+    expect(h.main().querySelector("form")).toBeNull();
+    expect(h.main().querySelector("input[type=checkbox]")).toBeNull();
+    expect([...h.main().querySelectorAll("button")].map(node => (node.textContent ?? "").trim())).toEqual(["Cancel"]);
+    expect(h.requests.some(request => request.path === "/forget")).toBe(false);
+  });
+
+  test("a readable repository counts its own registered worktrees", async () => {
+    const h = harness({ "/": () => inventory([mainCheckout(), checkout(), checkout({ checkoutId: "x", workspaceId: undefined, registered: false, branch: "loose" })]) });
+    await open(h, { view: "forget", id: "atlas" });
+    expect(h.main().querySelector("[role=alert]")!.textContent)
+      .toBe("This repository still has 1 worktree registered in Uatu. Remove it from Uatu first; it inherits this repository's settings.");
+    expect(h.main().querySelector("form")).toBeNull();
+  });
+
+  // A linked checkout registered on its own through Add workspace has no
+  // parent: it inherits nothing, and the Hub's guard does not wait for it.
+  test("a linked checkout registered on its own is not counted as a dependent", async () => {
+    const independent = checkout({ checkoutId: "checkout-own", workspaceId: "own-checkout", parentWorkspaceId: undefined, branch: "own", ownership: "external" });
+    const h = harness({ "/": () => inventory([mainCheckout(), independent]) });
+    await open(h, { view: "forget", id: "atlas" });
+    expect(h.main().querySelector("[role=alert]")).toBeNull();
+    expect(h.main().querySelector("[name=confirm]")).toBeTruthy();
+  });
+
+  test("a worktree, or a repository with none left, still offers the confirmation", async () => {
+    for (const [id, checkouts] of [["atlas-child", [mainCheckout(), checkout()]], ["atlas", [mainCheckout()]]] as const) {
+      const h = harness({ "/": () => inventory([...checkouts]) });
+      await open(h, { view: "forget", id, dependents: 3 });
+      expect(h.main().querySelector("[name=confirm]")).toBeTruthy();
+      for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
+      savedGlobals.clear();
+    }
+  });
+});
+
+// Demo 03a/03b: a worktree whose folder was deleted, in a repository that is
+// still intact, was promised "Checkout, branch, files … remain" and then told
+// they "were kept". The checkout is already gone; say so.
+describe("#504 Remove from Uatu for a missing checkout in a readable repository", () => {
+  test("the dialog and the confirmation say the folder is already gone and nothing on disk changes", async () => {
+    const h = harness({
+      "/": () => inventory([mainCheckout(), checkout({ availability: "missing" })]),
+      "/forget": () => ({ ok: true, operationId: "op", kind: "forget", phase: "complete", registered: false, started: false }),
+    });
+    await open(h, { view: "forget", id: "atlas-child" });
+    expect(h.text()).toContain("This checkout's folder is already gone.");
+    expect(h.text()).toContain("Uatu changes nothing on disk.");
+    expect(h.text()).not.toContain("Checkout, branch, files and creation provenance remain.");
+    h.main().querySelector<HTMLInputElement>("[name=confirm]")!.checked = true;
+    h.submit();
+    await settle();
+    const confirmation = h.document.querySelector("[data-worktree-confirmation]")!.textContent!;
+    expect(confirmation).toContain("Removed from Uatu. Its folder was already gone; nothing on disk was changed.");
+    expect(confirmation).not.toContain("were kept");
   });
 });
 

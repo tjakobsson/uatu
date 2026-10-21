@@ -43,6 +43,9 @@ export type WorktreeDialogRow = {
   availability?: "missing" | "replaced";
   checkout: string;
   workspaceId?: string;
+  /** The main workspace this registration inherits from. Absent for a main
+   *  checkout and for a linked checkout registered on its own. */
+  parentWorkspaceId?: string;
   main: boolean;
   /** Recorded branch-creation history, when the Hub has any. Never inferred. */
   sourceRef?: string;
@@ -70,6 +73,21 @@ export type WorktreeDialogOptions = {
   mode?: "new" | "existing";
   /** The checkout a non-inventory view acts on. */
   id?: string;
+  /** What the opener's own row calls `id`. Names the workspace in a forget
+   *  whose repository can no longer be read (#504), so has no row for it. */
+  label?: string;
+  /** What the opener's own row knows about `id`'s folder, for a forget whose
+   *  repository can no longer be read and so has no row to say it. */
+  availability?: "missing" | "replaced";
+  /** Forget of a main workspace: how many linked worktrees the opener lists
+   *  under it. Used only when the repository can no longer be read; a
+   *  readable inventory counts its own registered rows. */
+  dependents?: number;
+  /** Whether the opener's row is a Git checkout, by workspaceIsCheckout.
+   *  Names a missing stand-in "checkout" or plain workspace folder, as the
+   *  row itself says "Missing checkout" or "Missing folder": with the
+   *  folder gone the Hub cannot tell which it was. */
+  checkout?: boolean;
   message?: string;
   error?: boolean;
 };
@@ -93,6 +111,16 @@ export type WorktreeDialogModel = {
    *  acknowledge with the required checkbox. Absent for a clean tree. */
   localData?: WorktreeLocalData;
   blocked?: boolean;
+  /** Forget: why the repository could not be read (its files may have been
+   *  deleted outside Uatu), so `selected` stands in from the opener's row.
+   *  Removing a registration needs no Git and touches no files. */
+  unreadable?: string;
+  /** Forget of a main workspace: its linked worktrees still registered in
+   *  Uatu, which must be removed first. The Hub refuses otherwise. */
+  dependents?: number;
+  /** Forget of a stand-in whose folder is missing: whether the opener's row
+   *  is a checkout, so it is named the way the row names it. */
+  checkout?: boolean;
 };
 
 /** Defines every runtime helper the dialog needs, nested inside this one
@@ -159,7 +187,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
 .wt-toolbar,.wt-actions{display:flex;flex-wrap:wrap;gap:.65rem;align-items:center;margin:.9rem 0}.wt-card{padding:1rem;border:1px solid var(--border-soft);border-radius:8px;margin:8px 0}.wt-card h3{margin:0;font-size:1rem;overflow-wrap:anywhere}.wt-card-top{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}.wt-path{font: .8rem var(--mono-font-family);overflow-wrap:anywhere}
 .wt-card-path{font: .8rem var(--mono-font-family);color:var(--text-subtle);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .wt-form p{overflow-wrap:anywhere}
-.wt-button,.wt-content button{display:inline-flex;align-items:center;min-height:40px;border:1px solid var(--border-medium);border-radius:6px;padding:.45rem .7rem;background:transparent;color:inherit;text-decoration:none;font:inherit}.wt-button.primary,.wt-content button.primary{background:var(--accent);color:white}.wt-content button:disabled{opacity:.5;cursor:wait}.wt-content .danger{border-color:var(--danger)}
+.wt-button,.wt-content button{display:inline-flex;align-items:center;min-height:40px;border:1px solid var(--border-medium);border-radius:6px;padding:.45rem .7rem;background:transparent;color:inherit;text-decoration:none;font:inherit}.wt-button.primary,.wt-content button.primary{background:var(--accent);color:white}.wt-content button:disabled{opacity:.5;cursor:wait}.wt-content .danger{border-color:var(--danger);color:var(--danger)}
 .wt-notice{padding:1rem;border:1px solid var(--accent);border-radius:8px;margin:1rem 0;overflow-wrap:anywhere}.wt-notice.error{border-color:var(--danger)}.wt-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}.wt-form{display:grid;gap:1rem}.wt-form label{display:grid;gap:.35rem;font-weight:600;font-size:.9rem}.wt-form label.check{display:flex;align-items:start;font-weight:400}.wt-form input:not([type=checkbox]),.wt-form select{width:100%;min-width:0;background:var(--surface,#fff);color:inherit;border:1px solid var(--border-medium);border-radius:5px;padding:.55rem}.wt-form fieldset{border:1px solid var(--border-soft);border-radius:6px;min-width:0}.wt-form legend{font-weight:600}.wt-summary{display:grid;grid-template-columns:8rem 1fr;gap:.55rem}.wt-summary dd{margin:0;overflow-wrap:anywhere}.wt-summary dt{color:var(--text-subtle)}.wt-content :focus-visible{outline:2px solid var(--accent);outline-offset:3px}.wt-content [hidden]{display:none!important}
 @media(max-width:600px){.wt-grid{grid-template-columns:1fr}.wt-content button,.wt-button{min-height:44px}.wt-summary{grid-template-columns:1fr;gap:.2rem}.wt-summary dd{margin-bottom:.7rem}}
 </style>`;
@@ -187,11 +215,27 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     return row.sourceRef ? `from ${row.sourceRef}` : "origin unknown";
   }
 
+  /** Whether a registration is a Git checkout, as far as Hub state says
+   *  without running Git: a linked worktree, a main checkout that can host
+   *  worktrees, or a main workspace with worktrees still registered under it.
+   *  Anything else — a folder deleted outside Uatu included, whose `.git` went
+   *  with it (#504) — is a folder, never claimed to be a checkout. The one
+   *  rule for that wording on the dashboard's rows (pages.ts) and in the
+   *  picker (hub-nav.ts). */
+  function workspaceIsCheckout(
+    workspace: { id: string; parentId?: string; createWorktree?: boolean },
+    workspaces: readonly { parentId?: string }[],
+  ): boolean {
+    return Boolean(workspace.parentId) || workspace.createWorktree === true
+      || workspaces.some(candidate => candidate.parentId === workspace.id);
+  }
+
   /** Maps one inventory checkout onto the dialog's row. `sourceName` titles
    *  the repository's own main checkout; a child IS its branch. */
   function worktreeRowFrom(checkout: Record<string, unknown>, sourceName: string): WorktreeDialogRow {
     const branch = typeof checkout.branch === "string" ? checkout.branch : "";
     const workspaceId = typeof checkout.workspaceId === "string" ? checkout.workspaceId : undefined;
+    const parentWorkspaceId = typeof checkout.parentWorkspaceId === "string" ? checkout.parentWorkspaceId : undefined;
     const checkoutId = String(checkout.checkoutId ?? "");
     const main = checkout.main === true;
     return {
@@ -209,6 +253,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
         : {}),
       checkout: checkoutId,
       ...(workspaceId === undefined ? {} : { workspaceId }),
+      ...(parentWorkspaceId === undefined ? {} : { parentWorkspaceId }),
       main,
       ...(typeof checkout.sourceRef === "string" && checkout.sourceRef !== ""
         ? { sourceRef: checkout.sourceRef }
@@ -244,7 +289,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
       ? ""
       : `<div class="wt-notice${m.error ? " error" : ""}" role="${m.error ? "alert" : "status"}" tabindex="-1">${h(m.message)}${conflict ? `<div class="wt-actions">${worktreeRowPrimary(conflict)}</div>` : ""}</div>`;
     const identity = m.selected
-      ? `<p style="overflow-wrap:anywhere"><strong>${h(m.source.name)} / ${h(m.selected.branch)}</strong></p>`
+      ? `<p style="overflow-wrap:anywhere"><strong>${h(m.source.name)}${m.selected.branch ? ` / ${h(m.selected.branch)}` : ""}</strong></p>`
       : "";
     const cancel = '<button type="button" data-cancel>Cancel</button>';
     // Until the first authoritative answer lands, a view shows its own title
@@ -353,9 +398,33 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
         + `<form class="wt-form" data-operation="register" data-pending="Verifying the same checkout → registering workspace…"><p>Register as ${h(m.selected?.branch ?? "")} at its existing path. Registration does not move files, transfer cleanup ownership or copy conversations.</p><label class="check"><input type="checkbox" name="start">Start after registration</label><div class="wt-actions">${cancel}<button class="primary">${retry ? "Retry registration" : "Register workspace"}</button></div></form>`)
         + `</section>`;
     } else if (m.view === "forget") {
+      // One statement of what is true on disk, in the body: an unreadable
+      // repository says why (the Hub's own reason, never repeated in a
+      // notice above the title), and a checkout whose folder is already gone
+      // is not promised that its files "remain".
+      // A stand-in its opener reports missing is named as its row names it
+      // ("Missing checkout" / "Missing folder"): the Hub's reason cannot say
+      // whether a folder that is gone held a repository. A listed row is a
+      // checkout by definition. Removal stops a running workspace first.
+      const removal = "Stop this workspace and remove Hub registration, assignments and personal state.";
+      const gone = m.selected?.availability === "missing"
+        ? `This ${m.unreadable !== undefined && m.checkout !== true ? "workspace" : "checkout"}'s folder is already gone.`
+        : undefined;
+      const consequence = gone !== undefined
+        ? `${gone} ${removal} <strong>Uatu changes nothing on disk.</strong>`
+        : m.unreadable !== undefined
+          ? `${h(m.unreadable)} ${removal} <strong>No files are changed.</strong>`
+          : `${removal} <strong>Checkout, branch, files and creation provenance remain.</strong>`;
+      const dependents = m.dependents ?? 0;
+      // The Hub refuses to remove a main workspace while worktrees inherit
+      // its settings; say so before offering a confirmation it would refuse.
+      const blocker = dependents === 1
+        ? "This repository still has 1 worktree registered in Uatu. Remove it from Uatu first; it inherits this repository's settings."
+        : `This repository still has ${dependents} worktrees registered in Uatu. Remove them from Uatu first; they inherit this repository's settings.`;
       body = `<section data-compact><h2 class="wt-heading" tabindex="-1">Remove from Uatu</h2>${identity}`
         + (m.loading ? pendingWith("Loading checkout…") : !m.selected ? notFound("That workspace could not be found. Close and try again.")
-          : `<form class="wt-form" data-operation="forget" data-pending="Stopping workspace → removing Hub registration only…"><p>Stop this workspace and remove Hub registration, assignments and personal state. <strong>Checkout, branch, files and creation provenance remain.</strong></p><label class="check"><input type="checkbox" name="confirm" required>Stop Uatu activity and remove only the Hub registration.</label><div class="wt-actions"><button>Remove from Uatu</button><button type="button" data-cancel>Keep registration</button></div></form>`)
+          : dependents > 0 ? `<p role="alert" tabindex="-1">${h(blocker)}</p><div class="wt-actions" style="justify-content:flex-end">${cancel}</div>`
+          : `<form class="wt-form" data-operation="forget" data-pending="Stopping workspace → removing Hub registration only…"><p>${consequence}</p><label class="check"><input type="checkbox" name="confirm" required>Stop Uatu activity and remove only the Hub registration.</label>${notice}<div class="wt-actions" style="justify-content:flex-end"><button type="button" data-cancel>Keep registration</button><button class="danger">Remove from Uatu</button></div></form>`)
         + `</section>`;
     } else {
       body = `<section data-compact><h2 class="wt-heading" tabindex="-1">Open worktree</h2>${identity}`
@@ -366,7 +435,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     // user asked for, and each one ends in Cancel or its own committed
     // operation. No view links "Back to worktrees" — there is no general
     // inventory to go back to.
-    return `${worktreeDialogStyle()}<div class="wt-content"><div id="operation-status" class="wt-notice" role="status" tabindex="-1" hidden></div>${m.view === "delete" ? "" : notice}${body}</div>`;
+    return `${worktreeDialogStyle()}<div class="wt-content"><div id="operation-status" class="wt-notice" role="status" tabindex="-1" hidden></div>${m.view === "delete" || m.view === "forget" ? "" : notice}${body}</div>`;
   }
 
   function updateWorktreeCreate(root: ParentNode): void {
@@ -644,6 +713,9 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     let requiresStop = false;
     let localData: WorktreeLocalData | undefined;
     let blocked = false;
+    // The last inventory answer was an error (not a transport failure): the
+    // repository itself could not be read, for this reason.
+    let unreadable: string | undefined;
 
     dialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); });
     const controller = new AbortController();
@@ -658,7 +730,37 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     function model(): WorktreeDialogModel {
       const rows = checkouts.map(checkout => worktreeRowFrom(checkout, source.name));
       const mainRow = rows.find(row => row.main) ?? rows.find(row => row.id === source.id);
-      const selected = selectedId === undefined ? undefined : rows.find(row => row.id === selectedId);
+      const listed = selectedId === undefined ? undefined : rows.find(row => row.id === selectedId);
+      // A forget is the one view that needs no Git: when the repository
+      // cannot be read at all (#504), the opener's own row stands in, and the
+      // Hub still checks the id against its registry before removing it.
+      const standInId = listed === undefined && view === "forget" && unreadable !== undefined ? selectedId : undefined;
+      const standIn = standInId !== undefined;
+      const isMain = standInId === source.id;
+      const selected: WorktreeDialogRow | undefined = standInId === undefined ? listed : {
+        id: standInId,
+        name: isMain ? source.name : options.label ?? standInId,
+        path: "",
+        branch: isMain ? "" : options.label ?? "",
+        ownership: isMain ? "main" : "uncertain",
+        registered: true,
+        running: false,
+        checkout: "",
+        ...(isMain ? {} : { workspaceId: standInId }),
+        ...(options.availability === undefined ? {} : { availability: options.availability }),
+        main: isMain,
+      };
+      // Forget of a main workspace: the worktrees still registered under it,
+      // by the Hub's own rule (assertNoRegisteredWorktreeDependents): a
+      // registration whose parent is this workspace. A linked checkout
+      // registered on its own through Add workspace inherits nothing and does
+      // not count. A readable inventory lists them itself; an unreadable one
+      // has no rows, so the opener's own count stands in.
+      const dependents = view !== "forget" || !selected?.main ? 0
+        : standIn ? options.dependents ?? 0
+          : rows.filter(row => row.registered && row.parentWorkspaceId === selected.id).length;
+      // The stand-in's body states the inventory's reason itself.
+      const shown = standIn && message === unreadable ? undefined : message;
       return {
         view,
         source: { ...source, path: mainRow?.path ?? "" },
@@ -667,14 +769,17 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
         ...(selected === undefined ? {} : { selected }),
         ...(mode === undefined ? {} : { mode }),
         ...(draft === undefined ? {} : { draft }),
-        ...(message === undefined ? {} : { message }),
-        error,
+        ...(shown === undefined ? {} : { message: shown }),
+        error: shown === undefined ? false : error,
         ...(conflictId === undefined ? {} : { conflictId }),
         loading,
         empty: rows.every(row => row.main),
         requiresStop,
         ...(localData === undefined ? {} : { localData }),
         blocked,
+        ...(standIn ? { unreadable } : {}),
+        ...(standIn && options.checkout !== undefined ? { checkout: options.checkout } : {}),
+        ...(dependents > 0 ? { dependents } : {}),
       };
     }
 
@@ -730,13 +835,16 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
           local: [...listed.local],
           remote: [...listed.remote],
         };
+        unreadable = undefined;
         if (inventory.status === "error") {
           message = inventory.error?.message ?? "Worktree inventory unavailable. Close and retry.";
+          unreadable = message;
           error = true;
         }
         return true;
       } catch (failure) {
         if (controller.signal.aborted || current !== revision) return false;
+        unreadable = undefined;
         message = failure instanceof Error ? failure.message : String(failure);
         error = true;
         return false;
@@ -1075,11 +1183,17 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
         render();
         return;
       }
+      // Said as it was shown: a folder already gone was not "kept".
+      const outcomeText = row.availability === "missing"
+        ? "Removed from Uatu. Its folder was already gone; nothing on disk was changed."
+        : model().unreadable !== undefined
+          ? "Removed from Uatu. No files were changed."
+          : "Removed from Uatu. Checkout, branch and files were kept.";
       const status = startBusy(form.dataset.pending ?? "Working…");
       try {
         const outcome = await request(`${api}/forget`, value => parsers.parseWorktreeEndpointResult(value, "forget"), { reference: row.id });
         if (outcome.ok === true) {
-          committed("Removed from Uatu. Checkout, branch and files were kept.", undefined, row.id);
+          committed(outcomeText, undefined, row.id);
           return;
         }
         endBusy();
@@ -1174,6 +1288,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     worktreeDialogStyle,
     worktreeRowState,
     worktreeProvenanceLabel,
+    workspaceIsCheckout,
     worktreeRowFrom,
     worktreeRowPrimary,
     renderWorktreeView,
@@ -1202,6 +1317,7 @@ export const worktreeEscape = runtime.worktreeEscape;
 export const worktreeDialogStyle = runtime.worktreeDialogStyle;
 export const worktreeRowState = runtime.worktreeRowState;
 export const worktreeProvenanceLabel = runtime.worktreeProvenanceLabel;
+export const workspaceIsCheckout = runtime.workspaceIsCheckout;
 export const worktreeRowFrom = runtime.worktreeRowFrom;
 export const worktreeRowPrimary = runtime.worktreeRowPrimary;
 export const renderWorktreeView = runtime.renderWorktreeView;

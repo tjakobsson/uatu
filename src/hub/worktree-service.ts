@@ -43,6 +43,7 @@ import {
 } from "./worktree-fetch";
 import {
   createGitRunner,
+  folderPresence,
   inspectCheckout,
   listRefs,
   listWorktrees,
@@ -71,6 +72,14 @@ import {
   type WorktreeRecoveryOutcome,
   type WorktreeRegistrar,
 } from "./worktree-journal";
+
+// The repository a registration belongs to: a linked worktree's main
+// workspace, or the workspace itself. Two registrations are one repository's
+// exactly when these agree; the forget route's no-Git shortcut uses the same
+// rule, so it never takes another repository's id for its own.
+export function registeredFamilyOf(entry: Pick<WorkspaceEntry, "id" | "worktree">): string {
+  return entry.worktree?.parentWorkspaceId ?? entry.id;
+}
 
 // Shared by both unregister APIs, including Hubs without the worktree API
 // enabled. Check before deleting ANY Hub state, not merely in registry.remove:
@@ -163,6 +172,16 @@ export class WorktreeService {
     if (!source) throw notFound("That workspace is not registered. Refresh and try again.");
     const capabilities = await probeGitCapabilities(source.path, { ...this.options.git, run: this.run });
     if (!capabilities.supported) {
+      // Git runs inside the repository, so a folder deleted outside Uatu
+      // fails the probe too; say which of the two it is (#504). One plain
+      // statement: the dialog that shows it says what removal does, and the
+      // dashboard rows say how to recover. Only a folder that is established
+      // to be gone says so; one the Hub cannot stat is not claimed gone.
+      // With the folder gone, so is any `.git`: the Hub cannot tell a
+      // repository from a plain docs folder, so it names neither.
+      if (!capabilities.available && await folderPresence(source.path, { follow: true }) === "missing") {
+        throw notFound("This workspace's folder no longer exists, so Uatu cannot read it.");
+      }
       throw WorktreeOperationError.of("git-unsupported", capabilities.reason ?? "Worktree operations are unavailable on this Hub.");
     }
     const context = await repositoryContext(source.path, { ...this.options.git, run: this.run });
@@ -921,8 +940,7 @@ export class WorktreeService {
       const entry = this.options.registry.byId(request.reference);
       if (!entry) throw WorktreeOperationError.of("not-found", "That workspace is not registered. Refresh and try again.", { retry: "refresh" });
       const source = this.options.registry.byId(request.sourceWorkspaceId);
-      const family = entry.worktree?.parentWorkspaceId ?? entry.id;
-      if (!source || (source.worktree?.parentWorkspaceId ?? source.id) !== family) {
+      if (!source || registeredFamilyOf(source) !== registeredFamilyOf(entry)) {
         throw WorktreeOperationError.of("not-found", "That workspace does not belong to this repository.");
       }
       // A main workspace owns its children's live policy: removing it first
@@ -987,7 +1005,16 @@ export class WorktreeService {
     if (!entry || !link) return { ownership: "external", value: "present" };
     const cached = this.availabilityCache.get(workspaceId);
     const now = this.now();
-    const matches = (item: typeof cached) => item?.path === entry.path && item.repositoryId === link.repositoryId && item.checkoutId === link.checkoutId;
+    // The cache spares the polled state list a Git probe per child; it never
+    // outlives the folder it describes. One stat says whether the folder is
+    // still there, so a checkout deleted outside Uatu reads as missing on
+    // the very next state answer rather than when the cache expires (#504).
+    // lstat, like inspectCheckout's own presence test, so the two agree:
+    // only ENOENT/ENOTDIR mean missing, and a folder that cannot be stated
+    // is not served a cached "missing" it no longer establishes.
+    const missing = await folderPresence(entry.path) === "missing";
+    const matches = (item: typeof cached) => item?.path === entry.path && item.repositoryId === link.repositoryId && item.checkoutId === link.checkoutId
+      && (item.value === "missing") === missing;
     if (cached && now - cached.at < AVAILABILITY_CACHE_MS && matches(cached)) return cached;
     const inspection = await inspectCheckout(entry.path, { ...this.options.git, run: this.run });
     const resolved = await ownershipForCheckout({ provenance: this.options.provenance, inspection, checkoutPath: entry.path, registeredIdentity: link });

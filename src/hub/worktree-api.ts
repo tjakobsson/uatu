@@ -38,7 +38,7 @@ import {
 } from "../shared/worktree-contract";
 import { validWorktreeBranch, WORKTREE_BRANCH_NAME_MAX_LENGTH } from "../shared/worktree-branches";
 import type { WorkspaceRegistry } from "./registry";
-import type { WorktreeService } from "./worktree-service";
+import { registeredFamilyOf, type WorktreeService } from "./worktree-service";
 
 // The published JSON family the Hub session authorizes, and nothing else.
 export const WORKTREE_API_PATH = "/api/hub/worktrees";
@@ -263,14 +263,29 @@ export function createWorktreeApi(deps: WorktreeApiDeps) {
     } catch (error) {
       return refusal("forget", worktreeError("invalid-input", error instanceof Error ? error.message : "The request is not valid."));
     }
-    const inventory = await inventoryFor(source, "open");
-    if (inventory.status === "error") {
-      return refusal("forget", inventory.error ?? worktreeError("inventory-unavailable", "The worktree inventory is unavailable.", { retry: "refresh" }));
+    // A workspace id registered to THIS repository is the service's own
+    // vocabulary and needs no Git read: forgetting touches no files.
+    // Reading the repository first would strand a registration whose files
+    // were deleted outside Uatu (#504): the inventory of a repository that
+    // no longer exists is an error. Anything else — a branch name, a
+    // checkout id, or an id another repository owns that also names a
+    // branch here — is resolved against the inventory.
+    let reference = request.reference;
+    const registered = deps.registry.byId(reference);
+    const sourceEntry = deps.registry.byId(source);
+    const ownRegistration = registered !== undefined && sourceEntry !== undefined
+      && registeredFamilyOf(registered) === registeredFamilyOf(sourceEntry);
+    if (!ownRegistration) {
+      const inventory = await inventoryFor(source, "open");
+      if (inventory.status === "error") {
+        return refusal("forget", inventory.error ?? worktreeError("inventory-unavailable", "The worktree inventory is unavailable.", { retry: "refresh" }));
+      }
+      const resolved = resolveWorktreeReference(inventory, reference);
+      if (!resolved.ok) return refusal("forget", resolved.error);
+      reference = resolved.reference;
     }
-    const resolved = resolveWorktreeReference(inventory, request.reference);
-    if (!resolved.ok) return refusal("forget", resolved.error);
-    const result = await deps.service.forget(principal.user, { sourceWorkspaceId: source, reference: resolved.reference, stop: true });
-    if (result.ok) committed(source, [resolved.reference]);
+    const result = await deps.service.forget(principal.user, { sourceWorkspaceId: source, reference, stop: true });
+    if (result.ok) committed(source, [reference]);
     return json(200, result);
   };
 

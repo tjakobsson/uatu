@@ -32,7 +32,7 @@ import type { WorkspaceActivity } from "../shared/live-protocol";
 import { AttentionNotices, renderAttentionNotices } from "./attention-notice";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
-import { openWorktreeFork, worktreeForkIcon, worktreeProvenanceLabel } from "./worktree-dialog";
+import { openWorktreeFork, workspaceIsCheckout, worktreeForkIcon, worktreeProvenanceLabel } from "./worktree-dialog";
 import { watchWorktreeInventory, WORKTREES_CHANGED_EVENT } from "./worktree-live";
 
 export type HubWorkspaceSummary = {
@@ -159,8 +159,16 @@ export function switcherBadgeLabel(badge: SwitcherBadge): string {
 // starting again clears finished: a workspace that is both is working.
 export type WorkspaceMenuState = { text: string; tone: "stopped" | "working" | "awaiting" | "finished" } | null;
 
-export function workspaceMenuState(workspace: HubWorkspaceSummary, activity: WorkspaceActivityMap): WorkspaceMenuState {
-  if (workspace.availability === "missing") return { text: "Missing checkout", tone: "stopped" };
+// `workspaces` is the Hub list the entry belongs to: a missing registration is
+// named a checkout or a folder by the same rule the dashboard uses.
+export function workspaceMenuState(
+  workspace: HubWorkspaceSummary,
+  activity: WorkspaceActivityMap,
+  workspaces: readonly HubWorkspaceSummary[],
+): WorkspaceMenuState {
+  if (workspace.availability === "missing") {
+    return { text: workspaceIsCheckout(workspace, workspaces) ? "Missing checkout" : "Missing folder", tone: "stopped" };
+  }
   if (workspace.availability === "replaced") return { text: "Identity conflict", tone: "stopped" };
   if (!workspace.running) return { text: "stopped", tone: "stopped" };
   const facts = activity.get(workspace.id);
@@ -772,7 +780,7 @@ export function initHubNav(): void {
       // value (the dot) also goes dark for an unreachable child of a
       // running session, which a start cannot help.
       const stopped = workspace.id === currentId ? listedRunning === false : !workspace.running;
-      const menuState = workspaceMenuState(stopped ? { ...workspace, running: false } : { ...workspace, running: true }, activity);
+      const menuState = workspaceMenuState(stopped ? { ...workspace, running: false } : { ...workspace, running: true }, activity, latest);
       if (menuState !== null) {
         const state = document.createElement("span");
         state.className = `hub-menu-state is-${menuState.tone}`;
@@ -782,7 +790,7 @@ export function initHubNav(): void {
       if (workspace.availability) {
         item.setAttribute("aria-disabled", "true");
         item.title = workspace.availability === "missing"
-          ? "Checkout missing. Restore it externally, then reopen the picker to refresh."
+          ? `${workspaceIsCheckout(workspace, latest) ? "Checkout" : "Folder"} missing. Restore it externally, then reopen the picker to refresh.`
           : "A different checkout occupies this path. Resolve the identity conflict before opening.";
         item.addEventListener("click", event => event.preventDefault());
       } else if (!stopped) {

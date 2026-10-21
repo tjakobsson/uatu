@@ -19,6 +19,7 @@ type Workspace = {
   repositoryId?: string;
   running: boolean;
   createWorktree?: boolean;
+  availability?: "missing" | "replaced";
 };
 
 function setup() {
@@ -96,6 +97,38 @@ describe("W10 the 'Main checkout' chip and fork wording are truthful about creat
     const workspaces: Workspace[] = [{ id: "solo", displayName: "solo", running: false }];
     render(workspaces, new Map([["solo", standalone]]));
     expect(standalone.querySelector(".chip")!.textContent).toBe("Linked checkout");
+  });
+});
+
+// Issue #504 (demo 04a/06a): once a repository's folder is deleted outside
+// Uatu there is no `.git` left, so createWorktree is gone and the main row
+// was chipped "Linked checkout". A missing row with registered worktrees
+// under it is still their main checkout; one with none left is not claimed
+// to be either kind of checkout.
+describe("#504 a missing top-level row is never chipped a linked checkout", () => {
+  test("a missing main workspace with registered worktrees keeps 'Main checkout' and offers no Start in its summary", () => {
+    const { document, render, row } = setup();
+    const main = row("atlas", "Atlas", false);
+    const child = row("atlas-a", "feature/a", false);
+    document.getElementById("workspaces")!.append(main, child);
+    const workspaces: Workspace[] = [
+      { id: "atlas", displayName: "Atlas", repositoryId: "r", running: false, availability: "missing" },
+      { id: "atlas-a", parentId: "atlas", repositoryId: "r", branch: "feature/a", running: false, availability: "missing" },
+    ];
+    render(workspaces, new Map([["atlas", main], ["atlas-a", child]]));
+    expect(main.querySelector(".chip")!.textContent).toBe("Main checkout");
+    const summary = document.querySelector('[data-disclosure="atlas-inactive"] > summary')!;
+    expect(summary.textContent).toBe("Atlas · folder missing · expand to review");
+  });
+
+  test("a missing row with nothing under it carries no checkout chip at all", () => {
+    const { document, render, row } = setup();
+    const lone = row("atlas", "Atlas", false);
+    document.getElementById("workspaces")!.append(lone);
+    render([{ id: "atlas", displayName: "Atlas", running: false, availability: "missing" }], new Map([["atlas", lone]]));
+    expect(lone.querySelector(".chip")).toBeNull();
+    expect(lone.textContent).not.toContain("Linked checkout");
+    expect(document.querySelector('[data-disclosure="atlas-inactive"] > summary')!.textContent).toBe("Atlas · folder missing · expand to review");
   });
 });
 

@@ -273,11 +273,28 @@ describe("chipLabel", () => {
 describe("parseHubState", () => {
   test("unavailable checkouts remain unavailable even while stale activity says running", () => {
     const state = parseHubState({ workspaces: [
-      { ...summary("missing", true), availability: "missing" },
-      { ...summary("replaced", true), availability: "replaced" },
+      { ...summary("missing", true), repositoryId: "r", parentId: "main", availability: "missing" },
+      { ...summary("replaced", true), repositoryId: "r", parentId: "main", availability: "replaced" },
     ] })!;
     const activity = new Map(state.workspaces.map(row => [row.id, { running: true, working: true, awaiting: false, finished: false }]));
-    expect(state.workspaces.map(row => workspaceMenuState(row, activity)?.text)).toEqual(["Missing checkout", "Identity conflict"]);
+    expect(state.workspaces.map(row => workspaceMenuState(row, activity, state.workspaces)?.text)).toEqual(["Missing checkout", "Identity conflict"]);
+  });
+
+  // #504: a top-level registration whose folder is gone is reported missing
+  // too. The picker names it the way the dashboard does: a checkout when Hub
+  // state says it is one (a linked worktree, a main checkout that can fork,
+  // or a main workspace with worktrees still registered under it), and a
+  // folder otherwise — a deleted docs workspace is not a checkout.
+  test("a missing registration is a checkout or a folder by the dashboard's rule", () => {
+    const state = parseHubState({ workspaces: [
+      { ...summary("docs", false), availability: "missing" },
+      { ...summary("atlas", false), repositoryId: "r", availability: "missing" },
+      { ...summary("atlas-a", false), repositoryId: "r", parentId: "atlas", branch: "a", availability: "missing" },
+      { ...summary("beacon", false), createWorktree: true, availability: "missing" },
+    ] })!;
+    const activity = new Map();
+    expect(state.workspaces.map(row => workspaceMenuState(row, activity, state.workspaces)?.text))
+      .toEqual(["Missing folder", "Missing checkout", "Missing checkout", "Missing checkout"]);
   });
 
   test("preserves only explicit string source snapshots, never infers from upstream", () => {
@@ -469,9 +486,9 @@ describe("switcher activity", () => {
       ["three", facts(true, false, true, true)],
       ["four", facts(true, true, true, true)],
     ]);
-    expect(workspaceMenuState(summary("two", true), activity)).toEqual({ text: "working", tone: "working" });
-    expect(workspaceMenuState(summary("three", true), activity)).toEqual({ text: "awaiting you", tone: "awaiting" });
-    expect(workspaceMenuState(summary("four", true), activity)).toEqual({ text: "awaiting you", tone: "awaiting" });
+    expect(workspaceMenuState(summary("two", true), activity, [])).toEqual({ text: "working", tone: "working" });
+    expect(workspaceMenuState(summary("three", true), activity, [])).toEqual({ text: "awaiting you", tone: "awaiting" });
+    expect(workspaceMenuState(summary("four", true), activity, [])).toEqual({ text: "awaiting you", tone: "awaiting" });
     expect(switcherBadge(list, activity, "uatu")).toEqual({ kind: "awaiting", count: 2 });
     activity.delete("three");
     activity.delete("four");
@@ -493,13 +510,13 @@ describe("switcher activity", () => {
 
   test("menu entries name stopped, awaiting, working, and finished; idle running entries stay quiet", () => {
     const activity = new Map([["a", facts(true, true, true)], ["b", facts(true, true, false)], ["c", facts(true)], ["e", facts(true, false, false, true)]]);
-    expect(workspaceMenuState(summary("a", true), activity)).toEqual({ text: "awaiting you", tone: "awaiting" });
-    expect(workspaceMenuState(summary("b", true), activity)).toEqual({ text: "working", tone: "working" });
-    expect(workspaceMenuState(summary("c", true), activity)).toBeNull();
-    expect(workspaceMenuState(summary("d", true), activity)).toBeNull();
-    expect(workspaceMenuState(summary("e", true), activity)).toEqual({ text: "finished", tone: "finished" });
-    expect(workspaceMenuState(summary("a", false), activity)).toEqual({ text: "stopped", tone: "stopped" });
-    expect(workspaceMenuState(summary("e", false), activity)).toEqual({ text: "stopped", tone: "stopped" });
+    expect(workspaceMenuState(summary("a", true), activity, [])).toEqual({ text: "awaiting you", tone: "awaiting" });
+    expect(workspaceMenuState(summary("b", true), activity, [])).toEqual({ text: "working", tone: "working" });
+    expect(workspaceMenuState(summary("c", true), activity, [])).toBeNull();
+    expect(workspaceMenuState(summary("d", true), activity, [])).toBeNull();
+    expect(workspaceMenuState(summary("e", true), activity, [])).toEqual({ text: "finished", tone: "finished" });
+    expect(workspaceMenuState(summary("a", false), activity, [])).toEqual({ text: "stopped", tone: "stopped" });
+    expect(workspaceMenuState(summary("e", false), activity, [])).toEqual({ text: "stopped", tone: "stopped" });
   });
 
   test("an activity update folds its running fact into the hub list without touching other entries", () => {
@@ -1664,6 +1681,24 @@ describe("initHubNav renders the repository title and the grouped menu", () => {
     expect(menu.querySelectorAll(".hub-menu-group")).toHaveLength(1);
     // Only a main checkout has a fork control, and only one.
     expect(menu.querySelectorAll('[aria-label^="Add worktree to"]')).toHaveLength(1);
+  });
+
+  test("a missing docs folder is labelled a folder in the picker, a missing worktree a checkout", async () => {
+    const { document, window } = await mount("/s/notes/", [
+      { id: "notes", displayName: "Notes", path: "/src/notes", running: true },
+      { id: "docs", displayName: "Docs", path: "/src/docs", running: false, availability: "missing" },
+      { id: "atlas", displayName: "atlas", path: "/src/atlas", running: false, repositoryId: "repo-1", branch: "main", createWorktree: true },
+      { id: "atlas-gone", displayName: "gone", path: "/src/atlas.worktrees/gone", running: false, repositoryId: "repo-1", parentId: "atlas", branch: "gone", ownership: "uatu", availability: "missing" },
+    ]);
+    document.querySelector<HTMLElement>("#hub-toggle")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const menu = document.querySelector<HTMLElement>("#hub-menu")!;
+    const row = (id: string) => menu.querySelector<HTMLElement>(`.hub-menu-item[data-workspace-id="${id}"]`)!;
+    expect(row("docs").getAttribute("aria-disabled")).toBe("true");
+    expect(row("docs").querySelector(".hub-menu-state.is-stopped")!.textContent).toBe("Missing folder");
+    expect(row("docs").title).toBe("Folder missing. Restore it externally, then reopen the picker to refresh.");
+    expect(row("atlas-gone").getAttribute("aria-disabled")).toBe("true");
+    expect(row("atlas-gone").querySelector(".hub-menu-state.is-stopped")!.textContent).toBe("Missing checkout");
+    expect(row("atlas-gone").title).toBe("Checkout missing. Restore it externally, then reopen the picker to refresh.");
   });
 
   // Decisions F2–F4 (2026-09-19, second round): the fork control trails its

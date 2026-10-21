@@ -357,7 +357,23 @@ session-authenticated JSON family, `worktree-api.ts` at
 /{fetch,create,open,preflight-delete,delete,register,forget}`), published
 like any other hub route with no separate progress poll: each call answers
 its own bounded outcome, and a safety refusal is an ordinary `{ok: false,
-error}` response rather than a transport failure. `src/shell/worktree-dialog.ts`
+error}` response rather than a transport failure. `forget` ("Remove from
+Uatu") touches no files and, given a workspace id registered to that
+repository, reads no Git, so a family whose checkouts were deleted outside
+Uatu is still removable:
+its worktrees first, then the main workspace. The dashboard learns which
+folders are gone from `/api/hub/state`'s `availability: "missing"`, which
+covers a top-level workspace as well as a linked worktree; it is read with a
+stat rather than Git (only `ENOENT`/`ENOTDIR` mean gone: a folder the Hub
+cannot stat is never reported missing), and the short cache of a worktree's Git probe never
+outlives its folder, so a deletion shows on the next state read. A workspace
+still running when its folder went is offered removal too; `forget` stops it
+first. The forget dialog names that state instead of promising files "remain"
+(a checkout or a workspace folder, by the dashboard row's own
+classification, since the Hub cannot tell a deleted repository from a deleted
+docs folder), and it explains
+a main workspace's registered worktrees up front rather than offering a
+confirmation the Hub would refuse. `src/shell/worktree-dialog.ts`
 is the one client for that family — a shadow-DOM dialog embedded both in
 the in-workspace picker (`shell/hub-nav.ts`) and the hub dashboard
 (`hub/pages.ts`) — and `shell/worktree-live.ts` refreshes an open
@@ -502,7 +518,27 @@ that file. The observer bounds metadata work to 16 concurrent paths, excludes
 denied directories before descent, and does not follow symlink entries.
 Unsupported recursive watching and explicit polling use Chokidar's normalized
 initial events instead. Both backends supply stats to the index and normalize
-atomic replacement with a short removal delay.
+atomic replacement with a short removal delay. Polling takes each file's and
+directory's baseline stat asynchronously, after the watch is registered, so
+an edit or a new child that lands first would never be reported. The polling
+observer therefore checks every reported file state and every reported
+directory once more, a second later: a missed edit is reported then, and a
+missed child is handed to Chokidar (`add`), which watches and reports it. A
+path found removed is reported removed. A path found to be a symlink, or of the
+other type, is reported removed and handed back (`unwatch`, then `add`) to
+re-register that path under the watch policy. The watched path itself keeps
+its registration because it has no parent subscription to discover a later
+replacement. Unwatching a directory does not guarantee that Chokidar closes
+every existing descendant poller; the check drops its own descendant state,
+not Chokidar's entire subtree. Missed-child handoff validates ancestors below
+the configured root, then rechecks the directory's type and identity after
+the awaited validation. Stale directory generations and closed observers
+discard pending handoffs. The configured root and its ancestors remain trusted;
+these metadata checks are not atomic containment for concurrent filesystem
+replacement or later content reads (the broader read-time containment work is
+separate). Checks use one-shot timers per reported state, with at most 16 paths
+checked concurrently across batches, not periodic whole-tree rescans. A path
+replaced during validation is scheduled for another check.
 
 A native rename notification may name only the temporary source. The observer
 coalesces those notifications into a shallow metadata check of the containing

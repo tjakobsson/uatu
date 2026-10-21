@@ -1835,17 +1835,42 @@ async function refresh(force) {
         // the Hub's own Settings page, which the site navigation already
         // reaches; parent credentials and shared policy are managed there,
         // for every repository, as they always were.
-        const forget = actions.querySelector('[aria-label^="Remove "]');
+        let forget = actions.querySelector('[aria-label^="Remove "]');
+        // A workspace still running when its folder was deleted (its child
+        // can outlive an unlinked cwd) is a running row, which has no Remove
+        // button of its own. It is offered one: the forget route stops the
+        // workspace before unregistering it, as its dialog says.
+        if (!forget && w.availability) {
+          forget = el("button", "danger", "Remove from Uatu");
+          actions.append(forget);
+        }
         // Capability is Hub-wide, not proof that this row is a repository.
         // Docs folders must keep the ordinary unregister path, which needs
         // no Git inventory. Repository families retain the guarded dialog.
-        if (forget && (w.parentId || w.createWorktree === true || dashboardWorkspaces.some(child => child.parentId === w.id))) {
+        // So does a row whose folder is gone (#504): with no .git left the
+        // Hub cannot tell a repository from a docs folder, and either way the
+        // dialog's confirmation says that no files are changed.
+        const dependents = w.parentId ? 0 : dashboardWorkspaces.filter(child => child.parentId === w.id).length;
+        const checkout = workspaceIsCheckout(w, dashboardWorkspaces);
+        if (forget && (checkout || w.availability)) {
           forget.textContent = "Remove from Uatu";
           forget.setAttribute("aria-label", "Remove " + workspaceLabel(w) + " from Uatu");
-          forget.onclick = () => openWorktreeDialog({ ...target, view: "forget", id: w.id }, forget);
+          // What the row knows travels with it: the dialog cannot read a
+          // repository whose folder is gone, and must not offer to remove a
+          // main workspace while worktrees still inherit its settings.
+          forget.onclick = () => openWorktreeDialog({
+            ...target, view: "forget", id: w.id, label: workspaceLabel(w),
+            ...(w.availability ? { availability: w.availability } : {}),
+            ...(w.parentId ? {} : { dependents }),
+            checkout,
+          }, forget);
         }
         if (w.availability) {
-          const warning = el("p", "action-error", (w.availability === "missing" ? "Missing checkout" : "Identity conflict — path replaced") + ". Restore the original checkout externally, then retry. Nothing will be recreated.");
+          // A top-level row with no worktree and no .git left may have been
+          // a plain docs folder; it is not called a checkout.
+          const noun = checkout ? "checkout" : "folder";
+          const state = w.availability === "missing" ? "Missing " + noun : "Identity conflict — path replaced";
+          const warning = el("p", "action-error", state + ". Restore the original " + noun + " externally, then retry, or remove it from Uatu. Nothing will be recreated.");
           warning.setAttribute("role", "alert");
           // W3: appended to .row directly, the warning took width as a flex
           // item in .row's row-direction flexbox and squeezed .row-main
