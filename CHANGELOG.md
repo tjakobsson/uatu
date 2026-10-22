@@ -4,6 +4,15 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.8.1](https://github.com/tjakobsson/uatu/compare/v0.8.0...v0.8.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **chat:** readable token scales, named skill loads, and multi-question forms ([#533](https://github.com/tjakobsson/uatu/issues/533)) ([71e4700](https://github.com/tjakobsson/uatu/commit/71e4700752d6c16dc8a7e41787e6698d35aa5c1a))
+* **hub:** remove workspaces whose files were deleted outside Uatu ([#515](https://github.com/tjakobsson/uatu/issues/515)) ([bef981e](https://github.com/tjakobsson/uatu/commit/bef981e6aa86dedc8dd69fe1980ef42c0fee0acb)), closes [#504](https://github.com/tjakobsson/uatu/issues/504)
+* **watch:** report changes made before a polled path's baseline stat ([#511](https://github.com/tjakobsson/uatu/issues/511)) ([e813edd](https://github.com/tjakobsson/uatu/commit/e813eddb977a2976c1ea183a47be6874dd33df43))
+
 ## [0.8.0](https://github.com/tjakobsson/uatu/compare/v0.7.0...v0.8.0) (2026-10-12)
 
 
