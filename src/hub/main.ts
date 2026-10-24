@@ -42,6 +42,7 @@ import {
   hubPreferencesPath,
   onboardingJournalPath,
   personalWorkspaceStatePath,
+  personalChatPreferencesPath,
   registryPath,
   resolveHubStateRoot,
   sessionsPath,
@@ -49,6 +50,7 @@ import {
   worktreeProvenancePath,
 } from "./state-dir";
 import { HubPreferencesStore } from "./preferences";
+import { PersonalChatPreferencesStore } from "./personal-chat-preferences";
 import { createWorktreeRenameGuard } from "./worktree-rename-guard";
 import { WorktreeJournal, WorktreeProvenanceStore } from "./worktree-journal";
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
@@ -329,6 +331,8 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await registry.load();
   const preferences = new HubPreferencesStore(hubPreferencesPath(stateRoot));
   await preferences.load();
+  const personalChatPreferences = new PersonalChatPreferencesStore(personalChatPreferencesPath(stateRoot));
+  await personalChatPreferences.load();
   const personalState = new PersonalWorkspaceStateStore(personalWorkspaceStatePath(stateRoot));
   // What finished where, and who has seen it. Read before the live broker is
   // assembled: the broker adopts the marks at construction and resumes its
@@ -650,6 +654,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     watchActivityFromStart: true,
     notifications,
     preferences,
+    personalChatPreferences,
     onboarding,
     gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
     cloneCredentials,

@@ -1,4 +1,26 @@
-import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, MessageDelivery, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+
+// One user entry pending in the agent's own inbox — a steer the agent holds
+// until its running turn's next step boundary (opencode-v2-steering D3). The
+// adapter's pending-steer map is built from these and reconciled against
+// `listPendingInbox`. `id` is the agent's inbox id, which is also the
+// message id the adapter minted for a steer it submitted itself.
+export type PendingInboxEntry = {
+  id: string;
+  text: string;
+  attachments?: MessageAttachment[];
+  delivery: MessageDelivery;
+  at: number;
+};
+
+// What an inbox event says about one entry: it is pending, it settled
+// (delivered into the turn, or cancelled), or its delivery changed. Not a
+// timeline item — the adapter keeps the dock from these, and the delivered
+// message's row arrives as an ordinary upsert alongside the settled delta.
+export type InboxDelta =
+  | ({ kind: "pending" } & PendingInboxEntry)
+  | { kind: "settled"; id: string; outcome: "delivered" | "cancelled" }
+  | { kind: "delivery"; id: string; delivery: MessageDelivery };
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -72,7 +94,11 @@ export type NormalizedProviderUpdate =
   | { kind: "upsert"; item: ConversationItem }
   | { kind: "text"; itemId: string; identity: string; mode: "cumulative" | "incremental"; text: string; item?: ConversationItem }
   | { kind: "remove"; itemId: string }
-  | { kind: "status"; status: ConversationStatus; message?: string };
+  | { kind: "status"; status: ConversationStatus; message?: string }
+  // The agent's inbox changed (a steer pending, delivered, cancelled, or
+  // switched). The adapter applies these to its pending-steer map; they
+  // never reach a projection's timeline.
+  | { kind: "inbox"; delta: InboxDelta };
 
 export type NormalizedSessionLifecycle = {
   kind: "created" | "updated" | "deleted";
@@ -125,11 +151,13 @@ export type NormalizedProviderEvent = {
   // the envelope rather than on an item: it belongs to the message, and the
   // one thing that needs it — attributing a subagent on its parent's row —
   // reads it from the child's event stream, not from the child's timeline.
-  assistantModel?: { messageId: string; model: string; createdAt: number; promptId?: string };
+  assistantModel?: { messageId: string; model: string; createdAt: number; effort?: string; promptId?: string };
   // The tokens a message reported, with the message's own id. A message can
   // produce several parts, so aggregation keys on this id rather than counting
   // the dedicated usage carrier as though it were another content part.
   assistantUsage?: { messageId: string; usage: TokenUsage; promptId?: string };
+  // Native provider's cumulative session aggregate, never a per-message price.
+  sessionCostUsd?: number;
   // A deleted assistant message must also leave any aggregate keyed by its
   // provider id; timeline removes alone cannot reach the adapter's tally.
   removedMessageId?: string;
@@ -151,17 +179,30 @@ export type NormalizedProviderEvent = {
 // `promptId` is the user message an assistant message answers: a subagent
 // given several tasks has one prompt per task, and it is what lets a task's
 // row state that task's spend rather than the whole session's.
-export type StoredMessageAccounting = { messageId: string; createdAt: number; usage?: TokenUsage; model?: string; promptId?: string };
+export type StoredMessageAccounting = { messageId: string; createdAt: number; usage?: TokenUsage; model?: string; effort?: string; promptId?: string };
 
 export type ProviderHistoryPage = {
+  // Includes hidden/reverted/compaction spend where the provider reports it.
+  // No message-level fallback: even a complete transcript can omit such spend.
+  sessionCostUsd?: number;
   // Normalized timeline items for this page, in the provider's part order.
   items: ConversationItem[];
   // Accounting for the stored messages underlying this page's items.
   accounting: StoredMessageAccounting[];
   // Providers that page locally over a fully loaded transcript can expose the
-  // complete normalized items, so a walker that needs the whole conversation
-  // (title derivation) avoids refetching the transcript once per page.
+  // complete visible normalized items, so a walker that needs the whole
+  // conversation (title derivation) avoids refetching it once per page.
   completeItems?: ConversationItem[];
+  // Native revert authority from the SAME complete transcript and boundary
+  // read as this page, never inferred from omitted page rows. Exclusions name
+  // exact normalized identities in the hidden suffix; live-only rows and inbox
+  // ownership are outside this evidence. Internal only, not a wire field.
+  revertVisibility?: { boundaryId: string | null; state: ReversibleHistoryState; excludedItemIds: string[] };
+  // Internal evidence for inbox withdrawal, not a timeline/wire field. When
+  // visibility filtering can hide delivered inputs (for example a revert),
+  // absence from even completeItems cannot establish cancellation. Positive
+  // visible delivery evidence and explicit inbox settlements remain valid.
+  deliveryHistoryIncomplete?: true;
   nextCursor?: string;
 };
 
@@ -193,6 +234,26 @@ export class BackgroundTaskUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "BackgroundTaskUnavailableError";
+  }
+}
+
+/** A dispatched mutation may have applied. Retain this outcome in receipts;
+ * rejecting it through the ordinary receipt helper would permit a replay.
+ */
+export class OperationOutcomeUnknownError extends Error {
+  constructor() {
+    super("Operation outcome unknown; refresh state before a new explicit action. Do not automatically retry.");
+    this.name = "OperationOutcomeUnknownError";
+  }
+}
+
+/** Positive provider evidence that Stop was refused before application.
+ * An ordinary rejection, including a lost response, carries no such evidence.
+ */
+export class InterruptNotAppliedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InterruptNotAppliedError";
   }
 }
 
@@ -265,20 +326,41 @@ export interface ChatProvider {
   createSession(id: string, configuration?: ConversationConfiguration): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
   getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration>;
-  listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage>;
+  listMessages(sessionId: string, options: { cursor?: string; limit: number; signal?: AbortSignal }): Promise<ProviderHistoryPage>;
+  // Revalidates the exact native marker (including non-user/unknown targets)
+  // before covered recovery commits a page's revertVisibility evidence. A
+  // changed expected marker also invalidates any provider transcript reuse:
+  // its commit event may not have reached the subscribed stream yet.
+  getHistoryRevertBoundary?(sessionId: string, options: { signal: AbortSignal; expectedBoundary?: string | null }): Promise<string | null>;
   getReversibleHistoryState?(sessionId: string): Promise<ReversibleHistoryState>;
   undo?(sessionId: string): Promise<ReversibleHistoryResult>;
   redo?(sessionId: string): Promise<ReversibleHistoryResult>;
   revert?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
   restore?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
   events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent>;
+  /** Optional transport barrier: the currently consumed events() subscription
+   * can now receive native events. Rejects on abort or that generation ending;
+   * never starts a subscription. Providers without a handshake omit this.
+   */
+  waitForEventStream?(signal: AbortSignal): Promise<void>;
   /**
    * Retire the provider's own resources — live agent sessions, pending
    * tool callbacks, background probes. The adapter awaits this as part of
    * its own disposal, so a retired adapter leaves no agent process behind.
    */
   dispose?(): Promise<void>;
-  prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  /**
+   * `delivery` says who holds the message until the agent takes it. `queue`
+   * is the workspace's held queue releasing a message onto an idle session,
+   * with the model, mode, and variant frozen at submission applied first.
+   * `steer` hands the message to a running turn for its next step boundary
+   * (opencode-v2-steering D1): only an agent declaring `steering` is asked,
+   * and a steer carries no model or mode to the session — a mid-turn switch
+   * would retarget the turn being steered (D6).
+   */
+  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  /** Native identity known before dispatch, for read-only unknown recovery. */
+  promptIdentity?(identity: string): string;
   /**
    * `text`, when set, is what the user's row reads as because the provider
    * sent something other than the typed command — a 2.x skill runs as a
@@ -297,7 +379,30 @@ export interface ChatProvider {
   // Only the provider knows — a config command or skill named `reload`
   // shadows the built-in — so clients key reload behavior off this answer.
   command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string; operation?: "reload" }>;
-  interrupt(sessionId: string): Promise<void>;
+  /**
+   * Stop the running turn. `resume: true` asks the agent to wake and deliver
+   * the steers it still holds (Send now on a paused steer, D8); `false`, or
+   * no option, leaves them pending (Cancel, D9). Agents without an inbox
+   * ignore the option.
+   * Stop may throw InterruptNotAppliedError only with definite non-application
+   * evidence. Other failures leave application unknown; false is a valid no-op.
+   */
+  interrupt(sessionId: string, options?: { resume?: boolean }): Promise<void | { interrupted: boolean }>;
+  /**
+   * The user's steers the agent still holds for this session, in enqueue
+   * order — what the adapter's pending-steer map is rebuilt from on attach
+   * and after a stream reconnect (D3). Optional: only an agent declaring
+   * `steering`.
+   */
+  listPendingInbox?(sessionId: string, options?: { signal?: AbortSignal }): Promise<PendingInboxEntry[]>;
+  /**
+   * Withdraw one pending inbox entry. The agent confirms on its stream with
+   * a cancelled (or, if it got there first, delivered) settlement; a missing
+   * or already-delivered entry is a quiet no-op, which is why callers wait
+   * for the event rather than trusting the answer (D7). Optional: only an
+   * agent declaring `steering`.
+   */
+  cancelInbox?(sessionId: string, inboxId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void>;
   /**
    * Every pending permission request the server holds, each naming the session
@@ -324,6 +429,13 @@ export interface ChatProvider {
    * Optional: a provider without background work never lists any.
    */
   listBackgroundTasks?(): Promise<PendingBackgroundTask[]>;
+  /** Scoped evidence, including terminal results and uncertain last-known rows.
+   * Unlike a live-only list, absence is never an instruction to cancel a task.
+   */
+  reconcileBackgroundTasks?(sessionId: string, options?: { fresh?: boolean; signal?: AbortSignal }): Promise<import("./types").BackgroundTaskItem[]>;
+  backgroundBlockingWork?(sessionId: string): Promise<void>;
+  /** Native one-shot context answer, with no admission, tool loop or turn interruption. */
+  generate?(sessionId: string, prompt: string): Promise<string>;
   /**
    * Stop one running background task; the agent reports the stop as that
    * task settling. Optional: only an agent declaring `background-tasks`.

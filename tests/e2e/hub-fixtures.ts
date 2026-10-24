@@ -55,6 +55,9 @@ type WorkerOptions = {
   hubPush: boolean;
   // Serve Agent accounts over fake agent runtimes — see hub-server.ts.
   hubAgentAccounts: boolean;
+  // Use production private child bootstrap for personal chat policy tests.
+  hubChatPolicy: boolean;
+  hubChatPolicyTrust: boolean;
 };
 
 export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
@@ -63,9 +66,11 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
   hubCredentials: [false, { option: true, scope: "worker" }],
   hubPush: [false, { option: true, scope: "worker" }],
   hubAgentAccounts: [false, { option: true, scope: "worker" }],
+  hubChatPolicy: [false, { option: true, scope: "worker" }],
+  hubChatPolicyTrust: [true, { option: true, scope: "worker" }],
 
   hubProcess: [
-    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts }, use, workerInfo) => {
+    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts, hubChatPolicy, hubChatPolicyTrust }, use, workerInfo) => {
       const { hubPort, end } = hubPortBlock(workerInfo.parallelIndex);
       if (hubWorkspaces.length >= HUB_PORTS_PER_WORKER) {
         throw new Error(`a hub worker serves at most ${HUB_PORTS_PER_WORKER - 1} workspaces`);
@@ -81,6 +86,8 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
           UATU_E2E_HUB_WORKTREES: hubWorktrees ? "1" : "0",
           UATU_E2E_HUB_CREDENTIALS: hubCredentials ? "1" : "0",
           UATU_E2E_HUB_AGENT_ACCOUNTS: hubAgentAccounts ? "1" : "0",
+          UATU_E2E_HUB_CHAT_POLICY: hubChatPolicy ? "1" : "0",
+          UATU_E2E_HUB_CHAT_POLICY_TRUST: hubChatPolicyTrust ? "1" : "0",
           UATU_E2E_HUB_PUSH: hubPush ? "1" : "0",
           UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
         },

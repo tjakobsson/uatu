@@ -12,6 +12,13 @@ const htmlFor = {
   settings: () => settingsPage("alice"),
 };
 
+test("standalone help distinguishes native/API facilities from absent chat automation and controls", () => {
+  const help = parseHTML(settingsPage("alice")).document.querySelector(".personal-chat-learn")!.textContent;
+  expect(help).toContain("Standalone has no Hub account automation or manual chat Continue control");
+  expect(help).toContain("native agent facilities and the background-work API remain available");
+  expect(help).not.toContain("Standalone keeps explicit Continue");
+});
+
 test("authenticated navigation wraps dynamic notifications without losing labelled actions", () => {
   for (const render of Object.values(htmlFor)) {
     const html = render();

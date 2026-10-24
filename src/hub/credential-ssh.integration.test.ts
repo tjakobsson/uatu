@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -52,6 +52,141 @@ async function run(executable: string, args: string[], env: Record<string, strin
 }
 
 describe("managed SSH credential lifecycle", () => {
+  test.each(["native rejection", "nonreading tool"])("invalid encrypted import with an oversized secret cannot block the FIFO write or leak its descriptor (%s)", async mode => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-fifo-backpressure-");
+    let keygen = found.keygen;
+    if (mode === "nonreading tool") {
+      keygen = path.join(root, "nonreading-keygen");
+      await writeFile(keygen, "#!/bin/sh\nexec /bin/sleep 5\n", { mode: 0o700 });
+    }
+    // A subprocess watchdog makes the old blocking FIFO write red-capable
+    // without leaving a blocked filesystem worker in the test runner.
+    const script = `
+      import { promises as fs } from "node:fs";
+      import { CredentialMetadataStore } from ${JSON.stringify(path.join(import.meta.dir, "credential-store.ts"))};
+      import { SshCredentialService } from ${JSON.stringify(path.join(import.meta.dir, "credential-ssh.ts"))};
+      let openPipes = 0;
+      const originalOpen = fs.open;
+      fs.open = async (...args) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]).endsWith(".pipe")) {
+          openPipes++;
+          const close = handle.close.bind(handle);
+          handle.close = async () => { await close(); openPipes--; };
+        }
+        return handle;
+      };
+      const metadata = new CredentialMetadataStore(${JSON.stringify(credentialsPath(root))});
+      await metadata.load();
+      const service = new SshCredentialService({
+        secretsDirectory: ${JSON.stringify(credentialSecretsPath(root))},
+        runtimeDirectory: ${JSON.stringify(credentialRuntimePath(root))},
+        metadataStore: metadata, agent: {},
+        sshKeygenPath: ${JSON.stringify(keygen)}, sshAddPath: ${JSON.stringify(found.add)},
+        operationTimeoutMs: 100,
+      });
+      const started = performance.now();
+      let sanitizedFailure = false;
+      try {
+        await service.import("Invalid", ["ssh-authentication"],
+          "-----BEGIN ENCRYPTED PRIVATE KEY-----\\ninvalid\\n-----END ENCRYPTED PRIVATE KEY-----", "x".repeat(1_048_576));
+      } catch (error) {
+        sanitizedFailure = error.message === "SSH private key could not be unlocked";
+      }
+      console.log(JSON.stringify({ sanitizedFailure, openPipes, elapsed: performance.now() - started,
+        runtimeFiles: await fs.readdir(${JSON.stringify(credentialRuntimePath(root))}),
+        secretFiles: await fs.readdir(${JSON.stringify(credentialSecretsPath(root))}),
+        credentials: metadata.snapshot().credentials.length }));
+    `;
+    const child = Bun.spawn([process.execPath, "--eval", script], {
+      stdin: "ignore", stdout: "pipe", stderr: "ignore", detached: true, env: cleanEnv(),
+    });
+    let watchdogExpired = false;
+    const watchdog = setTimeout(() => {
+      watchdogExpired = true;
+      process.kill(-child.pid, "SIGKILL");
+    }, 1_500);
+    const output = new Response(child.stdout).text();
+    try {
+      const code = await child.exited;
+      expect(watchdogExpired).toBe(false);
+      expect(code).toBe(0);
+      const result = JSON.parse(await output);
+      expect(result.sanitizedFailure).toBe(true);
+      expect(result.elapsed).toBeLessThan(1_500);
+      expect(result.openPipes).toBe(0);
+      expect(result.runtimeFiles).toEqual([]);
+      expect(result.secretFiles).toEqual([]);
+      expect(result.credentials).toBe(0);
+    } finally {
+      clearTimeout(watchdog);
+      await output;
+    }
+  }, 5_000);
+
+  test("encrypted import drains native public-key output delivered after the tool process exits", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-pty-drain-");
+    const source = path.join(root, "source");
+    const passphrase = "pty-drain-fixture-passphrase";
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", passphrase, "-f", source], cleanEnv())).code).toBe(0);
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
+    agents.push(agent);
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+    });
+    // Keep native OpenSSH, PTY, and passphrase exchange. Only control the
+    // delivery order at Bun's boundary: public output/EOF follow process exit.
+    const pending: Array<() => void> = [];
+    let processExited = false;
+    const deliverAfterExit = (deliver: () => void) => {
+      if (processExited) queueMicrotask(deliver);
+      else pending.push(deliver);
+    };
+    const NativeTerminal = Bun.Terminal;
+    const nativeSpawn = Bun.spawn;
+    const terminalSpy = spyOn(Bun as unknown as { Terminal: (options: Bun.TerminalOptions) => Bun.Terminal }, "Terminal").mockImplementation((options: Bun.TerminalOptions) => new NativeTerminal({
+      ...options,
+      data(terminal, bytes) {
+        if (new TextDecoder().decode(bytes).includes("ssh-ed25519 ") || pending.length > 0) {
+          const copy = bytes.slice();
+          deliverAfterExit(() => options.data?.(terminal, copy));
+        } else options.data?.(terminal, bytes);
+      },
+      exit(terminal, code, signal) {
+        deliverAfterExit(() => options.exit?.(terminal, code, signal));
+      },
+    }));
+    const spawnSpy = spyOn(Bun, "spawn").mockImplementation(((...args: unknown[]) => {
+      const child = Reflect.apply(nativeSpawn, Bun, args) as ReturnType<typeof Bun.spawn>;
+      if ((args[1] as { terminal?: unknown } | undefined)?.terminal) {
+        void child.exited.then(() => {
+          processExited = true;
+          queueMicrotask(() => {
+            for (const deliver of pending.splice(0)) deliver();
+          });
+        });
+      }
+      return child;
+    }) as typeof Bun.spawn);
+    try {
+      const imported = await service.import("Pending public output", ["ssh-authentication"], await readFile(source, "utf8"), passphrase);
+      expect(imported.metadata.publicKey).toBe((await readFile(`${source}.pub`, "utf8")).trim());
+      expect(await service.testUsability(imported.id)).toBe(true);
+    } finally {
+      spawnSpy.mockRestore();
+      terminalSpy.mockRestore();
+    }
+  }, 30_000);
+
   test("generates, imports, unlocks, locks, disables, enables, tests, and deletes without retaining its passphrase", async () => {
     const found = await tools();
     const root = await stateRoot("uatu-ssh-credential-");

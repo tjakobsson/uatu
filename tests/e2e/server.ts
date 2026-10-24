@@ -4,7 +4,11 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { ChatAdapter } from "../../src/chat/adapter";
+import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstrap";
 import { MultiAgentChatService } from "../../src/chat/agents";
+import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
+import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
 import { CLAUDE_PERMISSION_SCOPE_NOTE } from "../../src/chat/claude/provider";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../../src/chat/opencode/v1/provider";
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
@@ -34,6 +38,8 @@ const E2E_PORT = e2ePort();
 // process's child routes through it. Unset, nothing below changes.
 const E2E_BASE_PATH = normalizeBasePath(process.env.UATU_E2E_BASE_PATH ?? "/");
 const E2E_HUB_CHILD = E2E_BASE_PATH !== "/";
+const privateBootstrap = Bun.argv.includes("--hub-policy-bootstrap");
+const childPolicy = privateBootstrap ? await consumeChildPolicyDescriptor() : null;
 import { safeGit } from "../../src/document/git-base-ref";
 import { normalizeBasePath, stripBasePath } from "../../src/shared/base-path";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, spaShellResponse } from "../../src/server/navigation";
@@ -52,6 +58,7 @@ import { LiveBroker, type LiveSessionChange, type LiveUpstreamSource } from "../
 import { LiveEndpoint } from "../../src/hub/live-endpoint";
 import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
+import { startOpenCodeV2Fake } from "./opencode-v2-fake";
 import { e2eTerminalShell } from "./terminal-shell";
 import type { ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
 
@@ -147,7 +154,9 @@ const fakeSecondAgent = new FakeE2EChatService({
   // Claude Code's own persistent-approval sentence and its typed-id
   // capability, as the real descriptor declares them (chat/claude/provider).
   permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
-  extraCapabilities: ["custom-model-id", "background-tasks", "scheduled-wakeups", "usage"],
+  // `send-now` without `steering`, as Claude Code declares them
+  // (opencode-v2-steering D2): Send now dispatches a dormant queue's message.
+  extraCapabilities: ["custom-model-id", "background-tasks", "scheduled-wakeups", "usage", "send-now"],
 });
 // The fake owns attachment persistence (its prompt path validates ids
 // against its own store), so the routers delegate rather than keeping a
@@ -176,6 +185,46 @@ const dualAgentRouter = new MultiAgentChatService({
   ],
   attachmentStore: fakeAttachmentStore,
 });
+// The real 2.x stack (opencode-v2-steering D13): the real ChatAdapter and
+// OpenCodeV2Provider over a scripted fake OpenCode 2.0.28 server, selected
+// with `{ action: "agents", stack: "opencode-v2" }` and driven with
+// `{ action: "opencode", op }`. Built on first selection and retired on
+// reset, so every test starts with a fresh adapter over an empty server.
+const openCodeV2Fake = startOpenCodeV2Fake({ directory: E2E_WORKSPACE_ROOT });
+let openCodeV2Router: MultiAgentChatService | null = null;
+function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
+  if (openCodeV2Router) return openCodeV2Router;
+  const ready = { state: "ready" as const, version: "2.0.28" };
+  const runtime: AgentRuntime = {
+    status: async () => ready,
+    ensure: async () => ready,
+    restart: async () => ready,
+    dispose: async () => undefined,
+    createProvider: () => {
+      const provider = createOpenCodeV2Provider({ endpoint: openCodeV2Fake.url, password: openCodeV2Fake.password, directory: E2E_WORKSPACE_ROOT });
+      // Only the negative capability test hides the production declarations.
+      if (!backgroundPreview) {
+        const describe = provider.describe.bind(provider);
+        provider.describe = () => ({ ...describe(), capabilities: describe().capabilities.filter(capability => capability !== "background-tasks" && capability !== "background-blocking-work") });
+      }
+      return provider;
+    },
+  };
+  const service = new LazyChatService({
+    workspacePath: E2E_WORKSPACE_ROOT,
+    agentRuntime: runtime,
+    attachmentStore: fakeAttachmentStore,
+    // A short settlement wait, so a withdrawal the fake never settles
+    // decides from the inbox list within a test's patience.
+    createAdapter: options => new ChatAdapter({ ...options, steerWithdrawTimeoutMs: 1_500 }),
+  });
+  openCodeV2Router = new MultiAgentChatService({
+    workspacePath: E2E_WORKSPACE_ROOT,
+    agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }],
+    attachmentStore: fakeAttachmentStore,
+  });
+  return openCodeV2Router;
+}
 let activeChatRouter: MultiAgentChatService = singleAgentRouter;
 const chatService = new Proxy({} as MultiAgentChatService, {
   get(_target, property) {
@@ -300,6 +349,10 @@ async function handleE2EReset(request: Request): Promise<Response> {
   fakeChatAgent.reset();
   fakeSecondAgent.reset();
   activeChatRouter = singleAgentRouter;
+  const retiringOpenCodeV2 = openCodeV2Router;
+  openCodeV2Router = null;
+  await retiringOpenCodeV2?.dispose().catch(() => undefined);
+  openCodeV2Fake.reset();
 
   // Kill every PTY session so tests are hermetic: with persistent sessions
   // and the session picker, a shell leaked from a previous test would
@@ -409,6 +462,21 @@ async function handleE2EChat(request: Request): Promise<Response> {
     // Plan usage (design D9): the last-known report and how the next read answers.
     report?: AgentUsageReport | null;
     outcome?: UsageReadOutcome;
+    // The real 2.x stack: which router `agents` selects, and the scripted
+    // fake OpenCode's controls (`opencode` action).
+    stack?: "opencode-v2";
+    backgroundPreview?: boolean;
+    op?: "step" | "finish" | "raceDeliverOnCancel" | "state" | "launchWorker" | "settleWorker" | "workerReport" | "disconnect" | "pauseEvents" | "reconnectEvents" | "externalRevert" | "appendHistory" | "loseBackgroundResponse" | "loseWorkerResponse" | "launchShell" | "shellPhase" | "wakeParent" | "losePromptResponse" | "loseResumeResponse" | "refuseBackground" | "launchShellOnNextSteer";
+    revertMessageId?: string | null;
+    usedModel?: string;
+    usedEffort?: string;
+    costUsd?: number;
+    shellId?: string;
+    shellPhase?: "exit" | "capture" | "captureBeforeRemove";
+    background?: boolean;
+    workerState?: "completed" | "error" | "cancelled";
+    childId?: string;
+    inboxId?: string;
   };
   // The chat wire is agent-qualified ("opencode:<id>") while the fake works
   // in bare provider ids. The control boundary translates both directions so
@@ -440,7 +508,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
   const targetFake = body.agent === "claude" ? fakeSecondAgent : fakeChatAgent;
   switch (body.action) {
     case "agents": {
-      const next = body.count === 2 ? dualAgentRouter : singleAgentRouter;
+      const next = body.stack === "opencode-v2" ? openCodeV2Stack(body.backgroundPreview) : body.count === 2 ? dualAgentRouter : singleAgentRouter;
       if (next !== activeChatRouter) {
         // Existing SSE subscriptions are bound to their original router;
         // changing the delegating proxy only affects new requests.
@@ -448,8 +516,77 @@ async function handleE2EChat(request: Request): Promise<Response> {
         activeChatRouter = next;
         setLiveSessionRunning(true);
       }
-      return Response.json({ agents: body.count === 2 ? 2 : 1 });
+      return Response.json({ agents: body.count === 2 && body.stack === undefined ? 2 : 1, ...(body.stack ? { stack: body.stack } : {}) });
     }
+    // The scripted fake OpenCode 2.0.28 behind the real stack. Conversation
+    // ids arrive qualified or bare; the fake works in bare session ids.
+    case "opencode":
+      switch (body.op) {
+        case "losePromptResponse":
+          openCodeV2Fake.loseNextPromptResponse(); return Response.json({ ok: true });
+        case "loseResumeResponse":
+          openCodeV2Fake.loseNextResumeResponse(); return Response.json({ ok: true });
+        case "refuseBackground":
+          openCodeV2Fake.refuseNextBackground(); return Response.json({ ok: true });
+        case "launchShellOnNextSteer":
+          if (body.conversationId) { openCodeV2Fake.launchShellOnNextSteer(body.conversationId); return Response.json({ ok: true }); }
+          break;
+        case "wakeParent":
+          if (body.conversationId) { openCodeV2Fake.wakeParent(body.conversationId); return Response.json({ ok: true }); }
+          break;
+        case "launchShell":
+          if (body.conversationId) return Response.json(openCodeV2Fake.launchShell(body.conversationId, body.background !== false));
+          break;
+        case "shellPhase":
+          if (body.shellId && body.shellPhase) { openCodeV2Fake.shellPhase(body.shellId, body.shellPhase); return Response.json({ ok: true }); }
+          break;
+        case "launchWorker":
+          if (body.conversationId) return Response.json(openCodeV2Fake.launchWorker(body.conversationId, body.background !== false, body.childId));
+          break;
+        case "settleWorker":
+          if (body.childId) { openCodeV2Fake.settleWorker(body.childId, body.workerState ?? "completed", body.text ?? "Fixture checked."); return Response.json({ ok: true }); }
+          break;
+        case "workerReport":
+          if (body.childId) { openCodeV2Fake.workerReport(body.childId, body.usedModel ?? "Fixture Model", body.usedEffort, body.costUsd); return Response.json({ ok: true }); }
+          break;
+        case "disconnect":
+          openCodeV2Fake.disconnect(); return Response.json({ ok: true });
+        case "pauseEvents":
+          openCodeV2Fake.pauseEvents(true); return Response.json({ ok: true });
+        case "reconnectEvents":
+          openCodeV2Fake.pauseEvents(false); return Response.json({ ok: true });
+        case "externalRevert":
+          if (body.conversationId && body.revertMessageId !== undefined) {
+            openCodeV2Fake.externalRevert(body.conversationId, body.revertMessageId);
+            return Response.json({ ok: true });
+          }
+          break;
+        case "appendHistory":
+          if (body.conversationId) { openCodeV2Fake.appendHistory(body.conversationId, body.count ?? 60); return Response.json({ ok: true }); }
+          break;
+        case "loseBackgroundResponse":
+          openCodeV2Fake.loseNextBackgroundResponse(); return Response.json({ ok: true });
+        case "loseWorkerResponse":
+          openCodeV2Fake.loseNextWorkerResponse(); return Response.json({ ok: true });
+        case "step":
+          if (body.conversationId) return Response.json(openCodeV2Fake.step(body.conversationId));
+          break;
+        case "finish":
+          if (body.conversationId) {
+            const finished = openCodeV2Fake.finish(body.conversationId, body.text);
+            return finished ? Response.json(finished) : Response.json({ error: "no turn is running" }, { status: 409 });
+          }
+          break;
+        case "raceDeliverOnCancel":
+          if (body.inboxId) {
+            openCodeV2Fake.raceDeliverOnCancel(body.inboxId);
+            return Response.json({ ok: true });
+          }
+          break;
+        case "state":
+          return Response.json(openCodeV2Fake.state());
+      }
+      break;
     case "seed":
       return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration, body.updatedAt), body.agent ?? "opencode");
     case "externalCreate":
@@ -631,6 +768,7 @@ server = Bun.serve({
       chatService,
       getWorkspaceCredential: () => watchSession.getTerminalToken(),
       basePath: E2E_BASE_PATH,
+      childPolicy: childPolicy?.basePath === E2E_BASE_PATH ? childPolicy : undefined,
       // A hub owns its origin root, as production's child invocation declares.
       ...(E2E_HUB_CHILD ? { manifestScope: "origin" as const } : {}),
       handleE2EReset,
@@ -747,7 +885,7 @@ const fetchFallback = buildFetchFallback({
 
 // The readiness line the spawning fixture waits for. A hub child announces
 // its prefixed session URL, the shape the hub's backend contract expects.
-console.log(E2E_HUB_CHILD ? `http://127.0.0.1:${server.port}${E2E_BASE_PATH}` : `http://127.0.0.1:${server.port}`);
+console.log(E2E_HUB_CHILD ? `http://127.0.0.1:${server.port}${E2E_BASE_PATH}${privateBootstrap ? `?t=${encodeURIComponent(watchSession.getTerminalToken())}` : ""}` : `http://127.0.0.1:${server.port}`);
 
 let shuttingDown = false;
 const shutdown = async () => {
@@ -757,6 +895,8 @@ const shutdown = async () => {
   liveBroker.dispose();
   await singleAgentRouter.dispose();
   await dualAgentRouter.dispose().catch(() => undefined);
+  await openCodeV2Router?.dispose().catch(() => undefined);
+  await openCodeV2Fake.stop().catch(() => undefined);
   await watchSession.stop();
   await server.stop(true);
   process.exit(0);

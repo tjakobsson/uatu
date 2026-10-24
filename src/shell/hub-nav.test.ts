@@ -1633,6 +1633,18 @@ describe("initHubNav renders the repository title and the grouped menu", () => {
     return { document, window };
   }
 
+  test("workspace Hub menu links to personal Settings without workspace-relative routing", async () => {
+    const { document, window } = await mount("/s/atlas/", []);
+    const toggle = document.querySelector<HTMLElement>("#hub-toggle")!;
+    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const settings = document.querySelector<HTMLAnchorElement>('#hub-menu a[href="/settings#personal-chat-preferences-pane"]')!;
+    expect(settings).not.toBeNull();
+    expect(settings.textContent).toBe("Settings");
+    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    expect(document.querySelector('#hub-menu a[href="/settings#personal-chat-preferences-pane"]')).toBe(settings);
+  });
+
   test("the chip names the repository, the menu groups by it, and no title line duplicates it", async () => {
     const { document, window } = await mount("/s/atlas-trst/", [
       { id: "atlas", displayName: "atlas", path: "/src/atlas", running: true, repositoryId: "repo-1", branch: "main", createWorktree: true },

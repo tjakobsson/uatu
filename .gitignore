@@ -3,6 +3,8 @@ dist/
 .e2e/
 playwright-report/
 test-results/
+# Generated Impeccable critique snapshots; keep ignore.md available for project rules
+.impeccable/critique/*__*.md
 .astro/
 # Local scratch: dev hub state (dev/hub.json), benchmark and screenshot runs
 .local/

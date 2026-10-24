@@ -10,9 +10,10 @@ import type { APIRequestContext, Page } from "@playwright/test";
 
 import { withMoreModels } from "../../src/chat/claude/models";
 import type { ChatModel, ConversationItem } from "../../src/chat/types";
-import { openChatConfiguration, openChatPanel } from "./chat-helpers";
+import { openChatConfiguration, openChatPanel, openChatWorkers } from "./chat-helpers";
 import { captureScreenshot as capture } from "./evidence";
 import { expect, test } from "./fixtures";
+import { expectWorkControlVisible } from "./work-panel-assertions";
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<any> {
   const response = await request.post("/__e2e/chat", { data: body });
@@ -86,18 +87,13 @@ const skillTool = (id: string, createdAt: number, skill: string, status: "runnin
   ...(childConversationId === undefined ? {} : { childConversationId }),
   ...(output === undefined ? {} : { output }),
 });
-/**
- * The composer's task list, open so its rows can be read and clicked. It
- * opens itself when running work first appears in it — no disclosure click —
- * so this asserts that rather than clicking: a click on an open list would
- * collapse it.
- */
+/** Deliberately open the shared card without changing any worker lifecycle. */
 async function openTaskList(page: Page) {
-  const list = page.locator("#chat-background-tasks");
-  await expect(list).toBeVisible();
-  await expect(list).toHaveAttribute("open", "");
-  return list;
+  await openChatWorkers(page);
+  return page.locator("#chat-compact-workers");
 }
+
+const workerNamed = (page: Page, name: string) => page.locator(".chat-worker-row").filter({ has: page.getByText(name, { exact: true }) });
 
 /** Boots the dual-agent workspace and opens a seeded Claude conversation. */
 async function bootClaude(page: Page, request: APIRequestContext, title: string, items: ConversationItem[] = [], configuration: Record<string, unknown> = {}, touch = false, models: ChatModel[] = claudeModels): Promise<string> {
@@ -437,28 +433,31 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     // not Cancel, while the task runs.
     await page.locator("#chat-input").fill("still there?");
     await expect(page.locator("#chat-send")).toBeEnabled();
-    await expect(page.locator("#chat-send")).not.toHaveAttribute("aria-label", /Cancel/);
+    await expect(page.locator("#chat-stop")).toBeDisabled();
     await page.locator("#chat-input").fill("");
-    const list = page.locator("#chat-background-tasks");
+    const list = page.locator("#chat-compact-workers");
     await expect(list).toBeVisible();
-    await expect(list.locator("#chat-background-tasks-label")).toHaveText("1 background task running · Sleep then report");
+    await expect(list.locator("#chat-compact-workers-label")).toHaveText("1 working");
+    await expect(workerNamed(page, "Sleep then report")).toHaveCount(1);
     await expect(page.locator('[data-chat-item-id="task:b2f6"]')).toHaveCount(0);
     await capture(page, testInfo, "phase2-background-state-composer");
     await control(request, { action: "item", conversationId: id, item: { ...task, progress: "Using Bash" } });
-    // Open already: running work is reachable without disclosing the list.
-    await expect(list).toHaveAttribute("open", "");
+    await openTaskList(page);
     await expect(list.locator("li")).toHaveCount(1);
-    await expect(list.locator("li .chat-background-task-progress")).toHaveText("Using Bash");
+    await list.locator('[data-inspect-task="b2f6"]').click();
+    await expect(page.locator("#chat-drilldown-task .chat-drilldown-task-progress")).toHaveText("Using Bash");
+    await page.locator("#chat-drilldown-back").click();
     await capture(page, testInfo, "phase2-task-list-stop");
 
     // Stop: the request reaches the agent, which settles the row as stopped;
-    // the list empties and the timeline records the outcome in place.
-    const stop = list.getByRole("button", { name: "Stop Sleep then report" });
+    // history remains until Dismiss, and the timeline records the outcome.
+    const stop = list.getByRole("button", { name: "Stop worker: Sleep then report", exact: true });
     const stopRequest = page.waitForResponse(response => response.url().includes("/tasks/b2f6/stop"));
     await stop.click();
     expect((await stopRequest).status()).toBe(200);
     await control(request, { action: "status", conversationId: id, status: "idle" });
-    await expect(list).toBeHidden();
+    await expect(list.locator('[data-background-task="b2f6"]')).toHaveAttribute("data-state", "stopped");
+    await expect(list.locator('[data-background-task="b2f6"] [data-stop-task]')).toHaveCount(0);
     const row = page.locator('[data-chat-item-id="task:b2f6"]');
     await expect(row).toContainText("Background task stopped");
     await expect(row.locator(".chat-activity-subject")).toHaveText("Sleep then report");
@@ -477,7 +476,12 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(settled).toContainText("Background task finished");
     await settled.locator("summary").click();
     await expect(settled.locator(".chat-task-summary")).toContainText("exited with code 0");
+    await expect(list.locator("#chat-compact-workers-label")).toHaveText("2 finished");
+    await expect(list.locator("li")).toHaveCount(2);
+    await list.getByRole("button", { name: "Dismiss finished", exact: true }).click();
     await expect(list).toBeHidden();
+    await expect(row).toContainText("Background task stopped");
+    await expect(settled).toContainText("Background task finished");
     await capture(page, testInfo, "phase2-settled-task-row");
   });
 
@@ -491,12 +495,12 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await openChatPanel(page);
     await page.locator("#chat-conversation-select").selectOption(id);
     await expect(page.locator("#chat-composer-status")).toHaveAttribute("data-state", "background");
-    await expect(page.locator("#chat-background-tasks-label")).toHaveText("1 background task running · Watch the build");
+    await expect(page.locator("#chat-compact-workers-label")).toHaveText("1 working");
+    await openTaskList(page);
+    await expect(workerNamed(page, "Watch the build")).toBeVisible();
   });
 
-  test("running work is reachable without disclosing its list, and a list the user collapsed stays collapsed", async ({ page, request }) => {
-    // Spec: "Running work is reachable without disclosing the list" and "A
-    // list the user collapsed stays collapsed".
+  test("running work opens one desktop disclosure and a user collapse survives new work", async ({ page, request }) => {
     const id = await bootClaude(page, request, "Reachable running work", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Run the suite and have an explorer read the tree" },
     ]);
@@ -505,28 +509,26 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await control(request, { action: "item", conversationId: id, item: runningTask("bgjpa", "bun test", { taskType: "local_bash", toolUseId: "toolu_2", outputFile: "/tmp/tasks/bgjpa.output" }) });
     await control(request, { action: "item", conversationId: id, item: agentTool("tool:toolu_1", "Read the tree", "explore") });
 
-    // No disclosure click: the task's inspect and Stop controls are on screen.
-    const list = page.locator("#chat-background-tasks");
-    await expect(list.locator('[data-inspect-task="bgjpa"]')).toBeVisible();
-    await expect(list.getByRole("button", { name: "Stop bun test" })).toBeVisible();
-    const track = page.locator("#chat-subagents");
-    await expect(track.locator("li")).toContainText("explore · Read the tree");
-    await expect(track.locator("li")).toBeVisible();
-    // Opening moved no focus.
+    const track = page.locator("#chat-compact-workers");
+    await expect(track.locator("summary")).toContainText("2 working");
+    await expect(track).toHaveAttribute("open", "");
+    // New desktop work opens without moving focus.
     expect(await page.evaluate(() => document.activeElement?.id ?? "")).toBe(focusedBefore);
+    await openTaskList(page);
+    await expect(track.locator('[data-inspect-task="bgjpa"]')).toBeVisible();
+    await expect(track.getByRole("button", { name: "Stop worker: bun test", exact: true })).toBeVisible();
+    await expect(workerNamed(page, "Read the tree").locator(".chat-worker-meta")).toContainText("explore");
 
-    // The user collapses both; new running work does not reopen them.
-    await list.locator("summary").click();
+    // The single collapse controls agent and shell rows together.
     await track.locator("summary").click();
-    await expect(list).not.toHaveAttribute("open", "");
     await expect(track).not.toHaveAttribute("open", "");
     await control(request, { action: "item", conversationId: id, item: runningTask("c1", "Build the docs", { taskType: "local_bash", toolUseId: "toolu_3" }) });
     await control(request, { action: "item", conversationId: id, item: agentTool("tool:toolu_4", "Audit the links", "explore") });
-    await expect(list.locator("#chat-background-tasks-label")).toHaveText("2 background tasks running");
-    await expect(track.locator("summary")).toContainText("2 of 2 subagents working");
-    await expect(list).not.toHaveAttribute("open", "");
+    await expect(track.locator("summary")).toContainText("4 working");
+    await expect(track.locator("li")).toHaveCount(4);
     await expect(track).not.toHaveAttribute("open", "");
-    await expect(list.locator('[data-inspect-task="c1"]')).toBeHidden();
+    await expect(track.locator('[data-inspect-task="c1"]')).toBeHidden();
+    await expect(workerNamed(page, "Audit the links")).toBeHidden();
   });
 
   test("work that starts mid-turn is listed while the turn is still running", async ({ page, request }) => {
@@ -550,13 +552,15 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     const list = await openTaskList(page);
     await expect(list.locator("li")).toHaveCount(2);
     await expect(list.locator('li[data-background-task="bgjpa"]')).toContainText("Build the docs");
-    const track = page.locator("#chat-subagents");
+    const track = page.locator("#chat-compact-workers");
     await expect(track).toBeVisible();
     await expect(track).toHaveAttribute("open", "");
-    // No child id has been reported for this run yet, so the row names it
-    // without offering a transcript — it is still listed, with its progress.
-    await expect(track.locator("li")).toContainText("explore · Read the tree");
-    await expect(track.locator(".chat-subagent-progress")).toHaveText("Listing src/");
+    // The launcher and task are one occurrence. Before its child id arrives,
+    // inspection still exposes its live progress in the task output view.
+    await expect(workerNamed(page, "Read the tree")).toHaveCount(1);
+    await track.locator('[data-inspect-task="ada2b"]').click();
+    await expect(page.locator("#chat-drilldown-task .chat-drilldown-task-type")).toHaveText("explore");
+    await expect(page.locator("#chat-drilldown-task .chat-drilldown-task-progress")).toHaveText("Listing src/");
   });
 
   test("a running agent task opens its subagent's transcript, live, under a strip stating the task's facts", async ({ page, request }, testInfo) => {
@@ -576,11 +580,9 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     });
     await control(request, { action: "item", conversationId: id, item: task });
 
-    // Both ways in address the child by the id the drill-down opens it with:
-    // the agent-qualified one the rest of the wire uses.
-    await expect(page.locator("#chat-subagents [data-open-conversation]")).toHaveAttribute("data-open-conversation", child.conversation.id);
     const list = await openTaskList(page);
     const inspect = list.locator('[data-inspect-task="ada2b"]');
+    await expect(inspect).toHaveAttribute("data-worker-item", "task:ada2b");
     await expect(inspect).toHaveAttribute("data-inspect-view", "transcript");
     await inspect.click();
 
@@ -612,11 +614,11 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     // The same run from the subagents track: one way in, one transcript.
     await page.locator("#chat-drilldown-back").click();
     await expect(drilldown).toBeHidden();
-    const track = page.locator("#chat-subagents");
+    const track = page.locator("#chat-compact-workers");
     await expect(track).toHaveAttribute("open", "");
-    await expect(track.locator(".chat-subagent-progress")).toHaveText("Writing the findings");
-    await track.getByRole("button", { name: "explore · Review renderer" }).click();
+    await track.locator('[data-inspect-task="ada2b"]').click();
     await expect(drilldown).toBeVisible();
+    await expect(strip.locator(".chat-drilldown-task-progress")).toHaveText("Writing the findings");
     await expect(strip).toHaveAttribute("data-task-id", "ada2b");
     await expect(page.locator("#chat-drilldown-items")).toContainText("The renderer groups by turn.");
 
@@ -625,7 +627,11 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await control(request, { action: "item", conversationId: id, item: { ...task, status: "completed", summary: "Reviewed 4 files." } });
     await expect(page.locator("#chat-drilldown-items")).toContainText("Findings filed.");
     await expect(strip).toHaveAttribute("data-task-state", "settled");
-    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("finished · Reviewed 4 files.");
+    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("finished");
+    await expect(strip).not.toContainText("Reviewed 4 files.");
+    await strip.getByRole("button", { name: "View worker result" }).click();
+    await expect(drilldown).toBeHidden();
+    await expect(page.locator('[data-chat-item-id="task:ada2b"] .chat-task-summary')).toHaveText("Reviewed 4 files.");
   });
 
   test("a running shell task opens an output view whose pane follows the output as it is written", async ({ page, request }, testInfo) => {
@@ -693,13 +699,18 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     expect((await stopped).status()).toBe(200);
     await expect(strip).toHaveAttribute("data-task-state", "settled");
     await expect(strip).toHaveClass(/is-settled/);
-    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("stopped · Stopped by the user.");
+    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("stopped");
+    await expect(strip).not.toContainText("Stopped by the user.");
     await expect(strip.locator("[data-stop-task]")).toHaveCount(0);
 
-    // Behind the view the row has left the list and taken its timeline place.
-    await page.locator("#chat-drilldown-back").click();
-    await expect(page.locator("#chat-background-tasks")).toBeHidden();
+    // Behind the view the settled history stays until Dismiss, while its
+    // canonical timeline result remains independently readable.
+    await strip.getByRole("button", { name: "View worker result" }).click();
+    await expect(page.locator("#chat-drilldown")).toBeHidden();
+    await expect(list.locator('[data-background-task="tailer"]')).toHaveAttribute("data-state", "stopped");
+    await expect(list.locator('[data-background-task="tailer"] [data-stop-task]')).toHaveCount(0);
     await expect(page.locator('[data-chat-item-id="task:tailer"]')).toContainText("Background task stopped");
+    await expect(page.locator('[data-chat-item-id="task:tailer"] .chat-task-summary')).toHaveText("Stopped by the user.");
   });
 
   test("a running fork is named in the track and opens a complete transcript once its result names it", async ({ page, request }, testInfo) => {
@@ -714,22 +725,23 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await control(request, { action: "status", conversationId: id, status: "running" });
     await control(request, { action: "item", conversationId: id, item: skillTool("tool:toolu_skill", 10, "code-review", "running") });
 
-    // Listed as work in progress, named by the skill it runs. There is no id
-    // to click yet, so the entry is a label rather than a button.
-    const track = page.locator("#chat-subagents");
+    // Listed as work in progress; inspection can reveal its launcher before
+    // the provider has supplied a separate child transcript.
+    const track = await openTaskList(page);
     await expect(track).toBeVisible();
-    await expect(track.locator("summary")).toContainText("code-review");
+    await expect(track.locator("summary")).toContainText("1 working");
     await expect(track).toHaveAttribute("open", "");
     await expect(track.locator("li")).toHaveCount(1);
-    await expect(track.locator(".chat-subagent-label")).toHaveText("Skill · code-review");
-    await expect(track.locator("[data-open-conversation]")).toHaveCount(0);
+    await expect(track.locator(".chat-worker-name")).toHaveText("code-review");
+    await expect(track.locator("[data-inspect-task]")).toHaveCount(0);
 
     // The fork's tool activity streams into the parent timeline under the
     // Skill row, and the track reads its latest step off exactly that.
     await control(request, { action: "item", conversationId: id, item: bash("tool:fork-bash", 11, "git diff HEAD", "completed", "diff --git a/README.md b/README.md") });
-    await expect(track.locator(".chat-subagent-progress")).toHaveText("Bash · git diff HEAD");
+    await expect(track.locator(".chat-worker-meta")).toHaveAttribute("title", /Bash · git diff HEAD/);
     await page.locator(".chat-activity-group > summary").first().click();
     await expect(page.locator('[data-chat-item-id="tool:fork-bash"] .chat-activity-subject')).toHaveText("git diff HEAD");
+    await expect(page.locator('[data-chat-item-id="tool:fork-bash"] .chat-activity-subject')).toBeVisible();
     await capture(page, testInfo, "phase5-running-fork-in-the-track");
 
     // The result names the run. The child it names holds what the fork
@@ -748,9 +760,11 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
 
     // The same entry, in place, now openable.
     await expect(track.locator("li")).toHaveCount(1);
-    const open = track.getByRole("button", { name: "Skill · code-review" });
-    await expect(open).toHaveAttribute("data-open-conversation", child.conversation.id);
+    const open = track.locator(".chat-worker-inspect");
+    await expect(open).toHaveAttribute("data-worker-item", "tool:toolu_skill");
+    const childRead = page.waitForResponse(response => response.url().includes(encodeURIComponent(child.conversation.id)) && response.request().method() === "GET");
     await open.click();
+    expect((await childRead).ok()).toBe(true);
     const drilldown = page.locator("#chat-drilldown");
     const items = page.locator("#chat-drilldown-items");
     await expect(drilldown).toBeVisible();
@@ -783,10 +797,8 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     ]);
     await control(request, { action: "status", conversationId: id, status: "running" });
     await control(request, { action: "item", conversationId: id, item: skillTool("tool:toolu_skill", 10, "run", "running") });
-    const track = page.locator("#chat-subagents");
-    await expect(track).toBeVisible();
-    await expect(track).toHaveAttribute("open", "");
-    await expect(track.locator(".chat-subagent-label")).toHaveText("Skill · run");
+    const track = await openTaskList(page);
+    await expect(track.locator(".chat-worker-name")).toHaveText("run");
 
     // It settles without ever naming a child: an ordinary skill load, a
     // moment's work, no run to follow. The track drops it rather than
@@ -835,7 +847,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(status).toHaveAttribute("data-state", "retrying");
     await expect(status).toHaveAttribute("aria-label", "Retrying (attempt 2 of 10, HTTP 529)");
     // Still a live turn: the primary action is Cancel, not Send.
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", /Cancel/);
+    await expect(page.locator("#chat-stop")).toBeEnabled();
     // The standing is the composer's, not the timeline's: one chip, opened
     // for the detail, and no row anywhere.
     await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 5, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt: Date.now() + 3_600_000 } });
@@ -1336,8 +1348,13 @@ for (const touch of [false, true]) {
       const label = page.locator("#chat-context-usage-label");
       await expect(label).toHaveText("213k");
       await expect(page.locator("#chat-context-usage")).toHaveAttribute("data-fill", "unknown");
-      await page.locator("#chat-context-usage > summary").click();
-      await expect(page.locator("#chat-context-usage-breakdown")).toContainText("Limit unavailable");
+      if (touch) {
+        await expect(page.locator("#chat-inline-context")).toContainText("limit unknown");
+        await expect(page.locator("#chat-context-usage")).toBeHidden();
+      } else {
+        await page.locator("#chat-context-usage > summary").click();
+        await expect(page.locator("#chat-context-usage-breakdown")).toContainText("Limit unavailable");
+      }
       await capture(page, testInfo, "context-limit-unavailable");
       await control(request, { action: "item", conversationId: id, item: {
         id: "window:live", type: "context_window", createdAt: 3, model, limit: 1_000_000,
@@ -1444,7 +1461,7 @@ test.describe("Claude Code scheduled wakeups (fixture-driven)", () => {
     // Prompting stays possible: Send, not Cancel.
     await page.locator("#chat-input").fill("anything new?");
     await expect(page.locator("#chat-send")).toBeEnabled();
-    await expect(page.locator("#chat-send")).not.toHaveAttribute("aria-label", /Cancel/);
+    await expect(page.locator("#chat-stop")).toBeDisabled();
     await page.locator("#chat-input").fill("");
     await capture(page, testInfo, "scheduled-composer");
 
@@ -1511,6 +1528,9 @@ test.describe("Claude Code scheduled wakeups (fixture-driven)", () => {
     await expect(row.locator(".chat-wakeup-label")).toHaveText("Recurring wakeup paused");
     await expect(row.locator(".chat-wakeup-message")).toContainText("restores this schedule");
     await capture(page, testInfo, "paused-cron-reopened");
+    const cancel = panel.getByRole("button", { name: /Cancel wakeup/ });
+    await cancel.scrollIntoViewIfNeeded();
+    await expectWorkControlVisible(cancel);
     const cancelRequest = page.waitForResponse(response => response.url().includes("/wakeups/c1/cancel"));
     await panel.getByRole("button", { name: /Cancel wakeup/ }).click();
     expect((await cancelRequest).status()).toBe(200);

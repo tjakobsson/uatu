@@ -5,14 +5,16 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
-import { isLiveConversationStatus, type ChatAccountChange, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
+import { isLiveConversationStatus, type ChatAccountChange, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
-import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError } from "../chat/adapter";
-import { ReversibleHistoryTargetError, InvalidQuestionAnswerError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../chat/provider";
+import { CommandSteeringError, ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError } from "../chat/adapter";
+import { OperationOutcomeUnknownError, ReversibleHistoryTargetError, InvalidQuestionAnswerError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../chat/provider";
 import { MetricsRegistry } from "../debug/metrics";
 import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
 import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
+import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
+import type { ChatActionContext } from "../chat/types";
 
 const TOKEN = "chat-test-token";
 // The conversation route opens with an `open` event naming the cursor its
@@ -26,12 +28,18 @@ class FakeChatService implements WorkspaceChatService {
   prompts = 0;
   retries = 0;
   renames = 0;
-  private promptResult: { messageId: string; held: boolean } | undefined;
+  private promptResult: { messageId: string; pending: boolean; delivery: MessageDelivery } | undefined;
   selectedModel: ModelSelection | undefined;
   selectedAgent: string | undefined;
   questionResponses: QuestionOutcome[] = [];
   rejectAnswers: Error | null = null;
   stoppedTasks: string[] = [];
+  backgrounded: string[] = [];
+  generated: string[] = [];
+  async generate(id: string, _requestId: string, question: string) { this.require(id); this.generated.push(question); return { text: "Side answer" }; }
+  async backgroundBlockingWork(id: string, _requestId: string): Promise<{ accepted: true }> {
+    this.require(id); this.backgrounded.push(id); return { accepted: true };
+  }
   released: string[] = [];
   cancelledWakeups: string[] = [];
   removals: string[] = [];
@@ -61,14 +69,20 @@ class FakeChatService implements WorkspaceChatService {
     const handoff = this.replay.handoff(() => this.snapshot(), options.cursor, options.signal);
     return { snapshot: handoff.snapshot, events: handoff.subscription };
   }
-  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection, agent?: string, _variant?: string, attachments?: MessageAttachment[]) {
+  selectedDelivery: MessageDelivery | undefined;
+  actionContexts: Array<ChatActionContext | undefined> = [];
+  operationReceipts: Array<string | undefined> = [];
+  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection, agent?: string, _variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) {
+    this.actionContexts.push(context);
+    this.operationReceipts.push(operationReceipt);
     this.require(id);
     this.selectedModel = model;
     this.selectedAgent = agent;
     this.promptAttachments = attachments;
+    this.selectedDelivery = delivery;
     if (!this.promptResult) {
       this.prompts += 1;
-      this.promptResult = { messageId: requestId, held: false };
+      this.promptResult = { messageId: requestId, pending: false, delivery: "queue" };
     }
     return { ...this.promptResult, configuration: { ...(model ? { model } : {}), ...(agent ? { mode: agent } : {}) } };
   }
@@ -88,8 +102,29 @@ class FakeChatService implements WorkspaceChatService {
   async removeQueued(id: string, messageId: string, _requestId: string) {
     this.require(id);
     if (messageId === "delivered") throw new QueuedMessageNotHeldError();
+    if (messageId === "unconfirmed") throw new SteerWithdrawalUnconfirmedError();
+    if (messageId === "steered") throw new SteerAlreadyDeliveredError();
     this.removals.push(messageId);
     return { removed: true } as const;
+  }
+  switches: Array<{ messageId: string; delivery: MessageDelivery }> = [];
+  sent: string[] = [];
+  async changeDelivery(id: string, messageId: string, _requestId: string, delivery: MessageDelivery, context?: ChatActionContext) {
+    this.actionContexts.push(context);
+    this.require(id);
+    if (messageId === "steered") throw new SteerAlreadyDeliveredError();
+    if (messageId === "unconfirmed") throw new SteerWithdrawalUnconfirmedError();
+    if (messageId === "command") throw new CommandSteeringError();
+    if (messageId === "unsupported") throw new SteeringUnsupportedError();
+    this.switches.push({ messageId, delivery });
+    return { messageId, delivery };
+  }
+  async sendNow(id: string, messageId: string, _requestId: string) {
+    this.require(id);
+    if (messageId === "running") throw new SendNowUnavailableError();
+    if (messageId === "unsupported") throw new SendNowUnsupportedError();
+    this.sent.push(messageId);
+    return { messageId, delivery: "queue" as const };
   }
   async renameConversation(id: string, _requestId: string, title: string) {
     this.require(id);
@@ -204,7 +239,7 @@ class FakeChatService implements WorkspaceChatService {
   private require(id: string) { if (id !== "local") throw new ConversationNotFoundError(); }
 }
 
-function routes(chatService = new FakeChatService(), basePath = "/", chatKeepaliveMs?: number, metrics?: MetricsRegistry) {
+function routes(chatService = new FakeChatService(), basePath = "/", chatKeepaliveMs?: number, metrics?: MetricsRegistry, childPolicy?: ReturnType<typeof readChildPolicyBootstrap>) {
   const repo = path.resolve(import.meta.dir, "..", "..");
   // The real router over the single-agent fake: route tests exercise the
   // qualifying seam exactly as production does. The fake keeps owning the
@@ -224,6 +259,7 @@ function routes(chatService = new FakeChatService(), basePath = "/", chatKeepali
   return buildRoutes({
     mode: "prod",
     basePath,
+    childPolicy,
     ...(chatKeepaliveMs === undefined ? {} : { chatKeepaliveMs }),
     ...(metrics === undefined ? {} : { metrics }),
     assets: {
@@ -255,6 +291,41 @@ function request(pathname: string, init: RequestInit = {}, params?: Record<strin
 }
 
 describe("workspace chat routes", () => {
+  test("an opaque operation receipt is only a dedup identifier and never unsigned principal or automatic-policy authority", async () => {
+    const service = new FakeChatService();
+    const table = routes(service, "/s/project/");
+    const path = "/s/project/api/chat/conversations/opencode:local/prompts";
+    const handler = table["/s/project/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request): Promise<Response> };
+    const token = `opr_${"a".repeat(43)}`;
+    const send = (headers: Record<string, string>) => handler.POST(request(path, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json", "x-uatu-hub-operation-receipt": token, ...headers }, body: '{"requestId":"correlation","text":"Fixture","delivery":"steer"}' }, { conversationId: "opencode:local" }));
+    const accepted = await send({});
+    expect(accepted.status).toBe(202);
+    expect(await accepted.json()).not.toHaveProperty("automaticBackground");
+    expect(service.actionContexts).toEqual([undefined]);
+    expect(service.operationReceipts).toEqual([token]);
+    expect((await send({ [CHILD_POLICY_HEADER]: "workspace-credential-forged-policy" })).status).toBe(403);
+    expect((await send({ origin: "https://foreign.example" })).status).toBe(403);
+    expect(service.operationReceipts).toHaveLength(1);
+  });
+  test("verified child-bound policy crosses qualified prompt dispatch without becoming shared response metadata", async () => {
+    const authority = createChildPolicyAuthority("project", "/s/project/");
+    const service = new FakeChatService();
+    const table = routes(service, "/s/project/", undefined, undefined, readChildPolicyBootstrap(authority.bootstrap()));
+    const path = "/s/project/api/chat/conversations/opencode:local/prompts";
+    const body = JSON.stringify({ requestId: "request", text: "steer", delivery: "steer" });
+    const policy = authority.sign({ method: "POST", pathname: path, body }, { principal: "alice", revision: 1, autoBackgroundOnSteer: true });
+    const handler = table["/s/project/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request): Promise<Response> };
+    const send = (envelope: string, text = body) => handler.POST(request(path, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json", [CHILD_POLICY_HEADER]: envelope }, body: text }, { conversationId: "opencode:local" }));
+    const response = await send(policy);
+    expect(response.status).toBe(202);
+    expect(service.actionContexts).toEqual([{ receiptScope: "alice", automaticBackground: "on" }]);
+    expect(JSON.stringify(await response.json())).not.toContain("alice");
+    expect((await send(policy, body.replace("steer\"}", "queue\"}"))).status).toBe(403);
+    expect((await send("workspace-token-forgery")).status).toBe(403);
+    expect(service.actionContexts).toHaveLength(1);
+    const untrusted = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/prompts"] as typeof handler;
+    expect((await untrusted.POST(request(path, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json", [CHILD_POLICY_HEADER]: policy }, body }, { conversationId: "opencode:local" }))).status).toBe(403);
+  });
   test("requires the child credential for every read without starting chat", async () => {
     let calls = 0;
     const service = new FakeChatService();
@@ -691,9 +762,88 @@ describe("workspace chat routes", () => {
     const conflict = await send("delivered");
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toEqual({ error: "message is no longer held" });
+    // A steer the agent delivered before the withdrawal (opencode-v2-steering
+    // D7): the same status with its own code.
+    const late = await send("steered");
+    expect(late.status).toBe(409);
+    expect(await late.json()).toEqual({ error: "the message was already delivered", code: "steer-already-delivered" });
+    const unconfirmed = await send("unconfirmed");
+    expect(unconfirmed.status).toBe(409);
+    expect(await unconfirmed.json()).toMatchObject({ code: "steer-withdrawal-unconfirmed" });
 
     const foreign = handler.DELETE(request("/api/chat/conversations/other/queue/held-1", {
       method: "DELETE", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "remove-2" }),
+    }, { conversationId: "other", messageId: "held-1" }) as never);
+    expect((await foreign).status).toBe(404);
+  });
+
+  test("the prompt route accepts and validates a delivery (opencode-v2-steering)", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (body: unknown) => handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
+      method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify(body),
+    }, { conversationId: "opencode:local" }) as never);
+    expect((await send({ requestId: crypto.randomUUID(), text: "hello", delivery: "later" })).status).toBe(400);
+    expect((await send({ requestId: crypto.randomUUID(), text: "hello", delivery: 1 })).status).toBe(400);
+    const steered = await send({ requestId: crypto.randomUUID(), text: "hello", delivery: "steer" });
+    expect(steered.status).toBe(202);
+    expect(service.selectedDelivery).toBe("steer");
+    expect(await steered.json()).toMatchObject({ pending: false, delivery: "queue" });
+    expect((await send({ requestId: crypto.randomUUID(), text: "hello" })).status).toBe(202);
+    expect(service.selectedDelivery).toBeUndefined();
+  });
+
+  test("switches a pending message's delivery: origin-guarded, validated, idempotent, with distinct refusals", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/queue/:messageId"] as { PATCH(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (messageId: string, body: unknown = { requestId: "switch-1", delivery: "steer" }, origin = "http://127.0.0.1:4711") => handler.PATCH(request(`/api/chat/conversations/opencode:local/queue/${messageId}`, {
+      method: "PATCH", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body),
+    }, { conversationId: "opencode:local", messageId }) as never);
+    expect((await send("held-1", undefined, "https://attacker.example")).status).toBe(403);
+    expect((await send("held-1", { delivery: "steer" })).status).toBe(400);
+    expect((await send("held-1", { requestId: "switch-1" })).status).toBe(400);
+    expect((await send("held-1", { requestId: "switch-1", delivery: "later" })).status).toBe(400);
+    const switched = await send("held-1");
+    expect(switched.status).toBe(200);
+    expect(await switched.json()).toEqual({ messageId: "held-1", delivery: "steer" });
+    expect(await (await send("msg_1", { requestId: "switch-2", delivery: "queue" })).json()).toEqual({ messageId: "msg_1", delivery: "queue" });
+    expect(service.switches).toEqual([{ messageId: "held-1", delivery: "steer" }, { messageId: "msg_1", delivery: "queue" }]);
+    // Already delivered by the agent: a conflict with its own code, so the
+    // client can say "too late" rather than "not held".
+    const late = await send("steered", { requestId: "switch-3", delivery: "queue" });
+    expect(late.status).toBe(409);
+    expect(await late.json()).toEqual({ error: "the message was already delivered", code: "steer-already-delivered" });
+    const command = await send("command");
+    const unconfirmed = await send("unconfirmed", { requestId: "withdrawal-unknown", delivery: "queue" });
+    expect(unconfirmed.status).toBe(409);
+    expect(await unconfirmed.json()).toMatchObject({ code: "steer-withdrawal-unconfirmed" });
+    expect(command.status).toBe(409);
+    expect(await command.json()).toEqual({ error: "a command cannot be steered; it stays queued" });
+    expect((await send("unsupported")).status).toBe(409);
+    const foreign = handler.PATCH(request("/api/chat/conversations/other/queue/held-1", {
+      method: "PATCH", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "switch-4", delivery: "steer" }),
+    }, { conversationId: "other", messageId: "held-1" }) as never);
+    expect((await foreign).status).toBe(404);
+  });
+
+  test("sends a pending message now: origin-guarded, idempotent, refused while a turn runs or without the capability", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/queue/:messageId/send-now"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (messageId: string, body: unknown = { requestId: "send-1" }, origin = "http://127.0.0.1:4711") => handler.POST(request(`/api/chat/conversations/opencode:local/queue/${messageId}/send-now`, {
+      method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body),
+    }, { conversationId: "opencode:local", messageId }) as never);
+    expect((await send("held-1", undefined, "https://attacker.example")).status).toBe(403);
+    expect((await send("held-1", { messageId: "held-1" })).status).toBe(400);
+    const sent = await send("held-1");
+    expect(sent.status).toBe(200);
+    expect(await sent.json()).toEqual({ messageId: "held-1", delivery: "queue" });
+    expect(service.sent).toEqual(["held-1"]);
+    const running = await send("running");
+    expect(running.status).toBe(409);
+    expect(await running.json()).toEqual({ error: "a turn is running; the message is delivered when it ends" });
+    expect((await send("unsupported")).status).toBe(409);
+    const foreign = handler.POST(request("/api/chat/conversations/other/queue/held-1/send-now", {
+      method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "send-2" }),
     }, { conversationId: "other", messageId: "held-1" }) as never);
     expect((await foreign).status).toBe(404);
   });
@@ -804,6 +954,60 @@ describe("workspace chat routes", () => {
     expect((await send({})).status).toBe(400);
     expect((await send({ requestId: crypto.randomUUID(), extra: 1 })).status).toBe(400);
     expect(service.stoppedTasks).toEqual(["b2f6"]);
+  });
+  test("background-all is qualified, validated, and exposes unknown outcomes as 409, never acceptance", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/background"] as { POST(request: Request): Promise<Response> };
+    const send = (body: Record<string, unknown>, id = "opencode:local") => handler.POST(request(`/api/chat/conversations/${id}/background`, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify(body) }, { conversationId: id }));
+    expect(await (await send({ requestId: "bg-request" })).json()).toEqual({ accepted: true });
+    expect(service.backgrounded).toEqual(["local"]);
+    expect((await send({})).status).toBe(400);
+    expect((await send({ requestId: "bg-request", childId: "other" })).status).toBe(400);
+    expect((await send({ requestId: "bg-request" }, "opencode:foreign")).status).toBe(404);
+    service.backgroundBlockingWork = async () => { throw new OperationOutcomeUnknownError(); };
+    const unknown = await send({ requestId: "ambiguous" });
+    expect(unknown.status).toBe(409);
+    expect(await unknown.json()).toMatchObject({ code: "operation_outcome_unknown" });
+  });
+
+  test("side answers authenticate and validate a closed bounded request without prompt dispatch", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/aside"] as { POST(request: Request): Promise<Response> };
+    const send = (body: Record<string, unknown>, id = "opencode:local") => handler.POST(request(`/api/chat/conversations/${id}/aside`, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify(body) }, { conversationId: id }));
+    const result = await send({ requestId: "q", question: "Why?" });
+    expect(result.status).toBe(200); expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual({ text: "Side answer" });
+    for (const body of [{ question: "Why?" }, { requestId: "q", question: "" }, { requestId: "q", question: "x".repeat(16385) }, { requestId: "q", question: "Why?", tools: true }]) expect((await send(body)).status).toBe(400);
+    expect((await send({ requestId: "q", question: "Why?" }, "opencode:foreign")).status).toBe(404);
+    expect(service.generated).toEqual(["Why?"]); expect(service.prompts).toBe(0); expect(service.backgrounded).toEqual([]);
+  });
+  test("relocated side answers refuse unauthenticated and foreign-origin access before inference", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/aside"] as { POST(request: Request): Promise<Response> };
+    const pathname = "/s/project/api/chat/conversations/opencode:local/aside";
+    const params = { conversationId: "opencode:local" };
+    const init = { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "side", question: "Why?" }) };
+    const unauthenticated = new Request(`http://127.0.0.1:4711${pathname}`, init) as Request & { params: typeof params };
+    unauthenticated.params = params;
+    expect((await handler.POST(unauthenticated)).status).toBe(401);
+    expect((await handler.POST(request(pathname, { ...init, headers: { ...init.headers, origin: "https://foreign.invalid" } }, params))).status).toBe(403);
+    expect(service.generated).toEqual([]);
+    expect((await handler.POST(request(pathname, init, params))).status).toBe(200);
+    expect(service.generated).toEqual(["Why?"]);
+  });
+  test("relocated background mutation refuses missing credentials and foreign origins before dispatch", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/background"] as { POST(request: Request): Promise<Response> };
+    const pathname = "/s/project/api/chat/conversations/opencode:local/background";
+    const params = { conversationId: "opencode:local" };
+    const init = { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "receipt" }) };
+    const unauthenticated = new Request(`http://127.0.0.1:4711${pathname}`, init) as Request & { params: typeof params };
+    unauthenticated.params = params;
+    expect((await handler.POST(unauthenticated)).status).toBe(401);
+    expect((await handler.POST(request(pathname, { ...init, headers: { ...init.headers, origin: "https://foreign.invalid" } }, params))).status).toBe(403);
+    expect(service.backgrounded).toEqual([]);
+    expect((await handler.POST(request(pathname, init, params))).status).toBe(200);
+    expect(service.backgrounded).toEqual(["local"]);
   });
 
   test("releases a scheduled conversation through the chat service; a refused release is a conflict", async () => {

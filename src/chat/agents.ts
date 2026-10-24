@@ -1,9 +1,11 @@
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import { NotificationFeed } from "./notification-feed";
+import type { ChatActionContext, AutomaticBackgroundFeedback } from "./types";
 import { qualifyNotificationEvent } from "./notifications";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
+import { BackgroundTasksUnsupportedError, SideGenerationUnsupportedError } from "./adapter";
 import type {
   AgentChatStatus,
   BackgroundTaskOutput,
@@ -19,6 +21,7 @@ import type {
   ConversationSnapshot,
   ConversationSummary,
   MessageAttachment,
+  MessageDelivery,
   ModelSelection,
   PermissionOutcome,
   QuestionOutcome,
@@ -102,13 +105,16 @@ export interface MultiAgentWorkspaceChatService {
     snapshot: AgentConversationSnapshot;
     events: ChatEventSubscription;
   }>;
-  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
+  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string): Promise<{
     messageId: string;
-    held: boolean;
+    pending: boolean;
+    delivery: MessageDelivery;
     configuration: ConversationConfiguration;
     conversation?: AgentConversationSummary;
-  }>;
+  } & AutomaticBackgroundFeedback>;
   removeQueued(id: string, messageId: string, requestId: string): Promise<{ removed: true }>;
+  changeDelivery(id: string, messageId: string, requestId: string, delivery: MessageDelivery, context?: ChatActionContext, operationReceipt?: string): Promise<{ messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback>;
+  sendNow(id: string, messageId: string, requestId: string, context?: ChatActionContext, operationReceipt?: string): Promise<{ messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback>;
   saveAttachment(bytes: Uint8Array): Promise<{ id: string; mimeType: string; sizeBytes: number }>;
   resolveAttachment(id: string): Promise<StoredAttachment | null>;
   renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: AgentConversationSummary }>;
@@ -120,6 +126,8 @@ export interface MultiAgentWorkspaceChatService {
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }>;
+  backgroundBlockingWork?(id: string, requestId: string): Promise<{ accepted: true }>;
+  generate?(id: string, requestId: string, question: string): Promise<{ text: string }>;
   release(id: string, requestId: string): Promise<{ released: true }>;
   cancelWakeup(id: string, wakeupId: string, requestId: string): Promise<{ cancelled: true }>;
   taskOutput(id: string, taskId: string, options: { tailBytes: number }): Promise<BackgroundTaskOutput | null>;
@@ -333,9 +341,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     };
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]) {
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) {
     const { agent, conversationId } = this.resolve(id);
-    const { conversation, ...accepted } = await agent.service.prompt(conversationId, requestId, text, model, mode, variant, attachments);
+    const { conversation, ...accepted } = await agent.service.prompt(conversationId, requestId, text, model, mode, variant, attachments, delivery, context, operationReceipt);
     return {
       ...accepted,
       ...(conversation ? { conversation: this.qualifySummary(agent.descriptor, conversation) } : {}),
@@ -345,6 +353,16 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async removeQueued(id: string, messageId: string, requestId: string) {
     const { agent, conversationId } = this.resolve(id);
     return agent.service.removeQueued(conversationId, messageId, requestId);
+  }
+
+  async changeDelivery(id: string, messageId: string, requestId: string, delivery: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) {
+    const { agent, conversationId } = this.resolve(id);
+    return agent.service.changeDelivery(conversationId, messageId, requestId, delivery, context, operationReceipt);
+  }
+
+  async sendNow(id: string, messageId: string, requestId: string, context?: ChatActionContext, operationReceipt?: string) {
+    const { agent, conversationId } = this.resolve(id);
+    return agent.service.sendNow(conversationId, messageId, requestId, context, operationReceipt);
   }
 
   async saveAttachment(bytes: Uint8Array): Promise<{ id: string; mimeType: string; sizeBytes: number }> {
@@ -400,6 +418,17 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async stopTask(id: string, taskId: string, requestId: string) {
     const { agent, conversationId } = this.resolve(id);
     return agent.service.stopTask(conversationId, taskId, requestId);
+  }
+
+  async backgroundBlockingWork(id: string, requestId: string) {
+    const { agent, conversationId } = this.resolve(id);
+    if (!agent.service.backgroundBlockingWork) throw new BackgroundTasksUnsupportedError();
+    return agent.service.backgroundBlockingWork(conversationId, requestId);
+  }
+  async generate(id: string, requestId: string, question: string) {
+    const { agent, conversationId } = this.resolve(id);
+    if (!agent.service.generate) throw new SideGenerationUnsupportedError();
+    return agent.service.generate(conversationId, requestId, question);
   }
 
   async release(id: string, requestId: string) {

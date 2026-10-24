@@ -1,4 +1,5 @@
 import { ChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
+import type { ChatActionContext, AutomaticBackgroundFeedback } from "./types";
 import { NotificationFeed } from "./notification-feed";
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
 import { OpenCodeService, type OpenCodeGeneration, type OpenCodeServiceOptions } from "./opencode/opencode-service";
@@ -18,6 +19,7 @@ import type {
   ConversationSnapshot,
   ConversationSummary,
   MessageAttachment,
+  MessageDelivery,
   PermissionOutcome,
   ModelSelection,
   QuestionOutcome,
@@ -58,13 +60,21 @@ export interface WorkspaceChatService {
     snapshot: ConversationSnapshot;
     events: ReplaySubscription;
   }>;
-  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
+  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string): Promise<{
     messageId: string;
-    held: boolean;
+    // Accepted but not delivered yet: held by the workspace or pending with
+    // the agent, as `delivery` says (opencode-v2-steering D5).
+    pending: boolean;
+    delivery: MessageDelivery;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
-  }>;
+  } & AutomaticBackgroundFeedback>;
+  /** Remove a held message, or withdraw a steer from the agent (D7). */
   removeQueued(id: string, messageId: string, requestId: string): Promise<{ removed: true }>;
+  /** Switch a pending message between steer and queue (D7, D8). */
+  changeDelivery(id: string, messageId: string, requestId: string, delivery: MessageDelivery, context?: ChatActionContext, operationReceipt?: string): Promise<{ messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback>;
+  /** Send a pending message now (D8). */
+  sendNow(id: string, messageId: string, requestId: string, context?: ChatActionContext, operationReceipt?: string): Promise<{ messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback>;
   // The attachment store is workspace state, not agent state: uploads and
   // serving work regardless of whether the agent runtime is up.
   saveAttachment(bytes: Uint8Array): Promise<{ id: string; mimeType: string; sizeBytes: number }>;
@@ -78,6 +88,8 @@ export interface WorkspaceChatService {
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }>;
+  backgroundBlockingWork?(id: string, requestId: string): Promise<{ accepted: true }>;
+  generate?(id: string, requestId: string, question: string): Promise<{ text: string }>;
   /** End a session held for its scheduled wakeups (design D5 of claude-scheduled-wakeups). */
   release(id: string, requestId: string): Promise<{ released: true }>;
   /** Cancel one scheduled wakeup, live or paused; it never fires again. */
@@ -289,8 +301,10 @@ export class LazyChatService implements WorkspaceChatService {
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode, variant, attachments); }
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode, variant, attachments, delivery, context, operationReceipt); }
   async removeQueued(id: string, messageId: string, requestId: string) { return (await this.requireAdapter()).removeQueued(id, messageId, requestId); }
+  async changeDelivery(id: string, messageId: string, requestId: string, delivery: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) { return (await this.requireAdapter()).changeDelivery(id, messageId, requestId, delivery, context, operationReceipt); }
+  async sendNow(id: string, messageId: string, requestId: string, context?: ChatActionContext, operationReceipt?: string) { return (await this.requireAdapter()).sendNow(id, messageId, requestId, context, operationReceipt); }
   async saveAttachment(bytes: Uint8Array) {
     const stored = await this.attachmentStore.save(bytes);
     return { id: stored.id, mimeType: stored.mimeType, sizeBytes: stored.sizeBytes };
@@ -310,6 +324,13 @@ export class LazyChatService implements WorkspaceChatService {
   }
   async stopTask(id: string, taskId: string, requestId: string) {
     return (await this.requireAdapter()).stopTask(id, taskId, requestId);
+  }
+
+  async backgroundBlockingWork(id: string, requestId: string) {
+    return (await this.requireAdapter()).backgroundBlockingWork(id, requestId);
+  }
+  async generate(id: string, requestId: string, question: string) {
+    return (await this.requireAdapter()).generate(id, requestId, question);
   }
   async release(id: string, requestId: string) {
     return (await this.requireAdapter()).release(id, requestId);

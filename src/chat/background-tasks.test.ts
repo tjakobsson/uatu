@@ -9,6 +9,10 @@ const task = (taskId: string, status: "running" | "completed" | "failed" | "stop
 });
 
 describe("background work in the composer", () => {
+  test("unknown liveness is not announced as confirmed running", () => {
+    expect(backgroundStatusLabel([{ ...task("a", "running"), stateUncertain: true }])).toContain("Status unavailable");
+    expect(backgroundStatusLabel([task("b", "running"), { ...task("a", "running"), stateUncertain: true }])).toBe("1 background task running · 1 status unavailable");
+  });
   test("only running tasks are live; settled ones have left the list", () => {
     const items: ConversationItem[] = [task("a", "running"), task("b", "completed"), task("c", "stopped"), task("d", "running"), { id: "m", type: "user_message", createdAt: 0, text: "hi" }];
     expect(runningBackgroundTasks(items).map(entry => entry.taskId)).toEqual(["a", "d"]);

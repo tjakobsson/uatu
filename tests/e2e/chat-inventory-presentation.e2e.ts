@@ -108,7 +108,7 @@ test.describe("desktop conversation inventory presentation", () => {
       action: "bash",
       resources: ["bun test"],
     } });
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+    await expect(page.locator("#chat-stop")).toBeEnabled();
     // What this state needs settled before it is captured is that the request
     // is admitted and counted. Its card is the only entry in the transcript,
     // so the pill yields to it and the count is what remains to assert.

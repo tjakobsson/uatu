@@ -18,8 +18,25 @@
 // child ignores `t` on routes that don't read it.
 
 import type { ServerWebSocket } from "bun";
+import { CHAT_OPERATION_RECEIPT_HEADER } from "../shared/chat-operation-receipt";
+import { HubOperationReceipts } from "./operation-receipts";
 
 import type { RunningSession } from "./backend";
+import { signSessionChatPolicy } from "./backend";
+import { CHAT_ACTION_BODY_BYTES, CHILD_POLICY_HEADER, isChildPolicyAction, type VerifiedChatPolicy } from "./child-policy";
+
+// No principal or policy crosses this degraded channel. Tokens are operation
+// identifiers only, unguessable by another Hub account or workspace caller.
+// Per-running-child keys live only in this Hub's memory, never in credentials.
+const degradedReceipts = new WeakMap<RunningSession, HubOperationReceipts>();
+function degradedReceiptState(session: RunningSession) {
+  let state = degradedReceipts.get(session);
+  if (!state) {
+    state = new HubOperationReceipts();
+    degradedReceipts.set(session, state);
+  }
+  return state;
+}
 
 // Structural subset of Bun.Server the bridge needs for the handshake.
 export type UpgradableServer = {
@@ -76,6 +93,7 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
   const headers = new Headers();
   for (const [name, value] of request.headers) {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue;
+    if (name.toLowerCase().startsWith("x-uatu-hub-")) continue;
     headers.set(name, value);
   }
   headers.set("host", `${session.endpoint.hostname}:${session.endpoint.port}`);
@@ -95,10 +113,51 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
   return headers;
 }
 
-export async function proxyHttp(request: Request, session: RunningSession): Promise<Response> {
+export async function proxyHttp(request: Request, session: RunningSession, policy?: VerifiedChatPolicy): Promise<Response> {
   const requestUrl = new URL(request.url);
   const target = childUrlFor(session, requestUrl);
   const transport = classifyProxyTransport(requestUrl.pathname);
+  const requestHeaders = forwardedHeaders(request, session);
+  let requestBody: BodyInit | null = request.body;
+  let policyUnavailable = false;
+  if (policy && isChildPolicyAction(request.method, requestUrl.pathname, session.basePath)) {
+    const reader = request.body?.getReader();
+    let text = "";
+    try {
+      let bytes = 0;
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      if (reader) for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > CHAT_ACTION_BODY_BYTES) return Response.json({ error: "request body is too large" }, { status: 413 });
+        text += decoder.decode(chunk.value, { stream: true });
+      }
+      text += decoder.decode();
+    } catch { return Response.json({ error: "invalid request body" }, { status: 400 }); }
+    finally { if (reader) void reader.cancel().catch(() => undefined); }
+    const envelope = signSessionChatPolicy(session, { method: request.method, pathname: requestUrl.pathname, body: text }, policy);
+    if (envelope) requestHeaders.set(CHILD_POLICY_HEADER, envelope);
+    else {
+      policyUnavailable = policy.autoBackgroundOnSteer || policy.unavailable === true;
+      // Preserve the original requestId for browser/projection correlation.
+      // Only the server-selected authenticated account selects this opaque
+      // receipt namespace. It carries no automation permission to the child.
+      let body: unknown;
+      try { body = JSON.parse(text); } catch { /* The child's closed validator owns body refusal. */ }
+      if (body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") {
+        const state = degradedReceiptState(session);
+        try {
+          const first = await state.identify({ principal: policy.principal, method: request.method, pathname: requestUrl.pathname, requestId: body.requestId }, policyUnavailable);
+          requestHeaders.set(CHAT_OPERATION_RECEIPT_HEADER, first.token);
+          policyUnavailable = first.unavailable;
+        }
+        catch { return Response.json({ error: "operation receipt capacity unavailable" }, { status: 503, headers: { "cache-control": "no-store" } }); }
+      }
+    }
+    requestBody = text;
+    requestHeaders.delete("content-length");
+  }
 
   // Downstream abandonment has to reach the child, or a phone that walked out
   // of Wi-Fi mid-stream leaves the workspace holding a subscriber forever.
@@ -132,8 +191,8 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
   try {
     upstream = await fetch(target, {
       method: request.method,
-      headers: forwardedHeaders(request, session),
-      body: request.body,
+      headers: requestHeaders,
+      body: requestBody,
       redirect: "manual",
       signal: upstreamAbort.signal,
     });
@@ -143,6 +202,19 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
   }
 
   statusCategory = statusCategoryOf(upstream.status);
+  if (policyUnavailable && upstream.ok && upstream.headers.get("content-type")?.includes("application/json")) {
+    try {
+      const value = await upstream.json();
+      const headers = new Headers(upstream.headers);
+      headers.delete("content-length");
+      headers.set("cache-control", "no-store");
+      upstream = Response.json(value && typeof value === "object" && !Array.isArray(value) && value.delivery === "steer"
+        ? { ...value, automaticBackground: "unavailable" } : value, { status: upstream.status, headers });
+    } catch {
+      finish("failed");
+      return Response.json({ error: "Steer outcome unconfirmed; refresh status without repeating it", code: "operation_outcome_unknown" }, { status: 409, headers: { "cache-control": "no-store" } });
+    }
+  }
   if (upstream.status === 200 && upstream.headers.get("content-type")?.includes("text/html")) {
     upstream = new HTMLRewriter().on("head", { element(head) {
       head.prepend('<meta name="uatu-hub" content="true">', { html: true });

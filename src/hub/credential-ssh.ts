@@ -118,7 +118,6 @@ async function runSecretPty(options: {
   env: Record<string, string>;
   responses: string[];
   timeoutMs: number;
-  capturePublicKey?: boolean;
 }): Promise<PtyResult> {
   let output = "";
   let promptOutput = "";
@@ -132,10 +131,6 @@ async function runSecretPty(options: {
       const chunk = decoder.decode(bytes.subarray(0, MAX_PUBLIC_OUTPUT_BYTES), { stream: true });
       promptOutput = `${promptOutput}${chunk}`.slice(-4_096);
       for (const secret of options.responses) promptOutput = promptOutput.replaceAll(secret, "[redacted]");
-      if (options.capturePublicKey && output.length < MAX_PUBLIC_OUTPUT_BYTES) {
-        output = `${output}${chunk}`.slice(0, MAX_PUBLIC_OUTPUT_BYTES);
-        for (const secret of options.responses) output = output.replaceAll(secret, "[redacted]");
-      }
       const prompts = (promptOutput.match(/passphrase[^:\r\n]*:/gi) ?? []).length;
       while (responseIndex < prompts && responseIndex < options.responses.length) {
         activeTerminal.localFlags &= ~ECHO_FLAG;
@@ -220,7 +215,11 @@ async function readPublicKey(executable: string, args: string[], env: Record<str
     env,
     detached: process.platform !== "win32",
   });
-  const reader = child.stdout.getReader();
+  return drainPublicKey(child, child.stdout, timeoutMs);
+}
+
+async function drainPublicKey(child: SpawnedProcess, stdout: ReadableStream<Uint8Array>, timeoutMs: number): Promise<PtyResult> {
+  const reader = stdout.getReader();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -269,25 +268,54 @@ async function runSecretAskpass(options: {
   mkfifoPath: string;
   runtimeDirectory: string;
   timeoutMs: number;
-}): Promise<number> {
+  capturePublicKey?: boolean;
+}): Promise<PtyResult> {
   const operationId = randomUUID();
   const askpassPath = path.join(options.runtimeDirectory, `.${operationId}.askpass`);
   const secretPipePath = path.join(options.runtimeDirectory, `.${operationId}.pipe`);
   let secretPipe: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let child: SpawnedProcess | undefined;
+  let outputTask: Promise<PtyResult> | undefined;
+  let toolStarted = false;
+  let timedOut = false;
+  let result: PtyResult = { exitCode: 124, publicOutput: "" };
+  // One budget covers setup, secret delivery, stdout, exit, and cleanup.
+  const deadline = performance.now() + options.timeoutMs;
+  const remainingMs = () => Math.max(1, Math.ceil(deadline - performance.now()));
+  const checkDeadline = () => {
+    if (timedOut || performance.now() >= deadline) {
+      timedOut = true;
+      throw new Error("SSH operation timed out");
+    }
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    if (child) terminateDetachedProcess(child);
+  }, options.timeoutMs);
   try {
     await fs.writeFile(askpassPath, "#!/bin/sh\nIFS= read -r secret < \"$UATU_SSH_ASKPASS_PIPE\"\nprintf '%s\\n' \"$secret\"\n", { mode: 0o700 });
+    checkDeadline();
     let mkfifoExitCode: number;
     try {
-      mkfifoExitCode = await runQuiet(options.mkfifoPath, ["-m", "600", secretPipePath], options.env, options.timeoutMs);
+      child = Bun.spawn([options.mkfifoPath, "-m", "600", secretPipePath], {
+        stdin: "ignore", stdout: "ignore", stderr: "ignore", env: options.env,
+        detached: process.platform !== "win32",
+      });
+      mkfifoExitCode = (await child.exited) ?? 1;
+      checkDeadline();
     } catch {
       throw new Error("SSH passphrase channel could not be created");
     }
     if (mkfifoExitCode !== 0) throw new Error("SSH passphrase channel could not be created");
-    secretPipe = await fs.open(secretPipePath, constants.O_RDWR);
-    const child = Bun.spawn([options.executable, ...options.args], {
+    // A blocking write can outlive both the tool and its timeout when no
+    // askpass reader opens the FIFO. Nonblocking writes keep backpressure
+    // cancellable, without imposing a new passphrase-length restriction.
+    secretPipe = await fs.open(secretPipePath, constants.O_RDWR | constants.O_NONBLOCK);
+    checkDeadline();
+    const tool = Bun.spawn([options.executable, ...options.args], {
       detached: process.platform !== "win32",
       stdin: "ignore",
-      stdout: "ignore",
+      stdout: options.capturePublicKey ? "pipe" : "ignore",
       stderr: "ignore",
       env: {
         ...options.env,
@@ -297,22 +325,51 @@ async function runSecretAskpass(options: {
         UATU_SSH_ASKPASS_PIPE: secretPipePath,
       },
     });
-    await secretPipe.writeFile(`${options.passphrase}\n`);
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      terminateDetachedProcess(child);
-    }, options.timeoutMs);
+    child = tool;
+    toolStarted = true;
+    let exited = false;
+    const exitTask = tool.exited.then(code => { exited = true; return code ?? 1; });
+    outputTask = tool.stdout
+      ? drainPublicKey(tool, tool.stdout, remainingMs())
+      : exitTask.then(exitCode => ({ exitCode, publicOutput: "" }));
+    // Observe failures immediately even while the FIFO is backpressured.
+    void outputTask.catch(() => undefined);
+    const bytes = Buffer.from(`${options.passphrase}\n`);
+    let offset = 0;
+    while (offset < bytes.length) {
+      checkDeadline();
+      if (exited) break;
+      try {
+        const { bytesWritten } = await secretPipe.write(bytes, offset, bytes.length - offset, null);
+        offset += bytesWritten;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EAGAIN" && code !== "EWOULDBLOCK") throw error;
+        await Bun.sleep(Math.min(5, remainingMs()));
+      }
+    }
+    result = await outputTask;
+    checkDeadline();
+    if (options.passphrase !== "") result.publicOutput = result.publicOutput.replaceAll(options.passphrase, "[redacted]");
+  } catch (error) {
+    if (timedOut) {
+      if (!toolStarted) throw new Error("SSH passphrase channel could not be created");
+    } else throw error;
+  } finally {
     try {
-      const exitCode = (await child.exited) ?? 1;
-      return timedOut ? 124 : exitCode;
+      if (child) {
+        // Also reap descendants holding the FIFO/stdout after an early exit.
+        terminateDetachedProcess(child);
+        await child.exited;
+      }
+      await outputTask?.catch(() => undefined);
+      await secretPipe?.close().catch(() => undefined);
+      await Promise.all([askpassPath, secretPipePath].map(file => fs.rm(file, { force: true })));
     } finally {
       clearTimeout(timer);
     }
-  } finally {
-    await secretPipe?.close().catch(() => undefined);
-    await Promise.all([askpassPath, secretPipePath].map(file => fs.rm(file, { force: true })));
   }
+  return timedOut || performance.now() >= deadline ? { exitCode: 124, publicOutput: "" } : result;
 }
 
 export class SshCredentialService {
@@ -388,12 +445,17 @@ export class SshCredentialService {
       await fs.writeFile(privatePath, privateKey, { flag: "wx", mode: 0o600 });
       privateCreated = true;
       await assertPrivateKeyFile(privatePath);
+      // Derive through a drained stdout pipe, not PTY data callbacks: process
+      // exit can precede the final PTY output. Keep the passphrase in the
+      // existing private FIFO askpass channel, never argv or the environment.
       const result = encrypted
-        ? await runSecretPty({
+        ? await runSecretAskpass({
             executable: this.options.sshKeygenPath,
             args: ["-y", "-f", privatePath],
             env: this.toolEnvironment(),
-            responses: [passphrase],
+            passphrase,
+            mkfifoPath: this.options.mkfifoPath ?? await executableFromPath("mkfifo", this.servicePath),
+            runtimeDirectory: this.options.runtimeDirectory,
             timeoutMs: this.timeoutMs,
             capturePublicKey: true,
           })
@@ -452,7 +514,7 @@ export class SshCredentialService {
       throw new Error("SSH private key passphrase is required");
     }
     const socket = await this.options.agent.start();
-    const exitCode = await runSecretAskpass({
+    const { exitCode } = await runSecretAskpass({
       executable: this.options.sshAddPath,
       args: [privatePath],
       env: this.agentEnvironment(socket),

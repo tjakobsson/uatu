@@ -251,7 +251,7 @@ test.describe("chat image attachments", () => {
     const conversationId = await newConversation(page);
 
     await send(page, "Start the work");
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+    await expect(page.locator("#chat-stop")).toBeEnabled();
 
     await attachViaPicker(page, "follow-up.png");
     await send(page, "and look at this");

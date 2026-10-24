@@ -2305,6 +2305,10 @@ describe("ClaudeProvider sessions", () => {
       },
     });
     expect(provider.describe().capabilities).toContain("conversation-rename");
+    // Send now, but no steering: the SDK has no inbox to deliver into a
+    // running turn (opencode-v2-steering D2).
+    expect(provider.describe().capabilities).toContain("send-now");
+    expect(provider.describe().capabilities).not.toContain("steering");
     const { events, stop } = collect(provider);
     const session = await provider.createSession("x");
     await provider.prompt(session.id, { id: "r1", text: "Investigate the flaky build on CI", delivery: "queue" });

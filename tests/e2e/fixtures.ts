@@ -38,8 +38,7 @@ export const test = base.extend<{}, WorkerFixtures>({
       // worker must not inherit a predecessor's leftover files.
       const port = workerServerPort(workerInfo.parallelIndex);
       const workspace = path.resolve(
-        process.cwd(),
-        ".e2e",
+        process.env.UATU_E2E_WORKSPACE_ROOT ?? path.join(process.cwd(), ".e2e"),
         `watch-docs-w${workerInfo.workerIndex}`,
       );
 

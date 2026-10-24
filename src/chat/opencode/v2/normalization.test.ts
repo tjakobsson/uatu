@@ -3,9 +3,21 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, type OpenCodeV2Memory } from "./normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, storedAccounting, type OpenCodeV2Memory } from "./normalization";
 import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
+import { compactWorkers } from "../../compact-work";
+
+test("only assistant execution metadata reports effort, live and stored, not parent/user selection", () => {
+  const normalize = createOpenCodeV2Normalizer(process.cwd());
+  const event = normalize({ id: "event", type: "session.step.started", created: 5, data: { sessionID: "child", assistantMessageID: "a", started: 4, model: { providerID: "fixture", id: "model", variant: "medium" } } });
+  expect(event.assistantModel).toEqual({ messageId: "a", model: "model", createdAt: 4, effort: "medium" });
+  expect(storedAccounting({ id: "a", type: "assistant", time: { created: 4 }, model: { id: "model", variant: "none" }, cost: 0 })).toEqual({ messageId: "a", createdAt: 4, model: "model", effort: "none", usage: { costUsd: 0 } });
+  expect(storedAccounting({ id: "u", type: "user", model: { id: "model", variant: "high" } })).toBeUndefined();
+  expect(storedAccounting({ id: "b", type: "assistant", model: { id: "other" } })).not.toHaveProperty("effort");
+  expect(normalize({ id: "cost", type: "session.usage.updated", created: 6, data: { sessionID: "child", cost: 0, tokens: {} } })).toMatchObject({ conversationId: "child", sessionCostUsd: 0, updates: [] });
+  expect(normalize({ id: "missing", type: "session.usage.updated", created: 7, data: { sessionID: "child" } })).not.toHaveProperty("sessionCostUsd");
+});
 
 // Captured from a real OpenCode 2.0.13 `/api/event` stream (sandboxed home,
 // the free public model), workspace directory `/tmp/oc-v2-ws`. The shapes
@@ -34,6 +46,234 @@ function upserts(entry: NormalizedProviderEvent) {
   return entry.updates.filter((update): update is Extract<NormalizedProviderUpdate, { kind: "upsert" }> => update.kind === "upsert").map(update => update.item);
 }
 
+test("native terminal report clocks retain provider provenance live and stored, including zero but never fallbacks", () => {
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+  for (const kind of ["subagent", "shell"]) for (const stored of [false, true]) for (const noticeFirst of [false, true]) for (const clock of [40, 0, undefined, -1, NaN, Infinity]) {
+    // A shell notice without a known tool launch is indistinguishable from
+    // a user-shell note and intentionally cannot mint a background worker.
+    if (kind === "shell" && noticeFirst) continue;
+    const memory = createOpenCodeV2Memory();
+    memory.workers.verifyChild("child", "parent");
+    const part = { type: "tool", id: "call", name: kind, time: { created: 0, completed: 1 }, state: { status: "completed", input: { description: "Worker", command: "fixture" }, metadata: { status: "running", ...(kind === "shell" ? { shellID: "child" } : { sessionID: "child" }) } } };
+    const payload = { description: "Worker", text: "Result", metadata: { source: kind, state: "completed", ...(kind === "shell" ? { shellID: "child", exit: 0 } : { childID: "child" }) } };
+    const launch = () => stored
+      ? normalizeStoredMessage({ id: "launch", type: "assistant", time: { created: 0 }, content: [part] }, false, { workers: memory.workers, parent: "parent" })
+      : upserts(normalize({ id: "launch", type: "session.message.content.updated", created: 1, data: { sessionID: "parent", messageID: "launch", content: [part] } }, memory));
+    const notice = () => stored
+      ? normalizeStoredMessage({ id: "result", type: "synthetic", time: { created: clock }, ...payload }, false, { workers: memory.workers, parent: "parent" })
+      : upserts(normalize({ id: "result-event", type: "session.inbox.enqueued", created: clock, data: { sessionID: "parent", inboxID: "result", item: { type: "synthetic", payload } } }, memory));
+    if (!noticeFirst) launch();
+    const reported = notice().find(item => item.type === "background_task");
+    expect(reported).toBeDefined();
+    const valid = clock !== undefined && Number.isFinite(clock) && clock >= 0;
+    if (valid) expect(reported).toHaveProperty("terminalReportedAt", clock);
+    else expect(reported).not.toHaveProperty("terminalReportedAt");
+    expect(reported).not.toHaveProperty("completedAt");
+    expect(reported).not.toHaveProperty("usage");
+    if (noticeFirst) {
+      const correlated = launch().find(item => item.type === "background_task");
+      expect(correlated).toMatchObject({ status: "completed", resultId: "result" });
+      if (valid) expect(correlated).toHaveProperty("terminalReportedAt", clock);
+      else expect(correlated).not.toHaveProperty("terminalReportedAt");
+    }
+  }
+});
+
+test.each(["shell", "subagent"])("%s recovery uses stored delivery report time, not launcher end or an invented execution end", kind => {
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+  const memory = createOpenCodeV2Memory();
+  memory.workers.verifyChild("child", "parent");
+  const content = [{ type: "tool", id: "call", name: kind, time: { created: 10, completed: 12 }, state: { status: "completed", input: { description: "Worker", command: "fixture" }, metadata: { status: "running", ...(kind === "shell" ? { shellID: "child" } : { sessionID: "child" }) } } }];
+  const payload = { text: "Result", metadata: { source: kind, state: "completed", ...(kind === "shell" ? { shellID: "child", exit: 0 } : { childID: "child" }) } };
+  const launch = () => normalize({ id: "launch", type: "session.message.content.updated", created: 12, data: { sessionID: "parent", messageID: "launch", content } }, memory);
+  const notice = (created?: number) => normalize({ id: "report-event", type: "session.inbox.enqueued", created, data: { sessionID: "parent", inboxID: "result", item: { type: "synthetic", payload } } }, memory);
+  launch();
+  const live = compactWorkers(upserts(notice(40)))[0];
+  expect(live).toMatchObject({ since: 10, settledAt: 40, terminalReportedAt: 40 });
+  expect(live?.completedAt).toBeUndefined();
+
+  // A new projection is authoritative history recovery, not reuse of the live
+  // receipt clock. V2 stores the report's later delivery time in this record.
+  const recovered = createOpenCodeV2Memory();
+  recovered.workers.verifyChild("child", "parent");
+  const background = { workers: recovered.workers, parent: "parent" };
+  normalizeStoredMessage({ id: "launch", type: "assistant", time: { created: 12 }, content }, false, background);
+  const stored = normalizeStoredMessage({ id: "result", type: "synthetic", time: { created: 80 }, ...payload }, false, background);
+  expect(compactWorkers(stored)[0]).toMatchObject({ since: 10, settledAt: 80, terminalReportedAt: 80 });
+  expect(stored[0]).not.toHaveProperty("completedAt");
+
+  const missing = createOpenCodeV2Memory();
+  missing.workers.verifyChild("child", "parent");
+  normalize({ id: "launch", type: "session.message.content.updated", created: 12, data: { sessionID: "parent", messageID: "launch", content } }, missing);
+  const result = normalize({ id: "missing-time", type: "session.inbox.enqueued", data: { sessionID: "parent", inboxID: "result", item: { type: "synthetic", payload } } }, missing);
+  const [fallback] = compactWorkers(upserts(result));
+  expect(fallback).toMatchObject({ since: 10, settledAt: 10, state: "completed" });
+  expect(fallback?.terminalReportedAt).toBeUndefined();
+  expect(fallback?.completedAt).toBeUndefined();
+});
+
+test("a result-only native notice never presents receipt time as an unknown launch or finish", () => {
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+  for (const stored of [false, true]) for (const clock of [undefined, 40]) {
+    const memory = createOpenCodeV2Memory();
+    memory.workers.verifyChild("child", "parent");
+    const payload = { text: "Result", metadata: { source: "subagent", childID: "child", state: "completed" } };
+    const items = stored
+      ? normalizeStoredMessage({ id: "result", type: "synthetic", time: { created: clock }, ...payload }, false, { workers: memory.workers, parent: "parent" })
+      : upserts(normalize({ id: "notice", type: "session.inbox.enqueued", created: clock, data: { sessionID: "parent", inboxID: "result", item: { type: "synthetic", payload } } }, memory));
+    const [worker] = compactWorkers(items);
+    expect(worker).toMatchObject({ since: 0, settledAt: clock ?? 0 });
+    expect(worker?.completedAt).toBeUndefined();
+    expect(worker?.terminalReportedAt).toBe(clock);
+  }
+});
+
+describe("OpenCode 2.0.29 independent background lifecycle", () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+  function launch() {
+    const memory = createOpenCodeV2Memory();
+    normalize({ type: "session.created", created: 10, location: { directory: WORKSPACE }, data: { sessionID: "ses_child", parentID: "ses_parent", title: "Check fixture" } }, memory);
+    const event = normalize({ type: "session.message.content.updated", created: 30, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", messageID: "msg_launch", content: fixture.launch.content } }, memory);
+    return { memory, event };
+  }
+  test("exhausted live correlation memory falls back to recovery instead of retaining partial occurrence facts", () => {
+    const memory = createOpenCodeV2Memory({ backgroundEntries: 1 });
+    normalize({ type: "session.created", created: 10, data: { sessionID: "ses_child", parentID: "ses_parent" } }, memory);
+    normalize({ type: "session.message.content.updated", created: 30, data: { sessionID: "ses_parent", messageID: "msg_launch", content: fixture.launch.content } }, memory);
+    const result = normalize({ type: "session.inbox.enqueued", created: 41, data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } }, memory);
+    // The event type still triggers scoped adapter recovery. A partially
+    // retained child lifetime must not authorize a speculative settlement.
+    expect(result.eventType).toBe("session.inbox.enqueued");
+    expect(upserts(result)).toEqual([]);
+  });
+  test("a successful launcher leaves an independently running worker, not a finished report", () => {
+    const { event } = launch();
+    expect(upserts(event)).toContainEqual(expect.objectContaining({ id: "tool:call_worker", type: "tool", status: "completed" }));
+    expect(upserts(event)).toContainEqual(expect.objectContaining({ type: "background_task", toolUseId: "call_worker", childConversationId: "ses_child", status: "running", description: "Check fixture" }));
+    const worker = upserts(event).find(item => item.type === "background_task");
+    expect(worker).not.toHaveProperty("summary");
+  });
+  test("native tool success, without a content restatement, starts the worker", () => {
+    const memory = createOpenCodeV2Memory();
+    const at = (type: string, data: Record<string, unknown>) => normalize({ type, created: 30, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", ...data } }, memory);
+    at("session.created", { sessionID: "ses_child", parentID: "ses_parent" });
+    at("session.tool.input.started", { id: "call_worker", name: "subagent" });
+    at("session.tool.called", { id: "call_worker", input: fixture.launch.content[0].state.input });
+    const result = at("session.tool.success", { id: "call_worker", ...fixture.launch.content[0].state });
+    expect(upserts(result)).toContainEqual(expect.objectContaining({ type: "background_task", status: "running", description: "Check fixture" }));
+  });
+  test("a result arriving before the launcher remains readable and is retired when correlated", () => {
+    const memory = createOpenCodeV2Memory();
+    normalize({ type: "session.created", created: 10, location: { directory: WORKSPACE }, data: { sessionID: "ses_child", parentID: "ses_parent" } }, memory);
+    const first = normalize({ type: "session.inbox.enqueued", created: 41, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } }, memory);
+    const provisional = upserts(first).find(item => item.type === "background_task");
+    expect(provisional).toMatchObject({ status: "completed", summary: "Fixture checked.", childConversationId: "ses_child" });
+    const later = normalize({ type: "session.message.content.updated", created: 50, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", messageID: "msg_launch", content: fixture.launch.content } }, memory);
+    expect(later.updates).toContainEqual({ kind: "remove", itemId: provisional!.id });
+    expect(upserts(later)).toContainEqual(expect.objectContaining({ type: "background_task", toolUseId: "call_worker", status: "completed", summary: "Fixture checked." }));
+  });
+  test("replayed progress and duplicate notices cannot reopen a settled occurrence or settle its continuation", () => {
+    const { memory, event } = launch();
+    const notice = { type: "session.inbox.enqueued", created: 41, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } };
+    normalize(notice, memory);
+    const content = (message: typeof fixture.launch) => normalize({ type: "session.message.content.updated", created: 65, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", messageID: message.id, content: message.content } }, memory);
+    const next = content(fixture.converted);
+    expect(upserts(next)).toContainEqual(expect.objectContaining({ type: "background_task", toolUseId: "call_converted", status: "running" }));
+    expect(upserts(normalize(notice, memory))).toEqual([]);
+    const old = upserts(content(fixture.launch)).find(item => item.type === "background_task");
+    // No stale running update is emitted; the canonical terminal row remains.
+    expect(old === undefined || old.status === "completed").toBe(true);
+    expect(upserts(event).find(item => item.type === "background_task")?.id).not.toBe(upserts(next).find(item => item.type === "background_task")?.id);
+  });
+  test("human lookalikes, invalid states and foreign child references never settle a worker", () => {
+    const { memory } = launch();
+    for (const metadata of [{ source: "subagent", childID: "ses_child", state: "future" }, { source: "subagent", childID: "ses_foreign", state: "completed" }, { source: "other", childID: "ses_child", state: "completed" }]) {
+      const item = { type: "synthetic", payload: { text: fixture.pending.payload.text, metadata } };
+      const event = normalize({ type: "session.inbox.enqueued", created: 41, data: { sessionID: "ses_parent", inboxID: "msg_bad", item } }, memory);
+      expect(upserts(event).some(item => item.type === "background_task")).toBe(false);
+    }
+    expect(normalizeStoredMessage({ ...fixture.stored, type: "user" })).toEqual([expect.objectContaining({ type: "user_message", text: fixture.stored.text })]);
+  });
+  test("overlapping launch calls share one running worker without discarding either launcher", () => {
+    const { memory } = launch();
+    const other = structuredClone(fixture.launch);
+    other.content[0].id = "call_join";
+    other.content[0].time.created = 25;
+    const event = normalize({ type: "session.message.content.updated", created: 35, data: { sessionID: "ses_parent", messageID: "msg_join", content: other.content } }, memory);
+    expect(upserts(event)).toContainEqual(expect.objectContaining({ id: "tool:call_join", status: "completed" }));
+    expect(upserts(event).filter(item => item.type === "background_task")).toEqual([expect.objectContaining({ taskId: "v2:ses_parent:call_worker" })]);
+    expect(upserts(event)).toContainEqual(expect.objectContaining({ toolUseIds: ["call_worker", "call_join"] }));
+    normalize({ type: "session.inbox.enqueued", created: 41, data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } }, memory);
+    const replayed = normalize({ type: "session.message.content.updated", created: 50, data: { sessionID: "ses_parent", messageID: "msg_join", content: other.content } }, memory);
+    expect(upserts(replayed)).toContainEqual(expect.objectContaining({ type: "background_task", taskId: "v2:ses_parent:call_worker", status: "completed", resultId: "msg_result" }));
+  });
+  test("an uncorrelated notification after a child restarted keeps both occurrences uncertain", () => {
+    const { memory } = launch();
+    normalize(fixture.terminal, memory);
+    const next = normalize({ type: "session.message.content.updated", created: 60, data: { sessionID: "ses_parent", messageID: fixture.converted.id, content: fixture.converted.content } }, memory);
+    expect(upserts(next)).toContainEqual(expect.objectContaining({ type: "background_task", toolUseId: "call_worker", stateUncertain: true }));
+    expect(upserts(next)).toContainEqual(expect.objectContaining({ type: "background_task", toolUseId: "call_converted", status: "running" }));
+    // No call/generation identity travels with this notice. Delivery order
+    // alone cannot distinguish a delayed first result from the newer run.
+    const notice = normalize({ type: "session.inbox.enqueued", created: 70, data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } }, memory);
+    const workers = upserts(notice).filter(item => item.type === "background_task");
+    expect(workers.filter(item => item.status === "running")).toEqual([
+      expect.objectContaining({ toolUseId: "call_worker", stateUncertain: true }),
+      expect.objectContaining({ toolUseId: "call_converted", stateUncertain: true }),
+    ]);
+    expect(workers.filter(item => item.status === "completed")).toEqual([expect.objectContaining({ summary: "Fixture checked.", childConversationId: "ses_child" })]);
+  });
+  test("a converted shell is tracked without input.background and nonzero completion is failed", () => {
+    const memory = createOpenCodeV2Memory();
+    const event = normalize({ type: "session.message.content.updated", created: 80, data: { sessionID: "ses_parent", messageID: "msg_shell", content: fixture.shell.content } }, memory);
+    expect(upserts(event)).toContainEqual(expect.objectContaining({ type: "background_task", taskType: "shell", toolUseId: "call_shell", status: "running" }));
+    const result = normalize({ type: "session.inbox.enqueued", created: 90, data: { sessionID: "ses_parent", inboxID: "msg_shell_result", item: { type: "synthetic", payload: { text: '<shell id="sh_fixture" state="completed" command="printf fixture">\nfixture\n\nExited with code 1\n</shell>', metadata: { source: "shell", shellID: "sh_fixture", jobID: "sh_fixture", state: "completed", exit: 1, truncated: false } } } } }, memory);
+    expect(upserts(result)).toEqual([expect.objectContaining({ type: "background_task", status: "failed", summary: "fixture\n\nExited with code 1" })]);
+  });
+  for (const [facts, status] of [[{ exit: 0 }, "completed"], [{ signal: "SIGTERM" }, "failed"], [{ timeout: true }, "failed"], [{ exit: "zero" }, undefined]] as const) {
+    test(`shell completion respects exit/signal/timeout facts ${JSON.stringify(facts)}`, () => {
+      const memory = createOpenCodeV2Memory();
+      normalize({ type: "session.message.content.updated", created: 80, data: { sessionID: "ses_parent", messageID: "msg_shell", content: fixture.shell.content } }, memory);
+      const result = normalize({ type: "session.inbox.enqueued", created: 90, data: { sessionID: "ses_parent", inboxID: "shell_result", item: { type: "synthetic", payload: { text: "Shell report", metadata: { source: "shell", shellID: "sh_fixture", state: "completed", ...facts } } } } }, memory);
+      expect(upserts(result).filter(item => item.type === "background_task").map(item => item.status)).toEqual(status ? [status] : []);
+    });
+  }
+  test("ordinary user-shell notes never become background tasks", () => {
+    const memory = createOpenCodeV2Memory();
+    const notice = normalize({ type: "session.inbox.enqueued", created: 90, data: { sessionID: "ses_parent", inboxID: "user_shell_result", item: { type: "synthetic", payload: { text: "User shell output", metadata: { source: "shell", shellID: "sh_unlaunched", state: "completed", exit: 0 } } } } }, memory);
+    expect(upserts(notice)).toEqual([]);
+  });
+  test("malformed child identities cannot establish notification authorship", () => {
+    for (const child of ["", "bad\nidentity", "x".repeat(513)]) {
+      const memory = createOpenCodeV2Memory();
+      normalize({ type: "session.created", created: 10, data: { sessionID: child, parentID: "ses_parent" } }, memory);
+      const notice = normalize({ type: "session.inbox.enqueued", created: 41, data: { sessionID: "ses_parent", inboxID: "notice", item: { type: "synthetic", payload: { text: "Untrusted", metadata: { source: "subagent", childID: child, state: "completed" } } } } }, memory);
+      expect(upserts(notice).some(item => item.type === "background_task")).toBe(false);
+    }
+  });
+  test("a delayed older result cannot settle a later launch when its original launcher was not streamed", () => {
+    const memory = createOpenCodeV2Memory();
+    normalize({ type: "session.created", created: 10, data: { sessionID: "ses_child", parentID: "ses_parent" } }, memory);
+    normalize({ type: "session.message.content.updated", created: 60, data: { sessionID: "ses_parent", messageID: fixture.converted.id, content: fixture.converted.content } }, memory);
+    const notice = normalize({ type: "session.inbox.enqueued", created: 41, data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } }, memory);
+    expect(upserts(notice).filter(item => item.type === "background_task" && item.status === "completed")).toEqual([expect.objectContaining({ resultId: "msg_result", taskId: "v2:ses_parent:notification:msg_result" })]);
+    expect(upserts(notice).some(item => item.type === "background_task" && item.toolUseId === "call_converted" && item.status !== "running")).toBe(false);
+  });
+  for (const [state, status, report] of [["completed", "completed", "Fixture checked."], ["error", "failed", "Fixture failed."], ["cancelled", "stopped", "Subagent cancelled"]]) {
+    test(`a metadata-authenticated ${state} report settles only the worker`, () => {
+      const { memory, event } = launch();
+      const item = structuredClone(fixture.pending);
+      item.payload.metadata.state = state;
+      item.payload.text = `<subagent sessionID="ses_child" state="${state}" description="Check fixture">\n${report}\n</subagent>`;
+      const result = normalize({ type: "session.inbox.enqueued", created: 41, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", inboxID: item.id, item } }, memory);
+      const worker = upserts(event).find(item => item.type === "background_task");
+      expect(upserts(result)).toEqual([expect.objectContaining({ id: worker?.id, type: "background_task", status, summary: report })]);
+      expect(result.updates.some(update => update.kind === "status" || update.kind === "inbox")).toBe(false);
+    });
+  }
+});
+
 describe("OpenCode 2.x normalization: a real turn", () => {
   const { normalized, byType } = run(FIXTURES.turnWithPermissionAndTool);
 
@@ -42,8 +282,8 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     expect(normalized.filter(entry => entry.outcome === "unparseable").map(entry => entry.eventType)).toEqual([]);
   });
 
-  test("the running total and the inbox plumbing are ignored, not dropped", () => {
-    for (const type of ["session.usage.updated", "session.inbox.delivered", "session.instructions.updated", "session.step.streamed"]) {
+  test("the running total and the step stream are ignored, not dropped", () => {
+    for (const type of ["session.usage.updated", "session.instructions.updated", "session.step.streamed"]) {
       expect(byType(type).map(entry => entry.outcome)).toEqual(byType(type).map(() => "ignored"));
     }
   });
@@ -53,18 +293,26 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     expect(created?.sessionLifecycle).toEqual({ kind: "created", id: created!.conversationId!, directory: WORKSPACE, title: "capture4" });
   });
 
-  test("an enqueued prompt is the user's message, keyed by its inbox id", () => {
+  test("an enqueued prompt is pending until delivered, when it is the user's message keyed by its inbox id", () => {
+    // Steering (opencode-v2-steering D4): the enqueue carries no timeline
+    // row, only the pending delta; the row lands with the delivery.
     const [first] = byType("session.inbox.enqueued");
-    const [item] = upserts(first!);
-    expect(item).toMatchObject({ type: "user_message", text: "Read the file /etc/hosts using the read tool and reply with its first line only." });
+    expect(upserts(first!)).toEqual([]);
+    expect(first?.updates).toEqual([{ kind: "inbox", delta: { kind: "pending", id: expect.stringMatching(/^msg_/), text: "Read the file /etc/hosts using the read tool and reply with its first line only.", delivery: "steer", at: 1790075148437 } }]);
+    const [delivered] = byType("session.inbox.delivered");
+    const [item] = upserts(delivered!);
+    expect(item).toMatchObject({ type: "user_message", text: "Read the file /etc/hosts using the read tool and reply with its first line only.", createdAt: 1790075148446 });
     expect(item?.id).toMatch(/^message:msg_/);
     expect((item as { requestId?: string }).requestId).toBe(item!.id.slice("message:".length));
+    expect(delivered?.updates[0]).toEqual({ kind: "inbox", delta: { kind: "settled", id: item!.id.slice("message:".length), outcome: "delivered" } });
   });
 
   test("a skill turn reads as its mention text, live and from history", () => {
     const skills = [{ id: "openspec-apply-change", name: "openspec-apply-change", text: "# Apply", mention: { start: 0, end: 22, text: "@openspec-apply-change" } }];
     const normalize = createOpenCodeV2Normalizer(WORKSPACE);
-    const live = normalize({ id: "evt_sk", created: 1_789_999_999_000, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_sk", inboxID: "msg_sk", item: { type: "user", payload: { text: "@openspec-apply-change my-change", skills }, delivery: "queue" } } });
+    const memory = createOpenCodeV2Memory();
+    normalize({ id: "evt_sk", created: 1_789_999_999_000, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_sk", inboxID: "msg_sk", item: { type: "user", payload: { text: "@openspec-apply-change my-change", skills }, delivery: "queue" } } }, memory);
+    const live = normalize({ id: "evt_skd", created: 1_789_999_999_001, type: "session.inbox.delivered", location: { directory: WORKSPACE }, data: { sessionID: "ses_sk", inboxID: "msg_sk" } }, memory);
     expect(upserts(live!)[0]).toMatchObject({ id: "message:msg_sk", type: "user_message", text: "@openspec-apply-change my-change" });
     const stored = normalizeStoredMessage({ id: "msg_sk", type: "user", time: { created: 1 }, text: "@openspec-apply-change my-change", skills });
     expect(stored).toEqual([{ id: "message:msg_sk", type: "user_message", createdAt: 1, text: "@openspec-apply-change my-change" }]);
@@ -157,6 +405,80 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     // The step's start attributed the model to the message before any usage.
     const [stepStarted] = byType("session.step.started");
     expect(stepStarted?.assistantModel).toMatchObject({ messageId, model: "mimo-v2.6-flash-free", promptId: stepEnded?.assistantUsage?.promptId });
+  });
+});
+
+describe("OpenCode 2.x normalization: the session inbox (steering)", () => {
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+  const files = [{ mime: "image/png", name: "shot.png", source: { type: "uri", uri: "file:///tmp/uatu/11111111-2222-4333-8444-555555555555.png" } }];
+  const enqueued = (inboxID: string, item: Record<string, unknown>, created = 10) => ({ id: `evt_${inboxID}`, created, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_i", inboxID, item } });
+  const delivered = (inboxID: string, created = 20) => ({ id: `evt_${inboxID}_d`, created, type: "session.inbox.delivered", location: { directory: WORKSPACE }, data: { sessionID: "ses_i", inboxID } });
+
+  test("an enqueued user entry is a pending delta with its text, attachments, delivery, and time — and no timeline row", () => {
+    const event = normalize(enqueued("msg_p", { type: "user", payload: { text: "steer me", files }, delivery: "steer" }, 10), createOpenCodeV2Memory());
+    expect(event.outcome).toBe("handled");
+    expect(event.conversationId).toBe("ses_i");
+    expect(event.updates).toEqual([{ kind: "inbox", delta: {
+      kind: "pending", id: "msg_p", text: "steer me", delivery: "steer", at: 10,
+      attachments: [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }],
+    } }]);
+  });
+
+  test("synthetic, compaction, and move entries yield no pending delta; synthetic keeps its notice", () => {
+    const memory = createOpenCodeV2Memory();
+    const synthetic = normalize(enqueued("msg_s", { type: "synthetic", payload: { text: "a note" }, delivery: "steer" }), memory);
+    expect(synthetic.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "notice:msg_s", type: "notice", message: "a note" }) }]);
+    const compaction = normalize(enqueued("msg_c", { type: "compaction", payload: {}, delivery: "queue" }), memory);
+    expect(compaction.updates).toEqual([]);
+    const move = normalize(enqueued("msg_m", { type: "move", payload: { location: { directory: "/elsewhere" } }, delivery: "queue" }), memory);
+    expect(move.updates).toEqual([]);
+    // Their deliveries settle nothing the dock lists and add no row.
+    for (const id of ["msg_s", "msg_c", "msg_m"]) {
+      const settled = normalize(delivered(id), memory);
+      expect(settled.updates).toEqual([{ kind: "inbox", delta: { kind: "settled", id, outcome: "delivered" } }]);
+    }
+  });
+
+  test("delivery upserts the remembered message with the same id and requestId, timed at delivery", () => {
+    const memory = createOpenCodeV2Memory();
+    normalize(enqueued("msg_p", { type: "user", payload: { text: "steer me", files }, delivery: "steer" }, 10), memory);
+    const event = normalize(delivered("msg_p", 25), memory);
+    expect(event.outcome).toBe("handled");
+    expect(event.updates).toEqual([
+      { kind: "inbox", delta: { kind: "settled", id: "msg_p", outcome: "delivered" } },
+      { kind: "upsert", item: { id: "message:msg_p", type: "user_message", createdAt: 25, text: "steer me", requestId: "msg_p", attachments: [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }] } },
+    ]);
+    // The memory is consumed: a repeated delivery adds no second row, and
+    // the delivered prompt is now the one an assistant message answers.
+    expect(normalize(delivered("msg_p", 26), memory).updates).toEqual([{ kind: "inbox", delta: { kind: "settled", id: "msg_p", outcome: "delivered" } }]);
+    expect(memory.prompts.get("ses_i")).toBe("msg_p");
+  });
+
+  test("a delivery the memory never saw settles without a row; history supplies it", () => {
+    const event = normalize(delivered("msg_unknown"), createOpenCodeV2Memory());
+    expect(event.updates).toEqual([{ kind: "inbox", delta: { kind: "settled", id: "msg_unknown", outcome: "delivered" } }]);
+  });
+
+  test("a cancellation settles as cancelled with no timeline item", () => {
+    const memory = createOpenCodeV2Memory();
+    normalize(enqueued("msg_x", { type: "user", payload: { text: "never mind" }, delivery: "steer" }), memory);
+    const event = normalize({ id: "evt_x_c", created: 30, type: "session.inbox.cancelled", location: { directory: WORKSPACE }, data: { sessionID: "ses_i", inboxID: "msg_x" } }, memory);
+    expect(event.outcome).toBe("handled");
+    expect(event.updates).toEqual([{ kind: "inbox", delta: { kind: "settled", id: "msg_x", outcome: "cancelled" } }]);
+    // Forgotten: a later delivery of the same id has nothing to show.
+    expect(normalize(delivered("msg_x"), memory).updates).toEqual([{ kind: "inbox", delta: { kind: "settled", id: "msg_x", outcome: "delivered" } }]);
+  });
+
+  test("a delivery change is a delivery delta", () => {
+    const event = normalize({ id: "evt_dc", created: 30, type: "session.inbox.delivery.changed", location: { directory: WORKSPACE }, data: { sessionID: "ses_i", inboxID: "msg_x", delivery: "queue" } }, createOpenCodeV2Memory());
+    expect(event.outcome).toBe("handled");
+    expect(event.updates).toEqual([{ kind: "inbox", delta: { kind: "delivery", id: "msg_x", delivery: "queue" } }]);
+  });
+
+  test("another directory's inbox yields nothing", () => {
+    const foreign = normalize({ ...enqueued("msg_f", { type: "user", payload: { text: "x" }, delivery: "steer" }), location: { directory: "/elsewhere" } }, createOpenCodeV2Memory());
+    expect(foreign.updates).toEqual([]);
+    expect(foreign.outcome).toBe("ignored");
   });
 });
 

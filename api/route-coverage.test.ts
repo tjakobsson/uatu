@@ -98,6 +98,8 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubCreateConfiguredWorkspace", 'pathname === "/api/hub/workspaces/create"'],
     ["hubUpdateWorkspaceDisplayName", "const displayNameUpdate ="],
     ["hubGetWorkspaceDefaults", 'pathname === "/api/hub/settings/workspace-defaults"'],
+    ["hubGetPersonalChatPreferences", 'pathname === "/api/hub/settings/chat-preferences"'],
+    ["hubUpdatePersonalChatPreferences", 'pathname === "/api/hub/settings/chat-preferences"'],
     ["hubUpdateWorkspaceDefaults", 'pathname === "/api/hub/settings/workspace-defaults"'],
     ["hubListDeviceSessions", 'pathname === "/api/hub/sessions"'],
     ["hubCreateCloneJob", 'pathname === "/api/hub/clone-jobs"'],

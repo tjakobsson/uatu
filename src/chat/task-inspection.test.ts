@@ -3,8 +3,31 @@ import { parseHTML } from "linkedom";
 
 import { SILENT_RUN_QUIET_MS, SILENT_RUN_REFRESH_MS, SILENT_RUN_SETTLE_READS, SilentRunFollower, TASK_OUTPUT_BACKOFF_MAX_MS, TASK_OUTPUT_REFRESH_MS, TaskInspectionPanel, formatTaskElapsed, runningTaskForChild, taskInspection, taskSettledLabel, taskUsageLabel, type TaskInspectionTimers } from "./task-inspection";
 import type { BackgroundTaskItem, BackgroundTaskOutput } from "./types";
+import { taskById, taskForChild } from "./task-inspection";
 
 describe("task inspection facts", () => {
+  test("a reused provider id stops only the latest occurrence and opens the selected historical occurrence", () => {
+    const earlier = item({ id: "early", taskId: "reused", status: "completed", createdAt: 1 });
+    const latest = item({ id: "late", taskId: "reused", status: "running", createdAt: 2 });
+    expect(taskById([earlier, latest], "reused")).toBe(latest);
+    expect(taskById([earlier, latest], "reused", "early")).toBe(earlier);
+    expect(taskById([earlier, latest], "reused", "missing")).toBeUndefined();
+  });
+  test("historical result and joined launcher inspection retain their occurrence when the child is reused", () => {
+    const earlier = item({ id: "task:early", taskId: "early", childConversationId: "child", status: "completed", createdAt: 1, toolUseId: "call-early", toolUseIds: ["call-early", "call-joined"] });
+    const latest = item({ id: "task:latest", taskId: "latest", childConversationId: "child", status: "running", createdAt: 2, toolUseId: "call-latest" });
+    expect(taskForChild([latest, earlier], "child", "task:early")).toBe(earlier);
+    expect(taskForChild([latest, earlier], "child", "tool:call-early")).toBe(earlier);
+    expect(taskForChild([latest, earlier], "child", "tool:call-joined")).toBe(earlier);
+    expect(taskForChild([latest, earlier], "other", "task:early")).toBeUndefined();
+  });
+  test("a settled child's strip remains inspectable; reused children select the latest occurrence", () => {
+    const earlier = item({ taskId: "early", childConversationId: "child", status: "completed", createdAt: 1 });
+    const latest = item({ taskId: "latest", childConversationId: "child", status: "failed", createdAt: 2 });
+    expect(taskForChild([latest, earlier], "child")).toBe(latest);
+    expect(taskInspection(latest)).toEqual({ view: "transcript", conversationId: "child" });
+    expect(taskInspection(item({ status: "completed", outputFile: "shell:one" }))).toEqual({ view: "output" });
+  });
   test("the elapsed clock reads m:ss, then h:mm:ss", () => {
     expect(formatTaskElapsed(0)).toBe("0:00");
     expect(formatTaskElapsed(7_400)).toBe("0:07");
@@ -16,7 +39,7 @@ describe("task inspection facts", () => {
   test("usage and the settled line read as the agent reported them", () => {
     expect(taskUsageLabel({ totalTokens: 13_122, toolUses: 1, durationMs: 4_751 })).toBe("13k tokens · 1 tool use");
     expect(taskUsageLabel({ totalTokens: 640, toolUses: 3, durationMs: 100 })).toBe("640 tokens · 3 tool uses");
-    expect(taskSettledLabel(item({ status: "completed", summary: "There is 1 file" }))).toBe("finished · There is 1 file");
+    expect(taskSettledLabel(item({ status: "completed", summary: "There is 1 file" }))).toBe("finished");
     expect(taskSettledLabel(item({ status: "failed" }))).toBe("failed");
     expect(taskSettledLabel(item({ status: "stopped", summary: "  " }))).toBe("stopped");
   });
@@ -77,6 +100,27 @@ describe("task inspection panel", () => {
   });
   const text = (selector: string) => dom.document.querySelector(selector)?.textContent ?? null;
 
+  test("uncertain work remains inspectable but has no Stop; recovery restores it", () => {
+    const view = panel();
+    const task = item({ taskId: "uncertain", taskType: "agent", childConversationId: "child", stateUncertain: true });
+    view.show({ conversationId: "one", taskId: task.taskId, view: "transcript" }, task);
+    expect(hosts().strip.textContent).toContain("Status unavailable — reconnecting");
+    expect(hosts().strip.querySelector("[data-stop-task]")).toBeNull();
+    view.sync({ ...task, stateUncertain: false });
+    expect(hosts().strip.querySelector("[data-stop-task]")).not.toBeNull();
+    view.close();
+  });
+
+  for (const taskType of ["agent", "shell"]) test(`${taskType} inspection explicitly names Stop worker`, () => {
+    const view = panel();
+    const task = item({ taskId: "native", taskType, description: "Fixture worker" });
+    view.show({ conversationId: "one", taskId: task.taskId, view: "transcript" }, task);
+    const stop = hosts().strip.querySelector<HTMLButtonElement>("[data-stop-task]")!;
+    expect(stop.textContent).toBe("Stop worker");
+    expect(stop.getAttribute("aria-label")).toBe("Stop worker: Fixture worker");
+    view.close();
+  });
+
   test("an agent task's strip names the task, its type, progress, elapsed, spend, and Stop; it ticks and settles into one line", () => {
     const view = panel();
     const task = item({ taskId: "ada2b", description: "Review renderer", taskType: "local_agent", subagentType: "explore", createdAt: now - 65_000, childConversationId: "sub:p:ada2b", progress: "Reading the tests", usage: { totalTokens: 13_122, toolUses: 1, durationMs: 4_000 } });
@@ -117,7 +161,7 @@ describe("task inspection panel", () => {
     view.sync({ ...task, status: "completed", summary: "Two findings" });
     expect(strip.dataset.taskState).toBe("settled");
     expect(strip.classList.contains("is-settled")).toBe(true);
-    expect(text("#strip .chat-drilldown-task-settled")).toBe("finished · Two findings");
+    expect(text("#strip .chat-drilldown-task-settled")).toBe("finished");
     expect(dom.document.querySelector("#strip [data-stop-task]")).toBeNull();
     expect(dom.document.querySelector("#strip [data-task-elapsed]")).toBeNull();
     expect(live()).toHaveLength(0);
@@ -127,6 +171,14 @@ describe("task inspection panel", () => {
     expect(strip.childNodes.length).toBe(0);
   });
 
+  test("settled inspection states the outcome and links to its canonical result without repeating the report", () => {
+    const task = item({ id: "task:canonical", taskId: "canonical", childConversationId: "child", status: "failed", summary: "Long canonical report that must not be duplicated" });
+    const view = panel();
+    view.show({ conversationId: "parent", taskId: task.taskId, view: "transcript" }, task);
+    expect(hosts().strip.textContent).toContain("failed");
+    expect(hosts().strip.textContent).not.toContain(task.summary!);
+    expect(hosts().strip.querySelector("[data-task-result]")?.getAttribute("data-task-result")).toBe(task.id);
+  });
   test("a shell task's view reads the output on open, every two seconds while running, once more on settle, and never after close", async () => {
     const view = panel();
     const task = item({ taskId: "bgjpa", description: "sleep 25; echo done", taskType: "local_bash", createdAt: now - 3_000, outputFile: "/tmp/tasks/bgjpa.output" });
@@ -171,7 +223,7 @@ describe("task inspection panel", () => {
     reads[3]!.resolve({ text: "third\n[exited with code 0]\n", truncated: false, settled: true });
     await settle();
     expect(text("#text")).toBe("third\n[exited with code 0]\n");
-    expect(text("#strip .chat-drilldown-task-settled")).toBe("finished · exit 0");
+    expect(text("#strip .chat-drilldown-task-settled")).toBe("finished");
     // A settled read schedules nothing further.
     expect(live()).toHaveLength(0);
 
@@ -269,7 +321,7 @@ describe("task inspection panel", () => {
     view.sync({ ...task, status: "completed", summary: "exit 0" });
     expect(reads).toHaveLength(1);
     expect(live()).toHaveLength(0);
-    expect(text("#strip .chat-drilldown-task-settled")).toBe("finished · exit 0");
+    expect(text("#strip .chat-drilldown-task-settled")).toBe("finished");
     view.close();
   });
 

@@ -58,6 +58,9 @@ export type ChatCapability =
   // are listed with a stop action, settled tasks land in the timeline, and
   // the conversation presents a background-work state.
   | "background-tasks"
+  // Explicitly background every eligible blocker in the parent, including shells.
+  | "background-blocking-work"
+  | "side-generation"
   // The agent can schedule future turns for itself (a wakeup, a cron, a
   // loop) and reports them: the session is held while they are pending,
   // each is a timeline row that follows its life, a fired one starts a
@@ -65,7 +68,18 @@ export type ChatCapability =
   | "scheduled-wakeups"
   // The agent's login has plan usage that can be asked for: the workspace
   // keeps the newest report and a read can be requested on demand.
-  | "usage";
+  | "usage"
+  // The agent can take a message into its running turn at the next safe
+  // step boundary, and can withdraw or switch it before then: the composer
+  // offers steer delivery while busy, the dock shows Steer entries with
+  // their switch actions, and an undo replacement goes out as a steer.
+  // Declared by OpenCode 2.x only (opencode-v2-steering, design D2).
+  | "steering"
+  // The agent can deliver a held message ahead of the rest of the queue:
+  // the dock offers Send now. On a `steering` agent that is the switch to
+  // steer; without it, only while the queue is dormant or the conversation
+  // is idle. Declared by OpenCode 2.x and Claude Code, not by 1.x.
+  | "send-now";
 
 // Image attachment bounds, shared by the composer (intake refusal), the
 // upload route (authoritative enforcement), and the store. 10 MiB sits
@@ -158,6 +172,14 @@ export type ChatAccountChange =
 // `background` (live work, stoppable) and from idle (no session held):
 // prompting is possible, and the composer lists the wakeups with a release.
 export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed" | "background" | "retrying" | "compacting" | "scheduled";
+
+/** Server-only, verified Hub context; never included in shared replay/DTOs. */
+export type ChatActionContext = Readonly<{
+  receiptScope: string;
+  automaticBackground: "on" | "off" | "unavailable";
+}>;
+export type AutomaticBackgroundOutcome = "not-needed" | "accepted" | "unavailable" | "failed" | "unknown";
+export type AutomaticBackgroundFeedback = { automaticBackground?: AutomaticBackgroundOutcome };
 
 /** A turn is in flight: the composer offers Cancel, a new prompt is held. */
 export function isLiveConversationStatus(status: ConversationStatus | undefined): boolean {
@@ -355,6 +377,11 @@ export type SubagentLine = {
   usage?: TokenUsage;
 };
 
+/** Latest child execution and cumulative child-session cost, not task or parent cost.
+ * Null means unreported/incomplete; a reported zero remains zero. USD is the SDK unit.
+ */
+export type WorkerSessionReport = { model?: string; effort: string | null; costUsd: number | null };
+
 export type ToolItem = TimelineItemBase & {
   type: "tool";
   name: string;
@@ -378,6 +405,7 @@ export type ToolItem = TimelineItemBase & {
   // spend — nothing below is added into it — so these lines are what makes
   // the conversation's receipt whole. Absent when the subagent launched none.
   descendants?: SubagentLine[];
+  workerSession?: WorkerSessionReport;
   // How long the tool has been running, from the agent's own progress
   // heartbeat, when it reports one for a tool still producing no output.
   elapsedMs?: number;
@@ -729,6 +757,19 @@ export type CompactionItem = TimelineItemBase & {
  */
 export type BackgroundTaskItem = TimelineItemBase & {
   type: "background_task";
+  // Known history is retained, but current execution/occurrence is unverified.
+  // Never use an uncertain row as authority for a worker stop.
+  stateUncertain?: boolean;
+  // Structured provider notification identity; deduplicates provisional/live
+  // results against the same notification recovered with its launcher.
+  resultId?: string;
+  // Provider clock for a terminal report (Unix epoch ms), not execution end.
+  // V2 live admission and stored delivery can differ. Absent without a valid
+  // provider clock; never filled from local receipt time or a zero fallback.
+  terminalReportedAt?: number;
+  // Additional tool calls proven to share this worker occurrence. Each tool
+  // remains a separate task/cost row; this worker is counted only once.
+  toolUseIds?: string[];
   taskId: string;
   description: string;
   taskType?: string;
@@ -754,6 +795,7 @@ export type BackgroundTaskItem = TimelineItemBase & {
   // The child conversation an agent task runs as (`sub:<parent>:<agentId>`),
   // known from the start edge — what makes a running subagent openable.
   childConversationId?: string;
+  workerSession?: WorkerSessionReport;
   // A run Claude Code forked in the foreground with no launching tool use of
   // its own — the review a typed command starts (design D13). It is a run,
   // not background work: the subagents track lists it and opens it, while the
@@ -828,21 +870,46 @@ export type ConversationItem =
 
 export type InteractionRequest = PermissionRequest | QuestionRequest;
 
-// A prompt accepted while the conversation was busy, held by this workspace
-// and not yet delivered to the agent. Not a timeline item: it has no position
-// in the transcript until delivery, which is what lets it stay pinned at the
-// composer and removable. `id` is the handle removal addresses. `requestId`
-// echoes the accepting mutation's client request id so the submitting
-// client's optimistic draft retires the moment the held entry appears.
+// How a pending message reaches the agent. `queue`: held by this workspace
+// until the running turn ends, in submission order. `steer`: handed to the
+// agent at once, which keeps it until its running turn's next step boundary
+// (opencode-v2-steering, design D1). Only an agent declaring `steering`
+// accepts a steer.
+export type MessageDelivery = "steer" | "queue";
+
+// A prompt accepted while the conversation was busy and not yet delivered
+// to the agent: held by this workspace (`queue`) or pending with the agent
+// (`steer`). Not a timeline item: it has no position in the transcript until
+// delivery, which is what lets it stay pinned at the composer and removable.
+// `id` is the handle removal and switching address; for a steer it is the
+// agent's own inbox id. `requestId` echoes the accepting mutation's client
+// request id so the submitting client's optimistic draft retires the moment
+// the pending entry appears.
 export type QueuedMessage = {
   id: string;
+  // Server-owned opaque identity for this pending submission within its
+  // conversation. Preserved across delivery-handle changes, not a durable
+  // receipt or client/account identity. Older payloads may omit it.
+  submissionId?: string;
   text: string;
   queuedAt: number;
+  delivery: MessageDelivery;
+  // Present only when true: the entry is pending but nothing will deliver it
+  // on its own — a held message behind a cancellation or a staged revert, or
+  // a pending steer whose settled turn has not been superseded by a wake (D3).
+  paused?: true;
+  // Admission/resume/withdrawal may have applied. Reconcile read-only, never resend.
+  unconfirmed?: true;
   requestId?: string;
   // Attachment references held with the message; delivered exactly as
   // submitted, discarded with the message on removal.
   attachments?: MessageAttachment[];
 };
+
+// What a `conversation.queue` event announces about one entry. `held` and
+// `steered` are admissions; `switched` a delivery change; `paused` and
+// `resumed` the paused state changing; `removed` and `delivered` the ends.
+export type QueueChangeKind = "held" | "steered" | "removed" | "switched" | "paused" | "resumed" | "delivered";
 
 export type ConversationSnapshot = {
   conversation: ConversationSummary;
@@ -850,7 +917,8 @@ export type ConversationSnapshot = {
   generation: string;
   cursor: string;
   items: ConversationItem[];
-  // Held messages in submission order. Optional on the wire so a snapshot
+  // Pending messages in delivery order: steers first in enqueue order, then
+  // held messages in submission order. Optional on the wire so a snapshot
   // producer with no queue concept stays parseable; absent means empty.
   queued?: QueuedMessage[];
   reversibleHistory?: ReversibleHistoryState;
@@ -881,6 +949,6 @@ export type ChatEvent = ChatEventBase & (
   // duplicated frames converge on the same state, and a client that missed
   // nothing pays only the few queued entries a conversation can hold. `change`
   // names what happened for announcements.
-  | { type: "conversation.queue"; queued: QueuedMessage[]; change: { kind: "held" | "removed" | "delivered"; messageId: string } }
+  | { type: "conversation.queue"; queued: QueuedMessage[]; change: { kind: QueueChangeKind; messageId: string } }
   | { type: "resync"; reason: "generation-changed" | "retention-gap" | "invalid-cursor" | "conversation-rewritten" }
 );

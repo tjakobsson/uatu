@@ -123,9 +123,13 @@ test.describe("desktop chat panel layout", () => {
     const measure = () => page.evaluate(() => {
       const rect = (selector: string) => {
         const value = document.querySelector(selector)!.getBoundingClientRect();
-        return { top: value.top, left: value.left, right: value.right, width: value.width, height: value.height };
+        return { top: value.top, bottom: value.bottom, left: value.left, right: value.right, width: value.width, height: value.height };
       };
-      return { rail: rect(".chat-composer-actions"), trigger: rect("#chat-configuration-trigger"), status: rect("#chat-composer-status"), send: rect("#chat-send") };
+      const composer = document.querySelector<HTMLElement>("#chat-composer")!;
+      const css = getComputedStyle(composer);
+      const contentWidth = composer.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+      const twoRows = contentWidth <= 34 * parseFloat(getComputedStyle(document.documentElement).fontSize);
+      return { twoRows, rail: rect(".chat-composer-actions"), trigger: rect("#chat-configuration-trigger"), status: rect("#chat-composer-status"), send: rect("#chat-send"), stop: rect("#chat-stop") };
     });
 
     // The rail has settled at a width once two consecutive measurements
@@ -147,8 +151,14 @@ test.describe("desktop chat panel layout", () => {
     for (const fraction of [0.28, 0.42, 0.6]) {
       await page.evaluate(value => document.documentElement.style.setProperty("--chat-fraction", String(value)), fraction);
       const ready = await settled();
-      expect(ready.trigger.top + ready.trigger.height / 2).toBeCloseTo(ready.status.top + ready.status.height / 2, 0);
-      expect(ready.status.top + ready.status.height / 2).toBeCloseTo(ready.send.top + ready.send.height / 2, 0);
+      // The narrow fine-pointer composer deliberately has two rows. Keep
+      // status beside Send/Stop; configuration occupies the row above it.
+      expect(ready.send.top + ready.send.height / 2).toBeCloseTo(ready.status.top + ready.status.height / 2, 0);
+      if (ready.twoRows) expect(ready.trigger.bottom).toBeLessThanOrEqual(ready.status.top);
+      else expect(ready.trigger.top + ready.trigger.height / 2).toBeCloseTo(ready.status.top + ready.status.height / 2, 0);
+      expect(ready.send.top).toBeCloseTo(ready.stop.top, 0);
+      expect(ready.stop.left - ready.send.right).toBeGreaterThanOrEqual(8);
+      expect(ready.send.top + ready.send.height / 2).toBeGreaterThanOrEqual(ready.status.top + ready.status.height / 2);
       expect(ready.send.right).toBeLessThanOrEqual(ready.rail.right + 1);
       for (const status of ["sending", "running", "failed", "idle"] as const) {
         await request.post("/__e2e/chat", { data: { action: "status", conversationId, status, ...(status === "failed" ? { message: "fixture failure" } : {}) } });
@@ -157,6 +167,8 @@ test.describe("desktop chat panel layout", () => {
         expect(current.status.width).toBeCloseTo(ready.status.width, 1);
         expect(current.status.left).toBeCloseTo(ready.status.left, 1);
         expect(current.send.left).toBeCloseTo(ready.send.left, 1);
+        expect(current.send.top).toBeCloseTo(ready.send.top, 1);
+        expect(current.stop).toEqual(ready.stop);
       }
     }
     const withoutContext = await measure();
@@ -184,7 +196,11 @@ test.describe("desktop chat panel layout", () => {
     await expect(page.locator("#chat-configuration-variant-value")).toHaveText("High");
     await expect(page.locator("#chat-configuration-variant-summary svg")).toBeVisible();
     await page.evaluate(() => document.documentElement.style.setProperty("--chat-fraction", "0.28"));
-    await expect(page.locator("#chat-configuration-details")).toBeHidden();
+    // At this pane width the two-row composer gives the picker enough
+    // actual width to retain both details; pane fraction alone is not a gate.
+    await expect(page.locator("#chat-configuration-details")).toBeVisible();
+    await expect(page.locator("#chat-configuration-mode-summary")).toHaveText("Build");
+    await expect(page.locator("#chat-configuration-variant-value")).toHaveText("High");
     await page.evaluate(() => document.documentElement.style.setProperty("--chat-fraction", "0.45"));
     await expect(page.locator("#chat-configuration-details")).toBeVisible();
     await openChatConfiguration(page);

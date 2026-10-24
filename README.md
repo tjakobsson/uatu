@@ -47,6 +47,7 @@ cognitive debt.
 - [Git worktree workspaces](./docs/WORKTREES.md): create and switch branch checkouts from the workspace picker, with independent terminals and conversations, parent credential policy and guarded cleanup
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
 - Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
+- Subagent rows show the latest execution-reported reasoning effort and cumulative child-session USD cost when available; a labeled dash means not reported, never an estimated price or inherited parent selection.
 - Installable as a PWA so TUI editor shortcuts (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach the embedded terminal
 
 Claude Code and OpenCode are first-class agents in uatu: the aim is to use what each SDK offers, not the subset they share. The [Agent SDK coverage dashboard](https://github.com/tjakobsson/uatu/issues/480) lists everything each SDK declares and what uatu does with it; the gap count is the work still to do.

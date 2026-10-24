@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, unlink, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import chokidar from "chokidar";
@@ -395,6 +396,36 @@ describe("watchSession scope", () => {
     } finally {
       await session.stop();
     }
+  });
+
+  for (const phase of ["startup", "recovery"] as const) test(`a policy edit during ${phase} watcher registration is not lost`, async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-ignore-registration-"));
+    tempDirectories.push(tempDirectory);
+    const readme = path.join(tempDirectory, "README.md");
+    const lockfile = path.join(tempDirectory, "package-lock.json");
+    const uatuJson = path.join(tempDirectory, ".uatu.json");
+    await writeFile(readme, "# Readme\n");
+    await writeFile(lockfile, "{}\n");
+    await writeFile(uatuJson, JSON.stringify({ ignore: { exclude: [] } }));
+    let registrations = 0;
+    const session = createWatchSession([{ kind: "dir", absolutePath: tempDirectory }], true, {
+      usePolling: true,
+      collectRepositories: async () => [],
+      watch: (target, options) => {
+        // The matcher has been read, but this real polling watcher has not
+        // sampled its initial baseline. No later filesystem edit rescues it.
+        if (++registrations === (phase === "startup" ? 1 : 2)) {
+          writeFileSync(uatuJson, JSON.stringify({ ignore: { exclude: ["package-lock.json"] } }));
+        }
+        return chokidar.watch(target, options);
+      },
+    });
+    try {
+      await session.start();
+      if (phase === "recovery") await session.recover();
+      await waitUntil(() => session.getRoots().flatMap(root => root.docs).every(doc => doc.id !== lockfile));
+      expect(session.getRoots().flatMap(root => root.docs).some(doc => doc.id === readme)).toBe(true);
+    } finally { await session.stop(); }
   });
 
   // The first edit lands right after start and can precede the polling stat

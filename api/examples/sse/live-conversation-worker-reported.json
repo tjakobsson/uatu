@@ -1,0 +1,32 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "conversation",
+    "key": "opencode:conversation-1",
+    "cursor": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0xIiwicyI6M30",
+    "event": {
+      "kind": "data",
+      "data": {
+        "generation": "generation-1",
+        "sequence": 3,
+        "conversationId": "opencode:conversation-1",
+        "type": "item.upsert",
+        "item": {
+          "id": "task:v2:conversation-1:call-worker",
+          "type": "background_task",
+          "createdAt": 1724100000000,
+          "taskId": "v2:conversation-1:call-worker",
+          "toolUseId": "call-worker",
+          "description": "Review changes",
+          "taskType": "agent",
+          "childConversationId": "opencode:child-1",
+          "status": "completed",
+          "summary": "Review complete.",
+          "resultId": "native-report-1",
+          "terminalReportedAt": 1724100300000
+        }
+      }
+    }
+  }
+}

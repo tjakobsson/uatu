@@ -286,8 +286,8 @@ for (const browserName of ["chromium", "webkit"] as const) {
         if (touch) await page.locator("#touch-tab-chat").click();
         else await openChatPanel(page);
         if (child) {
-          await page.locator("#chat-subagents summary").click();
-          await page.getByRole("button", { name: "explore · Follow fixture" }).click();
+          await page.locator("#chat-compact-workers summary").click();
+          await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Follow fixture$/ }) }).click();
         }
         const selector = child ? "#chat-drilldown-timeline" : "#chat-timeline";
         const latest = child ? "#chat-drilldown-latest" : "#chat-latest";

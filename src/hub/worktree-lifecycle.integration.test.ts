@@ -181,6 +181,7 @@ const backend: SessionBackend = {
     if (!existsSync(workspace.path)) backendControl.startedInMissingFolder = true;
     return {
       workspaceId: workspace.id,
+      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath,
       endpoint: { hostname: "127.0.0.1", port: 1 },
       token: null,

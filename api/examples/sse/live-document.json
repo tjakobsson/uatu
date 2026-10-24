@@ -8,7 +8,7 @@
     "event": {
       "kind": "data",
       "data": {
-        "workspaceApiRevision": 24,
+        "workspaceApiRevision": 30,
         "kind": "snapshot",
         "epoch": "example-session",
         "revision": 4,

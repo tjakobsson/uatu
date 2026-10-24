@@ -38,7 +38,10 @@ src/
 │                   chat is the surface in front, which the hub switcher's
 │                   viewed acknowledgement also reads; login-action says
 │                   where a missing login is fixed: the Hub's Settings, or
-│                   the agent's own command outside a Hub);
+│                   the agent's own command outside a Hub; keyboard submission
+│                   steers by default, with Alt/Option+Enter queuing while a
+│                   steering conversation is busy — the dock is one list, steers in
+│                   OpenCode's inbox first, then the Uatu-held queue);
 │                   agent-specific stacks below the seam in
 │                   chat/opencode/ (the loopback server runtime, which
 │                   decides the spawned server's generation from its
@@ -180,6 +183,9 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   `UATU_E2E_SCREENSHOTS_DIR=openspec/changes/<change>/screenshots`; it
   travels with the change to the archive. `tests/evidence-discipline.test.ts`
   fails any test that names a change folder.
+- **Gallery regeneration is opt-in.** Standard tests leave committed evidence
+  unchanged; explicitly requested gallery refreshes use the commands in
+  `docs/screenshots/opencode-chat/README.md`.
 - E2E tests live in `tests/e2e/` under feature-named files
   (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.) —
   there is no monolithic `uatu.e2e.ts`.

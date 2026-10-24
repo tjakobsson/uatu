@@ -11,6 +11,7 @@
 // Timers are injected so the lifecycle can be tested without waiting.
 
 import { formatTokens } from "./usage";
+import { workerStateLabel } from "./worker-state";
 import type { BackgroundTaskItem, BackgroundTaskOutput, BackgroundTaskUsage, ConversationItem } from "./types";
 
 /** Where selecting a running task's row leads. */
@@ -26,9 +27,20 @@ export type TaskInspection =
  * taken a timeline row.
  */
 export function taskInspection(task: BackgroundTaskItem): TaskInspection | undefined {
-  if (task.status !== "running") return undefined;
   if (task.childConversationId) return { view: "transcript", conversationId: task.childConversationId };
+  if (task.status !== "running" && !task.outputFile) return undefined;
   return { view: "output" };
+}
+
+/** Historical children are not picker entries; their task link survives settlement. */
+export function taskForChild(items: readonly ConversationItem[], childId: string, sourceItemId?: string): BackgroundTaskItem | undefined {
+  const tasks = items.filter((item): item is BackgroundTaskItem => item.type === "background_task" && item.childConversationId === childId);
+  if (sourceItemId) {
+    const exact = tasks.find(item => item.id === sourceItemId || sourceItemId === `tool:${item.toolUseId}`
+      || item.toolUseIds?.some(call => sourceItemId === `tool:${call}`));
+    if (exact) return exact;
+  }
+  return tasks.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))[0];
 }
 
 /** The running task that a child transcript belongs to, if any. */
@@ -36,8 +48,9 @@ export function runningTaskForChild(items: readonly ConversationItem[], conversa
   return items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.status === "running" && item.childConversationId === conversationId);
 }
 
-export function taskById(items: readonly ConversationItem[], taskId: string): BackgroundTaskItem | undefined {
-  return items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === taskId);
+export function taskById(items: readonly ConversationItem[], taskId: string, itemId?: string): BackgroundTaskItem | undefined {
+  const tasks = items.filter((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === taskId);
+  return itemId === undefined ? tasks.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))[0] : tasks.find(item => item.id === itemId);
 }
 
 /** "0:07" / "1:05" / "1:02:03" — a clock, since the strip is watched rather than read once. */
@@ -59,11 +72,9 @@ export function taskUsageLabel(usage: BackgroundTaskUsage): string {
   return `${formatTokens(usage.totalTokens)} tokens · ${taskUsesLabel(usage)}`;
 }
 
-/** "finished · <summary>" / "failed" / "stopped": the strip's last line once the task settles. */
+/** Outcome only: the report body belongs to the canonical timeline result. */
 export function taskSettledLabel(task: BackgroundTaskItem): string {
-  const word = task.status === "completed" ? "finished" : task.status === "failed" ? "failed" : task.status === "stopped" ? "stopped" : "running";
-  const summary = task.summary?.trim();
-  return summary ? `${word} · ${summary}` : word;
+  return workerStateLabel(task.status, task.stateUncertain);
 }
 
 // How often the output pane re-reads the tail while the task runs. The file
@@ -113,7 +124,7 @@ export type TaskInspectionOptions = {
   timers?: TaskInspectionTimers;
 };
 
-export type OpenTaskInspection = { conversationId: string; taskId: string; view: TaskInspection["view"] };
+export type OpenTaskInspection = { conversationId: string; taskId: string; itemId?: string; view: TaskInspection["view"] };
 
 export class TaskInspectionPanel {
   private readonly hosts: TaskInspectionHosts;
@@ -165,7 +176,7 @@ export class TaskInspectionPanel {
 
   /** Shows the panel for a task; `sync` then keeps it current. */
   show(link: OpenTaskInspection, task: BackgroundTaskItem | undefined, stopping = false): void {
-    if (this.current && (this.current.taskId !== link.taskId || this.current.view !== link.view)) this.close();
+    if (this.current && (this.current.conversationId !== link.conversationId || this.current.taskId !== link.taskId || this.current.itemId !== link.itemId || this.current.view !== link.view)) this.close();
     this.current = link;
     this.following = true;
     this.outputFailures = 0;
@@ -191,7 +202,7 @@ export class TaskInspectionPanel {
     this.task = task;
     const running = task?.status === "running";
     const signature = task
-      ? [task.taskId, task.status, task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
+      ? [task.taskId, task.status, task.stateUncertain ? "uncertain" : "", task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
       : "";
     if (signature !== this.painted) {
       this.painted = signature;
@@ -261,19 +272,23 @@ export class TaskInspectionPanel {
     // A foreground run (a typed command's) is the turn's own work: the turn's
     // Cancel stops it, and the per-task stop the CLI offers is for background
     // work only, so the strip offers none.
-    if (task.status === "running" && task.foreground !== true) {
+    if (task.status === "running" && !task.stateUncertain && task.foreground !== true) {
       const stop = document.createElement("button");
       stop.type = "button";
       stop.className = "chat-task-stop";
       stop.dataset.stopTask = task.taskId;
-      stop.textContent = stopping ? "Stopping…" : "Stop";
+      stop.dataset.stopItem = task.id;
+      const nativeWorker = task.taskType === "agent" || task.taskType === "shell";
+      stop.textContent = stopping ? "Stopping…" : nativeWorker ? "Stop worker" : "Stop";
       stop.disabled = stopping;
-      stop.setAttribute("aria-label", `Stop ${task.description}`);
+      stop.setAttribute("aria-label", nativeWorker ? `Stop worker: ${task.description}` : `Stop ${task.description}`);
       line.append(stop);
     }
     const facts = document.createElement("div");
     facts.className = "chat-drilldown-task-facts";
-    if (task.status === "running") {
+    if (task.stateUncertain) {
+      facts.textContent = "Status unavailable — reconnecting";
+    } else if (task.status === "running") {
       const elapsed = document.createElement("span");
       elapsed.className = "chat-drilldown-task-elapsed";
       elapsed.dataset.taskElapsed = "";
@@ -300,6 +315,12 @@ export class TaskInspectionPanel {
       settled.className = "chat-drilldown-task-settled";
       settled.textContent = taskSettledLabel(task);
       facts.append(settled);
+      const result = document.createElement("button");
+      result.type = "button";
+      result.className = "chat-secondary-button";
+      result.dataset.taskResult = task.id;
+      result.textContent = "View worker result";
+      facts.append(result);
     }
     strip.replaceChildren(line, facts);
     strip.hidden = false;
@@ -366,7 +387,9 @@ export class TaskInspectionPanel {
   private paintOutput(output: BackgroundTaskOutput | null): void {
     const { outputText, outputNote } = this.hosts;
     if (!output) {
-      outputNote.textContent = "Output not yet available";
+      outputNote.textContent = this.task?.taskType === "shell"
+        ? "Output unavailable from the provider. Already received output remains here; it may be lost after reload."
+        : "Output not yet available";
       outputNote.hidden = false;
       return;
     }

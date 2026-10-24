@@ -1,6 +1,6 @@
 // Session coordination. File events own the index; Git runs independently.
 import type chokidar from "chokidar";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import path from "node:path";
 import { loadIgnoreMatcher } from "../ignore/engine";
@@ -49,6 +49,14 @@ type ObservedRoot = {
   ready: boolean;
   finish: () => void;
 };
+
+async function policyRevision(entry: WatchEntry): Promise<string> {
+  if (entry.kind !== "dir") return "";
+  return (await Promise.all([".uatu.json", ".gitignore"].map(async name => {
+    const stats = await stat(path.join(entry.absolutePath, name), { bigint: true }).catch(() => null);
+    return stats ? `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}` : "unreadable";
+  }))).join("|");
+}
 
 export type WatchSession = ReturnType<typeof createWatchSession>;
 export function createWatchSession(entries: WatchEntry[], initialFollow: boolean, options: WatchSessionOptions = {}) {
@@ -192,6 +200,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   }
 
   async function observe(entry: WatchEntry, staged = false): Promise<ObservedRoot | null> {
+    const policyBefore = await policyRevision(entry);
     const matcher = await loadIgnoreMatcher({ rootPath: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
       respectGitignore: options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
     if (stopped) return null;
@@ -242,6 +251,13 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     catch (error) {
       if (staged) { index.stop(); owned.delete(root); await watcher.close(); }
       throw error;
+    }
+    // Initial add events describe the watcher's baseline, not edits. A policy
+    // changed after matcher loading can already be in that baseline, leaving
+    // no change event to reconcile it. Check the registration gap explicitly.
+    if (!stopped && policyBefore !== await policyRevision(entry)) {
+      if (staged) pendingPolicyRecovery.add(entry.absolutePath);
+      else await recover(entry, true);
     }
     return stopped ? null : root;
   }

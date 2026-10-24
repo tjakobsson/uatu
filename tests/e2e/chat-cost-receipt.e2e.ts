@@ -7,7 +7,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem, SubagentLine, TokenUsage } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import { openChatPanel, openChatWorkers } from "./chat-helpers";
 import { openSeeded } from "./chat-shell-helpers";
 import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
@@ -79,15 +79,21 @@ test.describe("an OpenCode conversation's cost is a receipt", () => {
     await expect(chip).toHaveText("$1.60 this conversation");
 
     // In context: each task's row states that task alone, the launcher's row
-    // leaves out what it launched, and the list counts subagents, not rows.
+    // leaves out what it launched. The card counts distinct work occurrences;
+    // the receipt below separately counts reused subagent identities.
     const subject = (id: string) => page.locator(`[data-chat-item-id="${id}"] .chat-activity-subject`);
     await expect(subject("tool:t1")).toHaveText("general · Summarise README · $0.20");
     await expect(subject("tool:t2")).toHaveText("general · Audit mermaid docs · $0.10");
     await expect(subject("tool:t3")).toHaveText("general · Shorten README summary · $0.15");
-    await expect(page.locator("#chat-subagents-label")).toHaveText("2 subagents · 3 tasks finished");
-    await page.locator("#chat-subagents > summary").click();
-    await expect(page.locator("#chat-subagents-items li .chat-subagent-attribution")).toContainText(["$0.20", "$0.10", "$0.15"]);
-    await page.locator("#chat-subagents > summary").click();
+    await expect(page.locator("#chat-compact-workers-label")).toHaveText("3 finished");
+    await openChatWorkers(page);
+    await expect(page.locator("#chat-compact-workers-items [data-worker-id]")).toHaveCount(3);
+    for (const id of ["tool:t1", "tool:t2", "tool:t3"]) {
+      await expect(page.locator(`#chat-compact-workers-items [data-worker-id="${id}"]`)).toHaveCount(1);
+    }
+    // Each occurrence's dollar amount remains on its timeline subject above
+    // and in the real receipt below, not duplicated into compact rows.
+    await page.locator("#chat-compact-workers > summary").click();
 
     await chip.click();
     await expect(page.locator("#chat-plan-readout")).toBeVisible();

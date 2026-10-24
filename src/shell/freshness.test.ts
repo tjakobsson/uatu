@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import type { BuildSummary } from "../shared/types";
+import { BUNDLED_WEB_REVISION } from "../shared/version";
 import {
+  CLIENT_BUILD_IDENTITY,
   buildsMismatch,
   evaluateFreshness,
   serverIdentityKey,
@@ -28,6 +30,15 @@ const matchingClient: ClientBuildIdentity = {
 };
 
 describe("buildsMismatch", () => {
+  test("revision 2 assets must reload against revision 3 even at the same product build", () => {
+    expect(BUNDLED_WEB_REVISION).toBe(3);
+    const server = serverBuild({ ...CLIENT_BUILD_IDENTITY });
+    const oldClient = { ...CLIENT_BUILD_IDENTITY, bundledWebRevision: 2 };
+    expect(evaluateFreshness(oldClient, server, null)).toBe("reload");
+    expect(evaluateFreshness(oldClient, server, serverIdentityKey(server))).toBe("notice");
+    expect(evaluateFreshness(CLIENT_BUILD_IDENTITY, server, null)).toBe("in-sync");
+  });
+
   test("identical identities are in sync", () => {
     expect(buildsMismatch(matchingClient, serverBuild())).toBe(false);
   });

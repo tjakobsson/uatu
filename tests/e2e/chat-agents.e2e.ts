@@ -322,8 +322,8 @@ test.describe("multi-agent chat", () => {
     await expect(page.locator("#chat-items details.chat-request").last()).toContainText("Rejected");
 
     // The subagent opens as a drill-down and returns.
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Inspect" }).click();
+    await page.locator("#chat-compact-workers summary").click();
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Inspect$/ }) }).click();
     await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
     await expect(page.locator("#chat-conversation-select")).toHaveValue(id);
     await page.locator("#chat-drilldown-back").click();

@@ -7,6 +7,68 @@ today — **OpenCode** and **Claude Code** — and every conversation belongs
 to exactly one of them, chosen when the conversation is created and fixed
 for its life. One agent being missing or broken never blocks the other.
 
+## Personal Hub chat preferences
+
+The workspace Hub menu links to **Settings → Personal chat preferences**.
+The compact **Keep workers running when I steer** switch
+defaults ON only for an absent account record. It belongs to your account on
+that Hub across devices and workspaces, not other users, machine agent logins,
+workspace defaults or standalone chat. Saved OFF survives Hub restart.
+Settings refreshes on entry/focus/reconnect; stale saves show a conflict rather
+than overwriting another device. Unreadable persisted state reports unavailable
+instead of resetting OFF. The API is authenticated, no-store and versioned,
+with server-selected identity and compare-revision writes. Changes take effect
+only after **Save**. The one-line helper names the account scope; **Learn more**
+keeps the all-jobs, shared-workspace and native-resume caveats available.
+The switch shows ON/OFF. Changing it shows **Unsaved changes — Save to apply**;
+returning to the confirmed saved value restores **Saved**. Refreshes preserve an
+unsaved choice without silently applying it or rebasing it onto a competing
+revision. A conflict keeps the choice and reports the saved setting for review
+before another explicit Save. Unavailable settings and unconfirmed saves retain
+their distinct explanatory messages; no background refresh replays a save.
+
+With verified private Hub-to-child trust, ON considers one background request
+after an accepted composer steer, Queue → Steer, held Send now, paused-batch
+Send now, or submitted Undo/revert replacement. It never runs on job starts,
+ordinary idle/queued sends, preference selection or replacement staging alone.
+The request affects all native eligible blocking work, including shells.
+Admission/resume and backgrounding are separate, non-atomic operations: native
+resume may cancel blockers first, and neither acceptance nor backgrounding
+promises immediate steer delivery or worker completion. Other users can see
+the shared-work effects without having their personal preference changed.
+
+Missing child trust or unreadable preferences makes automation explicitly
+unavailable, not ON or OFF; an otherwise accepted steer stays accepted.
+Refused, unavailable and unknown follow-ups are reported separately and never
+restore an accepted input as a failed draft. An uncertain primary admission is
+retained as unconfirmed text/attachments and reconciled read-only, not resent.
+Late evidence never schedules a delayed background request. Same-account,
+same-request retries retain the first policy/outcome only while the bounded
+in-memory receipt survives (15 minutes after settlement by default, or less
+under count/byte pressure). Expiry, eviction and adapter/process restart end
+that protection; reload/reconnect never automatically replays the mutation.
+After refreshing evidence, an explicit background API request is a fresh action,
+not a resend; chat no longer offers a manual Continue control.
+
+Unknown steer/resume retention does not depend on automation being available.
+When private child trust is unavailable, the Hub still keeps accounts' operation
+identifiers separate without sending unsigned account identity or automation
+permission. The first degraded feedback snapshot is also memory-bounded (up to
+15 minutes from the proxy decision, or less under capacity pressure); losing
+either that snapshot or the child receipt ends composite replay protection.
+Queue → Steer and Send now response loss or server errors show persistent
+unconfirmed guidance for the current page and refresh state read-only, leaving
+an unrelated composing draft untouched. Reconnect/reload does not replay them.
+Warnings name the originating action and a short plain-text message excerpt
+(a short operation identifier for attachment-only inputs). “Checking conversation
+status” lasts only for the read; its completion says either “Status checked;
+acceptance still unconfirmed” or that the status check was unavailable. A status
+read alone is not an acceptance receipt. Unrelated successes do not clear these
+warnings. Notice excerpts are page-local and bounded to 20 operations in each of
+100 conversations; neither receipts nor excerpts are persisted.
+Multiple warnings share the existing focusable, bounded scrolling feedback
+region rather than displacing the message field or primary actions.
+
 ## Prerequisites
 
 ### OpenCode
@@ -55,6 +117,404 @@ Agent SDK session against your installed `claude`, and an idle
 conversation holds no process. Conversations resume from Claude Code's
 own session storage (`~/.claude/projects/...`), which uatu reads but
 never writes.
+
+### Sending, steering and queued messages
+
+**Send** taps steer ordinary text while OpenCode V2 is busy; the separate
+**Stop** cancels the current response. Hold Send continuously for **2.5 seconds**
+to queue automatically, exactly once without releasing: a silent **500ms arming
+delay** precedes the **2-second countdown**. Release before 500ms steers once.
+Releasing during the countdown (500ms–2499ms), dragging outside the original button, Escape, lost capture,
+pointer cancellation, leaving the tab, moving the target or changing the
+draft/conversation/configuration cancels without sending.
+No extension or progress appears during arming, so an ordinary tap never flashes
+the indicator. At 500ms the full pointer-transparent envelope appears 104px above
+the fixed Send target, limited by visible viewport space. Its outer bounds stay
+fixed while only the green fill moves bottom-to-top and the countdown runs from
+2.0s to zero. Reduced motion retains the same information and fixed bounds.
+The visual is viewport-owned, outside composer/dock clipping.
+Its fixed origin is sampled from a stable, inert zero-size probe in Send's
+client-coordinate space before the frame's paint writes, avoiding repeated
+write/read layout flushes and a second keyboard-pan translation in embedded
+browsers. A layout change that
+moves Send still cancels the gesture; moving the feedback does not move its target.
+The Send target never moves. Idle held
+sends dispatch normally, rather than inventing a pending queue entry.
+There is no Send dropdown. Keyboard users can hold Space on Send for the same
+2.5-second Queue action; Enter activates Send immediately. Escape cancels the
+hold and preserves focus. Send's accessible description explains these keys.
+A compact “Tap to steer · hold to queue” hint appears only with an eligible
+ordinary-text draft while work is running. An accepted held queue submission
+retires it for this browser/base path, not the account. Cancellation, refusal,
+an uncertain outcome and an ordinary tap do not retire it. If browser storage
+is unavailable, successful use is remembered only for the current page.
+Desktop Enter in the message field steers; on touch devices Enter always adds
+a newline and Ctrl/Command+Enter steers. Alt/Option+Enter queues where the
+delivery choice is available. These shortcuts are fixed: legacy saved delivery
+choices are ignored, not deleted, and there is no delivery-default setting.
+Send's accessible description names the shortcuts. Idle messages send immediately. Claude Code
+and OpenCode V1 queue busy follow-ups without offering steering. Pending images
+and native commands queue rather than being labelled as a text steer; replacement
+submission retains the native staged-revert semantics.
+
+While native steering is available, the configuration pill identifies **Next
+turn** choices. Changed model, mode and reasoning settings apply to queued or
+new turns; steers retain the active turn's settings. Differing staged choices
+show this distinction before submission and describe it to assistive technology.
+The pill does not invent the active turn's configuration from later queue
+admissions, and the extra explanation is absent for idle or unchanged settings.
+
+Touch keeps Attach and a two-line **agent · mode · model · effort** pill inline.
+Only declared/selected values appear; long names truncate with the full identity
+available to assistive technology and the familiar model chooser on activation.
+The second line shows actual context occupancy and known used/limit, or states
+what is unreported; it never substitutes cumulative worker/session usage.
+
+### Side questions with /btw
+
+OpenCode V2 offers `/btw <question>` as a native one-shot answer from existing
+session context, independently of foreground work. It admits no user message,
+does not interrupt/resume/background the parent, and executes no agent tool loop.
+Answers stay page-local, outside provider history: **Side answer ready** opens
+the response from a small transcript-edge notice, without a composer block or
+completion-time focus/scroll change. The reader uses the same sanitized Markdown
+as normal chat, with selectable text and locally scrolling tables/code. It opens
+at the answer's beginning with Close in its header; Escape closes only the reader,
+retaining an expanded worker list, and returns focus to the notice. Empty native text is
+reported honestly (the model may have attempted a tool call). Pending attachments
+are refused and retained; V1/Claude do not offer this command, and typing it there
+is refused rather than sent as an ordinary prompt. No automatic replay/retry is
+performed. Like native inference it may consume model usage; these tests use only
+the scripted fake, not a paid/live model. User-installed native plugins retain
+their existing hooks; this is not a new sandbox against arbitrary plugin code.
+If inference fails while you compose a newer draft, that draft stays unchanged;
+**Side question failed** retains the original question and failure for inspection.
+
+Workspace file references in side answers use the same watched-file resolution
+and pointer/Enter/Space actions as normal chat, including qualified paths and
+line numbers. Opening one closes the reader and brings the file into the existing
+Preview surface without reloading the app; the draft, conversation and page-local
+answer remain available. Hub workspace URL prefixes are preserved. Safe external
+links retain normal new-tab behavior; malformed, traversing or unrecognized
+references are not promoted into workspace file actions.
+
+### Pending messages
+
+The pending dock counts steers and queued messages. Each entry has its delivery
+badge, a separate **Paused** chip when applicable, and message-specific actions.
+For duplicate text and image-only entries, accessible action names also identify
+a stable pending-message number while that entry remains in the dock. Each
+successful action updates the dock silently; errors and uncertain outcomes remain visible.
+An ordinary action refusal is not delivery evidence: the dock rereads the queue
+and keeps messages the server still holds. If that check fails or omits the
+queue, the current entry stays visible with an error. Nothing is automatically
+resent; an unconfirmed withdrawal still permits only an explicit withdrawal retry.
+Paused messages wait for your next message or an explicit send action.
+**Send N paused steers now** wakes them together. Sending a queued message as a
+steer also wakes paused steers; its label and confirmation explain that effect.
+Other dormant queued messages remain held. Undo's count-only warning explains
+which batch will accompany the replacement, without repeating message text.
+
+Desktop and touch use the same compact worker card: one subtle border contains
+its disclosure header and rows. Active workers show agent, model with latest-used
+reasoning effort, cumulative tokens and cumulative child-session cost (USD).
+Wide desktop rows align on one line with separate 28px Stop targets; touch keeps
+44px targets and normally two lines. Very narrow phones use a third metadata
+line rather than hiding the agent/model. Finished workers use dense rows.
+An explicit dash means **not reported**, with an accessible label and tooltip;
+shell tasks have no reasoning/session cost. Reported zero is `$0.00`, sub-cent
+costs retain four decimal places, and smaller nonzero costs show `<$0.0001`.
+Effort comes only from the child's own execution metadata: OpenCode 2.x reports
+`model.variant` on step-start/history assistant records. It is the agent's
+execution report, not an independent downstream provider echo. Current OpenCode
+1.x and Claude message history do not report applied effort; their configured
+selection, the parent's selection, and model-name guesses are never substituted.
+Cost comes only from an authoritative cumulative session aggregate: OpenCode 2.x
+`SessionInfo.cost` on the existing history metadata read and live
+`session.usage.updated.cost` snapshots. They replace rather than add to each other.
+The native total includes compaction usage and retains spend hidden by revert;
+visible assistant-message sums cannot establish that total and are never a fallback.
+Current Claude and OpenCode 1.x integrations do not provide this authoritative
+aggregate, so their worker session cost is not reported even when task/message
+prices are available. Missing aggregate data remains unknown, not a partial sum.
+OpenCode can itself report zero for unpriced models: this is a reported zero,
+not a promise of free billing. Reused-child occurrences repeat one session snapshot
+without adding it to task/parent receipts or including descendant costs. Recovery
+uses existing child-history accounting; inspection reuses its own bounded read,
+and parent refreshes revalidate cached child history at most every 30 seconds,
+not on every paint. Ordered live removals protect model/effort/token accounting
+from older refresh and inspection reads; a later live upsert may recreate the
+message. Removal fences are bounded: retiring one invalidates older reads first,
+and parent-cache eviction clears its fences. Native lifetime cost remains separate
+and is not reduced by message removal. Legacy subagent/background summaries
+are not repeated above this card. Inspection, history and saved dismissal remain
+available.
+
+The historical accounting-authority check used the `@opencode/client` 2.0.28 contract and
+[OpenCode v2.0.28 projector](https://github.com/anomalyco/opencode/blob/026b106bc5d41b679ffc413264229c340871e4d3/packages/core/src/session/projector.ts#L58-L72):
+usage updates only the named session; step completion and compaction's
+[`UsageRecorded`](https://github.com/anomalyco/opencode/blob/026b106bc5d41b679ffc413264229c340871e4d3/packages/core/src/session/compaction.ts#L616-L622)
+add to that session, revert does not subtract spend, and `UsageUpdated` publishes
+the resulting aggregate. It is the agent's USD accounting, not a billing invoice.
+Pending is a separate compact disclosure **below** the worker card, before the
+composer—not a heading between the worker header and rows. Both cards use the
+same header, chevron and surface styling. Each open content pane scrolls on its
+own, without moving either header, the other pane or the transcript; there is
+no shared outer scroller. Long lists divide the measured budget, while short
+or collapsed lists yield unused space. Reverted history, TODOs and scheduled
+wakeups also remeasure when opened; their bounded panes include the header,
+borders, content gap and outer margins so actions remain scroll-reachable.
+With both cards collapsed, normal transcript/safe-area budgets remain wherever
+the measured minimum headers, whole actions and composer leave that space. With
+either expanded, cards can use most of the region left after measured header,
+composer, notices and safe-area padding. Touch and comfortable-density layouts
+keep 20% of that region for conversation, bounded to 32–96px; whole actions can
+reduce it, down to the lesser of 16px or 10% of the remaining region in an
+insufficient band. Short lists do not fill
+that capacity: they return unused height to conversation. This expanded policy
+also applies while the composer stays focused with the software keyboard hidden;
+the collapsed hardware-editing percentage cap cannot override it. Adding a second
+or fifth pending entry grows the card naturally until the measured budget is full.
+Collapsing both cards
+restores the normal budget without changing the reading intention. For example, a 230px
+landscape keyboard band has a 44px app header, 46px composer and 72px for two
+closed cards plus spacing: only 68px remains, not the normal 92px (40%). Both
+cards stay visible; touch does not switch to Show work or hide their headers.
+If the screen cannot physically fit whole actions, the transcript
+yields first; the pane you focus or touch then receives priority while both
+headers and the composer remain available. Desktop's explicit constrained
+Show work sheet may cover the chat header, never the composer; work never
+moves to a touch top sheet. Routine model
+timing notes stay inside expanded Pending, while replacement/batch consequences
+remain available in its content pane when collapsed. Batch actions live below
+the count header so they cannot change its disclosure styling or scroll away
+the worker header.
+
+The [PR-hosted screenshot gallery](https://github.com/tjakobsson/uatu/pull/519) covers the
+composer, workers, pending entries, hold countdown, inspection, questions, side
+reader, personal automation preference and uncertain/replacement feedback using
+synthetic fixtures only. The [capture guide](screenshots/opencode-chat/README.md)
+records the capture source and limitations.
+Selecting a card header also grants its body action space; allocation happens
+after the native click so moving the header cannot swallow a touch. In enlarged
+short landscape, physical 44px chrome/action minima replace rem-scaled empty
+space, and inter-card spacing can yield to retain both headers and a whole
+selected action. Pending restores its content offset after disclosure changes,
+scoped to the conversation for the current session; other conversations start
+with their own offset. Neither restoration nor pane selection moves the sibling
+scroll position or the transcript.
+Short keyboard/landscape layouts use compact input controls and counts;
+uncertain feedback has its own scrollable band (a bounded column in landscape),
+so it cannot consume the draft field. The inline model/context pill opens the
+real configuration picker directly, without a second Options panel or context
+circle. Paused-batch Send and replacement warnings remain available while typing.
+Outside picker taps dismiss it without activating controls below it.
+The touch picker reflows when Chat's visible area changes, including after a
+short viewport expands again. Short layouts reduce spacing around the model
+list while retaining complete model rows and touch targets. Browser regressions
+cover resizing, scrolling to the last model and selecting it; physical-iPhone
+acceptance remains user-owned.
+
+Edit returns an entry to the composer only after withdrawal succeeds. If
+delivery wins first, **Too late — already delivered** is informational: your
+private draft stays intact and the delivered message appears only once.
+
+If withdrawal cannot be confirmed, the pending entry and private draft stay
+visible. Chat checks status read-only; an empty inbox or filtered/reverted
+history does not silently remove the uncertain input. **Retry withdrawal**
+explicitly retries cancellation of the same native inbox ID, never resubmits
+the message. Edit and Steer → Queue remain unavailable until confirmation;
+duplicate clicks cannot start concurrent actions on the entry. Cancellation
+confirmation removes it; delivery confirmation says **Too late — already
+delivered** and the message stays delivered once. An inconclusive retry leaves
+the entry visible. Admission/resume uncertainty remains read-only. The retry
+classification is page-local: after reload, a generic unconfirmed entry alone
+does not establish that withdrawal retry is safe.
+
+### Background workers (OpenCode V2)
+
+OpenCode V2 exposes native background-worker inspection and controls. Automated
+acceptance uses source-shaped OpenCode 2.0.29 records with client 2.0.28.
+Isolated real-provider acceptance also passed native launch/completion, mixed
+worker/shell conversion, stop scopes and disconnect recovery on those versions.
+
+A background subagent's successful launch is not its finished result. Chat
+tracks its running, completed, failed, or stopped outcome separately, links the
+launcher to one result, and keeps its child transcript inspectable after it
+settles. Children need not appear in the conversation picker. Worker results
+are not editable steers and do not produce a successful-parent-turn push alert.
+The settled inspection strip links back to that result instead of repeating
+the report. Pending worker permissions/questions remain visible in workspace
+attention even before you open their parent conversation.
+
+Chat has no manual **Continue while workers run** or **What continues?** control.
+The existing background API remains unchanged: it requests all eligible blocking
+jobs, including shells, without stopping them; acceptance can be a no-op.
+Only the verified personal Hub steer policy automatically backgrounds work.
+Standalone has neither that account policy nor a manual chat background control;
+native agent facilities and the existing API remain available.
+
+A native question is not backgroundable work: OpenCode 2.0.29 awaits its form
+answer before that tool completes. Detached children can keep working while the
+parent waits, and child questions remain mirrored into the parent for answering.
+Uatu neither answers nor cancels questions automatically. `/btw` asks a separate
+one-shot question about existing context while work continues; it does not bypass
+an unanswered foreground tool question or execute a new agent task.
+
+Account usage stays beneath the inline actions when reported. The model
+pill opens the single picker directly. The worker summary remains reachable
+with hardware or software keyboards and in short landscape. Its compact header
+uses a small chevron; expansion stays in the bottom dock through keyboard resize
+and viewport pan, without flipping above the conversation or forcing keyboard
+blur. Pending counts, paused-batch Send and replacement warnings
+remain available while typing.
+Touch has one initially collapsed pending summary and one worker summary.
+Pending counts distinguish steers from queued input without repeating the total
+or zero categories (for example, **1 queued** or **2 steers · 1 queued**).
+Its header matches Workers' 28px minimum; compact cards share the delivery label and message
+line where they fit, followed by inline actions. Pending actions use the explicitly
+approved 32px density tradeoff with independent 8px gaps, including before Remove;
+existing confirmation safeguards remain unchanged. Composer Send/Stop and
+paused-batch Send stay 44px.
+Pending message leading scales with text enlargement (14px type/20px leading at
+default size, 28px/40px at 200%); multiline cards grow naturally inside Pending's
+independent pane instead of overlapping lines or imposing a fixed card height.
+Queued image rows and thumbnails stay within the card width when text is enlarged.
+Pending footers and action groups can shrink to the card width; long labels such
+as **Send now + paused steers** wrap without truncation. Paused-batch actions
+scroll inside Pending's content pane, never in its count header. Counts stay
+visible; confirmation wording and paused-batch delivery semantics stay intact.
+As before, enlarged replacement warnings may take extra space from the transcript
+to keep their full text and controls reachable. When the warning plus primary
+chrome cannot fit, the touch surface scrolls vertically; Pending keeps its own
+content pane and a whole warning, and the composer remains scroll-reachable.
+The warning's reading allocation includes the actual bottom fade height, so
+the scroll signal does not paint over its last line.
+The native conversation picker ellipsizes long selected titles within its own
+control; its option list retains the full titles and normal keyboard navigation.
+A shrinkable, paint-contained wrapper isolates native selected-value painting
+from the surrounding layout instead of relying on native control overflow rules.
+On touch, Rename and New conversation stay beside the picker on the same row,
+with 44px targets even at enlarged text. New conversation uses a plus SVG with
+the same accessible name; desktop keeps its text label. Long selected titles
+yield width instead of pushing actions onto another row. Header actions stay
+outside the paint boundary; no header-level overflow clipping is added.
+Touch transcript-edge navigation is contained within the transcript, so a
+Latest button taller than an enlarged short-landscape reading strip cannot
+paint or receive taps over the header or adjacent work controls.
+The wrapper draws the focus outline outside its paint boundary. The labeled
+native select, complete option names, and browser-owned popup remain unchanged.
+The 40% phone/short-landscape
+reading budget applies to collapsed cards whenever whole actions and headers
+physically fit; expanded cards use the small conversation strip above. A smaller
+band prioritizes the pane being used without overlapping the composer.
+Worker counts distinguish
+confirmed working, finished (including failed/stopped), and unknown occurrences.
+Counts and rows use the same deduplicated executions: actual background shell
+tasks count, ordinary foreground commands do not. Zero-count categories are
+omitted. Dismissed counts are not shown; when no visible workers remain the whole
+worker card disappears. Expansion shows one flat
+list: active work first, then finished work ordered newest first from available
+execution timestamps, without a second disclosure. Native V2 terminal reports
+retain their provider clock and show **Reported** rather than an exact finish
+time: live events time inbox admission, stored messages time delivery, so recovery
+can change this clock and the finished order. A missing report clock falls back
+to reported execution duration, then launch (**Started**), never local receipt
+time or a launcher's completion. These clocks add no worker-state or accounting
+authority. A result awaiting launcher correlation has no known start; without a
+provider report clock it shows no time. Rows open inspection or retained results;
+launch references and their costs remain in the transcript/timeline. Names use
+14px type and compact model/effort, Σ cumulative-token and session-USD columns
+(11px at default scale), with distinct working, unknown, finished, failed and
+stopped glyphs. Wide desktop rows align agent, title and metadata on one line,
+with separate 28px Stop/Inspect targets. Visible wide timing captions retain the
+full clock and provenance label; long agent/kind prefixes may ellipsize, with the
+complete metadata also available in its tooltip. Settled timing metadata stays
+hidden on narrow layouts. Narrow desktop/touch rows put the title
+first and metadata below; very narrow phones wrap one additional line. Missing
+agent/model/usage/effort/cost is not invented. Touch **Stop** remains a separate
+44px target with an 8px gap; unknown execution state disables it. Settled rows
+retain the approved compact inspection density and narrow-width fallback.
+**Dismiss finished**
+stays on the right of the same compact header, not in a footer, and hides only this device's per-conversation
+view using the existing persisted dismissal state, never provider history.
+There is no Restore finished control. Results and their inspection remain in
+the timeline; summaries count only visible rows.
+Σ usage is cumulative, not context occupancy.
+Touch's deliberate worker expansion is kept per conversation within this page's
+bounded presentation cache; new work and settlement do not open touch details.
+Replacement/batch warnings, applicable batch Send and actionable operation
+feedback stay outside the collapse. Successful sends, queue actions and
+automatic-background outcomes produce no confirmation notices; failed,
+unavailable and unknown guidance remains tied to its source operation; unrelated
+Remove, delivery changes or later successful steers cannot clear it. A Settings
+read failure means that page cannot confirm the saved preference, not that the
+server has disabled a saved ON policy in another tab or device. In desktop UI
+mode, Workers opens when visible working or unknown work first appears; Pending
+opens when entries first appear, including paused entries. A deliberate collapse
+holds throughout that nonempty active-work or pending batch, including further
+arrivals. Once that batch is empty, the next batch opens again. Settlement alone
+never closes an open card, and finished-only history does not open Workers.
+Touch starts collapsed and opens only deliberately. Choices are page-local,
+bounded to 200 conversations and isolated by conversation and selected UI mode;
+switching modes is not a gesture, and temporary selection clearing during refresh
+does not end a batch. Tablet desktop mode follows desktop disclosure policy even
+when its touch-first controls retain comfortable density.
+Desktop cards share only a measured capacity, never an outer scroller. When both
+are collapsed the cap is 40% of the measured chat panel (and 25rem), with the
+lesser of 12rem or 35% reserved for conversation. Expanded fine-pointer/hover
+desktop cards prefer a 35% reading reserve, bounded to 200–280px; physical action
+minimums can reduce it. Touch and comfortable-density layouts use the smaller
+reserve described above. Expanded cards do not require Show work when normal
+in-flow actions fit. A new replacement warning is revealed once within Pending after the restored
+draft has laid out; later updates respect deliberate independent pane scrolling.
+Non-empty desktop work reserves at least 52px (3.25rem when larger) so a full
+44px action and visible focus ring can be exposed. The transcript yields to
+its reserved floor first. If the measured remaining space cannot fit that
+minimum, **Show work** opens a scrollable sheet above the composer rather than
+clipping actions; **Close work** or Escape restores the entry. Drafts and
+persistent feedback stay intact. Keyboard focus reveals the complete action
+and ring within the work scrollers, without panning the outer surface.
+
+**Stop parent** affects the current parent execution and its still-blocking
+dependencies, not detached workers. **Stop worker** targets that verified
+worker only. An accepted request stays **Stopping…** until the provider reports
+its outcome. A later provider-owned completion notification can wake the
+parent again; Stop is not a permanent ban on future turns.
+Confirmed working workers, including foreground agents, label the action **Stop parent**.
+On touch devices, it opens an in-app explanation and confirmation before cancelling;
+unknown workers and settled history alone neither relabel Stop nor trigger that
+confirmation. Cancel leaves all work untouched.
+
+Stopping a shell removes its provider record and output. If removal prevents
+final capture, OpenCode can report **failed**, even after the process exited.
+An already confirmed completed report stays completed. Output already received
+can remain in the open view, but missing provider output cannot be recovered
+after reload; there is no persistent output archive.
+An in-app confirmation explains this destructive effect. Cancel or Escape
+closes only that confirmation, restores focus and makes no stop request.
+If the shell settles while confirmation is open, focus returns to the surviving
+inspection action rather than the parent composer.
+
+Reconnect reads history, pending results and current execution evidence.
+Complete history is reused only within a connected event generation, invalidated
+by session events, and reread after disconnection; execution/inbox evidence stays fresh.
+Missing evidence means **Status unavailable**, not finished or cancelled; an
+unverified worker cannot be stopped. This is not a promise of execution survival
+across service restarts. Reused child sessions can have ambiguous results, and
+the native interruption API cannot atomically lock a particular execution
+generation against an external continuation.
+
+If a response is lost, Chat reports **Outcome unknown** and refreshes without
+replaying the mutation. Same-request retries are deduplicated only while the
+in-memory receipt exists: by default up to 15 minutes after settlement, possibly
+less under capacity pressure, and never across adapter/process restart.
+
+**Optional workflow tip:** Prefer background subagents for independent work
+when useful, non-overlapping work can continue. Keep dependent work foreground;
+avoid overlapping writes or use isolated worktrees. Rely on completion
+notifications rather than polling. This is advice, not an always-background
+policy: Chat does not install instructions or change agent/model defaults.
 
 ### Scheduled wakeups (Claude Code)
 
@@ -173,7 +633,11 @@ complete trust model and network guidance.
 - **Chat reconnects or requests resync:** a brief disconnect replays
   retained events. A workspace restart or a long retention gap requires a
   fresh history snapshot automatically; completed agent history is not
-  deleted.
+  deleted. OpenCode 2.x has no native event replay: recovery reads history
+  after subscribing, reconciles exact native revert-boundary exclusions,
+  and requests a fresh view when that boundary changes. Missing rows in a
+  history page alone never authorize removal. Recovery does not replay a
+  prompt or resume paused work.
 - **A scheduled wakeup never fired:** a row that reads as lost means the
   workspace stopped or the process exited before it fired, so ask the
   agent to schedule it again. A row that reads as paused fires again once

@@ -33,6 +33,742 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
+  test("touch surface return consumes fresh work capacity before deciding physical overflow", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "touch");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    const surface = document.querySelector<HTMLElement>(".chat-surface")!;
+    const dock = document.querySelector<HTMLElement>("#chat-work-dock")!;
+    let visible = true, height = 788;
+    Object.defineProperty(surface, "clientHeight", { configurable: true, get: () => visible ? height : 0 });
+    Object.defineProperty(surface, "clientWidth", { configurable: true, value: 390 });
+    for (const [selector, pixels] of [[".chat-header", 80], ["#chat-composer", 124]] as const) {
+      document.querySelector<HTMLElement>(selector)!.getBoundingClientRect = () => ({ height: visible ? pixels : 0 }) as DOMRect;
+    }
+    const previousStyle = Reflect.get(globalThis, "getComputedStyle");
+    const previousObserver = Reflect.get(globalThis, "ResizeObserver");
+    const observers: Array<{ targets: Element[]; resize(): void }> = [];
+    Reflect.set(globalThis, "getComputedStyle", (node: HTMLElement) => ({
+      display: node.hidden ? "none" : "block", position: "static", fontSize: "16px",
+      paddingTop: node === dock ? "2px" : "0px", paddingBottom: node === dock ? "2px" : "0px",
+      getPropertyValue: () => "0px",
+    }));
+    Reflect.set(globalThis, "ResizeObserver", class {
+      targets: Element[] = [];
+      constructor(readonly resize: () => void) { observers.push(this); }
+      observe(node: Element) { this.targets.push(node); }
+      disconnect() {}
+    });
+    const { initChat } = await import(`./ui.ts?touch-capacity-return=${Date.now()}`);
+    try {
+      initChat(questionApi(document, { items: () => [] }));
+      await waitUntil(() => document.querySelector('option[value="one"]') !== null);
+      const layout = observers.find(observer => observer.targets.includes(dock))!;
+      expect(layout).toBeDefined();
+      layout.resize();
+      expect(surface.hasAttribute("data-work-overflow")).toBe(false);
+      visible = false;
+      document.documentElement.setAttribute("data-active-tab", "preview");
+      layout.resize();
+      expect(dock.style.getPropertyValue("--chat-work-hard-available")).toBe("0px");
+      visible = true;
+      document.documentElement.setAttribute("data-active-tab", "chat");
+      // No extra observer notification is guaranteed after these writes.
+      layout.resize();
+      expect(dock.style.getPropertyValue("--chat-work-hard-available")).toBe("584px");
+      expect(surface.hasAttribute("data-work-overflow")).toBe(false);
+      expect(dock.hasAttribute("data-work-cramped")).toBe(false);
+      // Conversely, a genuinely too-small band must still enter native outer
+      // scrolling on the first measurement, not retain the old large capacity.
+      height = 100;
+      layout.resize();
+      expect(surface.hasAttribute("data-work-overflow")).toBe(true);
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      Reflect.set(globalThis, "getComputedStyle", previousStyle);
+      Reflect.set(globalThis, "ResizeObserver", previousObserver);
+    }
+  });
+  for (const status of ["running", "idle"] as const) test(`held command paths retain ${status} steering controls while actual commands do not`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const entries = ["/build", "/build notes", "/build/notes.md", "/unknown", "/Build", "/provider:build notes"];
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["commands", "steering", "send-now"] } } }],
+      conversations: async () => [conversation("one")],
+      commands: async () => ["build", "provider:build"].map(name => ({ name, description: name, argumentHint: "", kind: "command" })),
+      models: async () => [], modes: async () => [],
+      snapshot: async () => ({ ...snapshot("one"), conversation: { ...conversation("one"), status }, queued: entries.map((text, index) => ({ id: `held-${index}`, text, queuedAt: 1, delivery: "queue" })) }),
+      stream: () => ({ close() {} }), inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?command-path-controls=${Date.now()}`);
+    initChat(api);
+    try {
+      const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+      await waitUntil(() => select.querySelector('option[value="one"]') !== null);
+      select.value = "one";
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+      const action = status === "running" ? "steer" : "send-now";
+      await waitUntil(() => document.querySelector(`[data-queue-${action}="held-3"]`) !== null);
+      await waitUntil(() => document.querySelector(`[data-queue-${action}="held-0"]`) === null);
+      for (const [index, expected] of [false, false, true, true, true, false].entries()) {
+        expect(!!document.querySelector(`[data-queue-${action}="held-${index}"]`), entries[index]).toBe(expected);
+      }
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+  for (const outcome of ["lost", "invalid-json", "missing-ack", "gateway", "unknown", "refused-400", "refused-409", "path-lost", "command-refused", "queue-500"] as const) test(`standalone busy input preserves ${outcome} without replay or draft loss`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", { configurable: true, value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    } });
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const { ChatApiClient } = await import("./client");
+    const response = deferred<Response>();
+    let calls = 0, reads = 0, requestId = "", delivery: unknown;
+    const transport = new ChatApiClient(async (_url, init) => {
+      calls++;
+      const body = JSON.parse(String(init?.body));
+      requestId = body.requestId; delivery = body.delivery;
+      return response.promise;
+    });
+    const running = { ...conversation("one"), status: "running" as const };
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["commands", "steering", "background-blocking-work"] } } }],
+      conversations: async () => [running], commands: async () => [{ name: "build", description: "Build", argumentHint: "", kind: "command" }], models: async () => [], modes: async () => [],
+      snapshot: async () => { reads++; return { ...snapshot("one"), conversation: running }; },
+      prompt: transport.prompt.bind(transport), stream: () => ({ close() {} }), inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?standalone-loss=${outcome}-${Date.now()}`);
+    initChat(api);
+    try {
+      const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+      await waitUntil(() => select.querySelector('option[value="one"]') !== null);
+      select.value = "one";
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      await waitUntil(() => !input.disabled && reads > 0);
+      const text = outcome === "path-lost" ? "/build/notes.md" : outcome === "command-refused" ? "/build notes" : "Original steer A";
+      input.value = text;
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      if (outcome === "path-lost") expect(document.querySelector("#chat-send")!.getAttribute("aria-label")).toContain("steer");
+      const before = reads;
+      const event = new window.Event("submit", { bubbles: true, cancelable: true });
+      // Exercise explicit Queue, not the retired stored keyboard default.
+      if (outcome === "queue-500") {
+        const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+        form.requestSubmit = () => { form.dispatchEvent(event); };
+        input.dispatchEvent(Object.assign(new window.Event("keydown", { bubbles: true, cancelable: true }), { key: "Enter", altKey: true }));
+      } else document.querySelector("#chat-composer")!.dispatchEvent(event);
+      await waitUntil(() => calls === 1);
+      input.value = "New draft C";
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      const refused = outcome.startsWith("refused") || outcome === "command-refused" || outcome === "queue-500";
+      if (outcome === "lost" || outcome === "path-lost") response.reject(new TypeError("Failed to fetch"));
+      else if (outcome === "invalid-json") response.resolve(new Response("not json", { status: 202 }));
+      else if (outcome === "missing-ack") response.resolve(Response.json({}, { status: 202 }));
+      else response.resolve(Response.json({ error: "Refused or unknown", ...(outcome === "unknown" ? { code: "operation_outcome_unknown" } : {}) }, { status: outcome === "gateway" ? 502 : outcome === "queue-500" ? 500 : outcome === "refused-400" ? 400 : 409 }));
+      await waitUntil(() => refused ? document.querySelector("#chat-composer-error")!.textContent!.includes("Draft restored") : document.querySelector("#chat-action-feedback")!.textContent!.includes("Status checked"));
+      expect(document.querySelector('meta[name="uatu-hub"]')).toBeNull();
+      expect(delivery).toBe(outcome === "queue-500" ? "queue" : "steer");
+      if (refused) {
+        expect(input.value).toBe(`${text}\nNew draft C`);
+        expect(reads).toBe(before);
+        expect(document.querySelector("#chat-action-feedback")!.textContent).not.toContain("unconfirmed");
+      } else {
+        expect(input.value).toBe("New draft C");
+        expect(document.querySelector("#chat-composer-error")!.textContent).not.toContain("Draft restored");
+        const feedback = document.querySelector("#chat-action-feedback")!.textContent!;
+        expect(feedback).toContain(text);
+        expect(feedback).toContain(requestId);
+        expect(feedback).toContain("acceptance still unconfirmed");
+        expect(reads).toBe(before + 1);
+        await waitUntil(() => document.querySelector("#chat-items")!.textContent!.includes("Acceptance unconfirmed"));
+      }
+      window.dispatchEvent(new window.Event("online"));
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    } finally {
+      const { presentationLocalStorage } = await import("../shell/presentation-storage");
+      presentationLocalStorage()?.removeItem("chat-delivery");
+      window.dispatchEvent(new window.Event("pagehide"));
+    }
+  });
+  for (const firstOutcome of ["steer", "rejected", "unknown", "forced-steer", "queue-with-new-stage"] as const) test(`staged model survives ${firstOutcome} and the next queue uses it`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", { configurable: true, value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    } });
+    const { presentationLocalStorage } = await import("../shell/presentation-storage");
+    const storage = presentationLocalStorage();
+    storage?.setItem("chat-delivery", firstOutcome === "forced-steer" || firstOutcome === "queue-with-new-stage" ? "queue" : "steer");
+    const model = (name: string): ChatModel => ({ selection: { providerId: "test", modelId: name }, provider: "Test", name });
+    const a = model("A"), b = model("B"), c = model("C");
+    const calls: Array<{ model: unknown; delivery: unknown }> = [];
+    const first = deferred<Awaited<ReturnType<ChatApiClient["prompt"]>>>();
+    let parent: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["models", "steering"] } } }],
+      conversations: async () => [{ ...conversation("one"), status: "running" }], commands: async () => [], models: async () => [a, b, c], modes: async () => [],
+      snapshot: async () => ({ ...snapshot("one"), configuration: { model: a.selection }, conversation: { ...conversation("one"), status: "running" } }),
+      prompt: async (_id: string, _request: string, _text: string, selection: unknown, _mode: unknown, _variant: unknown, _attachments: unknown, delivery: unknown) => {
+        calls.push({ model: selection, delivery });
+        return calls.length === 1 ? first.promise : { messageId: `queued-${calls.length}`, pending: true, delivery: "queue", configuration: { model: selection } };
+      },
+      stream: (_id: string, _cursor: string, handlers: Parameters<ChatApiClient["stream"]>[2]) => { parent = handlers; return { close() {} }; }, inventoryStream: () => ({ close() {} }), attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?staged-steer=${firstOutcome}-${Date.now()}`);
+    initChat(api);
+    try {
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      await waitUntil(() => !input.disabled && document.querySelector('[data-model-value="test/B"]') !== null);
+      const stage = (name: string) => document.querySelector(`[data-model-value="test/${name}"]`)!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const submit = (text: string, queue = false) => {
+        input.value = text;
+        input.dispatchEvent(new window.Event("input", { bubbles: true }));
+        const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+        const send = () => { form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); };
+        if (queue) {
+          form.requestSubmit = send;
+          input.dispatchEvent(Object.assign(new window.Event("keydown", { bubbles: true, cancelable: true }), { key: "Enter", altKey: true }));
+        } else send();
+      };
+      const scope = document.querySelector<HTMLElement>("#chat-configuration-scope")!;
+      const trigger = document.querySelector<HTMLButtonElement>("#chat-configuration-trigger")!;
+      expect(scope.hidden).toBe(true);
+      stage("B");
+      expect(scope.hidden).toBe(false);
+      expect(scope.textContent).toBe("Steers keep the active turn’s settings. Changes apply to queued or new turns.");
+      expect(trigger.getAttribute("aria-label")).toContain("Next turn. Model: B");
+      expect(document.querySelector("#chat-send")!.getAttribute("aria-describedby")).toBe("chat-send-help chat-configuration-scope");
+      submit("First");
+      await waitUntil(() => calls.length === 1);
+      expect(calls[0]!.model).toEqual(b.selection);
+      if (firstOutcome === "queue-with-new-stage") stage("C");
+      if (firstOutcome === "unknown") {
+        const { ChatTransportError } = await import("./client");
+        first.reject(new ChatTransportError("Operation outcome unknown", 409, "operation_outcome_unknown"));
+      } else if (firstOutcome === "rejected") first.reject(new Error("Steer refused"));
+      else first.resolve({ messageId: "first", pending: true, delivery: firstOutcome === "queue-with-new-stage" ? "queue" : "steer", configuration: { model: firstOutcome === "queue-with-new-stage" ? b.selection : a.selection } });
+      await waitUntil(() => firstOutcome === "rejected"
+        ? document.querySelector("#chat-composer-error")!.textContent!.includes("Draft restored")
+        : firstOutcome === "unknown" ? document.querySelector("#chat-action-feedback")!.textContent!.includes("unconfirmed")
+        : document.querySelector("#chat-queue")!.textContent!.includes("First"));
+      const next = firstOutcome === "queue-with-new-stage" ? c : b;
+      expect(document.querySelector(`[data-model-value="test/${next.name}"]`)!.getAttribute("aria-pressed")).toBe("true");
+      expect(scope.hidden).toBe(false);
+      storage?.setItem("chat-delivery", "queue");
+      submit("Next queued work", true);
+      await waitUntil(() => calls.length === 2);
+      expect(calls[1]).toEqual({ model: next.selection, delivery: "queue" });
+      await waitUntil(() => document.querySelector("#chat-queue")!.textContent!.includes("Next queued work"));
+      // A queue consumes that stage once: a later authoritative config is
+      // visible, not masked forever by the just-submitted staged selection.
+      parent!.event({ type: "conversation.configuration", generation: "g", sequence: 1, conversationId: "one", configuration: { model: a.selection } }, "cursor-one-1");
+      expect(document.querySelector('[data-model-value="test/A"]')!.getAttribute("aria-pressed")).toBe("true");
+      expect(scope.hidden).toBe(true);
+      expect(document.querySelector("#chat-send")!.getAttribute("aria-describedby")).toBe("chat-send-help");
+      submit("Third queued work", true);
+      await waitUntil(() => calls.length === 3);
+      expect(calls[2]).toEqual({ model: a.selection, delivery: "queue" });
+    } finally {
+      storage?.removeItem("chat-delivery");
+      window.dispatchEvent(new window.Event("pagehide"));
+    }
+  });
+
+  for (const scenario of ["mode", "reasoning", "unknown", "idle", "unsupported"] as const) test(`configuration scope explains ${scenario} without inventing active settings`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const model: ChatModel = { selection: { providerId: "test", modelId: "model" }, provider: "Test", name: "Model", variants: ["low", "high"] };
+    const configuration = scenario === "unknown" ? {} : { model: model.selection, mode: "build", variant: "low" };
+    const status = scenario === "idle" ? "idle" : "running";
+    let parent: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["models", "modes", "variants", ...(scenario === "unsupported" ? [] : ["steering"])] } } }],
+      conversations: async () => [{ ...conversation("one"), status }], commands: async () => [], models: async () => [model],
+      modes: async () => [{ name: "build", description: "Build" }, { name: "plan", description: "Plan" }],
+      snapshot: async () => ({ ...snapshot("one"), configuration, conversation: { ...conversation("one"), status } }),
+      stream: (_id: string, _cursor: string, handlers: Parameters<ChatApiClient["stream"]>[2]) => { parent = handlers; return { close() {} }; },
+      inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?configuration-scope=${scenario}-${Date.now()}`);
+    initChat(api);
+    try {
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      await waitUntil(() => !input.disabled && !!parent);
+      const scope = document.querySelector<HTMLElement>("#chat-configuration-scope")!;
+      const trigger = document.querySelector<HTMLButtonElement>("#chat-configuration-trigger")!;
+      expect(scope.hidden).toBe(true);
+      const control = document.querySelector<HTMLSelectElement>(scenario === "reasoning" ? "#chat-configuration-variant" : "#chat-configuration-mode")!;
+      // Linkedom exposes select.value as read-only, unlike a browser.
+      Object.defineProperty(control, "value", { configurable: true, value: scenario === "reasoning" ? "high" : "plan" });
+      control.dispatchEvent(new window.Event("change", { bubbles: true }));
+      const steering = scenario !== "idle" && scenario !== "unsupported";
+      expect(scope.hidden).toBe(!steering);
+      expect(trigger.getAttribute("aria-label")!.includes("Next turn")).toBe(steering);
+      expect(trigger.getAttribute("aria-label")).toContain(scenario === "reasoning" ? "Reasoning: High" : "Mode: Plan");
+      if (scenario === "unknown") {
+        expect(trigger.getAttribute("aria-label")).toContain("Model: chosen by Test");
+        expect(scope.textContent).not.toContain("Build");
+      }
+      // A remote equal configuration hides the extra explanation without
+      // clearing the local choice or implying it retargeted a running turn.
+      parent!.event({ type: "conversation.configuration", generation: "g", sequence: 1, conversationId: "one", configuration: { ...configuration, ...(scenario === "reasoning" ? { variant: "high" } : { mode: "plan" }) } }, "cursor-one-1");
+      expect(scope.hidden).toBe(true);
+      parent!.event({ type: "conversation.status", generation: "g", sequence: 2, conversationId: "one", status: "completed" }, "cursor-one-2");
+      await waitUntil(() => !trigger.getAttribute("aria-label")!.includes("Next turn"));
+      expect(trigger.getAttribute("aria-label")).not.toContain("Next turn");
+      expect(trigger.getAttribute("aria-label")).toContain(scenario === "reasoning" ? "Reasoning: High" : "Mode: Plan");
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
+  for (const scenario of ["held", "absent", "failed-read", "incomplete-read", "edit", "steer", "queue", "delivered-code", "early-terminal", "read-terminal", "switched", "read-switched", "withdrawal-retry"] as const) {
+    const name = `pending refusal reconciles ${scenario}`;
+    test(name, async () => {
+      if (process.env.UATU_PENDING_REFUSAL_CASE !== "1") {
+        const child = Bun.spawn({ cmd: [process.execPath, "test", import.meta.path, "-t", `${name}$`], env: { ...process.env, UATU_PENDING_REFUSAL_CASE: "1" }, stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+        expect(code, `${stdout}\n${stderr}`).toBe(0);
+        return;
+      }
+      const { document, window } = parseHTML(html);
+      installDomGlobals(document, window);
+      document.documentElement.setAttribute("data-ui-mode", "desktop");
+      document.documentElement.setAttribute("data-chat-panel", "open");
+      stubConversationSelect(document);
+      const { ChatApiClient } = await import("./client");
+      const response = deferred<Response>(), recovery = deferred<ConversationSnapshot>();
+      const retry = scenario === "withdrawal-retry";
+      const action = retry ? "remove" : ["edit", "steer", "queue"].includes(scenario) ? scenario : "send-now";
+      const entry = { id: "native-original", text: "Still owned pending input", queuedAt: 1, delivery: scenario === "queue" || retry ? "steer" as const : "queue" as const, paused: true as const };
+      let mutations = 0, reads = 0;
+      const requests: string[] = [];
+      const transport = new ChatApiClient(async (url) => {
+        mutations++; requests.push(String(url));
+        if (retry && mutations === 1) return Response.json({ error: "Withdrawal unknown", code: "steer-withdrawal-unconfirmed" }, { status: 409 });
+        return response.promise;
+      });
+      let events: Parameters<ChatApiClient["stream"]>[2];
+      const api = {
+        status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }],
+        conversations: async () => [conversation("one"), conversation("two")], commands: async () => [], models: async () => [], modes: async () => [],
+        snapshot: async (id: string) => {
+          reads++;
+          if (id === "two") return { ...snapshot(id), queued: [{ ...entry, text: "Other pending input" }] };
+          if (retry && mutations === 1) return { ...snapshot(id), queued: [] };
+          return mutations ? recovery.promise : { ...snapshot(id), conversation: { ...conversation(id), status: scenario === "steer" ? "running" : "idle" }, queued: [entry] };
+        },
+        sendNow: transport.sendNow.bind(transport), removeQueued: transport.removeQueued.bind(transport), changeDelivery: transport.changeDelivery.bind(transport),
+        stream: (_id: string, _cursor: string, handlers: typeof events) => { events = handlers; return { close() {} }; }, inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+      } as unknown as ChatApiClient;
+      const { initChat } = await import(`./ui.ts?pending-refusal=${scenario}-${Date.now()}`);
+      initChat(api);
+      try {
+        const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+        await waitUntil(() => !!document.querySelector(`[data-queue-${action}="native-original"]`));
+        input.value = "Private draft";
+        const click = () => {
+          const target = document.querySelector<HTMLButtonElement>(`[data-queue-${action}="native-original"]`)!;
+          target.dispatchEvent(new window.Event("click", { bubbles: true }));
+          return target;
+        };
+        if (retry) {
+          click();
+          await waitUntil(() => document.querySelector('[data-queue-remove="native-original"]')?.textContent === "Retry withdrawal" && !document.querySelector<HTMLButtonElement>('[data-queue-remove="native-original"]')!.disabled);
+        }
+        const before = reads, expectedMutations = retry ? 2 : 1;
+        const target = click();
+        await waitUntil(() => mutations === expectedMutations);
+        const terminal = () => events!.event({ type: "conversation.queue", generation: "g", sequence: 1, conversationId: "one", queued: [], change: { kind: "delivered", messageId: entry.id } }, "cursor-terminal");
+        const switchConversation = async () => {
+          const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+          select.value = "two"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+          await waitUntil(() => !!document.querySelector('[data-chat-queued-id="native-original"]')?.textContent?.includes("Other pending input"));
+          input.value = "Other draft";
+        };
+        if (scenario === "early-terminal") terminal();
+        if (scenario === "switched") await switchConversation();
+        response.resolve(Response.json({ error: "Send now is unavailable while a turn is running", ...(scenario === "delivered-code" ? { code: "steer-already-delivered" } : {}) }, { status: 409 }));
+        const noRead = ["delivered-code", "early-terminal", "switched"].includes(scenario);
+        if (!noRead) {
+          await waitUntil(() => reads === before + 1);
+          await flush();
+          expect(target.disabled).toBe(true);
+          document.querySelector(`[data-queue-${action}="native-original"]`)?.dispatchEvent(new window.Event("click", { bubbles: true }));
+          expect(mutations).toBe(expectedMutations);
+          if (scenario === "read-terminal") terminal();
+          if (scenario === "read-switched") await switchConversation();
+          if (scenario === "failed-read") recovery.reject(new Error("Read unavailable"));
+          else recovery.resolve({ ...snapshot("one"), ...(scenario === "incomplete-read" ? {} : { queued: scenario === "absent" || retry ? [] : [entry] }) });
+        }
+        await waitUntil(() => !target.disabled);
+        await flush();
+        const switched = scenario === "switched" || scenario === "read-switched";
+        const departed = ["absent", "delivered-code", "early-terminal", "read-terminal"].includes(scenario);
+        const row = document.querySelector('[data-chat-queued-id="native-original"]');
+        expect(!!row).toBe(!departed);
+        expect(input.value).toBe(switched ? "Other draft" : "Private draft");
+        expect(mutations).toBe(expectedMutations);
+        if (switched) {
+          expect(row!.textContent).toContain("Other pending input");
+          expect(document.querySelector("#chat-composer-error")!.textContent).toBe("");
+          expect(document.querySelector("#chat-state")!.textContent).not.toContain("unavailable");
+        } else if (scenario !== "early-terminal") {
+          expect(document.querySelector("#chat-composer-error")!.textContent).toContain(scenario === "delivered-code" ? "already delivered" : "unavailable");
+          if (!departed) {
+            expect(document.querySelector<HTMLButtonElement>('[data-queue-remove="native-original"]')!.disabled).toBe(false);
+            if (retry) {
+              expect(requests[1]).toBe(requests[0]);
+              expect(document.querySelector('[data-queue-remove="native-original"]')!.textContent).toBe("Retry withdrawal");
+              expect(document.querySelector('[data-queue-edit="native-original"]')).toBeNull();
+            } else expect(document.querySelector<HTMLButtonElement>('[data-queue-edit="native-original"]')!.disabled).toBe(false);
+          }
+          if (scenario === "failed-read" || scenario === "incomplete-read") expect(document.querySelector("#chat-composer-error")!.textContent).toContain("could not be checked");
+          // Routine stream/status paints must not erase the refusal.
+          events!.event({ type: "conversation.status", generation: "g", sequence: scenario === "read-terminal" ? 2 : 1, conversationId: "one", status: "idle" }, "cursor-status");
+          await flush();
+          expect(document.querySelector("#chat-composer-error")!.textContent).toContain(scenario === "delivered-code" ? "already delivered" : "unavailable");
+        }
+      } finally { window.dispatchEvent(new window.Event("pagehide")); }
+    });
+  }
+
+  for (const failure of ["typed", "network", "server", "missing-ack"] as const) for (const terminal of ["none", "removed", "delivered"] as const) for (const switched of [false, true]) for (const action of ["remove", "edit", "queue"] as const) {
+    if (terminal !== "none" && action !== "remove") continue;
+    const name = `unconfirmed withdrawal on ${action} ${switched ? "cannot affect a newly selected conversation" : "retains input and retries withdrawal only"}${terminal === "none" ? "" : ` after early ${terminal}`}${failure === "typed" ? "" : ` after ${failure} failure`}`;
+    test(name, async () => {
+    // Chat intentionally survives pagehide. Keep its pending renders and save
+    // timers from writing through the next case's global DOM/storage fixture.
+    if (process.env.UATU_WITHDRAWAL_UI_CASE !== "1") {
+      const child = Bun.spawn({
+        cmd: [process.execPath, "test", import.meta.path, "-t", `${name}$`],
+        env: { ...process.env, UATU_WITHDRAWAL_UI_CASE: "1" },
+        stdout: "pipe", stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+      return;
+    }
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const { ChatApiClient } = await import("./client");
+    let mutations = 0, reads = 0;
+    const response = deferred<Response>();
+    const retryResponse = deferred<Response>();
+    const requests: Array<{ url: string; method?: string }> = [];
+    let parent: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    const transport = new ChatApiClient(async (url, init) => {
+      mutations++;
+      requests.push({ url: String(url), method: init?.method });
+      return mutations === 1 ? response.promise : retryResponse.promise;
+    });
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }],
+      conversations: async () => [conversation("one"), conversation("two")], commands: async () => [], models: async () => [], modes: async () => [],
+      snapshot: async (id: string) => { reads++; return { ...snapshot(id), queued: mutations === 1 && id === "one" ? [] : [{ id: "pending", text: id === "one" ? "Original pending input" : "Other conversation input", queuedAt: 1, delivery: "steer" }] }; },
+      removeQueued: transport.removeQueued.bind(transport), changeDelivery: transport.changeDelivery.bind(transport),
+      stream: (_id: string, _cursor: string, handlers: Parameters<ChatApiClient["stream"]>[2]) => { parent = handlers; return { close() {} }; }, inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?withdrawal=${action}-${switched}-${Date.now()}`);
+    initChat(api);
+    try {
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      await waitUntil(() => !input.disabled && !!document.querySelector(`[data-queue-${action}="pending"]`));
+      const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+      if (select.value !== "one") {
+        select.value = "one";
+        select.dispatchEvent(new window.Event("change", { bubbles: true }));
+        await waitUntil(() => !!document.querySelector('[data-chat-queued-id="pending"]')?.textContent?.includes("Original pending input"));
+      }
+      input.value = "Draft typed meanwhile";
+      const before = reads;
+      const target = document.querySelector<HTMLButtonElement>(`[data-queue-${action}="pending"]`)!;
+      target.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await waitUntil(() => mutations === 1);
+      if (terminal !== "none") {
+        parent!.event({ type: "conversation.queue", generation: "g", sequence: 1, conversationId: "one", queued: [], change: { kind: terminal, messageId: "pending" } }, "cursor-one-1");
+        if (terminal === "delivered") parent!.event({ type: "item.upsert", generation: "g", sequence: 2, conversationId: "one", item: { id: "message:pending", type: "user_message", text: "Original pending input", createdAt: 2 } }, "cursor-one-2");
+        await waitUntil(() => !document.querySelector('[data-chat-queued-id="pending"]'));
+      }
+      if (switched) {
+        const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+        select.value = "two";
+        select.dispatchEvent(new window.Event("change", { bubbles: true }));
+        await waitUntil(() => !!document.querySelector('[data-chat-queued-id="pending"]')?.textContent?.includes("Other conversation input"));
+        input.value = "Other conversation draft";
+      }
+      if (failure === "network") response.reject(new TypeError("Failed to fetch"));
+      else if (failure === "missing-ack") response.resolve(Response.json({}));
+      else if (failure === "server") response.resolve(Response.json({ error: "Bad gateway" }, { status: 502 }));
+      else response.resolve(Response.json({ error: "the agent has not confirmed the withdrawal", code: "steer-withdrawal-unconfirmed" }, { status: 409 }));
+      if (terminal !== "none") {
+        await waitUntil(() => !target.disabled);
+        // Flush the response and any follow-on snapshot render, not a fixed
+        // elapsed-time guess, before checking for a resurrected dock entry.
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        expect(!!document.querySelector('[data-chat-queued-id="pending"]')).toBe(switched);
+        expect(document.querySelector("#chat-action-feedback")!.textContent).not.toContain("withdrawal");
+        expect(reads).toBe(before + (switched ? 1 : 0));
+        expect(input.value).toBe(switched ? "Other conversation draft" : "Draft typed meanwhile");
+        if (terminal === "delivered" && !switched) expect(document.querySelector("#chat-items")!.textContent).toContain("Original pending input");
+        expect(mutations).toBe(1);
+        expect(requests.map(request => request.method)).toEqual(["DELETE"]);
+        return;
+      }
+      if (switched) {
+        await waitUntil(() => !target.disabled);
+        expect(document.querySelector('[data-chat-queued-id="pending"]')!.textContent).toContain("Other conversation input");
+        expect(!!document.querySelector('[data-queue-remove="pending"]')).toBe(true);
+        expect(input.value).toBe("Other conversation draft");
+        expect(document.querySelector("#chat-action-feedback")!.textContent).not.toContain("withdrawal");
+        expect(mutations).toBe(1);
+        return;
+      }
+      await waitUntil(() => document.querySelector("#chat-action-feedback")!.textContent!.includes("withdrawal still unconfirmed"));
+      await waitUntil(() => document.querySelector('[data-queue-remove="pending"]')?.textContent === "Retry withdrawal");
+      expect(reads).toBe(before + 1);
+      expect(document.querySelector('[data-chat-queued-id="pending"]')!.textContent).toContain("Original pending input");
+      expect(input.value).toBe("Draft typed meanwhile");
+      expect(!!document.querySelector('[data-queue-remove="pending"]')).toBe(true);
+      expect(!!document.querySelector('[data-queue-edit="pending"]')).toBe(false);
+      expect(!!document.querySelector('[data-queue-queue="pending"]')).toBe(false);
+      expect(mutations).toBe(1);
+      const retry = document.querySelector<HTMLButtonElement>('[data-queue-remove="pending"]')!;
+      expect(retry.disabled).toBe(false);
+      retry.dispatchEvent(new window.Event("click", { bubbles: true }));
+      retry.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await waitUntil(() => mutations === 2);
+      expect(requests.map(request => request.method)).toEqual([action === "queue" ? "PATCH" : "DELETE", "DELETE"]);
+      expect(requests[1]!.url).toBe(requests[0]!.url);
+      expect(input.value).toBe("Draft typed meanwhile");
+      if (action === "queue") {
+        retryResponse.resolve(Response.json({ error: "the message was already delivered", code: "steer-already-delivered" }, { status: 409 }));
+        await waitUntil(() => document.querySelector("#chat-composer-error")!.textContent!.includes("already delivered"));
+        parent!.event({ type: "item.upsert", generation: "g", sequence: 1, conversationId: "one", item: { id: "message:pending", type: "user_message", text: "Original pending input", createdAt: 2 } }, "cursor-one-1");
+      } else {
+        retryResponse.resolve(Response.json({ removed: true }));
+        parent!.event({ type: "conversation.queue", generation: "g", sequence: 1, conversationId: "one", queued: [], change: { kind: "removed", messageId: "pending" } }, "cursor-one-1");
+      }
+      await waitUntil(() => !document.querySelector('[data-chat-queued-id="pending"]'));
+      expect(input.value).toBe("Draft typed meanwhile");
+      expect(mutations).toBe(2);
+      await waitUntil(() => !document.querySelector("#chat-action-feedback")!.textContent!.includes("withdrawal still unconfirmed"));
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+    });
+  }
+
+  for (const outcome of ["read-unavailable", "converted", "same-text-other-submission", "legacy-no-submission", "converted-unconfirmed", "refused-400", "refused-409", "programmer-error", "admission-unknown"] as const) {
+    const name = `lost withdrawal recovery distinguishes ${outcome}`;
+    test(name, async () => {
+      if (process.env.UATU_WITHDRAWAL_UI_CASE !== "1") {
+        const child = Bun.spawn({ cmd: [process.execPath, "test", import.meta.path, "-t", `${name}$`], env: { ...process.env, UATU_WITHDRAWAL_UI_CASE: "1" }, stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+        expect(code, `${stdout}\n${stderr}`).toBe(0);
+        return;
+      }
+      const { document, window } = parseHTML(html);
+      installDomGlobals(document, window);
+      document.documentElement.setAttribute("data-ui-mode", "desktop");
+      document.documentElement.setAttribute("data-chat-panel", "open");
+      stubConversationSelect(document);
+      const { ChatApiClient } = await import("./client");
+      const admission = outcome === "admission-unknown";
+      const original = { id: "native-original", submissionId: outcome === "legacy-no-submission" ? undefined : "logical-original", text: "Original pending input", queuedAt: 1, delivery: admission ? "queue" as const : "steer" as const };
+      const replacement = { ...original, id: "held-new", delivery: "queue" as const,
+        submissionId: outcome === "same-text-other-submission" ? "logical-other" : original.submissionId,
+        ...(outcome === "converted-unconfirmed" ? { unconfirmed: true as const } : {}) };
+      let mutations = 0, reads = 0;
+      const response = deferred<Response>();
+      const recovery = deferred<ConversationSnapshot>();
+      const transport = new ChatApiClient(async () => { mutations++; return response.promise; });
+      const models: ChatModel[] = ["A", "B"].map(name => ({ selection: { providerId: "test", modelId: name }, provider: "Test", name, imageInput: true }));
+      const api = {
+        status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "models", "attachments"] } } }],
+        conversations: async () => [{ ...conversation("one"), status: "running" }], commands: async () => [], models: async () => models, modes: async () => [],
+        snapshot: async () => { reads++; return mutations ? recovery.promise : { ...snapshot("one"), conversation: { ...conversation("one"), status: "running" }, queued: [original] }; },
+        removeQueued: outcome === "programmer-error" ? async () => { throw new Error("Local programmer failure"); } : transport.removeQueued.bind(transport),
+        changeDelivery: transport.changeDelivery.bind(transport), stream: () => ({ close() {} }), inventoryStream: () => ({ close() {} }), attachmentUrl: () => "",
+        uploadAttachment: async () => ({ id: "private-attachment", mimeType: "image/png", sizeBytes: 3 }),
+      } as unknown as ChatApiClient;
+      const { initChat } = await import(`./ui.ts?withdrawal-recovery=${outcome}-${Date.now()}`);
+      initChat(api);
+      try {
+        const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+        const action = admission ? "steer" : "remove";
+        await waitUntil(() => !!document.querySelector(`[data-queue-${action}="native-original"]`));
+        input.value = "New private draft";
+        const before = reads;
+        const target = document.querySelector<HTMLButtonElement>(`[data-queue-${action}="native-original"]`)!;
+        target.dispatchEvent(new window.Event("click", { bubbles: true }));
+        await waitUntil(() => !!document.querySelector('[data-model-value="test/B"]'));
+        document.querySelector('[data-model-value="test/B"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+        chooseFiles(document.querySelector<HTMLInputElement>("#chat-attach-input")!, [new File(["new"], "private-new.png", { type: "image/png" })]);
+        await waitUntil(() => document.querySelector("#chat-attachments")!.textContent!.includes("private-new.png"));
+        if (outcome === "programmer-error") {
+          await waitUntil(() => document.querySelector("#chat-state")!.textContent!.includes("Local programmer failure"));
+          expect(reads).toBe(before);
+          expect(mutations).toBe(0);
+        } else if (outcome.startsWith("refused")) {
+          response.resolve(Response.json({ error: "Definite refusal" }, { status: outcome === "refused-400" ? 400 : 409 }));
+          if (outcome === "refused-409") {
+            await waitUntil(() => reads === before + 1);
+            recovery.resolve({ ...snapshot("one"), queued: [original] });
+            await waitUntil(() => document.querySelector("#chat-composer-error")!.textContent!.includes("Definite refusal"));
+            expect(document.querySelector('[data-chat-queued-id="native-original"]')).not.toBeNull();
+          } else await waitUntil(() => document.querySelector("#chat-state")!.textContent!.includes("Definite refusal"));
+          expect(reads).toBe(before + (outcome === "refused-409" ? 1 : 0));
+        } else {
+          response.reject(new TypeError("Failed to fetch"));
+          await waitUntil(() => reads === before + 1);
+          await flush();
+          // The read is still pending: both the original target and any fresh
+          // Retry button must remain fenced, including synthetic double clicks.
+          target.dispatchEvent(new window.Event("click", { bubbles: true }));
+          const retry = document.querySelector<HTMLButtonElement>('[data-queue-remove="native-original"]');
+          if (retry) { expect(retry.disabled).toBe(true); retry.dispatchEvent(new window.Event("click", { bubbles: true })); }
+          expect(mutations).toBe(1);
+          if (outcome === "read-unavailable") recovery.reject(new Error("Read unavailable"));
+          else recovery.resolve({ ...snapshot("one"), queued: admission ? [{ ...original, unconfirmed: true }] : [replacement] });
+          await waitUntil(() => !target.disabled);
+          await flush();
+          if (outcome === "converted") {
+            expect(document.querySelector('[data-chat-queued-id="native-original"]')).toBeNull();
+            expect(document.querySelector('[data-queue-remove="held-new"]')?.textContent).toBe("Remove");
+            expect(document.querySelector("#chat-action-feedback")!.textContent).not.toContain("withdrawal still unconfirmed");
+          } else if (admission) {
+            expect(document.querySelectorAll('[data-chat-queued-id="native-original"] button')).toHaveLength(0);
+            expect(document.querySelector("#chat-action-feedback")!.textContent).not.toContain("withdrawal");
+          } else {
+            expect(document.querySelector('[data-queue-remove="native-original"]')?.textContent).toBe("Retry withdrawal");
+            expect(document.querySelector('[data-queue-edit="native-original"]')).toBeNull();
+            expect(document.querySelector('[data-queue-queue="native-original"]')).toBeNull();
+            if (outcome === "read-unavailable") expect(document.querySelector("#chat-action-feedback")!.textContent).toContain("Status check unavailable");
+          }
+          expect(reads).toBe(before + 1);
+        }
+        expect(document.querySelector("#chat-action-feedback")!.textContent).not.toContain("Draft restored");
+        expect(input.value).toBe("New private draft");
+        expect(document.querySelector("#chat-attachments")!.textContent).toContain("private-new.png");
+        expect(document.querySelector('[data-model-value="test/B"]')!.getAttribute("aria-pressed")).toBe("true");
+        if (outcome.startsWith("refused") || outcome === "programmer-error") expect(document.querySelector("#chat-action-feedback")!.textContent).not.toContain("withdrawal");
+      } finally { window.dispatchEvent(new window.Event("pagehide")); }
+    });
+  }
+
+  test("unrelated Remove and a later accepted steer cannot resolve an earlier unknown background operation", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    let prompts = 0, removes = 0;
+    let parent: { event(event: unknown, cursor: string): void } | undefined;
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "background-blocking-work"] } } }],
+      conversations: async () => [{ ...conversation("one"), status: "running" }], commands: async () => [], models: async () => [], modes: async () => [],
+      snapshot: async () => ({ ...snapshot("one"), conversation: { ...conversation("one"), status: "running" }, queued: [{ id: "unrelated", requestId: "held", text: "Unrelated held work", queuedAt: 1, delivery: "queue" }] }),
+      prompt: async () => ({ messageId: `accepted-${++prompts}`, pending: true, delivery: "steer", configuration: {}, automaticBackground: prompts === 1 ? "unknown" : "accepted" }),
+      removeQueued: async () => { removes++; return { removed: true }; },
+      stream: (_id: string, _cursor: string, handlers: { event(event: unknown, cursor: string): void }) => { parent = handlers; return { close() {} }; },
+      inventoryStream: () => ({ close() {} }), attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?unrelated-outcome-ui=${Date.now()}`);
+    initChat(api);
+    try {
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      await waitUntil(() => !input.disabled && document.querySelector("[data-queue-remove]") !== null);
+      const submit = (text: string) => {
+        input.value = text;
+        input.dispatchEvent(new window.Event("input", { bubbles: true }));
+        document.querySelector("#chat-composer")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+      };
+      const feedback = document.querySelector<HTMLElement>("#chat-action-feedback")!;
+      submit("First steer");
+      await waitUntil(() => feedback.textContent!.includes("Status checked; automatic backgrounding still unconfirmed"));
+      expect(feedback.textContent).toContain('Steer “First steer”');
+      const remove = document.querySelector<HTMLButtonElement>('[data-queue-remove="unrelated"]')!;
+      remove.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await waitUntil(() => removes === 1 && !remove.disabled);
+      expect(feedback.hidden).toBe(false);
+      expect(feedback.textContent).toContain("automatic backgrounding still unconfirmed");
+      submit("Another steer");
+      await waitUntil(() => prompts === 2 && document.querySelector("#chat-queue")!.textContent!.includes("Another steer"));
+      expect(feedback.textContent).not.toContain("acknowledged");
+      parent!.event({ type: "conversation.status", generation: "g", sequence: 1, conversationId: "one", status: "completed" }, "cursor-one-1");
+      await waitUntil(() => document.querySelector<HTMLButtonElement>("#chat-stop")!.disabled);
+      expect(feedback.textContent).toContain("automatic backgrounding still unconfirmed");
+      expect(feedback.textContent).toContain('Steer “First steer”');
+      expect(removes).toBe(1);
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
+  test("primary-unknown input reconciles read-only without restoring a resubmittable failed draft", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selected = "";
+    Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
+    let calls = 0, pendingRequest: string | undefined, readsAfterUnknown = 0;
+    const { ChatTransportError } = await import("./client");
+    const api = {
+      status: async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now", "background-blocking-work"] } } }],
+      conversations: async () => [conversation("one"), conversation("two")], commands: async () => [], models: async () => [], modes: async () => [],
+      snapshot: async (id: string) => {
+        if (pendingRequest) readsAfterUnknown++;
+        return { ...snapshot(id), queued: id === "one" && pendingRequest ? [{ id: "native", requestId: pendingRequest, text: "Keep this input", queuedAt: 1, delivery: "steer", paused: true, unconfirmed: true }] : [] };
+      },
+      prompt: async (_id: string, requestId: string) => { calls++; pendingRequest = requestId; throw new ChatTransportError("Operation outcome unknown", 409, "operation_outcome_unknown"); },
+      stream: () => ({ close() {} }), inventoryStream: () => ({ close() {} }), attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?unknown-input-ui=${Date.now()}`);
+    initChat(api);
+    try {
+      await waitUntil(() => select.querySelector('option[value="one"]') !== null);
+      select.value = "one"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      await waitUntil(() => !input.disabled);
+      input.value = "Keep this input";
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      document.querySelector("#chat-composer")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+      await waitUntil(() => calls === 1 && readsAfterUnknown > 0, () => `calls=${calls}, recovery reads=${readsAfterUnknown}`);
+      expect(input.value).toBe("");
+      expect(document.querySelector("#chat-action-feedback")?.textContent).toContain("unconfirmed");
+      expect(document.querySelector("#chat-composer-error")?.textContent).not.toContain("Draft restored");
+      await waitUntil(() => document.querySelector("#chat-queue")?.textContent?.includes("Keep this input") === true);
+      expect(document.querySelectorAll('#chat-queue [data-chat-queued-id="native"] button')).toHaveLength(0);
+      window.dispatchEvent(new window.Event("online"));
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
   test("dispatches local history operations and keeps composer state private and recoverable", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
@@ -114,7 +850,7 @@ describe("chat reversible-history composer", () => {
       },
       prompt: async (conversationId: string, _requestId: string, text: string, _model: unknown, _mode: unknown, _variant: unknown, attachments?: unknown[]) => {
         prompts.push({ conversationId, text, attachments });
-        return { messageId: `message-${prompts.length}`, held: false, configuration: {} };
+        return { messageId: `message-${prompts.length}`, pending: false, delivery: "queue", configuration: {} };
       },
     } as unknown as ChatApiClient;
 
@@ -545,6 +1281,7 @@ describe("catalog revisions", () => {
     const { initChat } = await import(`./ui.ts?catalog-revisions=${Math.random()}`);
     initChat(api);
     await waitUntil(() => reads.length === 1 && inventory !== undefined);
+    const selectionSettled = () => !document.querySelector("#chat-timeline")!.hasAttribute("aria-busy");
     return {
       reads,
       readAgents,
@@ -552,9 +1289,17 @@ describe("catalog revisions", () => {
       context: () => document.querySelector("#chat-context")?.textContent,
       select: (id: string) => { const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!; select.value = id; select.dispatchEvent(new Event("change", { bubbles: true })); },
       statusReads: () => statusReads,
+      selectionSettled,
       invalidate: (revision: string) => inventory!.invalidation({ type: "conversation.inventory", catalogs: { claude: revision } }),
       recover: () => inventory!.recovered?.(),
-      finish: () => { for (const read of reads) read.resolve([]); window.dispatchEvent(new Event("pagehide")); },
+      finish: async () => {
+        for (const read of reads) read.resolve([]);
+        // The context label can update before the selected snapshot's paint
+        // settles. Finish that read before flushing presentation on pagehide,
+        // so its late completion cannot save through the next fake window.
+        await waitUntil(selectionSettled, () => "catalog fixture selection to settle");
+        window.dispatchEvent(new Event("pagehide"));
+      },
     };
   }
 
@@ -574,7 +1319,7 @@ describe("catalog revisions", () => {
       f.invalidate("g:2");
       await waitUntil(() => f.statusReads() > before);
       expect(f.reads).toHaveLength(2);
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
   });
 
   test("a failed refresh leaves the same revision eligible for a later tick", async () => {
@@ -589,7 +1334,7 @@ describe("catalog revisions", () => {
       f.reads[2]!.resolve([model(1_000_000)]);
       await waitUntil(() => f.label() === "15%");
       expect(f.reads).toHaveLength(3);
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
   });
 
   test("matching ticks received before failure coalesce into one automatic retry", async () => {
@@ -606,7 +1351,7 @@ describe("catalog revisions", () => {
       f.reads[2]!.resolve([model(1_000_000)]);
       await waitUntil(() => f.label() === "15%");
       expect(f.reads).toHaveLength(3);
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
   });
 
   test("a queued retry does not loop on failure without another invalidation", async () => {
@@ -628,7 +1373,7 @@ describe("catalog revisions", () => {
       await waitUntil(() => f.reads.length === 4);
       f.reads[3]!.resolve([model(1_000_000)]);
       await waitUntil(() => f.label() === "15%");
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
   });
 
   test("an old queued retry cannot supersede the reconnect's newer refresh", async () => {
@@ -646,7 +1391,7 @@ describe("catalog revisions", () => {
       expect(f.reads).toHaveLength(3);
       f.reads[2]!.resolve([model(1_000_000)]);
       await waitUntil(() => f.label() === "15%");
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
   });
 
   test("a matching tick during a reconnect refresh retries that request if it fails", async () => {
@@ -665,7 +1410,7 @@ describe("catalog revisions", () => {
       f.reads[3]!.resolve([model(1_000_000)]);
       await waitUntil(() => f.label() === "15%");
       expect(f.reads).toHaveLength(4);
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
   });
 
   test("a newer revision can finish first without an older refresh overwriting it", async () => {
@@ -686,7 +1431,7 @@ describe("catalog revisions", () => {
       await waitUntil(() => f.statusReads() > before);
       expect(f.label()).toBe("15%");
       expect(f.reads).toHaveLength(3);
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
   });
 
   test("an inactive agent's revision uses its own catalog capabilities", async () => {
@@ -705,7 +1450,8 @@ describe("catalog revisions", () => {
       expect(f.context()).toContain("Other");
       f.select("claude:one");
       await waitUntil(() => f.label() === "15%");
-    } finally { f.finish(); }
+    } finally { await f.finish(); }
+    expect(f.selectionSettled()).toBe(true);
   });
 });
 
@@ -844,17 +1590,30 @@ describe("chat paused crons", () => {
 });
 
 describe("chat cost receipt", () => {
-  test("itemizes three ways, remembers the choice across conversations and a reload, and leaves an agent's own totals alone", async () => {
+  for (const pendingPriorSnapshot of [false, true]) test(`itemizes three ways, remembers the choice across conversations and a reload, and leaves an agent's own totals alone${pendingPriorSnapshot ? " with a prior page's snapshot still pending" : ""}`, async () => {
     // One storage across two boots: the second boot is the reload.
-    const stored = new Map<string, string>();
-    const storage = {
-      get length() { return stored.size; },
-      clear() { stored.clear(); },
-      getItem: (key: string) => stored.get(key) ?? null,
-      key: (index: number) => [...stored.keys()][index] ?? null,
-      removeItem: (key: string) => { stored.delete(key); },
-      setItem: (key: string, value: string) => { stored.set(key, String(value)); },
+    const priorSnapshot = deferred<void>();
+    let priorSnapshotRequested = false;
+    let priorSnapshotReleased = false;
+    let priorSaveCompleted = false;
+    const makeStorage = () => {
+      const stored = new Map<string, string>();
+      return {
+        get length() { return stored.size; },
+        clear() { stored.clear(); },
+        getItem: (key: string) => stored.get(key) ?? null,
+        key: (index: number) => [...stored.keys()][index] ?? null,
+        removeItem: (key: string) => { stored.delete(key); },
+        setItem: (key: string, value: string) => {
+          stored.set(key, String(value));
+          // Observe the old callback's real save regardless of which fixture it
+          // targets. The reload assertion below detects cross-page corruption.
+          if (priorSnapshotReleased && key.endsWith(":uatu:chat-presentation") && JSON.parse(value).receiptView === undefined) priorSaveCompleted = true;
+        },
+      };
     };
+    const storage = makeStorage();
+    const priorStorage = makeStorage();
     const Q = { providerId: "berget", modelId: "qwen" };
     const carrier = (id: string, costUsd: number, agent: string) => ({ id: `usage:${id}`, type: "assistant_message" as const, createdAt: 1, markdown: "", usage: { input: 1_000, output: 10, costUsd }, model: Q, agent });
     const task = (id: string, description: string, kind: string, conversationId: string, costUsd: number, descendants?: unknown[]) => ({
@@ -881,7 +1640,7 @@ describe("chat cost receipt", () => {
     const boot = async (tag: string) => {
       const { document, window } = parseHTML(html);
       installDomGlobals(document, window);
-      Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+      Object.defineProperty(window, "localStorage", { configurable: true, value: tag === "prior" ? priorStorage : storage });
       document.documentElement.setAttribute("data-ui-mode", "desktop");
       document.documentElement.setAttribute("data-chat-panel", "open");
       const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
@@ -891,7 +1650,13 @@ describe("chat cost receipt", () => {
         status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["context", "subagents"] } } }]),
         conversations: async () => [conversation("one"), conversation("two"), conversation("tallied")],
         commands: async () => [],
-        snapshot: async (id: string) => ({ ...snapshot(id), items: itemsOf[id] ?? [] }),
+        snapshot: async (id: string) => {
+          if (tag === "prior") {
+            priorSnapshotRequested = true;
+            await priorSnapshot.promise;
+          }
+          return { ...snapshot(id), items: itemsOf[id] ?? [] };
+        },
         stream: () => ({ close() {} }),
         inventoryStream: () => ({ close() {} }),
         attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
@@ -913,6 +1678,15 @@ describe("chat cost receipt", () => {
       };
     };
 
+    // Browser windows have separate realms. This harness replaces Bun's one
+    // global window; a pending callback must still save to its own page's store.
+    let priorOpened: Promise<void> | undefined;
+    if (pendingPriorSnapshot) {
+      const prior = await boot("prior");
+      priorOpened = prior.open("one", "$1.00");
+      await waitUntil(() => priorSnapshotRequested);
+      prior.window.dispatchEvent(new Event("pagehide"));
+    }
     const first = await boot("first");
     try {
       await first.open("one", "$1.00");
@@ -966,6 +1740,14 @@ describe("chat cost receipt", () => {
       first.window.dispatchEvent(new Event("pagehide"));
     }
 
+    if (pendingPriorSnapshot) {
+      // Release an actual in-flight read after pagehide, not another lifecycle
+      // event. Wait for its normal queued save, not an arbitrary drain sleep.
+      priorSnapshotReleased = true;
+      priorSnapshot.resolve();
+      await priorOpened;
+      await waitUntil(() => priorSaveCompleted, () => "prior page's queued presentation save");
+    }
     // Reload: a fresh page over the same storage opens on the remembered choice.
     const second = await boot("second");
     try {
@@ -1808,7 +2590,7 @@ describe("chat outstanding-request pill", () => {
       observers.at(-1)!.callback([seen(200)]);
       expect(pill.hidden).toBe(true);
 
-      const openTranscript = () => document.querySelector<HTMLButtonElement>('#chat-subagents [data-open-conversation]');
+      const openTranscript = () => document.querySelector<HTMLButtonElement>('#chat-compact-workers [data-worker-item="tool:agent1"]');
       await waitUntil(() => openTranscript() != null, () => document.querySelector("#chat-items")?.textContent ?? "no subagent card");
       click(openTranscript()!);
       expect(drilldown.hidden).toBe(false);
@@ -1842,7 +2624,31 @@ describe("chat running-task inspection", () => {
     },
   ];
 
-  test("a running agent task's row and its subagents-track row open the child transcript under a strip that stops the task", async () => {
+  test("touch inspection follows live launcher metadata while desktop tracks stay absent", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "touch");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    let parent: { event(event: unknown, cursor: string): void } | undefined;
+    const api = taskApi(document, {
+      items: id => id === "one" ? runningAgentItems() : [],
+      onStream: (id, handlers) => { if (id === "one") parent = handlers; },
+    });
+    try {
+      const { initChat } = await import(`./ui.ts?touch-live-metadata=${Date.now()}`);
+      initChat(api);
+      const inspect = () => document.querySelector<HTMLButtonElement>('#chat-compact-workers [data-worker-item="task:ada2b"]');
+      await waitUntil(() => inspect() != null);
+      inspect()!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await waitUntil(() => document.querySelector("#chat-drilldown-title")?.textContent === "explore · Review renderer");
+      parent!.event({ type: "item.upsert", generation: "g", sequence: 1, conversationId: "one", item: { ...runningAgentItems()[1], input: JSON.stringify({ description: "Updated renderer review", subagent_type: "explore", prompt: "go" }) } }, "cursor-one-1");
+      await waitUntil(() => document.querySelector("#chat-drilldown-title")?.textContent === "explore · Updated renderer review", () => `inspection title: ${document.querySelector("#chat-drilldown-title")?.textContent}`);
+      expect(document.querySelectorAll("#chat-subagents-items li")).toHaveLength(0);
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
+  test("one canonical running agent row opens the child transcript under a strip that stops the task", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
@@ -1856,13 +2662,12 @@ describe("chat running-task inspection", () => {
     try {
       const { initChat } = await import(`./ui.ts?task-inspection-agent-ui-test=${Date.now()}`);
       initChat(api);
-      const inspect = () => document.querySelector<HTMLButtonElement>('#chat-background-tasks [data-inspect-task="ada2b"]');
-      await waitUntil(() => inspect() != null, () => document.querySelector("#chat-background-tasks")?.textContent ?? "no task list");
+      const inspect = () => document.querySelector<HTMLButtonElement>('#chat-compact-workers [data-inspect-task="ada2b"]');
+      await waitUntil(() => inspect() != null, () => document.querySelector("#chat-compact-workers")?.textContent ?? "no task list");
       expect(inspect()!.dataset.inspectView).toBe("transcript");
-      // The subagents track already offers the running run, with its progress.
-      const trackRow = document.querySelector<HTMLButtonElement>('#chat-subagents [data-open-conversation="child"]')!;
-      expect(trackRow).not.toBeNull();
-      expect(document.querySelector("#chat-subagents .chat-subagent-progress")?.textContent).toBe("Reading the tests");
+      expect(document.querySelectorAll('#chat-compact-workers [data-worker-id]')).toHaveLength(1);
+      expect(document.querySelector("#chat-subagents, #chat-background-tasks")).toBeNull();
+      expect(inspect()!.querySelector(".chat-worker-meta")?.getAttribute("title")).toContain("Reading the tests");
 
       click(inspect()!);
       expect(drilldown.hidden).toBe(false);
@@ -1886,8 +2691,8 @@ describe("chat running-task inspection", () => {
       expect(drilldown.hidden).toBe(true);
       expect(strip.hidden).toBe(true);
 
-      // The track row leads to the same transcript with the same strip.
-      click(document.querySelector<HTMLButtonElement>('#chat-subagents [data-open-conversation="child"]')!);
+      // Reopening the same keyed row retains the strip and in-flight stop.
+      click(inspect()!);
       expect(drilldown.hidden).toBe(false);
       expect(strip.hidden).toBe(false);
       expect(strip.dataset.taskId).toBe("ada2b");
@@ -1919,13 +2724,13 @@ describe("chat running-task inspection", () => {
     try {
       const { initChat } = await import(`./ui.ts?task-inspection-shell-ui-test=${Date.now()}`);
       initChat(api);
-      const inspect = () => document.querySelector<HTMLButtonElement>('#chat-background-tasks [data-inspect-task="bgjpa"]');
-      await waitUntil(() => inspect() != null, () => document.querySelector("#chat-background-tasks")?.textContent ?? "no task list");
+      const inspect = () => document.querySelector<HTMLButtonElement>('#chat-compact-workers [data-inspect-task="bgjpa"]');
+      await waitUntil(() => inspect() != null, () => document.querySelector("#chat-compact-workers")?.textContent ?? "no task list");
       expect(inspect()!.dataset.inspectView).toBe("output");
       // A shell task reports no progress at all, so the elapsed readout is
       // the row's only live signal (D6) — without it the row says nothing
       // about the task between launch and settle.
-      const elapsed = document.querySelector<HTMLElement>('#chat-background-tasks [data-background-task="bgjpa"] .chat-background-task-elapsed');
+      const elapsed = document.querySelector<HTMLElement>('#chat-compact-workers [data-background-task="bgjpa"] [data-elapsed-since]');
       expect(elapsed).not.toBeNull();
       expect(elapsed!.textContent).toMatch(/^\d+:\d\d(:\d\d)?$/);
       expect(elapsed!.dataset.elapsedSince).toBe("2");
@@ -1978,8 +2783,8 @@ describe("chat running-task inspection", () => {
     });
     const { initChat } = await import(`./ui.ts?${label}=${Date.now()}`);
     initChat(api);
-    const inspect = () => document.querySelector<HTMLButtonElement>('#chat-background-tasks [data-inspect-task="bgjpa"]');
-    await waitUntil(() => inspect() != null, () => document.querySelector("#chat-background-tasks")?.textContent ?? "no task list");
+    const inspect = () => document.querySelector<HTMLButtonElement>('#chat-compact-workers [data-inspect-task="bgjpa"]');
+    await waitUntil(() => inspect() != null, () => document.querySelector("#chat-compact-workers")?.textContent ?? "no task list");
     inspect()!.dispatchEvent(new window.Event("click", { bubbles: true }) as unknown as Event);
     const line = document.querySelector<HTMLElement>("#chat-drilldown-state")!;
     await waitUntil(() => line.textContent === "workspace did not answer", () => line.textContent ?? "no drill-down line");
@@ -2056,11 +2861,11 @@ describe("a typed command's silent run", () => {
     try {
       const { initChat } = await import(`./ui.ts?silent-run-ui-test=${Date.now()}`);
       initChat(api);
-      const trackRow = () => document.querySelector<HTMLButtonElement>('#chat-subagents [data-open-conversation="child"]');
-      await waitUntil(() => trackRow() != null, () => document.querySelector("#chat-subagents")?.textContent ?? "no track");
-      expect(trackRow()!.textContent).toBe("/code-review");
+      const trackRow = () => document.querySelector<HTMLButtonElement>('#chat-compact-workers [data-inspect-task="rv"]');
+      await waitUntil(() => trackRow() != null, () => document.querySelector("#chat-compact-workers")?.textContent ?? "no track");
+      expect(trackRow()!.querySelector(".chat-worker-name")?.textContent).toBe("/code-review");
       // Not background work: no composer list, and no row in the timeline.
-      expect(document.querySelector<HTMLElement>("#chat-background-tasks")!.hidden).toBe(true);
+      expect(document.querySelector("#chat-background-tasks")).toBeNull();
       expect(document.querySelector('#chat-items [data-chat-item-id="task:rv"]')).toBeNull();
 
       click(trackRow()!);
@@ -2126,8 +2931,8 @@ describe("a typed command's silent run", () => {
     try {
       const { initChat } = await import(`./ui.ts?silent-run-settle-ui-test=${Date.now()}`);
       initChat(api);
-      const trackRow = () => document.querySelector<HTMLButtonElement>('#chat-subagents [data-open-conversation="child"]');
-      await waitUntil(() => trackRow() != null, () => document.querySelector("#chat-subagents")?.textContent ?? "no track");
+      const trackRow = () => document.querySelector<HTMLButtonElement>('#chat-compact-workers [data-inspect-task="rv"]');
+      await waitUntil(() => trackRow() != null, () => document.querySelector("#chat-compact-workers")?.textContent ?? "no track");
       click(trackRow()!);
       await waitUntil(() => items().includes("Review step 1") && streamed != null, items);
       expect(childReads.length).toBe(1);
@@ -2157,12 +2962,269 @@ describe("a typed command's silent run", () => {
 });
 
 describe("chat running work reachable without a disclosure", () => {
+  test("touch foreground-only parent Stop explains native scope before cancelling the parent once", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "touch");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    const tool = { id: "tool:foreground", type: "tool" as const, createdAt: 2, name: "task", status: "running" as const,
+      input: JSON.stringify({ description: "Foreground analysis", subagent_type: "general", prompt: "Inspect" }) };
+    const cancelled: string[] = [], stopped: string[] = [];
+    const api = taskApi(document, { items: () => [tool], stop: id => { stopped.push(id); } });
+    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "subagents"] } } }];
+    api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool] });
+    api.cancel = async id => { cancelled.push(id); return { cancelled: true }; };
+    const dialog = document.querySelector<HTMLDialogElement>("#chat-action-confirm")!;
+    dialog.showModal = () => { dialog.setAttribute("open", ""); };
+    const close = (value: string) => {
+      dialog.returnValue = value;
+      dialog.removeAttribute("open");
+      dialog.dispatchEvent(new window.Event("close"));
+    };
+    try {
+      const { initChat } = await import(`./ui.ts?foreground-parent-stop=${Date.now()}`);
+      initChat(api);
+      const stop = document.querySelector<HTMLButtonElement>("#chat-stop")!;
+      await waitUntil(() => !stop.disabled);
+      expect(document.querySelectorAll('#chat-compact-workers-items [data-state="working"]')).toHaveLength(1);
+      expect(document.querySelector("[data-stop-task]")).toBeNull();
+      expect(stop.getAttribute("aria-label")).toBe("Stop parent");
+      expect(stop.textContent).toBe("Stop parent");
+      expect(stop.title).toContain("still-blocking work");
+      stop.click();
+      expect(dialog.hasAttribute("open")).toBe(true);
+      expect(dialog.textContent).toContain("foreground work");
+      expect(dialog.textContent).toContain("Detached workers continue");
+      expect(dialog.textContent).toContain("wake the parent again");
+      expect(cancelled).toEqual([]);
+      close("cancel");
+      await flush();
+      expect(cancelled).toEqual([]);
+      stop.click();
+      close("confirm");
+      await flush();
+      expect(cancelled).toEqual(["one"]);
+      expect(stopped).toEqual([]);
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
+  test("parent Stop follows canonical confirmed worker truth through aliases, mixed work and settlement", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "touch");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    const launcher = { id: "tool:a", type: "tool" as const, createdAt: 2, name: "task", status: "running" as const, input: '{"description":"Aliased analysis"}' };
+    const canonical = { id: "task:canonical", type: "background_task" as const, taskId: "canonical", createdAt: 2,
+      description: "Aliased analysis", taskType: "agent", status: "running" as const, toolUseIds: ["a", "b"], stateUncertain: true };
+    const items = [launcher, { ...launcher, id: "tool:b" }, canonical];
+    let stream: { event(event: unknown, cursor: string): void } | undefined;
+    const api = taskApi(document, { items: () => items, onStream: (_id, handlers) => { stream = handlers; } });
+    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "background-tasks", "subagents"] } } }];
+    api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items });
+    let sequence = 0;
+    const emit = (body: Record<string, unknown>) => { sequence++; stream!.event({ generation: "g", sequence, conversationId: "one", ...body }, `cursor-one-${sequence}`); };
+    const rows = (state: string) => document.querySelectorAll(`#chat-compact-workers-items [data-state="${state}"]`);
+    const stop = document.querySelector<HTMLButtonElement>("#chat-stop")!;
+    try {
+      const { initChat } = await import(`./ui.ts?canonical-parent-stop=${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => stream !== undefined && !stop.disabled);
+      expect(rows("unknown")).toHaveLength(1);
+      expect(document.querySelector<HTMLButtonElement>("[data-stop-task]")!.disabled).toBe(true);
+      expect(stop.getAttribute("aria-label")).toBe("Stop response");
+      emit({ type: "item.upsert", item: { ...canonical, stateUncertain: false } });
+      await waitUntil(() => rows("working").length === 1);
+      expect(stop.getAttribute("aria-label")).toBe("Stop parent");
+      expect(document.querySelectorAll("[data-stop-task]")).toHaveLength(1);
+      const foreground = { ...launcher, id: "tool:foreground", input: '{"description":"Foreground analysis"}' };
+      emit({ type: "item.upsert", item: foreground });
+      await waitUntil(() => rows("working").length === 2);
+      expect(stop.getAttribute("aria-label")).toBe("Stop parent");
+      expect(document.querySelectorAll("[data-stop-task]")).toHaveLength(1);
+      emit({ type: "item.upsert", item: { ...canonical, stateUncertain: false, status: "completed" } });
+      await waitUntil(() => rows("completed").length === 1);
+      expect(rows("working")).toHaveLength(1);
+      expect(stop.getAttribute("aria-label")).toBe("Stop parent");
+      for (const [status, state] of [["cancelled", "stopped"], ["failed", "failed"], ["completed", "completed"]]) {
+        emit({ type: "item.upsert", item: { ...foreground, status } });
+        await waitUntil(() => rows(state!).length > 0 && rows("working").length === 0);
+        expect(stop.getAttribute("aria-label")).toBe("Stop response");
+        expect(document.querySelector("[data-stop-task]")).toBeNull();
+      }
+      emit({ type: "item.upsert", item: foreground });
+      await waitUntil(() => rows("working").length === 1);
+      emit({ type: "conversation.status", status: "completed" });
+      await waitUntil(() => stop.disabled);
+      expect(stop.getAttribute("aria-label")).toBe("Stop parent");
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
+  for (const change of ["settles", "switches"] as const) test(`touch parent Stop revalidates when its parent ${change} during confirmation`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "touch");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    const tool = { id: "tool:foreground", type: "tool" as const, createdAt: 2, name: "task", status: "running" as const, input: '{"description":"Foreground analysis"}' };
+    let stream: { event(event: unknown, cursor: string): void } | undefined;
+    const cancelled: string[] = [];
+    const api = taskApi(document, { items: () => [tool], conversations: ["one", "two"], onStream: (_id, handlers) => { stream = handlers; } });
+    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-blocking-work", "subagents"] } } }];
+    api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool] });
+    api.cancel = async id => { cancelled.push(id); return { cancelled: true }; };
+    const dialog = document.querySelector<HTMLDialogElement>("#chat-action-confirm")!;
+    dialog.showModal = () => { dialog.setAttribute("open", ""); };
+    try {
+      const { initChat } = await import(`./ui.ts?parent-stop-revalidate=${change}-${Date.now()}`);
+      initChat(api);
+      const stop = document.querySelector<HTMLButtonElement>("#chat-stop")!;
+      await waitUntil(() => stream !== undefined && !stop.disabled);
+      stop.click();
+      expect(dialog.hasAttribute("open")).toBe(true);
+      if (change === "settles") {
+        stream!.event({ type: "conversation.status", generation: "g", sequence: 1, conversationId: "one", status: "completed" }, "cursor-one-1");
+        await waitUntil(() => stop.disabled);
+      } else {
+        const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+        select.value = "two";
+        select.dispatchEvent(new window.Event("change", { bubbles: true }));
+        await flush();
+        await waitUntil(() => !stop.disabled);
+      }
+      dialog.returnValue = "confirm";
+      dialog.removeAttribute("open");
+      dialog.dispatchEvent(new window.Event("close"));
+      await flush();
+      expect(cancelled).toEqual([]);
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
+  for (const [mode, supported] of [["desktop", true], ["desktop", false], ["touch", false]] as const) test(`${mode} foreground parent Stop retains direct cancellation with V2 scope ${supported ? "supported" : "unsupported"}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", mode);
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    const tool = { id: "tool:foreground", type: "tool" as const, createdAt: 2, name: "task", status: "running" as const, input: '{"description":"Foreground analysis"}' };
+    const cancelled: string[] = [];
+    const api = taskApi(document, { items: () => [tool] });
+    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: supported ? ["background-blocking-work", "subagents"] : ["subagents"] } } }];
+    api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool] });
+    api.cancel = async id => { cancelled.push(id); return { cancelled: true }; };
+    try {
+      const { initChat } = await import(`./ui.ts?parent-stop-direct=${mode}-${supported}-${Date.now()}`);
+      initChat(api);
+      const stop = document.querySelector<HTMLButtonElement>("#chat-stop")!;
+      await waitUntil(() => !stop.disabled);
+      expect(stop.getAttribute("aria-label")).toBe(supported ? "Stop parent" : "Stop response");
+      stop.click();
+      await flush();
+      expect(document.querySelector("#chat-action-confirm[open]")).toBeNull();
+      expect(cancelled).toEqual(["one"]);
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
+  test("pending/running tools, detached workers and an idle parent never introduce a manual Continue control", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    let stream: { event(event: unknown, cursor: string): void } | undefined;
+    const tool = { id: "tool:blocker", type: "tool", createdAt: 2, name: "subagent", status: "pending", input: "{}" };
+    const api = taskApi(document, { items: () => [tool], onStream: (_id, handlers) => { stream = handlers; } });
+    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["background-tasks", "background-blocking-work", "subagents"] } } }];
+    api.snapshot = async id => ({ ...snapshot(id), conversation: { ...conversation(id), status: "running" }, items: [tool as import("./types").ToolItem] });
+    let sequence = 0;
+    const emit = (body: Record<string, unknown>) => { sequence++; stream!.event({ generation: "g", sequence, conversationId: "one", ...body }, `cursor-one-${sequence}`); };
+    const absent = () => expect(document.querySelector("#chat-continue-workers, .chat-background-help")).toBeNull();
+    try {
+      const { initChat } = await import(`./ui.ts?blocker-gating=${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => stream !== undefined, () => "waiting for parent stream");
+      absent();
+      emit({ type: "item.upsert", item: { ...tool, status: "running" } });
+      absent();
+      emit({ type: "item.upsert", item: { id: "task:detached", type: "background_task", taskId: "detached", createdAt: 2, description: "Detached", taskType: "agent", status: "running", toolUseId: "blocker", childConversationId: "child" } });
+      await waitUntil(() => document.querySelectorAll("#chat-compact-workers-items [data-inspect-task]").length === 1);
+      absent();
+      emit({ type: "item.upsert", item: { id: "task:detached", type: "background_task", taskId: "detached", createdAt: 2, description: "Detached", taskType: "agent", status: "completed", foreground: true, toolUseId: "blocker", childConversationId: "child" } });
+      await waitUntil(() => document.querySelector('#chat-compact-workers [data-background-task="detached"]')?.getAttribute("data-state") === "completed", () => "settled task should remain as finished history, not active work");
+      absent();
+      emit({ type: "item.upsert", item: { ...tool, status: "completed" } });
+      emit({ type: "item.upsert", item: { id: "tool:shell", type: "command", createdAt: 3, command: "fixture", status: "running" } });
+      absent();
+      emit({ type: "conversation.status", status: "completed" });
+      await waitUntil(() => document.querySelector<HTMLButtonElement>("#chat-stop")!.disabled);
+      absent();
+    } finally {
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
   const shellTask = (taskId: string, status: "running" | "completed", createdAt = 2) => ({
     id: `task:${taskId}`, type: "background_task", createdAt, taskId, description: `Task ${taskId}`, taskType: "local_bash",
     toolUseId: `toolu_${taskId}`, status, outputFile: `/tmp/tasks/${taskId}.output`,
   });
 
-  test("both lists open on their first running work; a user collapse holds until the work is over, and a new conversation opens them afresh", async () => {
+  for (const mode of ["desktop", "touch"] as const) test(`${mode} pending arrival and paused batch respect disclosure policy without hiding safety`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", mode);
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    let stream: { event(event: unknown, cursor: string): void } | undefined;
+    const api = taskApi(document, { items: () => [], onStream: (_id, handlers) => { stream = handlers; } });
+    api.status = async () => [{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["steering", "send-now"] } } }];
+    let sequence = 0;
+    const queued = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `pending-${index}`, text: `Pending ${index}`, delivery: "steer", paused: true, queuedAt: 1 }));
+    const emit = (count: number) => {
+      sequence++;
+      stream!.event({ type: "conversation.queue", generation: "g", sequence, conversationId: "one", queued: queued(count), change: { kind: "paused", messageId: "pending-0" } }, `cursor-one-${sequence}`);
+    };
+    const toggle = () => document.querySelector<HTMLButtonElement>("[data-pending-toggle]")!;
+    const click = (button: HTMLElement) => button.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const open = () => toggle().getAttribute("aria-expanded");
+    try {
+      const { initChat } = await import(`./ui.ts?pending-disclosure=${mode}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => stream !== undefined);
+      emit(1);
+      await waitUntil(() => document.querySelectorAll("[data-chat-queued-id]").length === 1);
+      expect(open()).toBe(String(mode === "desktop"));
+      // Two native activations can precede the scheduled paint. Each is a
+      // toggle, not two copies of a command derived from the last DOM paint.
+      click(toggle()); click(toggle());
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      expect(open()).toBe(String(mode === "desktop"));
+      if (mode === "desktop") click(toggle());
+      await waitUntil(() => open() === "false");
+      emit(2);
+      await waitUntil(() => document.querySelectorAll("[data-chat-queued-id]").length === 2);
+      expect(open()).toBe("false");
+      // Paused-batch actions remain outside the collapsed entry list.
+      const batch = document.querySelector<HTMLElement>(".chat-queue-batch")!;
+      expect(batch.hidden).toBe(false);
+      expect(batch.querySelector('[data-queue-send-now="pending-0"]')?.textContent).toBe("Send 2 paused steers now");
+      expect(batch.closest("#chat-queue-items")).toBeNull();
+      emit(0);
+      await waitUntil(() => document.querySelectorAll("[data-chat-queued-id]").length === 0);
+      emit(1);
+      await waitUntil(() => document.querySelectorAll("[data-chat-queued-id]").length === 1);
+      expect(open()).toBe(String(mode === "desktop"));
+      if (mode === "touch") click(toggle());
+      await waitUntil(() => open() === "true");
+      emit(2);
+      await waitUntil(() => document.querySelectorAll("[data-chat-queued-id]").length === 2);
+      expect(open()).toBe("true");
+    } finally { window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  test("desktop opens new work, holds a deliberate collapse for its batch and isolates conversation choices", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
@@ -2183,8 +3245,7 @@ describe("chat running work reachable without a disclosure", () => {
       sequences.set(conversationId, sequence);
       streams.get(conversationId)!.event({ type: "item.upsert", generation: "g", sequence, conversationId, item }, `cursor-${conversationId}-${sequence}`);
     };
-    const tasks = document.querySelector<HTMLDetailsElement>("#chat-background-tasks")!;
-    const track = document.querySelector<HTMLDetailsElement>("#chat-subagents")!;
+    const tasks = document.querySelector<HTMLDetailsElement>("#chat-compact-workers")!;
     // What the browser does after `open` changes, a task later: linkedom
     // fires no `toggle`, so the tests deliver it as the page would see it.
     const toggle = (list: HTMLDetailsElement) => list.dispatchEvent(new window.Event("toggle") as unknown as Event);
@@ -2194,53 +3255,46 @@ describe("chat running work reachable without a disclosure", () => {
       const { initChat } = await import(`./ui.ts?running-work-disclosure-ui-test=${Date.now()}`);
       initChat(api);
       await waitUntil(() => !tasks.hidden && streams.has("one"), () => tasks.textContent ?? "no task list");
-      // Reachable at once: no disclosure click stands between the running
-      // task and its inspect and Stop controls.
       expect(tasks.open).toBe(true);
-      expect(track.hidden).toBe(false);
-      expect(track.open).toBe(true);
+      expect(document.querySelector("#chat-subagents, #chat-background-tasks")).toBeNull();
       expect(tasks.querySelector('[data-inspect-task="a"]')).not.toBeNull();
       expect(tasks.querySelector('[data-stop-task="a"]')).not.toBeNull();
-      // The open's own event lands afterwards; it is not a choice the user made.
       toggle(tasks);
-      toggle(track);
 
-      // The user collapses both; more running work does not reopen them.
+      // A deliberate collapse survives new work and settlement.
       collapse(tasks);
-      collapse(track);
       upsert("one", shellTask("b", "running", 3));
       upsert("one", { id: "tool:toolu_t", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Audit docs", subagent_type: "explore", prompt: "go" }) });
       await waitUntil(() => tasks.querySelector('[data-background-task="b"]') != null, () => tasks.textContent ?? "no task list");
       await settle();
       expect(tasks.open).toBe(false);
-      expect(track.open).toBe(false);
 
-      // The work ends: the collapse ends with it, and the next work opens.
+      // Finished work stays in the same card without undoing the collapse.
       upsert("one", shellTask("a", "completed"));
       upsert("one", shellTask("b", "completed", 3));
       upsert("one", { id: "tool:toolu_s", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Read the tree", subagent_type: "explore", prompt: "go" }) });
       upsert("one", { id: "tool:toolu_t", type: "tool", createdAt: 3, name: "task", status: "completed", input: JSON.stringify({ description: "Audit docs", subagent_type: "explore", prompt: "go" }) });
-      await waitUntil(() => tasks.hidden === true, () => tasks.textContent ?? "task list");
-      // Finished subagents stay listed until dismissed, but are not running
-      // work: they neither open the track nor keep a collapse alive.
-      expect(track.hidden).toBe(false);
-      expect(track.open).toBe(false);
+      await waitUntil(() => tasks.querySelector('[data-state="working"]') === null, () => tasks.textContent ?? "task list");
+      expect(tasks.hidden).toBe(false);
+      expect(tasks.open).toBe(false);
       upsert("one", shellTask("c", "running", 4));
       upsert("one", { id: "tool:toolu_u", type: "tool", createdAt: 4, name: "task", status: "running", input: JSON.stringify({ description: "Check links", subagent_type: "explore", prompt: "go" }) });
       await waitUntil(() => !tasks.hidden, () => "no task list");
       await settle();
       expect(tasks.open).toBe(true);
-      expect(track.open).toBe(true);
-      toggle(tasks);
-
-      // A collapse is a choice about this conversation's work: the next
-      // conversation's running work is shown open.
       collapse(tasks);
+
+      // Another conversation's new work opens, but returning restores the
+      // first conversation's deliberate collapse of its still-active batch.
       const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
       select.value = "two";
       select.dispatchEvent(new window.Event("change") as unknown as Event);
       await waitUntil(() => tasks.querySelector('[data-background-task="z"]') != null, () => tasks.textContent ?? "no task list");
       expect(tasks.open).toBe(true);
+      select.value = "one";
+      select.dispatchEvent(new window.Event("change") as unknown as Event);
+      await waitUntil(() => tasks.querySelector('[data-background-task="a"]') != null);
+      expect(tasks.open).toBe(false);
     } finally {
       await Bun.sleep(20);
       window.dispatchEvent(new Event("pagehide"));
@@ -2259,15 +3313,32 @@ describe("a question's owed-answer line", () => {
     conversations?: string[];
     itemsFor?: (conversationId: string) => unknown[];
     capabilities?: string[];
+    storedConversation?: string;
   } = {}) => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
     document.documentElement.setAttribute("data-chat-panel", "open");
     stubConversationSelect(document);
+    const previousStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
+    if (options.storedConversation) {
+      const values = new Map<string, string>();
+      Object.defineProperty(window, "localStorage", { configurable: true, value: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      } });
+      const { presentationLocalStorage } = await import("../shell/presentation-storage");
+      presentationLocalStorage()!.setItem("uatu:chat-presentation", JSON.stringify({ selectedId: options.storedConversation }));
+    }
+    const restoreStorage = () => {
+      if (!options.storedConversation) return;
+      if (previousStorage) Object.defineProperty(window, "localStorage", previousStorage);
+      else delete (window as unknown as { localStorage?: Storage }).localStorage;
+    };
     let questionCalls = 0;
     const questionResults = options.questionResults ?? [async () => ({})];
-    const questionCallsRecord: Array<{ outcome: unknown; answers?: string[][] }> = [];
+    const questionCallsRecord: Array<{ conversationId: string; interactionId: string; outcome: unknown; answers?: string[][] }> = [];
     const itemsFor = options.itemsFor ?? (() => [{ id: "message:u", type: "user_message", createdAt: 1, text: "please answer" }, {
       id: "question:q1", type: "question", createdAt: 2, requestId: "q1", status: "pending",
       questions: options.questions ?? [{
@@ -2281,8 +3352,8 @@ describe("a question's owed-answer line", () => {
       items: itemsFor,
     });
     Object.assign(api, {
-      question: async (_conversationId: string, _interactionId: string, _requestId: string, outcome: unknown) => {
-        questionCallsRecord.push({ outcome, answers: (outcome as { answers?: string[][] })?.answers });
+      question: async (conversationId: string, interactionId: string, _requestId: string, outcome: unknown) => {
+        questionCallsRecord.push({ conversationId, interactionId, outcome, answers: (outcome as { answers?: string[][] })?.answers });
         return await questionResults[Math.min(questionCalls++, questionResults.length - 1)]?.();
       },
     });
@@ -2292,7 +3363,7 @@ describe("a question's owed-answer line", () => {
     await waitUntil(() => document.querySelector("[data-chat-item-id] form[data-question-form]") != null);
     const card = document.querySelector<HTMLElement>("[data-chat-item-id] form[data-question-form]")!.closest<HTMLElement>("[data-chat-item-id]")!;
     const state = () => document.querySelector("#chat-state")?.textContent ?? "";
-    return { document, window, card, state, questionCallsRecord };
+    return { document, window, card, state, questionCallsRecord, restoreStorage };
   };
 
   test("a Next advance keeps the line naming the required steps still outstanding", async () => {
@@ -2435,7 +3506,7 @@ describe("a question's owed-answer line", () => {
     }
   });
 
-  test("an old in-flight rejection does not erase a newer question's raised line (A to B to A)", async () => {
+  for (const storedConversation of ["one", "two"]) test(`an old in-flight rejection does not erase a newer question's raised line (A to B to A) with stored ${storedConversation}`, async () => {
     // The reader defers conversation A's rejection, switches to B, returns
     // to A — where the conversation now carries a newer question — and
     // raises that newer question's line. The old rejection landing then
@@ -2448,7 +3519,8 @@ describe("a question's owed-answer line", () => {
       id: `question:${requestId}`, type: "question", createdAt: 2, requestId, status: "pending",
       questions: [{ prompt: header, header, multiple: false, allowFreeForm: true, options: [{ label: "main", description: "" }] }],
     });
-    const { window, document, state } = await boot({
+    const { window, document, card, state, questionCallsRecord, restoreStorage } = await boot({
+      storedConversation,
       conversations: ["one", "two"],
       itemsFor: conversationId => [
         { id: "message:u", type: "user_message", createdAt: 1, text: "please answer" },
@@ -2466,11 +3538,19 @@ describe("a question's owed-answer line", () => {
         select.value = id;
         select.dispatchEvent(new window.Event("change", { bubbles: true }));
         await waitUntil(() => document.querySelector(`[data-chat-item-id="question:${card}"] form[data-question-form]`) != null);
+        expect(select.value).toBe(id);
+        expect(findCard(card).dataset.chatItemId).toBe(`question:${card}`);
       };
 
+      // Restoring another selected conversation is valid. Establish A through
+      // the public picker rather than treating any mounted question as Old A.
+      expect(select.value).toBe(storedConversation);
+      expect(card.dataset.chatItemId).toBe(storedConversation === "one" ? "question:q-old" : "question:q-b");
+      await selectConversation("one", "q-old");
       submitCard(findCard("q-old"));
       expect(state()).toBe("Still to answer: Old A");
       findCard("q-old").querySelector<HTMLInputElement>("[data-question-reject]")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(questionCallsRecord).toEqual([{ conversationId: "one", interactionId: "q-old", outcome: { kind: "rejected" }, answers: undefined }]);
       await selectConversation("two", "q-b");
       submitCard(findCard("q-b"));
       expect(state()).toBe("Still to answer: B");
@@ -2482,8 +3562,10 @@ describe("a question's owed-answer line", () => {
       rejectOld.resolve();
       await flush();
       expect(state()).toBe("Still to answer: New A");
+      expect(questionCallsRecord).toHaveLength(1);
     } finally {
       window.dispatchEvent(new Event("pagehide"));
+      restoreStorage();
     }
   });
 
@@ -2517,7 +3599,7 @@ describe("a question's owed-answer line", () => {
       expect(state()).toBe("Still to answer: Mirrored");
       // The reject goes out from the drill-down and hangs in the api stub;
       // the reader closes the drill-down while it flies.
-      click(document.querySelector('#chat-subagents [data-open-conversation="child"]')!);
+      click(document.querySelector('#chat-compact-workers [data-inspect-task="child"]')!);
       await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] [data-question-reject]') != null);
       click(document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] [data-question-reject]')!);
       click(document.querySelector("#chat-drilldown-back")!);
@@ -2558,7 +3640,7 @@ describe("a question's owed-answer line", () => {
       parentForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
       expect(state()).toBe("Still to answer: Mirrored");
       // The answer goes out from the drill-down and hangs in the api stub.
-      click(document.querySelector('#chat-subagents [data-open-conversation="child"]')!);
+      click(document.querySelector('#chat-compact-workers [data-inspect-task="child"]')!);
       await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]') != null);
       const childForm = document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]')!;
       const choice = childForm.querySelector<HTMLInputElement>('[data-question-panel="0"] input[type="radio"]')!;
@@ -2654,7 +3736,7 @@ describe("a question's owed-answer line", () => {
       parentCard.querySelector("form[data-question-form]")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
       expect(state()).toBe("Still to answer: Mirrored");
       // The answer goes out from the drill-down, which stays open.
-      click(document.querySelector('#chat-subagents [data-open-conversation="child"]')!);
+      click(document.querySelector('#chat-compact-workers [data-inspect-task="child"]')!);
       await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]') != null);
       const childForm = document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]')!;
       const choice = childForm.querySelector<HTMLInputElement>('[data-question-panel="0"] input[type="radio"]')!;
@@ -2702,7 +3784,7 @@ describe("a question's owed-answer line", () => {
       parentCard.querySelector("form[data-question-form]")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
       expect(state()).toBe("Still to answer: Mirrored");
       // The drill-down's card raises that surface's own line.
-      click(document.querySelector('#chat-subagents [data-open-conversation="child"]')!);
+      click(document.querySelector('#chat-compact-workers [data-inspect-task="child"]')!);
       await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]') != null);
       document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]')!
         .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
@@ -2747,7 +3829,7 @@ describe("a question's owed-answer line", () => {
       const click = (element: Element) => element.dispatchEvent(new window.Event("click", { bubbles: true }));
       const drilldownState = () => document.querySelector("#chat-drilldown-state")?.textContent ?? "";
       // The drill-down's card raises that surface's line.
-      click(document.querySelector('#chat-subagents [data-open-conversation="child"]')!);
+      click(document.querySelector('#chat-compact-workers [data-inspect-task="child"]')!);
       await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]') != null);
       document.querySelector('#chat-drilldown-items [data-chat-item-id="question:mirrored"] form[data-question-form]')!
         .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
@@ -3129,6 +4211,19 @@ async function waitForQuestionCard(document: Document): Promise<HTMLElement> {
 let eventSourceConstructions = 0;
 
 function installDomGlobals(document: Document, window: Window): void {
+  // LinkeDOM has no media queries. Model a desktop fine pointer explicitly;
+  // layout and touch media behavior are exercised in the browser suites.
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: (media: string) => ({
+      media,
+      matches: media === "(pointer: fine) and (hover: hover)",
+      onchange: null,
+      addListener() {}, removeListener() {},
+      addEventListener() {}, removeEventListener() {},
+      dispatchEvent() { return true; },
+    }),
+  });
   const browserGlobal = window as unknown as Record<string, unknown>;
   const values: Record<string, unknown> = {
     document,

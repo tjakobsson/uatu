@@ -17,6 +17,23 @@ const { QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, mater
 // say about a running run is checked where the entries are built.
 const { subagentTrackSummary } = await import("./receipt-view");
 
+test("pending header actions retain DOM identity through count and expansion changes", () => {
+  const host = dom.document.createElement("div") as unknown as HTMLElement;
+  const renderer = new QueueDockRenderer();
+  const queued = [{ id: "a", text: "First", queuedAt: 1, delivery: "steer" as const, paused: true as const }];
+  const context = { steering: true, sendNow: true, running: false, isCommand: () => false, compactOpen: false };
+  renderer.render(host, queued, context);
+  const toggle = host.querySelector("[data-pending-toggle]");
+  const resume = host.querySelector("[data-queue-send-now]");
+  resume?.setAttribute("disabled", "");
+  renderer.render(host, [...queued, { id: "b", text: "Second", queuedAt: 2, delivery: "steer", paused: true as const }], { ...context, compactOpen: true });
+  expect(host.querySelector("[data-pending-toggle]")).toBe(toggle);
+  expect(host.querySelector("[data-queue-send-now]")).toBe(resume);
+  expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+  expect(resume?.textContent).toBe("Send 2 paused steers now");
+  expect(resume?.hasAttribute("disabled")).toBe(true);
+});
+
 test("closed activity defers its body and find materializes current sanitized content", () => {
   const previousFilter = Reflect.get(globalThis, "NodeFilter");
   Reflect.set(globalThis, "NodeFilter", { SHOW_TEXT: 4 });
@@ -54,6 +71,18 @@ function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjec
     ...overrides,
   };
 }
+
+for (const name of ["subagent", "shell"]) test(`${name} result follows its launcher even when the worker start timestamp predates the tool row`, () => {
+  const host = dom.document.createElement("div") as unknown as HTMLElement;
+  const worker: ConversationItem = { id: "task:worker", type: "background_task", taskId: "worker", createdAt: 1, description: "Fixture work", taskType: name === "shell" ? "shell" : "agent", toolUseId: "launch", status: "completed", summary: "Canonical report" };
+  const launcher: ConversationItem = name === "shell"
+    ? { id: "tool:launch", type: "command", createdAt: 2, command: "fixture", status: "completed" }
+    : { id: "tool:launch", type: "tool", createdAt: 2, name, status: "completed", input: "{}" };
+  new TimelineRenderer().render(host, projectionWith([worker, launcher]), new Set(["task:worker"]));
+  const ids = Array.from(host.querySelectorAll("[data-chat-item-id]")).map(node => node.getAttribute("data-chat-item-id"));
+  expect(ids.indexOf("tool:launch")).toBeLessThan(ids.indexOf("task:worker"));
+  expect(host.textContent!.match(/Canonical report/g)).toHaveLength(1);
+});
 
 describe("persistent shell rendering", () => {
   for (const input of ["wheel", "touch", "keyboard", "scrollbar", "untouched", "closed"]) test(`${input} inspection controls row and group completion`, () => {
@@ -504,6 +533,14 @@ describe("TimelineRenderer", () => {
 
     renderer.render(host, projectionWith([]), new Set());
     expect(host.querySelector('[data-chat-item-id="draft-r1"]')).toBeNull();
+  });
+
+  test("unconfirmed inputs retain their text without claiming sending or delivery", () => {
+    const host = target();
+    new TimelineRenderer().render(host, projectionWith([], { status: "idle", acceptedDrafts: [{ requestId: "uncertain", messageId: "pending:uncertain", text: "Keep this text", unconfirmed: true }] }), new Set());
+    expect(host.textContent).toContain("Keep this text");
+    expect(host.textContent).toContain("Acceptance unconfirmed");
+    expect(host.textContent).not.toMatch(/Sending|Delivered|Working/);
   });
 
   test("switching conversations clears the previous timeline", () => {
@@ -981,6 +1018,426 @@ describe("presentation details", () => {
     expect(host.textContent).toContain("worked 7s");
   });
 
+  describe("the queue dock under steering (opencode-v2-steering D10)", () => {
+    test("unconfirmed entries expose no resend/edit/remove or batch resume action", () => {
+      const host = target();
+      new QueueDockRenderer().render(host, [{ id: "uncertain", text: "Keep text", queuedAt: 1, delivery: "steer", paused: true, unconfirmed: true }], { steering: true, sendNow: true, running: false, isCommand: () => false });
+      expect(host.textContent).toContain("Outcome unconfirmed");
+      expect(host.querySelectorAll("button")).toHaveLength(0);
+    });
+    test("only scoped withdrawal uncertainty offers a cancellation retry, disabled during an action", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const entries = [{ id: "withdrawal", text: "Keep text", queuedAt: 1, delivery: "steer" as const, unconfirmed: true as const }, { id: "primary", text: "Admission unknown", queuedAt: 2, delivery: "steer" as const, unconfirmed: true as const }];
+      const context = { steering: true, sendNow: true, running: false, isCommand: () => false, withdrawalRetries: new Set(["withdrawal"]) };
+      dock.render(host, entries, context);
+      expect([...host.querySelectorAll("button")].map(button => button.textContent)).toEqual(["Retry withdrawal"]);
+      expect(host.querySelector<HTMLButtonElement>("button")!.disabled).toBe(false);
+      dock.render(host, entries, { ...context, pendingActions: new Set(["withdrawal"]) });
+      expect(host.querySelector<HTMLButtonElement>("button")!.disabled).toBe(true);
+    });
+    const queued = (overrides: Partial<import("./types").QueuedMessage> & { id: string }): import("./types").QueuedMessage => ({ text: overrides.id, queuedAt: 1, delivery: "queue", ...overrides });
+    const steering = { steering: true, sendNow: true, running: true, isCommand: (text: string) => text.startsWith("/") };
+    const actions = (node: Element) => [...node.querySelectorAll("button")].map(button => button.textContent?.trim());
+
+    test("duplicate text and image-only actions have stable human-readable discriminators", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const entries = [queued({ id: "first", text: "Same prompt" }), queued({ id: "second", text: "Same prompt" }), queued({ id: "image-a", text: "" }), queued({ id: "image-b", text: "" })];
+      dock.render(host, entries, steering);
+      const labels = () => [...host.querySelectorAll("[data-queue-remove]")].map(node => node.getAttribute("aria-label"));
+      expect(labels()).toEqual(["Remove “Same prompt”, pending message 1", "Remove “Same prompt”, pending message 2", "Remove “Image attachment”, pending message 3", "Remove “Image attachment”, pending message 4"]);
+      dock.render(host, [entries[3]!, entries[1]!], steering);
+      expect(labels()).toEqual(["Remove “Image attachment”, pending message 4", "Remove “Same prompt”, pending message 2"]);
+    });
+
+    for (const text of ["Same prompt", ""]) for (const gap of [false, true]) test(`pending submission numbers survive native delivery-ID changes${gap ? " and empty withdrawal snapshots" : ""} for ${text ? "duplicate text" : "image-only input"}`, () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const first = queued({ id: "native-first", submissionId: "original-first", requestId: "shared-request", queuedAt: 1, text });
+      const second = queued({ ...first, id: "native-second", submissionId: "original-second" });
+      const numbers = () => [...host.querySelectorAll("[data-queue-remove]")].map(node => node.getAttribute("aria-label")?.match(/pending message (\d+)/)?.[1]);
+      dock.render(host, [first, second], steering);
+      expect(numbers()).toEqual(["1", "2"]);
+      if (gap) dock.render(host, [], steering);
+      const held = { ...first, id: "fresh-held" };
+      dock.render(host, [second, held], steering);
+      expect(numbers()).toEqual(["2", "1"]);
+      expect(host.querySelector('[data-queue-remove="native-first"]')).toBeNull();
+      expect(host.querySelector('[data-queue-steer="fresh-held"]')).not.toBeNull();
+      if (gap) dock.render(host, [], steering);
+      const steered = { ...first, id: "fresh-steer", delivery: "steer" as const };
+      dock.render(host, [steered], steering);
+      expect(numbers()).toEqual(["1"]);
+      expect(host.querySelector('[data-queue-queue="fresh-steer"]')).not.toBeNull();
+      expect(host.querySelectorAll(".chat-queued-message")).toHaveLength(1);
+    });
+
+    test("pending numbering rejects client tuples and duplicate logical IDs as identity authority", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const entries = ["one", "two", "three", "four"].map(id => queued({ id, text: "", requestId: "shared", queuedAt: 1, ...(id === "one" || id === "two" ? { submissionId: "unexpected-collision" } : {}) }));
+      const number = (id: string) => host.querySelector(`[data-queue-remove="${id}"]`)?.getAttribute("aria-label")?.match(/pending message (\d+)/)?.[1];
+      dock.render(host, entries, steering);
+      expect(entries.map(entry => number(entry.id))).toEqual(["1", "2", "3", "4"]);
+      dock.render(host, [...entries].reverse(), steering);
+      expect(entries.map(entry => number(entry.id))).toEqual(["1", "2", "3", "4"]);
+      expect(host.querySelectorAll(".chat-queued-message")).toHaveLength(4);
+      dock.render(host, [], steering);
+      // Unknown recovered handles cannot be matched by request ID, time,
+      // image/text content, or an absent logical identity.
+      dock.render(host, [queued({ id: "unknown-recovered", text: "", requestId: "shared", queuedAt: 1 })], steering);
+      expect(number("unknown-recovered")).toBe("5");
+    });
+
+    test("pending numbering retains live entries plus only 64 recent transitions without retaining absent DOM", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const live = queued({ id: "live", submissionId: "live-submission", text: "" });
+      const metadata = dock as unknown as { pendingNumbers: Map<string, unknown>; entries: Map<string, unknown> };
+      for (let index = 0; index < 100; index++) {
+        dock.render(host, [live, queued({ id: `transient-${index}`, submissionId: `submission-${index}`, text: "" })], steering);
+        expect(host.querySelector('[data-queue-remove="live"]')?.getAttribute("aria-label")).toContain("pending message 1");
+        expect(metadata.pendingNumbers.size).toBeLessThanOrEqual(66);
+        expect(metadata.entries.size).toBe(2);
+        expect(host.querySelectorAll(".chat-queued-message")).toHaveLength(2);
+      }
+      dock.render(host, [], steering);
+      expect(metadata.pendingNumbers.size).toBe(64);
+      expect(metadata.entries.size).toBe(0);
+      expect(host.querySelectorAll(".chat-queued-message")).toHaveLength(0);
+      dock.render(host, [{ ...live, id: "live-native-after-gap" }, queued({ id: "transient-0", submissionId: "submission-0", text: "" })], steering);
+      expect(host.querySelector('[data-queue-remove="live-native-after-gap"]')?.getAttribute("aria-label")).toContain("pending message 1");
+      expect(host.querySelector('[data-queue-remove="transient-0"]')?.getAttribute("aria-label")).not.toContain("pending message 2");
+    });
+
+    test("reset ends conversation numbering and removes stale native action targets", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      dock.render(host, [queued({ id: "old-native", submissionId: "same-opaque-value", text: "" })], steering);
+      dock.reset();
+      dock.render(host, [queued({ id: "new-conversation-native", submissionId: "same-opaque-value", text: "" })], steering);
+      expect(host.querySelector('[data-queue-remove="old-native"]')).toBeNull();
+      expect(host.querySelector('[data-queue-remove="new-conversation-native"]')?.getAttribute("aria-label")).toContain("pending message 1");
+      expect(host.querySelectorAll(".chat-queued-message")).toHaveLength(1);
+    });
+
+    test("conversation boundaries reset numbering even through empty renders and omitted legacy scope", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const first = queued({ id: "native-one", submissionId: "opaque-one", text: "" });
+      const second = queued({ id: "native-two", submissionId: "opaque-two", text: "" });
+      const number = (id: string) => host.querySelector(`[data-queue-remove="${id}"]`)?.getAttribute("aria-label")?.match(/pending message (\d+)/)?.[1];
+      dock.render(host, [first, second], { ...steering, conversationId: "one" });
+      expect(number(second.id)).toBe("2");
+      // An empty render in the same conversation is a transition gap, not
+      // a reset; a different conversation, even empty, is a hard boundary.
+      dock.render(host, [], { ...steering, conversationId: "one" });
+      dock.render(host, [second], { ...steering, conversationId: "one" });
+      expect(number(second.id)).toBe("2");
+      dock.render(host, [], { ...steering, conversationId: "two" });
+      dock.render(host, [second], { ...steering, conversationId: "two" });
+      expect(number(second.id)).toBe("1");
+      expect(host.querySelector('[data-queue-remove="native-one"]') === null).toBe(true);
+      dock.render(host, [second, first], { ...steering, conversationId: "two" });
+      expect(number(first.id)).toBe("2");
+      dock.render(host, [], { ...steering, conversationId: null });
+      dock.render(host, [first], { ...steering, conversationId: "two" });
+      expect(number(first.id)).toBe("1");
+      dock.render(host, [first, second], { ...steering, conversationId: "two" });
+      // Older callers remain unscoped, but cannot inherit the last explicit
+      // conversation's identities when they omit the new context field.
+      dock.render(host, [second], steering);
+      expect(number(second.id)).toBe("1");
+      dock.render(host, [second, first], steering);
+      expect(number(first.id)).toBe("2");
+      dock.render(host, [first], { ...steering, conversationId: "one" });
+      expect(number(first.id)).toBe("1");
+      expect(host.querySelectorAll(".chat-queued-message")).toHaveLength(1);
+    });
+
+    test("dock counts pending deliveries and offers one contextual paused batch action", () => {
+      const host = target();
+      new QueueDockRenderer().render(host, [queued({ id: "a", text: "First", delivery: "steer", paused: true }), queued({ id: "b", text: "Second", delivery: "steer", paused: true }), queued({ id: "c", text: "Later" })], steering);
+      expect(host.querySelector(".chat-queue-header")?.textContent).toContain("3 pending · 2 steers · 1 queued");
+      expect(host.querySelectorAll("[data-queue-send-now]")).toHaveLength(1);
+      expect(host.querySelector("[data-queue-send-now]")?.textContent).toBe("Send 2 paused steers now");
+      expect(host.querySelector('[data-queue-remove="a"]')?.getAttribute("aria-label")).toBe("Remove “First”");
+      expect(host.querySelector('[data-chat-queued-id="a"] .chat-queued-badge')?.textContent).toBe("Steer");
+      expect(host.querySelector('[data-chat-queued-id="a"] .chat-queued-paused')?.textContent).toBe("Paused");
+      expect(host.querySelector('[data-chat-queued-id="c"]')?.textContent).toContain("After this turn");
+    });
+
+    test("compact pending counts omit redundant totals and zero delivery categories", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      dock.render(host, [queued({ id: "a", text: "Later" })], { ...steering, compactOpen: false });
+      expect(host.querySelector("[data-pending-toggle]")?.textContent).toBe("1 queued");
+      dock.render(host, [queued({ id: "b", text: "Next", delivery: "steer" })], { ...steering, compactOpen: true });
+      expect(host.querySelector("[data-pending-toggle]")?.textContent).toBe("1 steer");
+      dock.render(host, [queued({ id: "a", text: "Later" }), queued({ id: "b", text: "Next", delivery: "steer" })], { ...steering, compactOpen: true });
+      expect(host.querySelector("[data-pending-toggle]")?.textContent).toBe("1 steer · 1 queued");
+    });
+
+    test("queue updates retain their own content pane, keyed controls and scroll intent", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const first = queued({ id: "first", text: "Keep my reading position" });
+      dock.render(host, [first], { ...steering, compactOpen: true });
+      const content = host.querySelector<HTMLElement>(".chat-queue-content")!;
+      const header = host.querySelector(".chat-queue-header");
+      const remove = content.querySelector<HTMLElement>("[data-queue-remove]")!;
+      content.scrollTop = 123;
+      host.scrollTop = 0;
+      dock.render(host, [first, queued({ id: "second", text: "A new pending message" })], { ...steering, compactOpen: true });
+      expect(host.querySelector(".chat-queue-content")).toBe(content);
+      expect(host.querySelector(".chat-queue-header")).toBe(header);
+      expect(content.querySelector("[data-queue-remove]")).toBe(remove);
+      expect(header?.parentElement).toBe(host);
+      expect(content.contains(header)).toBe(false);
+      expect(content.scrollTop).toBe(123);
+      expect(host.scrollTop).toBe(0);
+    });
+
+    test("remote duplicate arrival, reorder and removal patch the original card and action nodes", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const first = queued({ id: "first", text: "Same pending" });
+      const second = queued({ id: "remote", text: first.text });
+      dock.render(host, [first], { ...steering, compactOpen: true });
+      const card = host.querySelector('[data-chat-queued-id="first"]')!;
+      const remove = card.querySelector<HTMLButtonElement>("[data-queue-remove]")!;
+      const edit = card.querySelector("[data-queue-edit]");
+      const steer = card.querySelector("[data-queue-steer]");
+      remove.disabled = true; // handler-local lock, not yet in the snapshot
+      for (const entries of [[first, second], [second, { ...first, paused: true as const }], [first]]) {
+        dock.render(host, entries, { ...steering, compactOpen: true });
+        expect(host.querySelector('[data-chat-queued-id="first"]')).toBe(card);
+        expect(card.querySelector("[data-queue-remove]")).toBe(remove);
+        expect(card.querySelector("[data-queue-edit]")).toBe(edit);
+        expect(card.querySelector("[data-queue-steer]")).toBe(steer);
+        expect(remove.disabled).toBe(true);
+        expect(remove.getAttribute("aria-label")).toContain("pending message 1");
+      }
+      dock.render(host, [{ ...first, unconfirmed: true }], { ...steering, withdrawalRetries: new Set([first.id]), pendingActions: new Set([first.id]) });
+      expect(card.querySelector("[data-queue-remove]")).toBe(remove);
+      expect(remove.textContent).toBe("Retry withdrawal");
+      expect(remove.disabled).toBe(true);
+      expect(card.querySelector("[data-queue-edit]")).toBeNull();
+      expect(card.querySelector("[data-queue-steer]")).toBeNull();
+      dock.render(host, [{ ...first, unconfirmed: true }], steering);
+      expect(card.querySelectorAll("button")).toHaveLength(0);
+    });
+
+    test("action changes retain surviving native controls, apply locks and retire converted native IDs", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const first = queued({ id: "native-first", submissionId: "submission", text: "Keep this" });
+      dock.render(host, [first], steering);
+      const card = host.querySelector("article")!;
+      const remove = card.querySelector<HTMLButtonElement>("[data-queue-remove]")!;
+      const edit = card.querySelector("[data-queue-edit]");
+      const steer = card.querySelector("[data-queue-steer]");
+      dock.render(host, [{ ...first, paused: true }], { ...steering, running: false, pendingActions: new Set([first.id]) });
+      expect(host.querySelector("article")).toBe(card);
+      expect(card.querySelector("[data-queue-remove]")).toBe(remove);
+      expect(card.querySelector("[data-queue-edit]")).toBe(edit);
+      expect(card.contains(steer)).toBe(false);
+      expect(card.querySelector("[data-queue-send-now]")).not.toBeNull();
+      expect(remove.disabled).toBe(true);
+      dock.render(host, [first], { ...steering, running: false });
+      expect(remove.disabled).toBe(false);
+      dock.render(host, [{ ...first, id: "native-converted", delivery: "steer" }], steering);
+      expect(host.contains(card)).toBe(false);
+      expect(host.querySelector('[data-queue-remove="native-first"]')).toBeNull();
+      expect(host.querySelector('[data-queue-queue="native-converted"]')).not.toBeNull();
+      expect(host.querySelector('[data-queue-remove="native-converted"]')).not.toBe(remove);
+    });
+
+    test("card patches preserve decorated attachment lifecycle until attachment content changes", () => {
+      const host = target();
+      const dock = new QueueDockRenderer();
+      const entry = queued({ id: "image", text: "Before", attachments: [{ id: "image/id", name: '<unsafe>.png', mimeType: "image/png" }] });
+      dock.render(host, [entry], steering);
+      const view = host.querySelector<HTMLButtonElement>("[data-attachment-view]")!;
+      const image = host.querySelector("img")!;
+      image.dispatchEvent(new dom.window.Event("error"));
+      expect(view.disabled).toBe(true);
+      expect(host.querySelector("img")).toBeNull();
+      dock.render(host, [{ ...entry, text: "After <script>unsafe</script>", paused: true }], steering);
+      expect(host.querySelector(".chat-attachment-view")).toBe(view);
+      expect(view.disabled).toBe(true);
+      expect(host.querySelector("img")).toBeNull();
+      expect(host.querySelector("article > p")?.textContent).toBe("After <script>unsafe</script>");
+      expect(host.querySelector("script")).toBeNull();
+      dock.render(host, [{ ...entry, attachments: [{ ...entry.attachments![0]!, id: "replacement" }] }], steering);
+      expect(host.querySelector(".chat-attachment-view")).not.toBe(view);
+      const replacement = host.querySelector("img")!;
+      expect(replacement.getAttribute("src")).toContain("/replacement");
+      replacement.dispatchEvent(new dom.window.Event("error"));
+      expect(host.querySelector("img")).toBeNull();
+    });
+
+    test("replacement warning and model note retain identity without child mutations on unrelated repaints", async () => {
+      const host = target();
+      const note = document.createElement("p"); host.append(note);
+      const dock = new QueueDockRenderer();
+      const entries = [queued({ id: "a", text: "First", delivery: "steer", paused: true })];
+      const context = { ...steering, note, replacement: true, compactOpen: false };
+      dock.render(host, entries, context);
+      const warning = note.querySelector(".chat-queue-replacement");
+      const model = note.querySelector(".chat-queue-model-note");
+      const mutations: MutationRecord[] = [];
+      const observer = new dom.window.MutationObserver(records => mutations.push(...records as unknown as MutationRecord[]));
+      observer.observe(note, { childList: true, subtree: true });
+      const content = host.querySelector<HTMLElement>(".chat-queue-content")!;
+      content.scrollTop = 73;
+      dock.render(host, entries, context);
+      dock.render(host, [...entries, queued({ id: "held", text: "Unrelated pending" })], context);
+      await Promise.resolve();
+      observer.disconnect();
+      expect(note.querySelector(".chat-queue-replacement") === warning).toBe(true);
+      expect(note.querySelector(".chat-queue-model-note") === model).toBe(true);
+      expect(mutations).toHaveLength(0);
+      expect(content.scrollTop).toBe(73);
+    });
+
+    test("replacement warning updates text in place, retires on exit, and reveals only on entry", () => {
+      const host = target();
+      const note = document.createElement("p"); host.append(note);
+      const dock = new QueueDockRenderer();
+      const first = queued({ id: "a", text: "First", delivery: "steer", paused: true });
+      const second = queued({ id: "b", text: "Second", delivery: "steer", paused: true });
+      const context = { ...steering, note, replacement: true, compactOpen: false };
+      dock.render(host, [first], context);
+      const warning = note.querySelector(".chat-queue-replacement");
+      const model = note.querySelector(".chat-queue-model-note");
+      const content = host.querySelector<HTMLElement>(".chat-queue-content")!;
+      expect(content.scrollTop).toBe(0);
+      content.scrollTop = 91;
+      dock.render(host, [first, second], context);
+      expect(note.querySelector(".chat-queue-replacement") === warning).toBe(true);
+      expect(note.textContent).toContain("2 pending steers will be delivered together with your replacement.");
+      expect(content.scrollTop).toBe(91);
+      expect(host.querySelector<HTMLElement>(".chat-queue-items")?.hidden).toBe(true);
+      expect(note.hidden).toBe(false);
+      expect(host.querySelector(".chat-queue-batch button")?.textContent).toBe("Send 2 paused steers now");
+      dock.render(host, [first], { ...context, replacement: false });
+      expect(note.querySelector(".chat-queue-replacement")).toBeNull();
+      expect(note.querySelector(".chat-queue-model-note")).toBe(model);
+      expect(content.scrollTop).toBe(91);
+      dock.render(host, [first], context);
+      expect(note.textContent).toContain("1 pending steer will be delivered together with your replacement.");
+      expect(content.scrollTop).toBe(0);
+      dock.render(host, [], context);
+      expect(note.hidden).toBe(true);
+      expect(note.querySelector(".chat-queue-replacement")).toBeNull();
+      dock.render(host, [first], { ...context, conversationId: "next" });
+      expect(note.hidden).toBe(false);
+      expect(note.textContent).toContain("1 pending steer");
+      const freshNote = document.createElement("p");
+      dock.render(host, [first], { ...context, note: freshNote, conversationId: "next" });
+      expect(freshNote.querySelectorAll(".chat-queue-replacement")).toHaveLength(1);
+      expect(freshNote.querySelectorAll(".chat-queue-model-note")).toHaveLength(1);
+    });
+
+    test("compact pending details collapse independently of replacement and paused batch safety", () => {
+      const host = target();
+      const note = document.createElement("p"); host.append(note);
+      const dock = new QueueDockRenderer();
+      const entries = [queued({ id: "a", text: "First", delivery: "steer", paused: true }), queued({ id: "b", text: "Second", delivery: "steer", paused: true })];
+      dock.render(host, entries, { ...steering, note, replacement: true, compactOpen: false });
+      expect(host.querySelector("[data-pending-toggle]")?.getAttribute("aria-expanded")).toBe("false");
+      expect(host.querySelector<HTMLElement>(".chat-queue-items")?.hidden).toBe(true);
+      expect(note.hidden).toBe(false);
+      expect(note.textContent).toContain("2 pending steers will be delivered together with your replacement");
+      expect(host.querySelector(".chat-queue-content [data-queue-send-now]")?.textContent).toBe("Send 2 paused steers now");
+      expect(host.querySelector(".chat-queue-header [data-queue-send-now]")).toBeNull();
+      const batchAction = host.querySelector<HTMLButtonElement>(".chat-queue-batch button")!;
+      batchAction.disabled = true;
+      dock.render(host, entries, { ...steering, note, replacement: true, compactOpen: true });
+      expect(host.querySelector<HTMLElement>(".chat-queue-items")?.hidden).toBe(false);
+      expect(host.querySelector("[data-pending-toggle]")?.getAttribute("aria-expanded")).toBe("true");
+      expect(host.querySelector(".chat-queue-batch button")).toBe(batchAction);
+      expect(batchAction.disabled).toBe(true);
+    });
+
+    test("steers render before queued entries, labelled, with a paused note, and the model note shows only while a steer is pending", () => {
+      const dock = new QueueDockRenderer();
+      const host = target();
+      const note = target();
+      dock.render(host, [queued({ id: "msg_1", text: "steer me", delivery: "steer" }), queued({ id: "held-1", text: "later", paused: true }), queued({ id: "msg_2", text: "stranded", delivery: "steer", paused: true })], { ...steering, note });
+      const entries = [...host.querySelectorAll(".chat-queued-message")];
+      expect(entries.map(entry => entry.getAttribute("data-delivery"))).toEqual(["steer", "queue", "steer"]);
+      expect(entries.map(entry => entry.classList.contains("is-held"))).toEqual([false, true, false]);
+      expect(entries.map(entry => entry.classList.contains("is-steer"))).toEqual([true, false, true]);
+      expect(entries.map(entry => entry.querySelector(".chat-queued-tag")?.textContent)).toEqual([
+        "Next step",
+        "Sends after your next message",
+        "Sends after your next message",
+      ]);
+      expect(entries.map(entry => entry.hasAttribute("data-paused"))).toEqual([false, true, true]);
+      expect(note.hidden).toBe(false);
+      expect(note.textContent).toContain("model and mode");
+      // No steer pending: no note.
+      dock.render(host, [queued({ id: "held-1", text: "later" })], { ...steering, note });
+      expect(note.hidden).toBe(true);
+      dock.render(host, [], { ...steering, note });
+      expect(host.hidden).toBe(true);
+      expect(note.hidden).toBe(true);
+    });
+
+    test("actions follow capability and state: remove and edit always; steer or send now on queued entries; queue on steers; send now on paused steers; none to steer a command", () => {
+      const dock = new QueueDockRenderer();
+      const host = target();
+      const entry = (id: string) => host.querySelector(`[data-chat-queued-id="${id}"]`)!;
+      // A steering agent while the turn runs.
+      dock.render(host, [queued({ id: "held-1", text: "later" }), queued({ id: "held-2", text: "/review all" }), queued({ id: "msg_1", text: "steer", delivery: "steer" }), queued({ id: "msg_2", text: "stranded", delivery: "steer", paused: true })], steering);
+      expect(actions(entry("held-1"))).toEqual(["Steer + paused steers", "Edit", "Remove"]);
+      expect(entry("held-1").querySelector("[data-queue-steer='held-1']")).not.toBeNull();
+      expect(actions(entry("held-2"))).toEqual(["Edit", "Remove"]);
+      expect(actions(entry("msg_1"))).toEqual(["Queue", "Edit", "Remove"]);
+      expect(entry("msg_1").querySelector("[data-queue-queue='msg_1']")).not.toBeNull();
+      expect(actions(entry("msg_2"))).toEqual(["Queue", "Edit", "Remove"]);
+      expect(host.querySelector(".chat-queue-content [data-queue-send-now='msg_2']")).not.toBeNull();
+      // The same agent at rest (dormant or idle): a queued message is sent
+      // now, which steers it; a command still cannot be steered.
+      dock.render(host, [queued({ id: "held-1", text: "later", paused: true }), queued({ id: "held-2", text: "/review all", paused: true })], { ...steering, running: false });
+      expect(actions(entry("held-1"))).toEqual(["Send now", "Edit", "Remove"]);
+      expect(entry("held-1").querySelector("[data-queue-send-now='held-1']")).not.toBeNull();
+      expect(actions(entry("held-2"))).toEqual(["Edit", "Remove"]);
+      // Send now without steering (Claude Code): only while nothing runs,
+      // and a command may be sent now there — it is a dispatch, not a steer.
+      const claude = { steering: false, sendNow: true, isCommand: steering.isCommand };
+      dock.render(host, [queued({ id: "held-1", text: "later" }), queued({ id: "held-2", text: "/review all" })], { ...claude, running: true });
+      expect(actions(entry("held-1"))).toEqual(["Edit", "Remove"]);
+      dock.render(host, [queued({ id: "held-1", text: "later", paused: true }), queued({ id: "held-2", text: "/review all", paused: true })], { ...claude, running: false });
+      expect(actions(entry("held-1"))).toEqual(["Send now", "Edit", "Remove"]);
+      expect(actions(entry("held-2"))).toEqual(["Send now", "Edit", "Remove"]);
+      // Neither capability (OpenCode 1.x): remove and edit only.
+      dock.render(host, [queued({ id: "held-1", text: "later", paused: true })], { steering: false, sendNow: false, running: false, isCommand: steering.isCommand });
+      expect(actions(entry("held-1"))).toEqual(["Edit", "Remove"]);
+      expect(entry("held-1").querySelector("[data-queue-edit='held-1']")).not.toBeNull();
+      expect(entry("held-1").querySelector("[data-queue-remove='held-1']")).not.toBeNull();
+    });
+
+    test("a change of delivery, paused state, or available actions re-renders the entry in place", () => {
+      const dock = new QueueDockRenderer();
+      const host = target();
+      dock.render(host, [queued({ id: "held-1", text: "later" })], steering);
+      const before = host.querySelector("[data-chat-queued-id='held-1']");
+      expect(before).not.toBeNull();
+      if (!before) throw new Error("Expected the original pending card");
+      dock.render(host, [queued({ id: "held-1", text: "later" })], steering);
+      expect(host.querySelector("[data-chat-queued-id='held-1']")).toBe(before);
+      dock.render(host, [queued({ id: "held-1", text: "later", paused: true })], { ...steering, running: false });
+      const after = host.querySelector("[data-chat-queued-id='held-1']")!;
+      expect(after).toBe(before);
+      expect(after.hasAttribute("data-paused")).toBe(true);
+      expect(actions(after)).toEqual(["Send now", "Edit", "Remove"]);
+    });
+  });
+
   test("held messages render in the queue dock, ordered, removable, and never in the timeline", () => {
     const renderer = new TimelineRenderer();
     const dock = new QueueDockRenderer();
@@ -988,7 +1445,7 @@ describe("presentation details", () => {
     const dockHost = target();
     const projection = projectionWith(
       [{ id: "message:u1", type: "user_message", createdAt: 1, text: "earlier" }],
-      { queued: [{ id: "held-1", text: "first held", queuedAt: 2 }, { id: "held-2", text: "second held", queuedAt: 3 }] },
+      { queued: [{ id: "held-1", text: "first held", queuedAt: 2, delivery: "queue" }, { id: "held-2", text: "second held", queuedAt: 3, delivery: "queue" }] },
     );
     renderer.render(host, projection, new Set());
     dock.render(dockHost, projection.queued);
@@ -1203,6 +1660,33 @@ describe("subagent entries", () => {
     const more = host.querySelector(".chat-subagent-result .chat-output-more") as HTMLDetailsElement;
     expect(more.querySelector(".chat-report-expand")?.textContent).toBe("Show full report");
     expect(more.hasAttribute("open")).toBe(false);
+  });
+
+  test("joined V2 launchers keep their rows and costs but share the worker outcome and one report", () => {
+    const launched = task("v2-a", { name: "subagent", output: "Provider launch instructions, not a report", usage: { costUsd: 0.01 } });
+    const joined = task("v2-b", { name: "subagent", output: "Provider launch instructions, not a report", usage: { costUsd: 0.02 } });
+    const worker: ConversationItem = { id: "task:v2-worker", taskId: "v2-worker", type: "background_task", createdAt: 2, description: "Review renderer", taskType: "agent", toolUseId: "v2-a", toolUseIds: ["v2-a", "v2-b"], childConversationId: "child", status: "failed", summary: "One canonical worker report", resultId: "result-1" };
+    const entries = subagentEntries([launched, joined, worker]);
+    expect(entries.map(entry => entry.status)).toEqual(["failed", "failed"]);
+    expect(entries.map(entry => entry.usage?.costUsd)).toEqual([0.01, 0.02]);
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([launched, joined, worker]), new Set(["tool:v2-a", "tool:v2-b", worker.id]));
+    expect(host.textContent).not.toContain("Provider launch instructions");
+    expect(host.textContent!.match(/One canonical worker report/g)).toHaveLength(1);
+    expect(host.querySelectorAll('[data-chat-jump="task:v2-worker"]')).toHaveLength(2);
+    expect(host.querySelector('[data-chat-item-id="task:v2-worker"] [data-open-conversation="child"]')).not.toBeNull();
+    expect(launched).toHaveProperty("status", "completed");
+    renderer.reset();
+  });
+  test("worker reports render hostile markup and links as inert text", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const summary = '<script>alert(1)</script><img src=x onerror=alert(1)>[unsafe](javascript:alert(1))';
+    renderer.render(host, projectionWith([{ id: "task:safe", taskId: "safe", type: "background_task", createdAt: 1, description: "Fixture", status: "failed", summary }]), new Set(["task:safe"]));
+    expect(host.querySelector(".chat-task-summary")?.textContent).toBe(summary);
+    expect(host.querySelector("script, img, a[href^='javascript:']")).toBeNull();
+    renderer.reset();
   });
 
   // A skill Claude Code ran as a fork is a conversation of its own, offered
@@ -1611,6 +2095,7 @@ describe("background task rows and tool elapsed time", () => {
     expect(host.querySelector('[data-chat-item-id="task:live"]')).toBeNull();
     const row = host.querySelector('[data-chat-item-id="task:completed"]')!;
     expect(row.querySelector("summary > span")?.textContent).toBe("Background task finished");
+    expect(row.querySelector(".chat-activity-status")?.textContent).toBe("finished");
     expect(row.querySelector(".chat-activity-subject")?.textContent).toBe("Sleep for 20 seconds then echo done");
     expect(row.querySelector(".chat-task-summary")?.textContent).toBe("done");
     expect(row.className).toContain("is-completed");

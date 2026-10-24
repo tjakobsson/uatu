@@ -3,7 +3,7 @@ import { chatViewportMetrics, ChatViewportController } from "./viewport";
 import { parseHTML } from "linkedom";
 
 const TOUCH_MARKUP = '<html data-ui-mode="touch" data-active-tab="chat"><body><section></section><form></form></body></html>';
-const GLOBALS = ["window", "document", "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout"] as const;
+const GLOBALS = ["window", "document", "visualViewport", "innerHeight", "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout"] as const;
 
 /** A controller over a fake visual viewport, with frames and timers in hand. */
 function harness(markup = TOUCH_MARKUP) {
@@ -50,6 +50,40 @@ function harness(markup = TOUCH_MARKUP) {
 }
 
 describe("chat visual viewport geometry", () => {
+  test("physical-minimum outer scrolling survives viewport and foreground resyncs only while active", () => {
+    const f = harness();
+    try {
+      f.viewport.height = 200;
+      f.surface.setAttribute("data-work-overflow", "");
+      f.surface.scrollTop = 100;
+      f.controller.start();
+      expect(f.surface.scrollTop).toBe(100);
+      for (const event of ["resize", "scroll"]) {
+        f.viewportEvent(event);
+        f.runFrames();
+        expect(f.surface.scrollTop).toBe(100);
+      }
+      for (const event of ["resize", "focus", "pageshow"]) {
+        f.windowEvent(event);
+        f.runFrames(); f.runTimers();
+        expect(f.surface.scrollTop).toBe(100);
+      }
+      f.documentEvent("visibilitychange");
+      f.runFrames(); f.runTimers();
+      expect(f.surface.scrollTop).toBe(100);
+      f.surface.removeAttribute("data-work-overflow");
+      f.viewportEvent("resize"); f.runFrames();
+      expect(f.surface.scrollTop).toBe(0);
+      // Normal touch caret reveal must still be prevented from panning chrome.
+      f.surface.scrollTop = 50;
+      f.windowEvent("focus"); f.runFrames(); f.runTimers();
+      expect(f.surface.scrollTop).toBe(0);
+      f.viewport.height = 800;
+      f.viewportEvent("resize"); f.runFrames();
+      expect(f.surface.scrollTop).toBe(0);
+    } finally { f.restore(); }
+  });
+
   test("reserves the visible touch bar and reclaims it when the keyboard covers it", () => {
     expect(chatViewportMetrics(800, 0, 800, 70)).toEqual({ height: 730, tabInset: 70, keyboardVisible: false });
     expect(chatViewportMetrics(500, 0, 800, 70)).toEqual({ height: 500, tabInset: 0, keyboardVisible: true });

@@ -49,6 +49,10 @@ channels:
           idempotent projections of conversation state. A resync never
           arrives as a data event. It arrives as a `resync` signal carrying
           the workspace's resync event.
+          Background `item.upsert` payloads may carry `terminalReportedAt`,
+          a provider report clock rather than execution end. Live admission
+          and stored delivery clocks can differ after recovery. It conveys
+          no additional worker-state or accounting authority.
       activity:
         domain: hub
         dataSchema: WorkspaceActivity

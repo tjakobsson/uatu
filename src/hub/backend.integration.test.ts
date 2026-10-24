@@ -8,7 +8,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { LocalProcessBackend, type RunningSession } from "./backend";
+import { LocalProcessBackend, signSessionChatPolicy, type RunningSession } from "./backend";
 import { EMPTY_RESOLVED_CREDENTIAL_CONTEXT } from "./credential-context";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
@@ -34,6 +34,65 @@ async function makeWorkspace(): Promise<string> {
 }
 
 describe("LocalProcessBackend", () => {
+  test("concurrent null-token children establish independent trust; missing proof stays unavailable", async () => {
+    const workspace = await makeWorkspace();
+    const fixturePath = path.join(workspace, "private-child.ts");
+    const bootstrapModule = new URL("./child-policy-bootstrap.ts", import.meta.url).pathname;
+    await writeFile(fixturePath, `import {consumeChildPolicyDescriptor} from ${JSON.stringify(bootstrapModule)};
+      const policy = await consumeChildPolicyDescriptor();
+      const server = Bun.serve({hostname:'127.0.0.1', port:0, async fetch(request) {
+        const {challenge} = await request.json(); return Response.json({proof: policy?.proof(challenge)});
+      }});
+      console.log('http://127.0.0.1:'+server.port+'/');
+      process.stdin.resume(); process.stdin.on('end',()=>process.exit(0)); process.on('SIGTERM',()=>process.exit(0));`);
+    const backend = new LocalProcessBackend({ uatuArgv: [process.execPath, fixturePath] });
+    const entry = { id: "null-token", path: workspace, backend: "local" as const, displayName: "null-token" };
+    const started = await Promise.allSettled([
+      backend.start(entry, "/s/null-token/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+      backend.start(entry, "/s/null-token/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+    ]);
+    const children = started.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+    try {
+      expect(children).toHaveLength(2);
+      expect(children.map(child => child.token)).toEqual([null, null]);
+      expect(children.map(child => child.policyTrust)).toEqual(["ready", "ready"]);
+      expect(children[0]!.instanceId).not.toBe(children[1]!.instanceId);
+    } finally { await Promise.all(children.map(child => child.stop())); }
+    await writeFile(fixturePath, `const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return Response.json({proof:'invalid'})}});
+      console.log('http://127.0.0.1:'+server.port+'/'); process.stdin.resume();process.on('SIGTERM',()=>process.exit(0));`);
+    running = await backend.start(entry, "/s/null-token/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+    expect(running.policyTrust).toBe("unavailable");
+    expect(signSessionChatPolicy(running, { method: "POST", pathname: "/s/null-token/api/chat/conversations/x/prompts", body: "{}" }, { principal: "alice", revision: 0, autoBackgroundOnSteer: true })).toBeNull();
+    await running.stop();
+    await writeFile(fixturePath, `import {consumeChildPolicyDescriptor} from ${JSON.stringify(bootstrapModule)};
+      await consumeChildPolicyDescriptor();
+      const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return new Promise(()=>{})}});
+      console.log('http://127.0.0.1:'+server.port+'/'); process.stdin.resume();process.on('SIGTERM',()=>process.exit(0));`);
+    running = await backend.start(entry, "/s/null-token/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+    expect(running.policyTrust).toBe("unavailable");
+  }, 60_000);
+  for (const [flavor, argv] of [
+    ["source", [process.execPath, "run", CLI_PATH]],
+    ...(process.env.UATU_TEST_COMPILED_BINARY ? [["compiled", [process.env.UATU_TEST_COMPILED_BINARY]]] : []),
+  ] as Array<[string, string[]]>) test(`${flavor} child proves fresh private policy trust and withdraws signing on stop/replacement`, async () => {
+    const workspace = await makeWorkspace();
+    const backend = new LocalProcessBackend({ uatuArgv: argv });
+    const entry = { id: "private-policy", path: workspace, backend: "local" as const, displayName: "private-policy" };
+    running = await backend.start(entry, "/s/private-policy/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+    expect(running.policyTrust).toBe("ready");
+    expect(running.instanceId).toMatch(/^[0-9a-f-]{36}$/);
+    const request = { method: "POST", pathname: "/s/private-policy/api/chat/conversations/x/prompts", body: "{}" };
+    const policy = { principal: "alice", revision: 0, autoBackgroundOnSteer: true };
+    expect(signSessionChatPolicy(running, request, policy)).not.toBeNull();
+    const old = running;
+    await old.stop();
+    expect(old.policyTrust).toBe("unavailable");
+    expect(signSessionChatPolicy(old, request, policy)).toBeNull();
+    const restartedBackend = new LocalProcessBackend({ uatuArgv: argv });
+    running = await restartedBackend.start(entry, "/s/private-policy/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+    expect(running.policyTrust).toBe("ready");
+    expect(running.instanceId).not.toBe(old.instanceId);
+  }, 60_000);
   test(
     "starts a real child, serves under the base path, and stops on SIGTERM",
     async () => {
