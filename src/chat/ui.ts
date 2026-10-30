@@ -1,4 +1,5 @@
 import { boundedSet } from "../shared/bounded-map";
+import { Composer, type PendingQueueAction } from "./composer";
 import { escapeHtml } from "../shared/html";
 import { createLoadingSignal } from "../preview/loading-signal";
 import { measureChatWork } from "./performance";
@@ -8,7 +9,7 @@ import { onUiModeChange } from "../shell/ui-mode";
 import { registerBackInterceptor } from "../shell/history";
 import { onManualRecovery, registerRecoveryWork, requestManualRecovery } from "../shell/live";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
-import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, STEER_ALREADY_DELIVERED_CODE, STEER_WITHDRAWAL_UNCONFIRMED_CODE, type ChatEventStream } from "./client";
+import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
 import { CoordinatedScrollOwner, type RevealOptions } from "./coordinated-scroll";
 import { ChatViewportController } from "./viewport";
@@ -20,7 +21,7 @@ import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, parsePromptSlashCommand, sideQuestionOperation, slashCommandQuery, type LocalHistoryOperation } from "./slash-commands";
 import { LatestRefresh } from "./latest-refresh";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, pendingSteerReplacementNote, questionStepLabel, statusLabel, subagentEntries, workingLabel } from "./timeline-renderer";
+import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, questionStepLabel, statusLabel, subagentEntries, workingLabel } from "./timeline-renderer";
 import { backgroundTasksByTool, runningBackgroundTasks } from "./background-tasks";
 import { pausedStatusLabel, pausedWakeups, pendingWakeups, scheduledStatusLabel, wakeupFireTime } from "./scheduled-wakeups";
 import { CompactDisclosure, compactWorkers, workerSummary } from "./compact-work";
@@ -31,8 +32,7 @@ import { SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
-import { AutomaticBackgroundNotices, actionOrigin, automaticBackgroundNote } from "./automatic-background";
-import type { AutomaticBackgroundFeedback, BackgroundTaskItem } from "./types";
+import type { BackgroundTaskItem } from "./types";
 import { contextReadout } from "./context-readout";
 import { HoldToQueue, HOLD_ARM_MS, HOLD_COUNTDOWN_MS, HOLD_TOTAL_MS } from "./hold-to-queue";
 import { QueueDiscovery } from "./queue-discovery";
@@ -40,19 +40,13 @@ import { buildReceiptRows, buildReceiptTotal, parseReceiptView, receiptHeading, 
 import { formatTokens, totalTokens } from "./usage";
 import { resolveSessionTotals, type ConversationTotals } from "./conversation-totals";
 import {
-  addAcceptedDraft,
-  markDraftUnconfirmed,
   applyChatEvent,
-  confirmAcceptedDraft,
-  dropQueuedMessage,
-  noteQueuedMessage,
   prependSnapshot,
   projectionFromSnapshot,
   refreshFromSnapshot,
-  removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatLoginState, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type ContextReportItem, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionOutcome, type QueuedMessage, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type SessionTotals } from "./types";
+import type { AgentChatStatus, ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatLoginState, ChatModel, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationSummary, ContextReportItem, MessageDelivery, ModelSelection, PermissionOutcome, QuestionOutcome, SessionTotals } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -202,16 +196,6 @@ export function initChat(api = new ChatApiClient()): void {
   // rebuilds (a resync, a switch away and back) so a late acceptance never
   // recreates a row the stream already retired.
   const removedRows = new Map<string, string[]>();
-  // A `/reload` this client sent, by conversation, with the agent whose
-  // catalogs it changes and — once accepted — its message id: when its turn
-  // completes, the palette and pickers re-read them. A reload held behind a
-  // running turn is still in the conversation's queue when THAT turn
-  // completes, so a completion arriving while it is queued is not its own.
-  // One arriving before the acceptance names the message cannot be told
-  // apart: it re-reads (harmlessly) and keeps the mark for the real one.
-  // A failed or interrupted reload changed nothing to re-read.
-  // Several can wait in one conversation's queue, oldest first.
-  const pendingReloads = new Map<string, Array<{ agentId: string; messageId?: string }>>();
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
   // Attachment surfaces. Guarded at use rather than joining the required
@@ -322,12 +306,6 @@ export function initChat(api = new ChatApiClient()): void {
   // parseSlashCommand decides — so the dock offers no steer for one.
   const isListedCommand = (text: string): boolean => parsePromptSlashCommand(text, commands) !== undefined;
   let projection: ChatProjection | null = null;
-  const unconfirmedInputs = new Map<string, ChatProjection["acceptedDrafts"]>();
-  const unconfirmedWithdrawals = new Map<string, Map<string, { operation: string; entry: QueuedMessage }>>();
-  type PendingQueueAction = { terminal?: true };
-  // Only live mutations own these fences. A terminal event can precede the
-  // HTTP response and must win even before an uncertainty notice exists.
-  const queueActionsInFlight = new Map<string, Map<string, PendingQueueAction>>();
   const stagedConfigurations = new Map<string, ConversationConfiguration>();
   const configurationLabels = { summary: "Chat settings", inline: "", accessible: [] as string[] };
   let configurationPicker: ChatConfigurationPickerController | null = null;
@@ -509,28 +487,13 @@ export function initChat(api = new ChatApiClient()): void {
   let lastTranscriptPaint = 0;
   let childIncrementalTimer: ReturnType<typeof setTimeout> | null = null;
   let lastChildPaint = 0;
-  let submitting = false;
   let cancelling = false;
   // Bumped on every main-projection snapshot install. queueRevision restarts
   // at zero with each fresh projection, so an in-flight held echo compares
   // this epoch too — a revision captured before a reload must never pass
   // against the replacement projection's coincidentally equal revision.
   let projectionEpoch = 0;
-  // A failed send leaves acceptance unknown — the server may already hold a
-  // receipt for the request. Resubmitting the same text reuses its id so the
-  // receipt dedupes instead of starting a second agent turn. Keyed per
-  // conversation: a success elsewhere must not discard another
-  // conversation's unresolved id.
-  // `attachments` joins the retry identity: a resubmission with the same text
-  // but a changed attachment set is a different message, and reusing the old
-  // request id would let the server replay the first acceptance receipt for a
-  // payload the provider never saw.
-  const retryRequests = new Map<string, { text: string; requestId: string; attachments: string }>();
-  const historyMutations = new Set<string>();
-  const pendingHistoryResyncs = new Set<string>();
-  const historyRefreshRequired = new Set<string>();
   type HistoryOperation = LocalHistoryOperation | "revert" | "restore";
-  const historyRetries = new Map<string, { operation: HistoryOperation; messageId?: string; requestId: string; result?: ReversibleHistoryResult }>();
   let commandInventoryAvailable = true;
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
@@ -1184,19 +1147,8 @@ export function initChat(api = new ChatApiClient()): void {
   // Stops in flight, by task id: a rebuild mid-request must not hand back
   // an enabled button that would send the stop twice.
   const stoppingTasks = new Set<string>();
-  const automaticNotes = new AutomaticBackgroundNotices();
   const queueDiscovery = new QueueDiscovery(presentationStorage);
   const actionFeedback = document.querySelector<HTMLElement>("#chat-action-feedback");
-  const recordAutomaticBackground = (conversationId: string, operationId: string, result: AutomaticBackgroundFeedback, action: string, text: string) => {
-    if (result.automaticBackground === "unknown") {
-      checkUnconfirmedAction(conversationId, operationId, action, text, "automatic backgrounding");
-      return;
-    }
-    if (result.automaticBackground === "failed" || result.automaticBackground === "unavailable") {
-      automaticNotes.unconfirmed(conversationId, operationId, `${actionOrigin(action, text)}: ${automaticBackgroundNote(result.automaticBackground)}`);
-    } else automaticNotes.record(conversationId, operationId, result.automaticBackground);
-    syncControls();
-  };
   let pendingChatAction: { dialog: HTMLDialogElement; closed: Promise<void>; reopening: boolean; cancel(): void } | undefined;
   const confirmChatAction = async (title: string, message: string, accept: string, invoker?: HTMLElement): Promise<boolean> => {
     const dialog = document.querySelector<HTMLDialogElement>("#chat-action-confirm");
@@ -1856,7 +1808,7 @@ export function initChat(api = new ChatApiClient()): void {
   });
 
   const syncHistoryControls = () => {
-    const historyBusy = submitting || (projection ? historyMutations.has(projection.conversationId) : false);
+    const historyBusy = composer.submitting || (projection ? composer.historyBusy(projection.conversationId) : false);
     for (const button of items.querySelectorAll<HTMLButtonElement>("[data-history-revert]")) button.disabled = historyBusy;
     for (const button of revertedItems?.querySelectorAll<HTMLButtonElement>("[data-history-restore]") ?? []) button.disabled = historyBusy;
   };
@@ -1894,8 +1846,8 @@ export function initChat(api = new ChatApiClient()): void {
     const restorePending = pendingOpen && (pendingConversation !== pendingPaintedConversation || !pendingPaintedOpen);
     queueDock.render(queueDockElement, projection?.queued ?? [], {
       conversationId: pendingConversation,
-      withdrawalRetries: pendingConversation ? unconfirmedWithdrawals.get(pendingConversation) : undefined,
-      pendingActions: pendingConversation ? queueActionsInFlight.get(pendingConversation) : undefined,
+      withdrawalRetries: pendingConversation ? composer.withdrawalRetries(pendingConversation) : undefined,
+      pendingActions: pendingConversation ? composer.pendingActions(pendingConversation) : undefined,
       steering: declares("steering"),
       sendNow: declares("send-now"),
       running: isLiveConversationStatus(projection?.status),
@@ -2054,89 +2006,67 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   // ------------------------------------------------------------------
-  // Image attachments: staged per conversation, uploaded at attach time,
-  // referenced by id everywhere after (spec: bytes cross each boundary once).
-  // Pending state deliberately does not persist across reloads.
-  // ------------------------------------------------------------------
-  type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
-  const pendingAttachments = new Map<string, PendingAttachment[]>();
-  const unavailableAttachments = new Map<string, MessageAttachment[]>();
-  // One serialized staging chain per conversation. Serialization makes the
-  // per-message bound check honest — a second paste near the eight-image
-  // limit runs after the first and sees its result instead of racing past
-  // the cap — and submission drains the chain (re-reading the tail until
-  // nothing new was appended while it waited) so an image attached moments
-  // before Enter joins the message it was attached for.
-  const attachmentStaging = new Map<string, Promise<void>>();
-  const attachmentStagingGeneration = new Map<string, number>();
-  // Attachments riding an in-flight submission still count against the
-  // per-message cap: a failure restores them to pending, and an intake that
-  // ignored them could push the restored draft past eight and make every
-  // retry refusable.
-  const submittedAttachmentReserve = new Map<string, number>();
-  // Monotonic per-conversation refusal count. Submission compares it across
-  // the staging drain: a refusal that lands while a submit waits is a piece
-  // of THAT message going missing, and the send must stop rather than
-  // deliver a partial prompt. Refusals from before the submit are the
-  // user's informed choice to send without the refused file.
-  const attachmentRefusals = new Map<string, number>();
-  const noteAttachmentRefusal = (conversationId: string, count = 1) => {
-    if (count > 0) attachmentRefusals.set(conversationId, (attachmentRefusals.get(conversationId) ?? 0) + count);
-  };
-
-  // The prompt route bounds attachment names to 200 UTF-8 bytes and refuses
-  // blank ones; a name staged verbatim past either rule would upload fine
-  // and then fail every send. Bounded here — fallback for empty and
-  // whitespace-only, truncation on a code-point boundary — so the reference
-  // stays sendable.
-  const boundAttachmentName = (name: string): string => {
-    const trimmed = name.trim() === "" ? "image" : name;
-    const encoder = new TextEncoder();
-    if (encoder.encode(trimmed).length <= 200) return trimmed;
-    let bounded = trimmed;
-    while (bounded.length > 1 && encoder.encode(bounded).length > 200) bounded = bounded.slice(0, -1);
-    // UTF-16 slicing can leave a lone high surrogate at the cut; it would
-    // encode as U+FFFD garbage in the name.
-    const last = bounded.charCodeAt(bounded.length - 1);
-    if (last >= 0xd800 && last <= 0xdbff) bounded = bounded.slice(0, -1);
-    return bounded || "image";
-  };
-  const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
-
-  // The conversation attachments belong to. The projection may still be
-  // loading when the user attaches — the selection is already made, so the
-  // selected id serves until the snapshot installs. Without this, an attach
-  // during the load window silently did nothing.
   const activeConversationId = (): string | null =>
     projection?.conversationId ?? presentation.selectedId ?? null;
-
-  const currentPendingAttachments = (): PendingAttachment[] => {
-    const conversationId = activeConversationId();
-    return conversationId ? pendingAttachments.get(conversationId) ?? [] : [];
-  };
-
-  const currentUnavailableAttachments = (): MessageAttachment[] => {
-    const conversationId = activeConversationId();
-    return conversationId ? unavailableAttachments.get(conversationId) ?? [] : [];
-  };
-
-  const setPendingAttachments = (conversationId: string, entries: PendingAttachment[]) => {
-    if (entries.length > 0) pendingAttachments.set(conversationId, entries);
-    else pendingAttachments.delete(conversationId);
-  };
-
-  const setUnavailableAttachments = (conversationId: string, entries: MessageAttachment[]) => {
-    if (entries.length > 0) unavailableAttachments.set(conversationId, entries);
-    else unavailableAttachments.delete(conversationId);
-  };
-
-  const revokeAttachmentPreviews = (entries: readonly PendingAttachment[]) => {
-    for (const entry of entries) if (entry.previewUrl.startsWith("blob:")) URL.revokeObjectURL(entry.previewUrl);
-  };
-
-  const invalidateAttachmentStaging = (conversationId: string) => {
-    attachmentStagingGeneration.set(conversationId, (attachmentStagingGeneration.get(conversationId) ?? 0) + 1);
-  };
+  const composer = new Composer({
+    selected: activeConversationId, read: () => projection,
+    write: next => { projection = next; }, epoch: () => projectionEpoch,
+    cancelling: () => cancelling, declares,
+    commands: () => commands, commandsAvailable: () => commandInventoryAvailable,
+    agentId: () => contextAgentId,
+    refreshCommands: agentId => { void refreshBankedCommands(agentId); },
+    reloadCommands: async () => {
+      if (!contextAgentId) return false;
+      try {
+        commands = await api.commands(contextAgentId);
+        commandInventoryAvailable = true;
+        const cached = agentCatalogs.get(contextAgentId);
+        if (cached) agentCatalogs.set(contextAgentId, { ...cached, commands, commandInventoryAvailable: true });
+        return true;
+      } catch { return false; }
+    },
+    configuration: () => {
+      const configuration = displayedConfiguration();
+      const record = declares("models") && configuration.model ? models.find(model => sameModel(model.selection, configuration.model!)) : undefined;
+      const model = record?.selection ?? (declares("models") && declares("custom-model-id") ? configuration.model : undefined);
+      const variant = declares("variants") && configuration.variant && record?.variants?.includes(configuration.variant) ? configuration.variant : undefined;
+      const mode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
+      return { value: { model, mode, variant }, stage: stagedConfigurations.get(activeConversationId()!) };
+    },
+    consumeConfiguration: (id, stage) => {
+      if (stagedConfigurations.get(id) === stage) stagedConfigurations.delete(id);
+    },
+    imageSupport: () => attachmentModelSupport(),
+    refresh: (id, entry) => refreshSelectedConversation(id, entry),
+  }, api, {
+    read: id => activeConversationId() === id ? input.value : presentation.drafts[id] ?? "",
+    write: (id, text) => {
+      presentation.drafts[id] = text;
+      if (activeConversationId() === id && input.value !== text) { input.value = text; slashQueryActive = false; autosize(input); }
+      save();
+    },
+  }, {
+    changed: (change, id) => {
+      if (change === "draft") closeCommandMenu();
+      if (change === "attachments" || change === "submit" || (change === "edit" || change === "history" || change === "restored") && activeConversationId() === id) renderAttachments();
+      if (change === "accepted" && projection?.conversationId === id) renderConfiguration();
+      syncControls();
+      if (change === "submit") { parentScroll.latest(); latestButton.hidden = true; }
+      if (change === "submit" || change === "accepted" || change === "pending" || change === "projection" || change === "restored") scheduleRender(change === "submit" || change === "accepted");
+      if ((change === "edit" || change === "history") && activeConversationId() === id) input.focus();
+    },
+    error: setComposerError, note: (message, error) => noteComposer(message, error), announce,
+    accepted: accepted => {
+      if (!accepted.conversation) return;
+      conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
+      relabelConversationOption(accepted.conversation);
+      if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
+    },
+    heldByHold: () => queueDiscovery.accepted(true),
+  });
+  const currentPendingAttachments = () => composer.pendingAttachments();
+  const currentUnavailableAttachments = () => composer.unavailableAttachments();
+  const noteAttachmentRefusal = (id: string, count = 1) => composer.noteAttachmentRefusal(id, count);
 
   // Whether the displayed model can see images. No selection means the agent
   // chooses — unknown is not "no", so the intake stays open and the provider
@@ -2194,8 +2124,7 @@ export function initChat(api = new ChatApiClient()): void {
       remove.addEventListener("click", () => {
         const conversationId = activeConversationId();
         if (!conversationId) return;
-        URL.revokeObjectURL(entry.previewUrl);
-        setPendingAttachments(conversationId, currentPendingAttachments().filter(candidate => candidate !== entry));
+        composer.removeAttachment(entry);
         renderAttachments();
         syncControls();
       });
@@ -2221,7 +2150,7 @@ export function initChat(api = new ChatApiClient()): void {
       remove.addEventListener("click", () => {
         const conversationId = activeConversationId();
         if (!conversationId) return;
-        setUnavailableAttachments(conversationId, currentUnavailableAttachments().filter(candidate => candidate !== entry));
+        composer.removeAttachment(entry);
         renderAttachments();
         syncControls();
       });
@@ -2257,65 +2186,7 @@ export function initChat(api = new ChatApiClient()): void {
    * explains itself on the composer error line and touches neither the draft
    * nor the attachments already staged.
    */
-  const stageAttachmentFiles = async (files: File[]) => {
-    const conversationId = activeConversationId();
-    if (!conversationId || files.length === 0) return;
-    if (agent && !declares("attachments")) return;
-    const support = attachmentModelSupport();
-    if (!support.supported) {
-      setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
-      return;
-    }
-    const generation = attachmentStagingGeneration.get(conversationId) ?? 0;
-    const noteRefusal = () => noteAttachmentRefusal(conversationId);
-    const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
-      for (const file of files) {
-        if ((attachmentStagingGeneration.get(conversationId) ?? 0) !== generation) return;
-        if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
-          setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`, conversationId);
-          noteRefusal();
-          break;
-        }
-        // An empty type claim is unknown, not unsupported: browsers derive
-        // File.type from the filename and local files carry no guarantee, so
-        // the authoritative magic-byte sniff on the upload route decides.
-        // Only an explicit non-image claim is refused without the round trip.
-        if (file.type !== "" && !supportedAttachmentTypes.has(file.type.toLowerCase())) {
-          setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`, conversationId);
-          noteRefusal();
-          continue;
-        }
-        if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
-          setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`, conversationId);
-          noteRefusal();
-          continue;
-        }
-        try {
-          const stored = await api.uploadAttachment(conversationId, file);
-          if ((attachmentStagingGeneration.get(conversationId) ?? 0) !== generation) return;
-          // Keyed to the conversation the upload was staged for, which may no
-          // longer be the selected one by the time the round trip returns.
-          const entries = pendingAttachments.get(conversationId) ?? [];
-          entries.push({ id: stored.id, name: boundAttachmentName(file.name), mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
-          setPendingAttachments(conversationId, entries);
-        } catch (error) {
-          setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`, conversationId);
-          noteRefusal();
-        }
-      }
-    });
-    attachmentStaging.set(conversationId, task);
-    // The chain existing is what makes an empty draft sendable, so the send
-    // control resyncs now, not only when the upload lands.
-    syncControls();
-    try {
-      await task;
-    } finally {
-      if (attachmentStaging.get(conversationId) === task) attachmentStaging.delete(conversationId);
-    }
-    renderAttachments();
-    syncControls();
-  };
+  const stageAttachmentFiles = (files: File[]) => composer.attach(files);
 
   const openAttachmentViewer = (src: string, name: string) => {
     if (!imageViewer || !imageViewerImage) return;
@@ -2714,7 +2585,7 @@ export function initChat(api = new ChatApiClient()): void {
       status: conversationStatus,
       statusMessage: projection ? statusMessages.get(projection.conversationId) : undefined,
       cancelling,
-      submitting,
+      submitting: composer.submitting,
       backgroundDeclared: declares("background-tasks"),
       backgroundTasks: runningBackgroundTasks(projection?.items ?? []),
       scheduledDeclared: declares("scheduled-wakeups"),
@@ -2764,8 +2635,6 @@ export function initChat(api = new ChatApiClient()): void {
     }
   };
 
-  const sideAnswers = new Map<string, { question: string; text: string; failed?: boolean }>();
-  const sideGenerating = new Set<string>();
   // Use the same canonical occurrences as Workers, including foreground agents.
   // Unknown workers remain inspectable, but are not confirmed live work.
   const hasLiveWorkers = () => declares("background-blocking-work")
@@ -2795,16 +2664,16 @@ export function initChat(api = new ChatApiClient()): void {
     if (openAside && openAside.dataset.conversation !== activeId) minimiseAside("switch");
     const asideButton = document.querySelector<HTMLButtonElement>("#chat-aside-ready");
     if (asideButton) {
-      asideButton.hidden = !activeId || !sideAnswers.has(activeId) && !sideGenerating.has(activeId);
-      asideButton.disabled = !projection || Boolean(activeId && sideGenerating.has(activeId));
-      asideButton.textContent = activeId && sideGenerating.has(activeId) ? "Side answer…" : activeId && sideAnswers.get(activeId)?.failed ? "Side question failed" : "Side answer ready";
+      asideButton.hidden = !activeId || !composer.sideAnswer(activeId) && !composer.sideGenerating(activeId);
+      asideButton.disabled = !projection || Boolean(activeId && composer.sideGenerating(activeId));
+      asideButton.textContent = activeId && composer.sideGenerating(activeId) ? "Side answer…" : activeId && composer.sideAnswer(activeId)?.failed ? "Side question failed" : "Side answer ready";
     }
     const hasContent = Boolean(input.value.trim()) || currentPendingAttachments().length > 0
-      || (activeId !== null && attachmentStaging.has(activeId));
+      || (activeId !== null && composer.uploading(activeId));
     // Initial openings wait for a snapshot. After failure, keep that
     // conversation's private draft editable through explicit read retries.
     input.disabled = !projection && (!activeId || failedOpeningConversationId !== activeId);
-    send.disabled = submitting || cancelling || !projection || !hasContent;
+    send.disabled = composer.submitting || cancelling || !projection || !hasContent;
     if (stop) {
       stop.disabled = cancelling || !projection || !running;
       const workers = hasLiveWorkers();
@@ -2814,14 +2683,14 @@ export function initChat(api = new ChatApiClient()): void {
       stop.title = workers ? "Stop the parent and still-blocking work. Detached workers continue; their later notifications can wake the parent again." : "Stop";
     }
     if (actionFeedback) {
-      const note = activeId ? automaticNotes.text(activeId) : "";
+      const note = activeId ? composer.feedback(activeId) : "";
       actionFeedback.hidden = !note;
       if (actionFeedback.textContent !== note) actionFeedback.textContent = note;
     }
     syncSendDescription();
     syncConfigurationScope();
     sendGroup?.toggleAttribute("data-steering", declares("steering"));
-    configurationTrigger.disabled = submitting || !projection || catalogLoading;
+    configurationTrigger.disabled = composer.submitting || !projection || catalogLoading;
     configurationTrigger.toggleAttribute("aria-busy", catalogLoading);
     if (renameButton) renameButton.disabled = !projection || selectedConversationDeleted;
     syncHistoryControls();
@@ -2998,40 +2867,10 @@ export function initChat(api = new ChatApiClient()): void {
     });
   };
 
-  const settleUnconfirmedWithdrawal = (conversationId: string, messageId: string) => {
-    const pending = queueActionsInFlight.get(conversationId)?.get(messageId);
-    if (pending) pending.terminal = true;
-    const withdrawals = unconfirmedWithdrawals.get(conversationId);
-    const notice = withdrawals?.get(messageId);
-    if (notice) automaticNotes.record(conversationId, notice.operation, "not-needed");
-    withdrawals?.delete(messageId);
-    if (!withdrawals?.size) unconfirmedWithdrawals.delete(conversationId);
-  };
-  const protectUnconfirmedWithdrawals = (current: ChatProjection): ChatProjection => {
-    const withdrawals = unconfirmedWithdrawals.get(current.conversationId);
-    if (withdrawals) {
-      const queued = [...current.queued];
-      for (const [id, notice] of withdrawals) {
-        if (current.items.some(item => item.id === `message:${id}`) || withdrawalConverted(current, notice.entry)) settleUnconfirmedWithdrawal(current.conversationId, id);
-        else if (!queued.some(entry => entry.id === id)) queued.push(notice.entry);
-      }
-      return { ...current, queued: queued.map(entry => withdrawals.has(entry.id) ? { ...entry, unconfirmed: true as const } : entry) };
-    }
-    return current;
-  };
-  // A new held handle is positive conversion evidence only when the server
-  // links it to this submission. Missing/filtered history is not a receipt.
-  const withdrawalConverted = (current: ChatProjection, entry: QueuedMessage) => !!entry.submissionId
-    && !current.queued.some(candidate => candidate.id === entry.id)
-    && current.queued.some(candidate => candidate.submissionId === entry.submissionId && candidate.delivery === "queue" && !candidate.unconfirmed);
   const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number) => {
-    projection = protectUnconfirmedWithdrawals(projectionFromSnapshot(snapshot, acceptedDrafts));
-    const unknown = projection.acceptedDrafts.filter(draft => draft.unconfirmed);
-    if (unknown.length) boundedSet(unconfirmedInputs, snapshot.conversation.id, unknown.slice(-20), 100);
-    else unconfirmedInputs.delete(snapshot.conversation.id);
+    projection = composer.acceptSnapshot(snapshot, acceptedDrafts);
     const carried = removedRows.get(snapshot.conversation.id);
     if (carried) projection = { ...projection, removedIds: carried };
-    historyRefreshRequired.delete(snapshot.conversation.id);
     projectionEpoch += 1;
     conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
     renderConfiguration();
@@ -3062,23 +2901,10 @@ export function initChat(api = new ChatApiClient()): void {
           return;
         }
         projection = result.projection;
+        composer.observe(event, result.outcome === "applied");
         if (projection.removedIds) removedRows.set(conversationId, projection.removedIds);
         if (event.type === "conversation.configuration") renderConfiguration();
         if (event.type === "conversation.status") {
-          const reloads = pendingReloads.get(conversationId);
-          if (reloads && (event.status === "completed" || event.status === "failed" || event.status === "interrupted")) {
-            // The turn that ended is the oldest tracked reload no longer
-            // waiting in the queue; one not yet named by its acceptance
-            // cannot be told apart, so it re-reads and stays tracked.
-            const queued = new Set((projection?.queued ?? []).map(entry => entry.id));
-            const index = reloads.findIndex(entry => entry.messageId === undefined || !queued.has(entry.messageId));
-            const reload = index < 0 ? undefined : reloads[index];
-            if (reload) {
-              if (reload.messageId !== undefined) reloads.splice(index, 1);
-              if (reloads.length === 0) pendingReloads.delete(conversationId);
-              if (event.status === "completed") void refreshBankedCommands(reload.agentId);
-            }
-          }
           if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
           else if (isLiveConversationStatus(event.status)) setComposerError(null);
           statusMessages.set(conversationId, event.message);
@@ -3090,16 +2916,13 @@ export function initChat(api = new ChatApiClient()): void {
           if (renameInput && renameForm && !renameForm.hidden && document.activeElement !== renameInput) renameInput.value = event.conversation.title;
         }
         if (result.outcome === "applied") {
-          if (event.type === "conversation.queue" && (event.change.kind === "removed" || event.change.kind === "delivered")) settleUnconfirmedWithdrawal(conversationId, event.change.messageId);
-          if (event.type === "conversation.queue" || event.type === "item.upsert") projection = protectUnconfirmedWithdrawals(projection);
           announce("");
           scheduleRender(true, true, event.type === "item.text_delta" || (event.type === "item.upsert" && event.item.type === "assistant_message" && event.item.completedAt === undefined && isLiveConversationStatus(projection.status)));
         }
       },
       resync: () => {
         if (token !== selectionGeneration) return;
-        if (historyMutations.has(conversationId)) pendingHistoryResyncs.add(conversationId);
-        else recoverSelectedConversation(conversationId);
+        if (!composer.historyResync(conversationId)) recoverSelectedConversation(conversationId);
       },
       error: error => { if (token === selectionGeneration) interruptions.report("conversation", error); },
       // Transport is healthy again. Cursor replay and `resync` still own
@@ -3116,14 +2939,7 @@ export function initChat(api = new ChatApiClient()): void {
       return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id, pendingEntry); }, async signal => {
         let snapshot = await api.snapshot(id, undefined, signal);
         if (signal.aborted || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
-        if (pendingEntry) {
-          // An omitted queue is legal on older snapshots, but is not evidence
-          // that a refused action's entry departed. Keep the current projection.
-          if (snapshot.conversation.id !== id || !Array.isArray(snapshot.queued)) throw new Error("Pending status check did not include the conversation queue.");
-          // A terminal event can overtake this read. Its positive evidence wins
-          // over an older snapshot while the action still owns its fence.
-          if (pendingEntry.action.terminal) snapshot = { ...snapshot, queued: snapshot.queued.filter(entry => entry.id !== pendingEntry.id) };
-        }
+        snapshot = composer.checkedSnapshot(id, snapshot, pendingEntry);
         const previousStream = stream;
         installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
         if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
@@ -3142,7 +2958,7 @@ export function initChat(api = new ChatApiClient()): void {
     supersedeStartupSelection();
     hasSelectedConversation = true;
     if (failedOpeningConversationId !== id) failedOpeningConversationId = null;
-    if (projection?.conversationId === id && stream && !historyRefreshRequired.has(id) && !selectedConversationDeleted) return true;
+    if (projection?.conversationId === id && stream && !composer.needsHistoryRefresh(id) && !selectedConversationDeleted) return true;
     // Navigation ends the outgoing hold before a fast snapshot can arrive
     // ahead of its clearing paint. Only an in-place refresh may renew it;
     // otherwise removing A's field could resume A's follow intent over B.
@@ -3161,7 +2977,7 @@ export function initChat(api = new ChatApiClient()): void {
     unestablishedStartup = openingStartup ? { conversationId: id, generation: token } : null;
     stream?.close();
     stream = null;
-    const acceptedDrafts = projection?.conversationId === id ? projection.acceptedDrafts : unconfirmedInputs.get(id) ?? [];
+    const acceptedDrafts = projection?.conversationId === id ? projection.acceptedDrafts : composer.acceptedDrafts(id);
     if (projection) {
       presentation.drafts[projection.conversationId] = input.value;
       const currentAnchor = anchor.currentAnchor();
@@ -3615,90 +3431,6 @@ export function initChat(api = new ChatApiClient()): void {
     }
   });
 
-  // A pending entry's actions (opencode-v2-steering D10). The server answers
-  // every one with a queue event that converges every client; nothing is
-  // changed optimistically. An ordinary 409 may only refuse the action while
-  // the server still holds the entry: reread before reconciling its ownership.
-  // Only positive already-delivered evidence removes it without that read.
-  const checkUnconfirmedAction = (conversationId: string, operationId: string, action: string, text: string, subject = "acceptance") => {
-    automaticNotes.unconfirmed(conversationId, operationId, action, text, subject);
-    syncControls();
-    return refreshSelectedConversation(conversationId).then(available => {
-      automaticNotes.checked(conversationId, operationId, available);
-      syncControls();
-    });
-  };
-  const queueActionFailed = async (error: unknown, conversationId: string, messageId: string, steerAction: boolean, withdrawalAction: boolean, operationId: string, action: string, text: string, entry: QueuedMessage, pending: PendingQueueAction) => {
-    if (error instanceof ChatTransportError && (error.code === STEER_WITHDRAWAL_UNCONFIRMED_CODE
-      || withdrawalAction && (error.status === undefined || error.status >= 500 || error.code === "operation_outcome_unknown"))) {
-      if (pending.terminal) return;
-      if (projection?.conversationId === conversationId && withdrawalConverted(projection, entry)) return;
-      const withdrawals = unconfirmedWithdrawals.get(conversationId) ?? new Map<string, { operation: string; entry: QueuedMessage }>();
-      const previous = withdrawals.get(messageId);
-      if (previous) automaticNotes.record(conversationId, previous.operation, "not-needed");
-      boundedSet(withdrawals, messageId, { operation: operationId, entry }, 20);
-      boundedSet(unconfirmedWithdrawals, conversationId, withdrawals, 100);
-      if (projection?.conversationId === conversationId) {
-        projection = { ...projection, queued: projection.queued.map(entry => entry.id === messageId ? { ...entry, unconfirmed: true as const } : entry) };
-        scheduleRender();
-      }
-      return checkUnconfirmedAction(conversationId, operationId, action, text, "withdrawal");
-    }
-    if (error instanceof ChatTransportError && (error.code === "operation_outcome_unknown" || steerAction && (error.status === undefined || error.status >= 500)) || error instanceof ChatConnectionInterruptedError) {
-      return checkUnconfirmedAction(conversationId, operationId, action, text);
-    }
-    if (error instanceof ChatTransportError && error.status === 409) {
-      if (error.code === STEER_ALREADY_DELIVERED_CODE) {
-        settleUnconfirmedWithdrawal(conversationId, messageId);
-        if (projection?.conversationId === conversationId) {
-          projection = protectUnconfirmedWithdrawals(dropQueuedMessage(projection, messageId));
-          scheduleRender();
-        }
-        // Streamed delivery can land after this response and clear the
-        // transient announcement. Keep the refusal visible at the composer.
-        setComposerError(TOO_LATE, conversationId);
-        if (activeConversationId() === conversationId) noteComposer(TOO_LATE);
-        return;
-      }
-      if (pending.terminal) return;
-      const available = await refreshSelectedConversation(conversationId, { id: messageId, action: pending });
-      const message = `${messageOf(error)}${available ? "" : " Pending status could not be checked; no message was resent."}`;
-      setComposerError(message, conversationId);
-      if (activeConversationId() === conversationId) announce(message, true);
-      return;
-    }
-    if (activeConversationId() === conversationId) announce(messageOf(error), true);
-  };
-  // Edit: the entry leaves the dock first — removal or withdrawal — and the
-  // composer takes its text and attachments only once that succeeded, so a
-  // failed withdrawal ("already delivered") leaves the draft untouched.
-  const loadIntoComposer = (conversationId: string, entry: QueuedMessage) => {
-    const available: PendingAttachment[] = [];
-    const unavailable: MessageAttachment[] = [];
-    for (const attachment of entry.attachments ?? []) {
-      if (attachment.id) available.push({ ...attachment, id: attachment.id, previewUrl: api.attachmentUrl(attachment.id) });
-      else unavailable.push(attachment);
-    }
-    if (activeConversationId() === conversationId) {
-      setPendingAttachments(conversationId, [...currentPendingAttachments(), ...available]);
-      setUnavailableAttachments(conversationId, [...(unavailableAttachments.get(conversationId) ?? []), ...unavailable]);
-      // The returned text leads; what was typed meanwhile follows as its own line.
-      if (entry.text) input.value = input.value.trim() ? `${entry.text}\n${input.value}` : entry.text;
-      slashQueryActive = false;
-      autosize(input);
-      presentation.drafts[conversationId] = input.value;
-      save();
-      renderAttachments();
-      syncControls();
-      input.focus();
-    } else {
-      setPendingAttachments(conversationId, [...(pendingAttachments.get(conversationId) ?? []), ...available]);
-      setUnavailableAttachments(conversationId, [...(unavailableAttachments.get(conversationId) ?? []), ...unavailable]);
-      const edits = presentation.drafts[conversationId];
-      presentation.drafts[conversationId] = edits?.trim() && entry.text ? `${entry.text}\n${edits}` : entry.text || edits || "";
-      save();
-    }
-  };
   // Keep the focused touch composer's chrome in place until activation.
   // Cancel mousedown's focus default, not pointerdown: WebKit suppresses
   // the compatibility click when a touch pointerdown is cancelled.
@@ -3723,117 +3455,25 @@ export function initChat(api = new ChatApiClient()): void {
       scheduleRender();
       return;
     }
-    const discardTarget = (event.target as Element).closest<HTMLButtonElement>("[data-queue-discard]");
-    if (discardTarget && projection) {
-      const conversationId = projection.conversationId;
-      const messageId = discardTarget.dataset.queueDiscard!;
-      const eligible = (entry: QueuedMessage | undefined) => entry?.unconfirmed === true
-        && !!entry.admissionUncertaintyId && !unconfirmedWithdrawals.get(conversationId)?.has(messageId);
-      const entry = projection.queued.find(candidate => candidate.id === messageId);
-      if (!eligible(entry) || discardTarget.disabled || queueActionsInFlight.get(conversationId)?.has(messageId)) return;
-      const uncertaintyId = entry!.admissionUncertaintyId!;
-      if (!await confirmChatAction("Discard local record?", "Delivery of this message is unconfirmed. Removing Uatu’s local record does not cancel or resend it; the original may still arrive. Other messages will stay queued until you choose Send now or submit a new message, or a later normal idle transition occurs.", "Discard local record", discardTarget)) return;
-      const current = projection?.conversationId === conversationId ? projection.queued.find(candidate => candidate.id === messageId) : undefined;
-      if (!eligible(current) || current!.admissionUncertaintyId !== uncertaintyId || queueActionsInFlight.get(conversationId)?.has(messageId)) return;
-      const inFlight = queueActionsInFlight.get(conversationId) ?? new Map<string, PendingQueueAction>();
-      const pending: PendingQueueAction = {};
-      inFlight.set(messageId, pending);
-      queueActionsInFlight.set(conversationId, inFlight);
-      discardTarget.disabled = true;
-      scheduleRender();
-      const operationId = newRequestId();
+    const target = (event.target as Element).closest<HTMLButtonElement>("[data-queue-remove], [data-queue-edit], [data-queue-steer], [data-queue-queue], [data-queue-send-now], [data-queue-discard]");
+    if (!target || target.disabled || !projection) return;
+    const id = projection.conversationId;
+    const { queueRemove, queueEdit, queueSteer, queueQueue, queueSendNow, queueDiscard } = target.dataset;
+    const messageId = queueRemove ?? queueEdit ?? queueSteer ?? queueQueue ?? queueSendNow ?? queueDiscard!;
+    const action = queueRemove !== undefined ? "remove" : queueEdit !== undefined ? "edit" : queueSteer !== undefined ? "steer" : queueQueue !== undefined ? "queue" : queueSendNow !== undefined ? "send-now" : "discard";
+    const result = composer.pending(messageId, action);
+    if (!result) return;
+    if ("confirm" in result) {
+      if (!await confirmChatAction(result.title, result.explanation, result.acceptLabel, target)) return;
+      target.disabled = true;
       try {
-        await api.discardUnconfirmedSteer(conversationId, messageId, operationId, uncertaintyId);
-        // A local-record acknowledgement cannot settle the original admission.
-        // Retain this operation's bounded, page-local notice even if selection
-        // changed; stream/snapshot paints and unrelated successes are not receipts.
-        const message = `Delivery remains unconfirmed; the original may still arrive. ${actionOrigin("Local record discarded", entry!.text)}. Discard did not cancel or resend it. Other messages were left queued.`;
-        automaticNotes.unconfirmed(conversationId, `discard:${operationId}`, message);
-        if (projection?.conversationId !== conversationId) return;
-        const remaining = projection.queued.find(candidate => candidate.id === messageId);
-        if (remaining?.admissionUncertaintyId === uncertaintyId && eligible(remaining)) projection = dropQueuedMessage(projection, messageId);
-        scheduleRender();
-        // This acknowledgement only removes a local row. Keep the original
-        // unknown receipt and every other draft/queue entry untouched.
-        syncControls();
-        if (document.activeElement === discardTarget || document.activeElement === document.body) input.focus({ preventScroll: true });
-      } catch (error) {
-        await refreshSelectedConversation(conversationId);
-        if (activeConversationId() === conversationId) announce(`${messageOf(error)} Delivery remains unconfirmed; no message was cancelled or resent.`, true);
-      } finally {
-        inFlight.delete(messageId);
-        if (!inFlight.size) queueActionsInFlight.delete(conversationId);
-        scheduleRender();
-      }
-      return;
+        const completed = await result.confirm();
+        if (completed && action === "discard" && activeConversationId() === id && (document.activeElement === target || document.activeElement === document.body)) input.focus({ preventScroll: true });
+      } finally { target.disabled = false; scheduleRender(); }
+    } else {
+      target.disabled = true;
+      try { await result; } finally { target.disabled = false; scheduleRender(); }
     }
-    const target = (event.target as Element).closest<HTMLButtonElement>("[data-queue-remove], [data-queue-edit], [data-queue-steer], [data-queue-queue], [data-queue-send-now]");
-    if (!target || !projection) return;
-    const conversationId = projection.conversationId;
-    const { queueRemove, queueEdit, queueSteer, queueQueue, queueSendNow } = target.dataset;
-    const steerAction = declares("steering") && (queueSteer !== undefined || queueSendNow !== undefined);
-    const messageId = queueRemove ?? queueEdit ?? queueSteer ?? queueQueue ?? queueSendNow!;
-    const entry = projection.queued.find(candidate => candidate.id === messageId);
-    if (!entry) return;
-    const withdrawalAction = entry.delivery === "steer" && (queueRemove !== undefined || queueEdit !== undefined || queueQueue !== undefined);
-    const withdrawalUnknown = unconfirmedWithdrawals.get(conversationId)?.has(messageId);
-    if (target.disabled || queueActionsInFlight.get(conversationId)?.has(messageId)) return;
-    if ((entry?.unconfirmed || withdrawalUnknown) && !(queueRemove !== undefined && withdrawalUnknown)) return;
-    const pausedSteers = projection.queued.filter(candidate => candidate.delivery === "steer" && candidate.paused).length;
-    if ((queueSendNow !== undefined || queueSteer !== undefined) && entry?.delivery === "queue" && pausedSteers
-      && !await confirmChatAction("Send queued message now?", `This also sends all ${pausedSteers} paused steer${pausedSteers === 1 ? "" : "s"}. Other queued messages stay held.`, "Send now", target)) return;
-    if (projection?.conversationId !== conversationId || !projection.queued.some(candidate => candidate.id === messageId)) return;
-    // A confirmation dialog yields to other actions and stream updates.
-    // Recheck the entry-wide lock and uncertainty after returning from it.
-    const currentEntry = projection.queued.find(candidate => candidate.id === messageId)!;
-    const currentWithdrawal = unconfirmedWithdrawals.get(conversationId)?.has(messageId);
-    if (queueActionsInFlight.get(conversationId)?.has(messageId)
-      || (currentEntry.unconfirmed || currentWithdrawal) && !(queueRemove !== undefined && currentWithdrawal)) return;
-    target.disabled = true;
-    const inFlight = queueActionsInFlight.get(conversationId) ?? new Map<string, PendingQueueAction>();
-    const pendingAction: PendingQueueAction = {};
-    inFlight.set(messageId, pendingAction);
-    // Do not evict an outstanding action's fence. Finally releases it when
-    // the request finishes, rather than retaining terminal IDs globally.
-    queueActionsInFlight.set(conversationId, inFlight);
-    scheduleRender();
-    const operationId = newRequestId();
-    const operation: Promise<unknown> = queueRemove !== undefined
-      ? api.removeQueued(conversationId, messageId, operationId)
-      : queueEdit !== undefined
-        ? api.removeQueued(conversationId, messageId, operationId).then(() => {
-          // An uncertainty response from another pending action can overtake
-          // this callback. Withdrawal retry never implicitly edits/resubmits.
-          if (unconfirmedWithdrawals.get(conversationId)?.has(messageId)) throw new ChatTransportError("Withdrawal is still unconfirmed", 409, STEER_WITHDRAWAL_UNCONFIRMED_CODE);
-          if (entry) loadIntoComposer(conversationId, entry);
-        })
-        : queueSteer !== undefined
-          ? api.changeDelivery(conversationId, messageId, operationId, "steer")
-          : queueQueue !== undefined
-            ? api.changeDelivery(conversationId, messageId, operationId, "queue")
-            : api.sendNow(conversationId, messageId, operationId);
-    void operation
-      .then(result => {
-        if (queueRemove !== undefined && withdrawalUnknown && result && typeof result === "object" && "removed" in result && result.removed === true) {
-          settleUnconfirmedWithdrawal(conversationId, messageId);
-          if (projection?.conversationId === conversationId) {
-            projection = dropQueuedMessage(projection, messageId);
-            scheduleRender();
-          }
-        }
-        if (result && typeof result === "object") recordAutomaticBackground(conversationId, operationId, result as AutomaticBackgroundFeedback,
-          queueSteer !== undefined ? "Queue → Steer" : queueSendNow !== undefined ? "Send now" : "Pending action", entry?.text ?? "");
-        if (activeConversationId() !== conversationId) return;
-        noteComposer(null);
-      })
-      .catch(error => queueActionFailed(error, conversationId, messageId, steerAction, withdrawalAction, operationId,
-        queueSteer !== undefined ? "Queue → Steer" : queueSendNow !== undefined ? "Send now" : queueQueue !== undefined ? "Steer → Queue" : queueEdit !== undefined ? "Edit pending message" : "Remove pending message", entry.text, entry, pendingAction))
-      .finally(() => {
-        target.disabled = false;
-        inFlight.delete(messageId);
-        if (!inFlight.size) queueActionsInFlight.delete(conversationId);
-        scheduleRender();
-      });
   });
 
   function syncQueueOverflow() {
@@ -3983,7 +3623,7 @@ export function initChat(api = new ChatApiClient()): void {
     const discovery = document.querySelector<HTMLElement>("#chat-queue-discovery");
     if (discovery) discovery.hidden = !queueDiscovery.visible(!send?.disabled && isLiveConversationStatus(projection?.status)
       && sendSupportsHold() && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0
-      && !attachmentStaging.has(activeConversationId() ?? "") && Boolean(input?.value.trim()));
+      && !composer.uploading(activeConversationId() ?? "") && Boolean(input?.value.trim()));
     const keys = sendSupportsHold() && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0
       ? `${touch ? "Ctrl+Enter" : "Enter"}: Steer; Alt+Enter: Queue while working`
       : `${touch ? "Ctrl+Enter" : "Enter"} sends`;
@@ -3996,7 +3636,7 @@ export function initChat(api = new ChatApiClient()): void {
 
   revertedItems?.addEventListener("click", event => {
     const target = (event.target as Element).closest<HTMLButtonElement>("[data-history-restore]");
-    if (!target || !projection || submitting || historyMutations.has(projection.conversationId)) return;
+    if (!target || !projection || composer.submitting || composer.historyBusy(projection.conversationId)) return;
     const messageId = target.dataset.historyRestore;
     if (!messageId) return;
     target.disabled = true;
@@ -4161,7 +3801,7 @@ export function initChat(api = new ChatApiClient()): void {
       const item = source.items.find(candidate => candidate.id === itemElement?.dataset.chatItemId);
       if (!item || item.type === "assistant_message") return;
       if (item.type === "user_message") {
-        if (target.dataset.historyRevert === undefined || source !== projection || submitting || historyMutations.has(source.conversationId)) return;
+        if (target.dataset.historyRevert === undefined || source !== projection || composer.submitting || composer.historyBusy(source.conversationId)) return;
         const button = target as HTMLButtonElement;
         button.disabled = true;
         void runHistoryOperation("revert", source.conversationId, item.id)
@@ -4836,7 +4476,7 @@ export function initChat(api = new ChatApiClient()): void {
   input.addEventListener("input", () => {
     autosize(input);
     const id = activeConversationId();
-    if (id) { presentation.drafts[id] = input.value; save(); }
+    if (id) composer.edit(input.value);
     syncControls();
     renderCommandMenu();
   });
@@ -4942,10 +4582,10 @@ export function initChat(api = new ChatApiClient()): void {
     form.requestSubmit();
   };
   const hold = new HoldToQueue(() => {
-    if (!projection || send.disabled || submitting || cancelling || document.hidden || !document.hasFocus()) return null;
+    if (!projection || send.disabled || composer.submitting || cancelling || document.hidden || !document.hasFocus()) return null;
     const box = send.getBoundingClientRect();
     return JSON.stringify([selectionGeneration, projection.conversationId, input.value,
-      currentPendingAttachments(), attachmentStaging.has(projection.conversationId), displayedConfiguration(),
+      currentPendingAttachments(), composer.uploading(projection.conversationId), displayedConfiguration(),
       box.left, box.top, box.width, box.height]);
   }, delivery => { requestedByHold = delivery === "queue"; submitDelivery(delivery); });
   const clearHoldVisual = () => {
@@ -5108,161 +4748,7 @@ export function initChat(api = new ChatApiClient()): void {
     finally { cancelling = false; syncControls(); }
   });
 
-  const installRestoredDraft = (conversationId: string, draft: RestoredDraft | undefined, updateVisible: boolean) => {
-    const restored = draft ?? { text: "" };
-    const available: PendingAttachment[] = [];
-    const unavailable: MessageAttachment[] = [];
-    for (const attachment of restored.attachments ?? []) {
-      if (attachment.id) {
-        available.push({ ...attachment, id: attachment.id, previewUrl: api.attachmentUrl(attachment.id) });
-      } else {
-        unavailable.push(attachment);
-      }
-    }
-    revokeAttachmentPreviews(pendingAttachments.get(conversationId) ?? []);
-    setPendingAttachments(conversationId, available);
-    setUnavailableAttachments(conversationId, unavailable);
-    presentation.drafts[conversationId] = restored.text;
-    save();
-    if (!updateVisible) return unavailable.length;
-    input.value = restored.text;
-    slashQueryActive = false;
-    autosize(input);
-    renderAttachments();
-    syncControls();
-    input.focus();
-    return unavailable.length;
-  };
-
-  const historyLabel = (operation: HistoryOperation) => operation[0]!.toUpperCase() + operation.slice(1);
-  const historyRetryInstruction = (operation: HistoryOperation) => operation === "undo" || operation === "redo"
-    ? `Submit /${operation} again`
-    : `Choose ${historyLabel(operation)} message again`;
-  const historyPreservedState = (operation: HistoryOperation) => operation === "undo" || operation === "redo"
-    ? "command and attachments"
-    : "composer and attachments";
-  const historyProgressLabel = (operation: HistoryOperation) => operation === "restore"
-    ? "Restoring..."
-    : `${historyLabel(operation)}ing...`;
-
-  const installChangedHistoryResult = async (operation: HistoryOperation, conversationId: string, result: ReversibleHistoryResult): Promise<boolean> => {
-    const label = historyLabel(operation);
-    retryRequests.delete(conversationId);
-    invalidateAttachmentStaging(conversationId);
-    if (activeConversationId() !== conversationId) {
-      const unavailable = installRestoredDraft(conversationId, result.restoredDraft, false);
-      if (unavailable > 0) {
-        setComposerError(`${unavailable} restored ${unavailable === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.`, conversationId);
-      }
-      historyRetries.delete(conversationId);
-      noteComposer(null);
-      return true;
-    }
-
-    const refreshed = await refreshSelectedConversation(conversationId);
-    pendingHistoryResyncs.delete(conversationId);
-    if (activeConversationId() !== conversationId) {
-      installRestoredDraft(conversationId, result.restoredDraft, false);
-      historyRetries.delete(conversationId);
-      noteComposer(null);
-      return true;
-    }
-    if (!refreshed) {
-      historyRefreshRequired.add(conversationId);
-      const message = `${label} completed, but the conversation could not be refreshed. ${historyRetryInstruction(operation)} to reconnect; the ${historyPreservedState(operation)} were kept.`;
-      setComposerError(message, conversationId);
-      noteComposer(message);
-      return false;
-    }
-
-    const unavailable = installRestoredDraft(conversationId, result.restoredDraft, true);
-    const unavailableMessage = unavailable > 0
-      ? `${unavailable} restored ${unavailable === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.`
-      : null;
-    historyRetries.delete(conversationId);
-    setComposerError(unavailableMessage, conversationId);
-    // Steers the agent still holds deliver together with the replacement,
-    // oldest first (opencode-v2-steering D6): the confirmation names them.
-    const pendingSteers = operation === "undo" && declares("steering") && projection?.conversationId === conversationId
-      ? projection.queued.filter(entry => entry.delivery === "steer")
-      : [];
-    const steerNote = pendingSteerReplacementNote(pendingSteers);
-    noteComposer(`${unavailableMessage ? `${label} complete. ${unavailableMessage}` : `${label} complete`}${steerNote ? ` ${steerNote}` : ""}`);
-    return true;
-  };
-
-  const runHistoryOperation = async (operation: HistoryOperation, conversationId: string, messageId?: string) => {
-    const label = historyLabel(operation);
-    submitting = true;
-    historyMutations.add(conversationId);
-    setComposerError(null, conversationId);
-    noteComposer(historyProgressLabel(operation));
-    closeCommandMenu();
-    syncControls();
-    try {
-      const pending = historyRetries.get(conversationId);
-      if (pending?.result && pending.operation === operation && pending.messageId === messageId) {
-        await installChangedHistoryResult(pending.operation, conversationId, pending.result);
-        return;
-      }
-      if (historyRefreshRequired.has(conversationId)) {
-        const refreshed = await refreshSelectedConversation(conversationId);
-        if (!refreshed) {
-          const message = `The conversation could not be refreshed. ${historyRetryInstruction(operation)} to retry; the ${historyPreservedState(operation)} were kept.`;
-          setComposerError(message, conversationId);
-          noteComposer(message);
-          return;
-        }
-      }
-
-      const retry: { operation: HistoryOperation; messageId?: string; requestId: string; result?: ReversibleHistoryResult } =
-        pending?.operation === operation && pending.messageId === messageId
-          ? pending
-          : { operation, ...(messageId ? { messageId } : {}), requestId: newRequestId() };
-      historyRetries.set(conversationId, retry);
-      const result = operation === "undo" || operation === "redo"
-        ? await api[operation](conversationId, retry.requestId)
-        : await api[operation](conversationId, messageId!, retry.requestId);
-      if (result.outcome !== "changed") {
-        historyRetries.delete(conversationId);
-        if (pendingHistoryResyncs.delete(conversationId)) {
-          const refreshed = await refreshSelectedConversation(conversationId);
-          if (!refreshed && activeConversationId() === conversationId) {
-            historyRefreshRequired.add(conversationId);
-            const message = `${result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo"}, but the conversation could not be refreshed. Submit /${operation} again to reconnect.`;
-            setComposerError(message, conversationId);
-            noteComposer(message);
-            return;
-          }
-        }
-        if (activeConversationId() === conversationId) {
-          noteComposer(result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo");
-        } else {
-          noteComposer(null);
-        }
-        return;
-      }
-      retry.result = result;
-      await installChangedHistoryResult(operation, conversationId, result);
-    } catch (error) {
-      const preserved = historyPreservedState(operation);
-      let message = `${label} failed: ${messageOf(error)}. ${preserved[0]!.toUpperCase()}${preserved.slice(1)} kept.`;
-      if (pendingHistoryResyncs.delete(conversationId)) {
-        const refreshed = await refreshSelectedConversation(conversationId);
-        if (!refreshed && activeConversationId() === conversationId) {
-          historyRefreshRequired.add(conversationId);
-          message += ` The conversation also needs to reconnect; ${historyRetryInstruction(operation)} to retry.`;
-        }
-      }
-      setComposerError(message, conversationId);
-      if (activeConversationId() === conversationId) noteComposer(message);
-      else noteComposer(null);
-    } finally {
-      historyMutations.delete(conversationId);
-      submitting = false;
-      syncControls();
-    }
-  };
+  const runHistoryOperation = (operation: HistoryOperation, conversationId: string, messageId?: string) => composer.history(operation, conversationId, messageId);
 
   const asideButton = document.querySelector<HTMLButtonElement>("#chat-aside-ready");
   const asideDialog = document.querySelector<HTMLDialogElement>("#chat-aside-dialog");
@@ -5300,7 +4786,7 @@ export function initChat(api = new ChatApiClient()): void {
   asideButton?.addEventListener("mousedown", keepTouchComposerFocus);
   asideButton?.addEventListener("click", () => {
     const id = activeConversationId();
-    const answer = id ? sideAnswers.get(id) : undefined;
+    const answer = id ? composer.sideAnswer(id) : undefined;
     if (!projection || !answer || !asideDialog) return;
     asideDialog.querySelector("#chat-aside-question")!.textContent = answer.question;
     const content = asideDialog.querySelector<HTMLElement>("#chat-aside-answer")!;
@@ -5350,371 +4836,7 @@ export function initChat(api = new ChatApiClient()): void {
     const submissionByHold = requestedByHold;
     requestedByHold = false;
     requestedDelivery = undefined;
-    if (!projection) {
-      // The composer owns this transient notice; the conversation status
-      // may still own an interruption message and its Reconnect control.
-      noteComposer("Conversation history is not loaded. Nothing was sent; your draft was kept. Use Retry read or select another conversation.", true);
-      return;
-    }
-    if (submitting || cancelling) return;
-    const aside = sideQuestionOperation(input.value);
-    if (aside) {
-      const conversationId = projection.conversationId;
-      const question = aside.question;
-      if (!declares("side-generation")) { setComposerError("/btw side answers are not supported by this agent. Nothing was sent."); return; }
-      if (!question) { setComposerError("Add a side question after /btw. Nothing was sent."); return; }
-      if (currentPendingAttachments().length || attachmentStaging.has(conversationId)) { setComposerError("/btw uses existing conversation context only. Remove pending images before asking a side question."); return; }
-      if (sideGenerating.has(conversationId)) { setComposerError("A side answer is already in progress for this conversation."); return; }
-      const captured = input.value;
-      sideGenerating.add(conversationId);
-      input.value = "";
-      presentation.drafts[conversationId] = "";
-      save(); autosize(input); closeCommandMenu(); setComposerError(null); syncControls();
-      try {
-        const answer = await api.generate(conversationId, newRequestId(), question);
-        boundedSet(sideAnswers, conversationId, { question, text: answer.text }, 200);
-      } catch (error) {
-        // No automatic replay; preserve newer edits and the original question.
-        const newer = activeConversationId() === conversationId ? input.value : presentation.drafts[conversationId] ?? "";
-        const failure = `Side answer failed: ${messageOf(error)}. No conversation message was sent. No automatic retry was made.`;
-        boundedSet(sideAnswers, conversationId, { question, text: failure, failed: true }, 200);
-        presentation.drafts[conversationId] = newer ? newer : captured;
-        if (activeConversationId() === conversationId) { input.value = presentation.drafts[conversationId]!; autosize(input); }
-        save(); setComposerError(failure, conversationId);
-      } finally { sideGenerating.delete(conversationId); syncControls(); }
-      return;
-    }
-    const operation = localHistoryOperation(input.value, commands, declares("reversible-history"));
-    if (operation) {
-      const conversationId = projection.conversationId;
-      if (!commandInventoryAvailable) {
-        submitting = true;
-        noteComposer("Reloading commands...");
-        syncControls();
-        const loaded = await (async () => {
-          if (!contextAgentId) return false;
-          try {
-            commands = await api.commands(contextAgentId);
-            commandInventoryAvailable = true;
-            const cached = agentCatalogs.get(contextAgentId);
-            if (cached) agentCatalogs.set(contextAgentId, { ...cached, commands, commandInventoryAvailable: true });
-            return true;
-          } catch {
-            return false;
-          }
-        })();
-        submitting = false;
-        if (!loaded) {
-          const message = `Chat commands could not be loaded. Submit /${operation} again to retry; the command and attachments were kept.`;
-          setComposerError(message, conversationId);
-          noteComposer(activeConversationId() === conversationId ? message : null);
-          syncControls();
-          return;
-        }
-        if (activeConversationId() !== conversationId) {
-          syncControls();
-          return;
-        }
-      }
-      await runHistoryOperation(operation, conversationId);
-      return;
-    }
-    // In-flight staging is prospective content: an image-only submit during
-    // its own upload waits for the drain below rather than being refused.
-    if (!input.value.trim() && currentPendingAttachments().length === 0 && !attachmentStaging.has(projection.conversationId)) return;
-    const conversationId = projection.conversationId;
-    const text = input.value;
-    // Restoration must not pick between the failed message and edits made
-    // while it was in flight — both are the user's words. The captured
-    // text leads, the newer edits follow as their own line.
-    const restoreDraftText = () => {
-      if (!text.trim()) return;
-      input.value = input.value.trim() ? `${text}\n${input.value}` : text;
-      slashQueryActive = false;
-      autosize(input);
-    };
-    // The same rule for a submission that ends while another conversation is
-    // selected: the switch already stored any newer edits as this
-    // conversation's draft, and the captured text — never sent — must lead
-    // rather than being discarded because the slot is occupied.
-    const mergeStoredDraft = () => {
-      if (!text.trim()) return;
-      const edits = presentation.drafts[conversationId];
-      presentation.drafts[conversationId] = edits?.trim() ? `${text}\n${edits}` : text;
-      save();
-    };
-    const refusalsAtSubmit = attachmentRefusals.get(conversationId) ?? 0;
-    submitting = true;
-    setComposerError(null);
-    // Captured AND cleared before any yield: the textarea stays editable
-    // while the drain below waits, and anything typed then belongs to the
-    // next message — an after-the-wait clear would erase it.
-    input.value = "";
-    slashQueryActive = false;
-    closeCommandMenu();
-    presentation.drafts[conversationId] = "";
-    save();
-    autosize(input);
-    // An upload attached moments before Enter belongs to THIS message:
-    // submission waits for in-flight staging rather than snapshotting a list
-    // the upload has not reached yet (and leaking the image into the next
-    // message).
-    let stagingTail = attachmentStaging.get(conversationId);
-    if (stagingTail) {
-      noteComposer("Uploading images...");
-      // Drain, not snapshot: an intake can append a new chain link while
-      // this await yields, and a snapshot would submit without it.
-      while (stagingTail) {
-        await stagingTail.catch(() => undefined);
-        const next = attachmentStaging.get(conversationId);
-        stagingTail = next === stagingTail ? undefined : next;
-      }
-      // The wait yielded: the user may have switched conversations. The text
-      // belongs to the conversation it was written in, so it becomes that
-      // conversation's draft instead of being sent against the wrong one.
-      if (!projection || projection.conversationId !== conversationId) {
-        mergeStoredDraft();
-        submitting = false;
-        syncControls();
-        return;
-      }
-      // Edits made during the wait are the next draft, not part of this
-      // message; nothing to do — they are already in the input.
-    }
-    // A refusal that landed during the drain is a piece of THIS message
-    // going missing: the user pressed send believing the upload was
-    // included, so the send stops rather than delivering a partial prompt.
-    // The staging path already named the refusal on the error line, and any
-    // successfully staged files stay pending for the corrected retry.
-    if ((attachmentRefusals.get(conversationId) ?? 0) !== refusalsAtSubmit) {
-      restoreDraftText();
-      presentation.drafts[conversationId] = input.value;
-      save();
-      submitting = false;
-      noteComposer("Message not sent; draft kept");
-      renderAttachments();
-      syncControls();
-      return;
-    }
-    // The drain can end with nothing to send: an image-only submission whose
-    // upload was refused has no content left, and the staging path already
-    // explained why on the composer error line.
-    if (!text.trim() && (pendingAttachments.get(conversationId) ?? []).length === 0) {
-      // Restore the (empty) capture only if the user typed nothing meanwhile.
-      if (!input.value.trim() && text) { input.value = text; slashQueryActive = false; autosize(input); }
-      submitting = false;
-      syncControls();
-      return;
-    }
-    // Staged images can outlive the model choice that admitted them: a later
-    // switch to a model without image support disables further intake, but
-    // the send itself must refuse too, or the prompt would carry images the
-    // selected model cannot see and the outcome would be the provider's to
-    // improvise. Same wording as the intake refusal, plus the way out.
-    const support = attachmentModelSupport();
-    if (!support.supported && (pendingAttachments.get(conversationId) ?? []).length > 0) {
-      restoreDraftText();
-      presentation.drafts[conversationId] = input.value;
-      save();
-      submitting = false;
-      setComposerError(`${support.modelName} cannot see images. Remove them or pick a model with image support.`);
-      syncControls();
-      return;
-    }
-    // Captured and cleared optimistically like the text; restored on failure.
-    const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
-    const stagedUnavailableAttachments = [...(unavailableAttachments.get(conversationId) ?? [])];
-    const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
-    submittedAttachmentReserve.set(conversationId, (submittedAttachmentReserve.get(conversationId) ?? 0) + stagedAttachments.length);
-    const releaseAttachmentReserve = () => {
-      const remaining = (submittedAttachmentReserve.get(conversationId) ?? 0) - stagedAttachments.length;
-      if (remaining > 0) submittedAttachmentReserve.set(conversationId, remaining);
-      else submittedAttachmentReserve.delete(conversationId);
-    };
-    const attachmentKey = stagedAttachments.map(entry => entry.id).join("\n");
-    const retry = retryRequests.get(conversationId);
-    const retriedRequest = retry?.text === text && retry.attachments === attachmentKey;
-    const requestId = retriedRequest ? retry!.requestId : newRequestId();
-    const configuration = displayedConfiguration();
-    const selectedModelRecord = declares("models") && configuration.model
-      ? models.find(model => sameModel(model.selection, configuration.model!))
-      : undefined;
-    // A typed model id is not in the list; under an agent that runs typed
-    // ids it travels verbatim (spec: the next prompt runs under that id).
-    const selectedModel = selectedModelRecord?.selection
-      ?? (declares("models") && declares("custom-model-id") && configuration.model ? configuration.model : undefined);
-    const selectedVariant = declares("variants") && configuration.variant && selectedModelRecord?.variants?.includes(configuration.variant)
-      ? configuration.variant
-      : undefined;
-    const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
-    // Captured before the round trip: a queue event that lands while the
-    // acceptance is in flight makes the stream authoritative, and the local
-    // held echo below must then stand down. The epoch catches the same
-    // staleness across a projection reload, where the revision restarts.
-    const queueRevisionAtSubmit = projection.queueRevision;
-    const configurationRevisionAtSubmit = projection.configurationRevision;
-    const stagedConfigurationAtSubmit = stagedConfigurations.get(conversationId);
-    const projectionEpochAtSubmit = projectionEpoch;
-    // Named only to a steering agent: fixed Steer, or this
-    // submission's explicit Queue choice (⌥Enter or hold). The workspace decides
-    // whether it steers, holds, or dispatches, and reports which.
-    const delivery: MessageDelivery | undefined = declares("steering") ? attachmentRefs.length ? "queue" : submissionDelivery ?? "steer" : undefined;
-    // Native steer acceptance can outlive a lost browser response on either
-    // standalone or Hub. Hub policy controls automation, not input safety.
-    const potentiallyNativeSteer = declares("steering") && !isListedCommand(text)
-      && (projection.reversibleHistory?.staged === true || delivery === "steer" && (isLiveConversationStatus(projection.status) || projection.queued.length > 0));
-    // Optimistic send: the message shows immediately and the input clears;
-    // on failure the draft is removed and the text restored.
-    projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
-    setPendingAttachments(conversationId, []);
-    setUnavailableAttachments(conversationId, []);
-    renderAttachments();
-    noteComposer("Sending...");
-    syncControls();
-    // Sending says where the reader wants to be: at the exchange they just
-    // started. Pin to the end so the echo, and the reply that follows it,
-    // land in view — a reader who scrolled up to reread an earlier turn
-    // before pressing Enter is not asking to stay there while the answer
-    // arrives out of sight below the latest-content affordance.
-    parentScroll.latest();
-    latestButton.hidden = true;
-    scheduleRender(true);
-    try {
-      // Marked before the send: the reload's outcome can reach the stream
-      // before the acceptance does. Only a guess from the text — the server
-      // decides whether `/reload` is the built-in or a shadowing config
-      // command or skill — so the acceptance's `operation` settles it; an
-      // extra catalog read from a wrong guess is harmless.
-      const reloading = Boolean(contextAgentId) && /^\/reload(?:\s|$)/.test(text.trim());
-      const reloadEntry = reloading ? { agentId: contextAgentId! } as { agentId: string; messageId?: string } : undefined;
-      if (reloadEntry) pendingReloads.set(conversationId, [...(pendingReloads.get(conversationId) ?? []), reloadEntry]);
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined, delivery).catch((error: unknown) => {
-        if (reloadEntry) {
-          const rest = (pendingReloads.get(conversationId) ?? []).filter(entry => entry !== reloadEntry);
-          if (rest.length) pendingReloads.set(conversationId, rest);
-          else pendingReloads.delete(conversationId);
-        }
-        throw error;
-      });
-      if (reloadEntry) {
-        reloadEntry.messageId = accepted.messageId;
-        // Dispatched and not the built-in: nothing to track. A held one is
-        // classified only at delivery, so it stays tracked.
-        if (!accepted.pending && accepted.operation !== "reload") {
-          const rest = (pendingReloads.get(conversationId) ?? []).filter(entry => entry !== reloadEntry);
-          if (rest.length) pendingReloads.set(conversationId, rest);
-          else pendingReloads.delete(conversationId);
-        }
-      }
-      retryRequests.delete(conversationId);
-      // A steer runs under the active turn's configuration, not this staged
-      // next-turn selection. Trust actual delivery (Undo can turn a requested
-      // queue into a steer), and never consume a newer choice made in flight.
-      if (accepted.delivery !== "steer" && stagedConfigurations.get(conversationId) === stagedConfigurationAtSubmit) stagedConfigurations.delete(conversationId);
-      if (accepted.conversation) {
-        conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
-        relabelConversationOption(accepted.conversation);
-        if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
-      }
-      if (projection?.conversationId === conversationId) {
-        // The acceptance's committed configuration stands only while the
-        // stream has not spoken since the request left and the projection
-        // was not reloaded — a configuration event that landed meanwhile
-        // (a reactivated queue head re-asserting its frozen selections, or
-        // this very commit's own event) is at least as new as this
-        // response, and a retried request can carry a receipt replayed
-        // from before all of it. Same authority rule as the queue echo.
-        if (accepted.delivery !== "steer" && !retriedRequest && projectionEpoch === projectionEpochAtSubmit && projection.configurationRevision === configurationRevisionAtSubmit) {
-          projection = { ...projection, configuration: accepted.configuration };
-        }
-        // A held acceptance moves the draft into the queue dock immediately;
-        // the server's queue event restates the same state and converges. A
-        // dispatched acceptance becomes a timeline item. The echo carries the
-        // pre-flight queue revision so a delivery or removal that outran the
-        // acceptance is not resurrected as a phantom entry — and stands down
-        // entirely after a reload or on a retried request. The echo exists
-        // only to bridge a FRESH acceptance and its queue event: a retry's
-        // response can be a replayed receipt for a message the stream has
-        // since resolved (delivered, or removed by another client) with
-        // nothing durable left to check it against, while anything the first
-        // attempt really held has long been stated by the stream itself.
-        projection = accepted.pending
-          ? !retriedRequest && projectionEpoch === projectionEpochAtSubmit
-            ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), delivery: accepted.delivery, requestId, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, queueRevisionAtSubmit)
-            : removeAcceptedDraft(projection, requestId)
-          // A reload's row is published before its acceptance and retired
-          // with its outcome, which can precede the acceptance — even
-          // unobserved by this client, if it was away. It is the stream's
-          // to show, never recreated here.
-          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, { insert: accepted.operation !== "reload" });
-        renderConfiguration();
-        scheduleRender(true);
-      }
-      noteComposer(null);
-      queueDiscovery.accepted(submissionByHold && accepted.pending && accepted.delivery === "queue");
-      recordAutomaticBackground(conversationId, requestId, accepted, "Steer", text);
-      // Addressed to the submitted conversation, not the selection: the
-      // acceptance may land after a switch, and clearing the selected
-      // conversation's own error would erase an unrelated reason.
-      setComposerError(null, conversationId);
-      // The message is accepted; the local previews have no further use.
-      for (const staged of stagedAttachments) URL.revokeObjectURL(staged.previewUrl);
-      releaseAttachmentReserve();
-    } catch (error) {
-      const primaryUnknown = error instanceof ChatTransportError && error.code === "operation_outcome_unknown"
-        || potentiallyNativeSteer && (error instanceof ChatConnectionInterruptedError || error instanceof ChatTransportError && (error.status === undefined || error.status >= 500));
-      if (primaryUnknown) {
-        retryRequests.delete(conversationId);
-        const draft = { requestId, messageId: `pending:${requestId}`, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}), unconfirmed: true as const };
-        const retained = [...(unconfirmedInputs.get(conversationId) ?? []).filter(entry => entry.requestId !== requestId), draft].slice(-20);
-        boundedSet(unconfirmedInputs, conversationId, retained, 100);
-        if (projection?.conversationId === conversationId) {
-          projection = markDraftUnconfirmed(projection, requestId);
-          const retainedIds = new Set(retained.map(entry => entry.requestId));
-          projection = { ...projection, acceptedDrafts: projection.acceptedDrafts.filter(entry => !entry.unconfirmed || retainedIds.has(entry.requestId)) };
-          scheduleRender();
-        }
-        for (const staged of stagedAttachments) URL.revokeObjectURL(staged.previewUrl);
-        releaseAttachmentReserve();
-        submitting = false;
-        syncControls();
-        checkUnconfirmedAction(conversationId, requestId, `Steer (${requestId})`, text);
-        return;
-      }
-      const message = messageOf(error);
-      announce(message, true);
-      retryRequests.set(conversationId, { text, requestId, attachments: attachmentKey });
-      // The refused message's attachments go back to pending — uploaded bytes
-      // are still stored, so the references stay valid for the retry. The
-      // reserve releases only now that they are pending again, so intake
-      // during the flight could never overfill the restored draft.
-      setPendingAttachments(conversationId, [...stagedAttachments, ...(pendingAttachments.get(conversationId) ?? [])]);
-      setUnavailableAttachments(conversationId, [...stagedUnavailableAttachments, ...(unavailableAttachments.get(conversationId) ?? [])]);
-      releaseAttachmentReserve();
-      if (projection?.conversationId === conversationId) {
-        projection = removeAcceptedDraft(projection, requestId);
-        restoreDraftText();
-        presentation.drafts[conversationId] = input.value;
-        save();
-        renderAttachments();
-        scheduleRender();
-      } else {
-        // Switched away while the request was in flight: the live input now
-        // belongs to another conversation, so the failed text goes back into
-        // the stored draft — ahead of any edits stored by the switch — and
-        // reappears on return.
-        mergeStoredDraft();
-      }
-      submitting = false;
-      // Same addressing as the success clear: a refusal that lands after a
-      // switch waits with its own conversation instead of flashing here.
-      setComposerError(`${message}. Draft restored.`, conversationId);
-      noteComposer("Message not accepted; draft restored");
-      syncControls();
-      return;
-    }
-    submitting = false;
-    syncControls();
+    await composer.submit({ delivery: submissionDelivery, byHold: submissionByHold });
   });
   const workDock = document.querySelector<HTMLElement>("#chat-work-dock");
   // Secondary native disclosures can change their content without changing

@@ -169,6 +169,9 @@ for (const browserName of ["chromium", "webkit"] as const) for (const mode of ["
     if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
     const discard = page.locator("[data-queue-discard]");
     await expect(discard).toHaveCount(1);
+    // Collapsed entries already exist in the DOM; expansion paints on a frame.
+    // Wait for that paint before measuring the action's actual target size.
+    await expect(discard).toBeVisible();
     const rowGeometry = await discard.boundingBox();
     expect(rowGeometry!.height).toBeGreaterThanOrEqual(32);
     const input = page.locator("#chat-input");
@@ -195,6 +198,10 @@ for (const browserName of ["chromium", "webkit"] as const) for (const mode of ["
       (window as unknown as { discardEventGate: DiscardEventGate }).discardEventGate.target = { conversationId, messageId };
     }, { conversationId, messageId: eligible.id });
     if (mode === "touch") await discard.tap(); else await discard.press("Enter");
+    // Reopening waits for the previous native close event. Do not send Tab
+    // until the new dialog has established its required initial Cancel focus.
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     const accepted = page.waitForResponse(response => response.url().includes("/discard-unconfirmed"));
     if (mode === "touch") await dialog.getByRole("button", { name: "Discard local record", exact: true }).tap();
     else {

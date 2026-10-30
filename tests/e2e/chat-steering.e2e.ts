@@ -829,8 +829,10 @@ for (const browserName of ["chromium", "webkit"] as const) test.describe(`steeri
     await startTurn(page, request);
     await submit(page, "Add middle theme", "Alt+Enter");
     const header = page.locator(".chat-queue-header");
-    await page.locator("[data-pending-toggle]").tap();
+    await inspectPending(page);
     const card = held(page).first();
+    // Expansion and row insertion paint asynchronously after submission/toggle.
+    await expect(card).toBeVisible();
     const dimensions = { header: await header.boundingBox(), card: await card.boundingBox() };
     await saveEvidence(info, `pending-${browserName}-${theme}-dimensions.json`, JSON.stringify(dimensions, null, 2));
     await captureScreenshot(page, info, `pending-${browserName}-${theme}-density`);

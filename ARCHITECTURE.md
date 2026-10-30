@@ -274,7 +274,8 @@ src/
 │                         registry + router (agents.ts — qualified
 │                         conversation ids, per-agent status, merged
 │                         inventory), client transport + validation, the
-│                         timeline renderer, and the whole browser UI.
+│                         timeline renderer, the browser Composer workflow
+│                         (composer.ts), and its DOM presentation (ui.ts).
 │                         Agent-specific code lives below the seam:
 │                         chat/opencode/ (loopback server runtime that
 │                         decides the spawned server's generation; v1/ and
@@ -770,6 +771,40 @@ The chat surface speaks one timeline model for every agent (`src/chat/types.ts`)
 | `context_window` | A limit-only observation, scoped by model and execution `contextKey`, with source and freshness. Replayed and recovered as data, never a row or an occupancy sample. | Context meter |
 | `compaction` | Where the agent compacted its context, with before/after figures | Timeline marker |
 | `turn_status`, `notice` | A turn's outcome; warnings and errors. A `notice.code` (`rate-limit-*`, `refusal-fallback`) drives the composer's badge. `login-failed` marks a turn that failed on the agent's login and renders with the way to log in; `reauthenticating` is the one item an agent occupies while it signs in again. | Timeline, composer |
+
+**Composer ownership**
+
+The [Composer](./GLOSSARY.md) workflow lives in `src/chat/composer.ts`.
+Its browser-facing interface covers editing, attachment intake, submission,
+pending-message actions, side questions and reversible history. Private workflows
+own capture/restoration, upload draining, attachment reservations and preview
+lifetimes, request identity, action locks, operation-scoped uncertainty, and
+history results awaiting a successful refresh.
+
+`ui.ts` retains rendering, dialogs, focus, scrolling, keyboard/hold gestures and
+conversation selection. Its adapters supply conversation facts, draft storage,
+the existing transport and presentation updates. A confirmation carries a
+one-shot continuation that rechecks the selected conversation and current target
+before dispatch; showing or cancelling the dialog remains presentation work.
+
+There is one authoritative browser conversation projection. The UI installs
+snapshots and applies stream events through the existing projection functions,
+feeding committed evidence synchronously to Composer. Composer uses that same
+projection for response echoes and uncertainty reconciliation; it keeps operation
+evidence, not another queue or transcript. Server admission, native delivery,
+receipt scope and authentication remain behind the existing transport/provider
+seams, with no new route or wire contract.
+
+Draft outcomes remain operation-specific: a refused ordinary send restores its
+captured text ahead of newer edits; uncertain admission does not restore a
+resendable draft; pending Edit transfers input only after confirmed removal;
+successful history restoration replaces that conversation's draft and attachments.
+Uploaded server bytes are not deleted when browser previews are released.
+`pagehide` flushes draft storage but does not dispose Composer or replay work.
+
+`composer.test.ts` exercises the interface without a DOM using deferred transport
+results, committed-event evidence and tracked preview resources. Existing UI and
+browser tests retain coverage of presentation, focus, gestures and scroll behavior.
 
 Claude context-window discovery is independent of occupancy. A query asks for
 `getContextUsage({ detail: "summary" })` before its first prompt. Prompt delivery
