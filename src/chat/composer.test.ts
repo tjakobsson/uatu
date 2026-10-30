@@ -279,6 +279,73 @@ test("side question failure preserves newer text and never enters ordinary admis
   expect(f.texts.get("one")).toBe("Newer"); expect(f.composer.sideAnswer("one")?.failed).toBe(true); expect(f.prompts).toHaveLength(0);
 });
 
+for (const [operation, label, instruction, preserved] of [
+  ["undo", "Undo", "Submit /undo again", "command and attachments"],
+  ["redo", "Redo", "Submit /redo again", "command and attachments"],
+  ["revert", "Revert", "Choose Revert message again", "composer and attachments"],
+  ["restore", "Restore", "Choose Restore message again", "composer and attachments"],
+] as const) {
+  test(`${operation} completed refresh failure keeps input and retries only the read`, async () => {
+    const f = fixture();
+    const mutations: unknown[][] = [], reads: string[] = [];
+    f.transport[operation] = async (...args: unknown[]) => {
+      mutations.push(args);
+      return { outcome: "changed", state: { canUndo: true, canRedo: true, staged: true, revertedMessages: [] }, restoredDraft: { text: "Restored" } };
+    };
+    await f.composer.attach([image()]);
+    const attachments = [...f.composer.pendingAttachments("one")];
+    const draft = operation === "undo" || operation === "redo" ? `/${operation}` : "Original draft";
+    f.composer.edit(draft);
+    const messageId = operation === "revert" || operation === "restore" ? "target" : undefined;
+    const run = () => messageId ? f.composer.history(operation, "one", messageId) : f.composer.submit();
+    f.refresh(async id => { reads.push(id); return false; });
+    await run();
+    const message = `${label} completed, but the conversation could not be refreshed. ${instruction} to reconnect; the ${preserved} were kept.`;
+    expect(f.errors.at(-1)).toEqual([message, "one"]);
+    expect(f.notes.at(-1)).toBe(message);
+    expect(f.texts.get("one")).toBe(draft);
+    expect(f.composer.pendingAttachments("one")).toEqual(attachments);
+    expect(f.released).toEqual([]);
+    expect(f.composer.needsHistoryRefresh("one")).toBe(true);
+    await run();
+    expect(mutations).toEqual([["one", ...(messageId ? [messageId] : []), expect.any(String)]]);
+    expect(reads).toEqual(["one", "one"]);
+    expect(f.texts.get("one")).toBe(draft);
+    expect(f.composer.pendingAttachments("one")).toEqual(attachments);
+    f.refresh(async id => { reads.push(id); return true; });
+    await run();
+    expect(mutations).toHaveLength(1);
+    expect(reads).toEqual(["one", "one", "one"]);
+    expect(f.texts.get("one")).toBe("Restored");
+    expect(f.released).toEqual(f.created);
+  });
+
+  test(`${operation} refuses a new mutation when the required history refresh fails`, async () => {
+    const f = fixture();
+    // A different completed operation establishes the reconnect requirement.
+    const seed = operation === "undo" ? "redo" : "undo";
+    f.transport[seed] = async () => ({ outcome: "changed", state: { canUndo: true, canRedo: true, staged: true, revertedMessages: [] } });
+    f.refresh(async () => false);
+    await f.composer.history(seed, "one");
+    let mutations = 0;
+    f.transport[operation] = async () => { mutations++; throw new Error("Must not mutate before refresh"); };
+    await f.composer.attach([image()]);
+    const attachments = [...f.composer.pendingAttachments("one")];
+    const draft = operation === "undo" || operation === "redo" ? `/${operation}` : "Original draft";
+    f.composer.edit(draft);
+    if (operation === "undo" || operation === "redo") await f.composer.submit();
+    else await f.composer.history(operation, "one", "target");
+    const message = `The conversation could not be refreshed. ${instruction} to retry; the ${preserved} were kept.`;
+    expect(f.errors.at(-1)).toEqual([message, "one"]);
+    expect(f.notes.at(-1)).toBe(message);
+    expect(mutations).toBe(0);
+    expect(f.texts.get("one")).toBe(draft);
+    expect(f.composer.pendingAttachments("one")).toEqual(attachments);
+    expect(f.released).toEqual([]);
+    expect(f.prompts).toEqual([]);
+  });
+}
+
 test("history result survives failed refresh; retry refreshes without another mutation and replaces newer draft", async () => {
   let mutations = 0; const result: ReversibleHistoryResult = { outcome: "changed", state: { canUndo: false, canRedo: true, staged: true, revertedMessages: [] }, restoredDraft: { text: "Restored", attachments: [{ id: "stored", name: "restored.png", mimeType: "image/png" }] } };
   const f = fixture({ undo: async () => { mutations++; return result; } }); await f.composer.attach([image()]); f.composer.edit("/undo");

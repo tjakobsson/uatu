@@ -86,6 +86,8 @@ export class Composer {
   // refreshes without retiring the still-unnamed operation.
   private readonly reloads = new Map<string, Array<{ agentId: string; messageId?: string }>>();
   private readonly previews = new Set<string>();
+  // Retain the old UI's global submission/history lock across conversations.
+  // Per-conversation sets track operation state, not independent submission locks.
   private busy = false;
   private disposed = false;
 
@@ -356,22 +358,36 @@ export class Composer {
   /** Confirmation questions are synchronous, preserving native dialog activation.
    * A direct action acquires its lock synchronously and settles asynchronously. */
   pending(messageId: string, action: PendingAction): ComposerConfirmation | Promise<void> | undefined {
-    const current = this.conversation.read(); if (!current || this.disposed) return;
-    const id = current.conversationId, entry = current.queued.find(entry => entry.id === messageId);
+    const current = this.conversation.read();
+    if (!current || this.disposed) return;
+    const id = current.conversationId;
+    const entry = current.queued.find(entry => entry.id === messageId);
     if (!entry || !this.eligible(id, entry, action)) return;
     const token = entry.admissionUncertaintyId;
     const paused = current.queued.filter(entry => entry.delivery === "steer" && entry.paused).length;
-    const question = action === "discard" ? { title: "Discard local record?", explanation: "Delivery of this message is unconfirmed. Removing Uatu’s local record does not cancel or resend it; the original may still arrive. Other messages will stay queued until you choose Send now or submit a new message, or a later normal idle transition occurs.", acceptLabel: "Discard local record" }
-      : (action === "send-now" || action === "steer") && entry.delivery === "queue" && paused ? { title: "Send queued message now?", explanation: `This also sends all ${paused} paused steer${paused === 1 ? "" : "s"}. Other queued messages stay held.`, acceptLabel: "Send now" } : undefined;
+    const question = action === "discard" ? {
+      title: "Discard local record?",
+      explanation: "Delivery of this message is unconfirmed. Removing Uatu’s local record does not cancel or resend it; the original may still arrive. Other messages will stay queued until you choose Send now or submit a new message, or a later normal idle transition occurs.",
+      acceptLabel: "Discard local record",
+    } : (action === "send-now" || action === "steer") && entry.delivery === "queue" && paused ? {
+      title: "Send queued message now?",
+      explanation: `This also sends all ${paused} paused steer${paused === 1 ? "" : "s"}. Other queued messages stay held.`,
+      acceptLabel: "Send now",
+    } : undefined;
     if (question) {
       let consumed = false;
-      return { ...question, confirm: async () => {
-        if (consumed) return false; consumed = true;
-        const now = this.conversation.read();
-        const currentEntry = now?.conversationId === id ? now.queued.find(candidate => candidate.id === messageId) : undefined;
-        if (this.disposed || !currentEntry || !this.eligible(id, currentEntry, action) || action === "discard" && currentEntry.admissionUncertaintyId !== token) return false;
-        return this.runPending(id, entry, action);
-      } };
+      return {
+        ...question,
+        confirm: async () => {
+          if (consumed) return false;
+          consumed = true;
+          const now = this.conversation.read();
+          const currentEntry = now?.conversationId === id ? now.queued.find(candidate => candidate.id === messageId) : undefined;
+          if (this.disposed || !currentEntry || !this.eligible(id, currentEntry, action)
+            || action === "discard" && currentEntry.admissionUncertaintyId !== token) return false;
+          return this.runPending(id, entry, action);
+        },
+      };
     }
     return this.runPending(id, entry, action).then(() => undefined);
   }
@@ -390,7 +406,9 @@ export class Composer {
     // A terminal fence belongs to this outstanding action. Never evict it or
     // replace it with a historical cache while its transport/read is pending.
     const inFlight = this.actions.get(id) ?? new Map<string, PendingQueueAction>(), pending: PendingQueueAction = {};
-    inFlight.set(messageId, pending); this.actions.set(id, inFlight); this.changed("pending", id);
+    inFlight.set(messageId, pending);
+    this.actions.set(id, inFlight);
+    this.changed("pending", id);
     const operation = this.resources.id();
     const label = action === "steer" ? "Queue → Steer" : action === "send-now" ? "Send now" : action === "queue" ? "Steer → Queue" : action === "edit" ? "Edit pending message" : "Remove pending message";
     try {
@@ -398,7 +416,10 @@ export class Composer {
         await this.transport.discardUnconfirmedSteer(id, messageId, operation, entry.admissionUncertaintyId!);
         if (this.disposed) return false;
         this.notices.unconfirmed(id, `discard:${operation}`, `Delivery remains unconfirmed; the original may still arrive. ${actionOrigin("Local record discarded", entry.text)}. Discard did not cancel or resend it. Other messages were left queued.`);
-        this.update(id, p => { const remaining = p.queued.find(candidate => candidate.id === messageId); return remaining && remaining.admissionUncertaintyId === entry.admissionUncertaintyId && this.eligibleDiscard(id, remaining) ? dropQueuedMessage(p, messageId) : p; });
+        this.update(id, p => {
+          const remaining = p.queued.find(candidate => candidate.id === messageId);
+          return remaining && remaining.admissionUncertaintyId === entry.admissionUncertaintyId && this.eligibleDiscard(id, remaining) ? dropQueuedMessage(p, messageId) : p;
+        });
         return true;
       }
       const result = action === "remove" || action === "edit" ? await this.transport.removeQueued(id, messageId, operation)
@@ -408,16 +429,25 @@ export class Composer {
         if (this.withdrawals.get(id)?.has(messageId)) throw new ChatTransportError("Withdrawal is still unconfirmed", 409, STEER_WITHDRAWAL_UNCONFIRMED_CODE);
         this.loadPending(id, entry);
       }
-      if (action === "remove" && withdrawalUnknown && "removed" in result && result.removed === true) { this.terminal(id, messageId); this.update(id, p => dropQueuedMessage(p, messageId)); }
+      if (action === "remove" && withdrawalUnknown && "removed" in result && result.removed === true) {
+        this.terminal(id, messageId);
+        this.update(id, p => dropQueuedMessage(p, messageId));
+      }
       this.recordBackground(id, operation, result as AutomaticBackgroundFeedback, action === "steer" || action === "send-now" ? label : "Pending action", entry.text);
       if (this.conversation.selected() === id) this.presentation.note(null);
       return true;
     } catch (error) {
       if (this.disposed) return false;
-      if (action === "discard") { await this.conversation.refresh(id); if (this.conversation.selected() === id) this.presentation.announce(`${messageOf(error)} Delivery remains unconfirmed; no message was cancelled or resent.`, true); }
-      else await this.pendingFailed(error, id, entry, uncertainty, operation, label, pending);
+      if (action === "discard") {
+        await this.conversation.refresh(id);
+        if (this.conversation.selected() === id) this.presentation.announce(`${messageOf(error)} Delivery remains unconfirmed; no message was cancelled or resent.`, true);
+      } else await this.pendingFailed(error, id, entry, uncertainty, operation, label, pending);
       return false;
-    } finally { inFlight.delete(messageId); if (!inFlight.size) this.actions.delete(id); this.changed("pending", id); }
+    } finally {
+      inFlight.delete(messageId);
+      if (!inFlight.size) this.actions.delete(id);
+      this.changed("pending", id);
+    }
   }
   private eligibleDiscard(id: string, entry: QueuedMessage): boolean { return entry.unconfirmed === true && !!entry.admissionUncertaintyId && !this.withdrawals.get(id)?.has(entry.id); }
   private convertStoredAttachments(attachments: readonly MessageAttachment[]) {
@@ -439,80 +469,138 @@ export class Composer {
     if (error instanceof ChatTransportError && (error.code === STEER_WITHDRAWAL_UNCONFIRMED_CODE || withdrawal && (error.status === undefined || error.status >= 500 || error.code === "operation_outcome_unknown"))) {
       if (pending.terminal || this.conversation.read()?.conversationId === id && this.converted(this.conversation.read()!, entry)) return;
       const entries = this.withdrawals.get(id) ?? new Map<string, { operation: string; entry: QueuedMessage }>();
-      const previous = entries.get(entry.id); if (previous) this.notices.record(id, previous.operation, "not-needed");
-      boundedSet(entries, entry.id, { operation, entry }, 20); boundedSet(this.withdrawals, id, entries, 100);
+      const previous = entries.get(entry.id);
+      if (previous) this.notices.record(id, previous.operation, "not-needed");
+      boundedSet(entries, entry.id, { operation, entry }, 20);
+      boundedSet(this.withdrawals, id, entries, 100);
       this.update(id, p => ({ ...p, queued: p.queued.map(candidate => candidate.id === entry.id ? { ...candidate, unconfirmed: true as const } : candidate) }));
-      await this.checkUnknown(id, operation, label, entry.text, "withdrawal"); return;
+      await this.checkUnknown(id, operation, label, entry.text, "withdrawal");
+      return;
     }
-    if (error instanceof ChatTransportError && (error.code === "operation_outcome_unknown" || steer && (error.status === undefined || error.status >= 500)) || error instanceof ChatConnectionInterruptedError) { await this.checkUnknown(id, operation, label, entry.text); return; }
+    if (error instanceof ChatTransportError && (error.code === "operation_outcome_unknown" || steer && (error.status === undefined || error.status >= 500)) || error instanceof ChatConnectionInterruptedError) {
+      await this.checkUnknown(id, operation, label, entry.text);
+      return;
+    }
     if (error instanceof ChatTransportError && error.status === 409) {
-      if (error.code === STEER_ALREADY_DELIVERED_CODE) { this.terminal(id, entry.id); this.update(id, p => this.protect(dropQueuedMessage(p, entry.id))); this.presentation.error(TOO_LATE, id); if (this.conversation.selected() === id) this.presentation.note(TOO_LATE); return; }
+      if (error.code === STEER_ALREADY_DELIVERED_CODE) {
+        this.terminal(id, entry.id);
+        this.update(id, p => this.protect(dropQueuedMessage(p, entry.id)));
+        this.presentation.error(TOO_LATE, id);
+        if (this.conversation.selected() === id) this.presentation.note(TOO_LATE);
+        return;
+      }
       if (pending.terminal) return;
       const available = await this.conversation.refresh(id, { id: entry.id, action: pending });
       const message = `${messageOf(error)}${available ? "" : " Pending status could not be checked; no message was resent."}`;
-      this.presentation.error(message, id); if (this.conversation.selected() === id) this.presentation.announce(message, true); return;
+      this.presentation.error(message, id);
+      if (this.conversation.selected() === id) this.presentation.announce(message, true);
+      return;
     }
     if (this.conversation.selected() === id) this.presentation.announce(messageOf(error), true);
   }
 
+  private historyRetryInstruction(operation: HistoryOperation): string {
+    const label = operation[0]!.toUpperCase() + operation.slice(1);
+    return operation === "undo" || operation === "redo" ? `Submit /${operation} again` : `Choose ${label} message again`;
+  }
+  private historyPreservedState(operation: HistoryOperation): string {
+    return operation === "undo" || operation === "redo" ? "command and attachments" : "composer and attachments";
+  }
   async history(operation: HistoryOperation, id: string, messageId?: string): Promise<void> {
     if (this.busy || this.disposed) return;
     const label = operation[0]!.toUpperCase() + operation.slice(1);
-    this.busy = true; this.histories.add(id); this.presentation.error(null, id);
-    this.presentation.note(operation === "restore" ? "Restoring..." : `${label}ing...`); this.changed("draft", id);
-    const instruction = operation === "undo" || operation === "redo" ? `Submit /${operation} again` : `Choose ${label} message again`;
-    const preserved = operation === "undo" || operation === "redo" ? "command and attachments" : "composer and attachments";
+    this.busy = true;
+    this.histories.add(id);
+    this.presentation.error(null, id);
+    this.presentation.note(operation === "restore" ? "Restoring..." : `${label}ing...`);
+    this.changed("draft", id);
+    const instruction = this.historyRetryInstruction(operation);
+    const preserved = this.historyPreservedState(operation);
     try {
       const pending = this.historyRetries.get(id);
-      if (pending?.result && pending.operation === operation && pending.messageId === messageId) { await this.installHistory(operation, id, pending.result); return; }
+      if (pending?.result && pending.operation === operation && pending.messageId === messageId) {
+        await this.installHistory(operation, id, pending.result);
+        return;
+      }
       if (this.historyRefresh.has(id) && !await this.conversation.refresh(id)) {
         const message = `The conversation could not be refreshed. ${instruction} to retry; the ${preserved} were kept.`;
-        this.presentation.error(message, id); this.presentation.note(message); return;
+        this.presentation.error(message, id);
+        this.presentation.note(message);
+        return;
       }
-      const retry = pending?.operation === operation && pending.messageId === messageId ? pending : { operation, ...(messageId ? { messageId } : {}), requestId: this.resources.id(), result: undefined as ReversibleHistoryResult | undefined };
+      const retry = pending?.operation === operation && pending.messageId === messageId ? pending : {
+        operation,
+        ...(messageId ? { messageId } : {}),
+        requestId: this.resources.id(),
+        result: undefined as ReversibleHistoryResult | undefined,
+      };
       this.historyRetries.set(id, retry);
       const result = operation === "undo" || operation === "redo" ? await this.transport[operation](id, retry.requestId) : await this.transport[operation](id, messageId!, retry.requestId);
       if (this.disposed) return;
       if (result.outcome !== "changed") {
         this.historyRetries.delete(id);
         if (this.historyResyncs.delete(id) && !await this.conversation.refresh(id) && this.conversation.selected() === id) {
-          this.historyRefresh.add(id); const message = `${result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo"}, but the conversation could not be refreshed. Submit /${operation} again to reconnect.`;
-          this.presentation.error(message, id); this.presentation.note(message); return;
+          this.historyRefresh.add(id);
+          const message = `${result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo"}, but the conversation could not be refreshed. Submit /${operation} again to reconnect.`;
+          this.presentation.error(message, id);
+          this.presentation.note(message);
+          return;
         }
-        this.presentation.note(this.conversation.selected() === id ? result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo" : null); return;
+        this.presentation.note(this.conversation.selected() === id ? result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo" : null);
+        return;
       }
-      retry.result = result; await this.installHistory(operation, id, result);
+      retry.result = result;
+      await this.installHistory(operation, id, result);
     } catch (error) {
       if (this.disposed) return;
       let message = `${label} failed: ${messageOf(error)}. ${preserved[0]!.toUpperCase()}${preserved.slice(1)} kept.`;
-      if (this.historyResyncs.delete(id) && !await this.conversation.refresh(id) && this.conversation.selected() === id) { this.historyRefresh.add(id); message += ` The conversation also needs to reconnect; ${instruction} to retry.`; }
-      this.presentation.error(message, id); this.presentation.note(this.conversation.selected() === id ? message : null);
-    } finally { this.histories.delete(id); this.busy = false; this.changed(); }
+      if (this.historyResyncs.delete(id) && !await this.conversation.refresh(id) && this.conversation.selected() === id) {
+        this.historyRefresh.add(id);
+        message += ` The conversation also needs to reconnect; ${instruction} to retry.`;
+      }
+      this.presentation.error(message, id);
+      this.presentation.note(this.conversation.selected() === id ? message : null);
+    } finally {
+      this.histories.delete(id);
+      this.busy = false;
+      this.changed();
+    }
   }
   private async installHistory(operation: HistoryOperation, id: string, result: ReversibleHistoryResult): Promise<void> {
     const label = operation[0]!.toUpperCase() + operation.slice(1);
-    this.retries.delete(id); this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
+    this.retries.delete(id);
+    this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
     if (this.conversation.selected() === id) {
-      const refreshed = await this.conversation.refresh(id); this.historyResyncs.delete(id);
+      const refreshed = await this.conversation.refresh(id);
+      this.historyResyncs.delete(id);
       if (this.disposed) return;
       if (this.conversation.selected() === id && !refreshed) {
         this.historyRefresh.add(id);
-        const instruction = operation === "undo" || operation === "redo" ? `Submit /${operation} again` : `Choose ${label} message again`;
-        const preserved = operation === "undo" || operation === "redo" ? "command and attachments" : "composer and attachments";
+        const instruction = this.historyRetryInstruction(operation);
+        const preserved = this.historyPreservedState(operation);
         const message = `${label} completed, but the conversation could not be refreshed. ${instruction} to reconnect; the ${preserved} were kept.`;
-        this.presentation.error(message, id); this.presentation.note(message); return;
+        this.presentation.error(message, id);
+        this.presentation.note(message);
+        return;
       }
     }
     for (const entry of this.pendingAttachments(id)) this.release(entry.previewUrl);
-    this.putAttachments(id, []); this.putUnavailable(id, []);
+    this.putAttachments(id, []);
+    this.putUnavailable(id, []);
     const restored = result.restoredDraft ?? { text: "" };
     // History deliberately replaces, rather than merges, this conversation's draft.
     this.drafts.write(id, restored.text);
     const { available, unavailable } = this.convertStoredAttachments(restored.attachments ?? []);
-    this.putAttachments(id, available); this.putUnavailable(id, unavailable); this.historyRetries.delete(id);
+    this.putAttachments(id, available);
+    this.putUnavailable(id, unavailable);
+    this.historyRetries.delete(id);
     const count = this.unavailableAttachments(id).length;
     const message = count ? `${count} restored ${count === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.` : null;
-    if (this.conversation.selected() !== id) { if (message) this.presentation.error(message, id); this.presentation.note(null); return; }
+    if (this.conversation.selected() !== id) {
+      if (message) this.presentation.error(message, id);
+      this.presentation.note(null);
+      return;
+    }
     this.presentation.error(message, id);
     const current = this.conversation.read();
     const steers = operation === "undo" && this.conversation.declares("steering") && current?.conversationId === id ? current.queued.filter(entry => entry.delivery === "steer").length : 0;
