@@ -189,11 +189,13 @@ export class Composer {
     const task = (this.staging.get(id) ?? Promise.resolve()).then(async () => {
       for (const file of files) {
         if (this.disposed || (this.generations.get(id) ?? 0) !== generation) return;
+        if ((this.attachments.get(id)?.length ?? 0) + (this.reserves.get(id) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
+          this.presentation.error(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`, id); this.noteAttachmentRefusal(id); break;
+        }
         let refusal: string | undefined;
-        if ((this.attachments.get(id)?.length ?? 0) + (this.reserves.get(id) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) refusal = `A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`;
-        else if (file.type && !(CHAT_ATTACHMENT_MIME_TYPES as readonly string[]).includes(file.type.toLowerCase())) refusal = `${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`;
+        if (file.type && !(CHAT_ATTACHMENT_MIME_TYPES as readonly string[]).includes(file.type.toLowerCase())) refusal = `${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`;
         else if (file.size > CHAT_ATTACHMENT_MAX_BYTES) refusal = `${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`;
-        if (refusal) { this.presentation.error(refusal, id); this.noteAttachmentRefusal(id); if (refusal.startsWith("A message")) break; continue; }
+        if (refusal) { this.presentation.error(refusal, id); this.noteAttachmentRefusal(id); continue; }
         try {
           const stored = await this.transport.uploadAttachment(id, file);
           if (this.disposed || (this.generations.get(id) ?? 0) !== generation) return;
@@ -381,6 +383,10 @@ export class Composer {
   }
   private async runPending(id: string, entry: QueuedMessage, action: PendingAction): Promise<boolean> {
     const messageId = entry.id, withdrawalUnknown = this.withdrawals.get(id)?.has(messageId);
+    // Classify the initiating operation before presentation callbacks or transport
+    // can switch the selected conversation and its advertised capabilities.
+    const uncertainty = entry.delivery === "steer" && (action === "remove" || action === "edit" || action === "queue") ? "withdrawal"
+      : this.conversation.declares("steering") && (action === "steer" || action === "send-now") ? "steer" : undefined;
     // A terminal fence belongs to this outstanding action. Never evict it or
     // replace it with a historical cache while its transport/read is pending.
     const inFlight = this.actions.get(id) ?? new Map<string, PendingQueueAction>(), pending: PendingQueueAction = {};
@@ -409,23 +415,27 @@ export class Composer {
     } catch (error) {
       if (this.disposed) return false;
       if (action === "discard") { await this.conversation.refresh(id); if (this.conversation.selected() === id) this.presentation.announce(`${messageOf(error)} Delivery remains unconfirmed; no message was cancelled or resent.`, true); }
-      else await this.pendingFailed(error, id, entry, action, operation, label, pending);
+      else await this.pendingFailed(error, id, entry, uncertainty, operation, label, pending);
       return false;
     } finally { inFlight.delete(messageId); if (!inFlight.size) this.actions.delete(id); this.changed("pending", id); }
   }
   private eligibleDiscard(id: string, entry: QueuedMessage): boolean { return entry.unconfirmed === true && !!entry.admissionUncertaintyId && !this.withdrawals.get(id)?.has(entry.id); }
-  private loadPending(id: string, entry: QueuedMessage): void {
+  private convertStoredAttachments(attachments: readonly MessageAttachment[]) {
     const available: PendingAttachment[] = [], unavailable: MessageAttachment[] = [];
-    for (const attachment of entry.attachments ?? []) {
+    for (const attachment of attachments) {
       if (attachment.id) available.push({ ...attachment, id: attachment.id, previewUrl: this.transport.attachmentUrl(attachment.id) }); else unavailable.push(attachment);
     }
+    // Authenticated stored URLs are borrowed, never added to owned blob previews.
+    return { available, unavailable };
+  }
+  private loadPending(id: string, entry: QueuedMessage): void {
+    const { available, unavailable } = this.convertStoredAttachments(entry.attachments ?? []);
     this.putAttachments(id, [...this.pendingAttachments(id), ...available]); this.putUnavailable(id, [...this.unavailableAttachments(id), ...unavailable]);
     if (entry.text) { const newer = this.drafts.read(id); this.drafts.write(id, newer.trim() ? `${entry.text}\n${newer}` : entry.text); }
     this.changed("edit", id);
   }
-  private async pendingFailed(error: unknown, id: string, entry: QueuedMessage, action: PendingAction, operation: string, label: string, pending: PendingQueueAction): Promise<void> {
-    const withdrawal = entry.delivery === "steer" && (action === "remove" || action === "edit" || action === "queue");
-    const steer = this.conversation.declares("steering") && (action === "steer" || action === "send-now");
+  private async pendingFailed(error: unknown, id: string, entry: QueuedMessage, uncertainty: "withdrawal" | "steer" | undefined, operation: string, label: string, pending: PendingQueueAction): Promise<void> {
+    const withdrawal = uncertainty === "withdrawal", steer = uncertainty === "steer";
     if (error instanceof ChatTransportError && (error.code === STEER_WITHDRAWAL_UNCONFIRMED_CODE || withdrawal && (error.status === undefined || error.status >= 500 || error.code === "operation_outcome_unknown"))) {
       if (pending.terminal || this.conversation.read()?.conversationId === id && this.converted(this.conversation.read()!, entry)) return;
       const entries = this.withdrawals.get(id) ?? new Map<string, { operation: string; entry: QueuedMessage }>();
@@ -498,7 +508,8 @@ export class Composer {
     const restored = result.restoredDraft ?? { text: "" };
     // History deliberately replaces, rather than merges, this conversation's draft.
     this.drafts.write(id, restored.text);
-    this.loadHistoryAttachments(id, restored.attachments ?? []); this.historyRetries.delete(id);
+    const { available, unavailable } = this.convertStoredAttachments(restored.attachments ?? []);
+    this.putAttachments(id, available); this.putUnavailable(id, unavailable); this.historyRetries.delete(id);
     const count = this.unavailableAttachments(id).length;
     const message = count ? `${count} restored ${count === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.` : null;
     if (this.conversation.selected() !== id) { if (message) this.presentation.error(message, id); this.presentation.note(null); return; }
@@ -508,12 +519,6 @@ export class Composer {
     const steerNote = steers ? ` ${steers} pending steer${steers === 1 ? "" : "s"} will be delivered together with your replacement.` : "";
     this.presentation.note(`${message ? `${label} complete. ${message}` : `${label} complete`}${steerNote}`);
     this.changed("history", id);
-  }
-  private loadHistoryAttachments(id: string, attachments: MessageAttachment[]): void {
-    for (const entry of attachments) {
-      if (entry.id) this.putAttachments(id, [...this.pendingAttachments(id), { ...entry, id: entry.id, previewUrl: this.transport.attachmentUrl(entry.id) }]);
-      else this.putUnavailable(id, [...this.unavailableAttachments(id), entry]);
-    }
   }
   dispose(): void {
     this.disposed = true;

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Composer, type ComposerConversation, type ComposerPresentation, type ComposerTransport } from "./composer";
 import { ChatTransportError } from "./client";
 import type { ChatProjection } from "./projection";
-import type { ConversationSnapshot, QueuedMessage, ReversibleHistoryResult } from "./types";
+import type { ConversationSnapshot, MessageAttachment, QueuedMessage, ReversibleHistoryResult } from "./types";
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -18,6 +18,7 @@ function fixture(overrides: Partial<ComposerTransport> = {}) {
   let selected = "one", epoch = 0, cancelling = false, count = 0;
   let projection: ChatProjection = { conversationId: "one", generation: "g", sequence: 0, cursor: "", status: "running", items: [], queued: [], acceptedDrafts: [], queueRevision: 0, configurationRevision: 0 };
   const texts = new Map<string, string>();
+  const steering = new Map<string, boolean>();
   const released: string[] = [], created: string[] = [], prompts: Parameters<ComposerTransport["prompt"]>[] = [];
   const errors: Array<[string | null, string | undefined]> = [], notes: Array<string | null> = [];
   let refresh: ComposerConversation["refresh"] = async () => true;
@@ -36,7 +37,7 @@ function fixture(overrides: Partial<ComposerTransport> = {}) {
   };
   const context: ComposerConversation = {
     selected: () => selected, read: () => projection, write: value => { projection = value; }, epoch: () => epoch,
-    cancelling: () => cancelling, declares: () => true, commands: () => [], commandsAvailable: () => true,
+    cancelling: () => cancelling, declares: capability => capability !== "steering" || (steering.get(selected) ?? true), commands: () => [], commandsAvailable: () => true,
     reloadCommands: async () => true, agentId: () => "agent", refreshCommands: () => {},
     configuration: () => ({ value: {}, stage: undefined }), consumeConfiguration: () => {},
     imageSupport: () => ({ supported: true }), refresh: (id, pending) => refresh(id, pending),
@@ -49,7 +50,7 @@ function fixture(overrides: Partial<ComposerTransport> = {}) {
     create: () => { const url = `blob:preview-${created.length}`; created.push(url); return url; },
     release: url => { released.push(url); }, id: () => `request-${++count}`,
   });
-  return { composer, context, transport, texts, prompts, errors, notes, released, created,
+  return { composer, context, transport, presentation, texts, prompts, errors, notes, released, created, steering,
     projection: () => projection,
     setProjection: (value: Partial<ChatProjection>) => { projection = { ...projection, ...value }; },
     select: (id: string) => { selected = id; projection = { ...projection, conversationId: id }; },
@@ -121,6 +122,24 @@ test("inflight attachment reserve prevents restored draft overflowing the eight-
   expect(f.composer.pendingAttachments()).toHaveLength(8); expect(f.errors.some(([message]) => message?.includes("at most 8"))).toBe(true);
 });
 
+test("an invalid image whose name starts with capacity wording does not stop later intake", async () => {
+  const uploaded: Blob[] = [], valid = image("valid.png");
+  const f = fixture({ uploadAttachment: async (_id, file) => { uploaded.push(file); return { id: "valid", mimeType: "image/png", sizeBytes: 5 }; } });
+  await f.composer.attach([new File(["text"], "A message.txt", { type: "text/plain" }), valid]);
+  expect(uploaded).toEqual([valid]);
+  expect(f.composer.pendingAttachments().map(attachment => attachment.name)).toEqual(["valid.png"]);
+  expect(f.errors).toEqual([["A message.txt is not a supported image (PNG, JPEG, GIF, WebP).", "one"]]);
+});
+
+test("capacity stops intake once, keeps eight uploaded images and refuses a partial send during drain", async () => {
+  const f = fixture(); f.composer.edit("Original");
+  const intake = f.composer.attach(Array.from({ length: 10 }, (_, index) => image(`${index}.png`)));
+  const sent = f.composer.submit(); f.composer.edit("Newer"); await Promise.all([intake, sent]);
+  expect(f.composer.pendingAttachments().map(attachment => attachment.name)).toEqual(["0.png", "1.png", "2.png", "3.png", "4.png", "5.png", "6.png", "7.png"]);
+  expect(f.errors.filter(([message]) => message?.includes("at most 8"))).toEqual([["A message can carry at most 8 images.", "one"]]);
+  expect(f.prompts).toEqual([]); expect(f.texts.get("one")).toBe("Original\nNewer"); expect(f.released).toEqual([]);
+});
+
 test("fresh receipt cannot resurrect a queue entry after the stream or projection reload", async () => {
   for (const reload of [false, true]) {
     const response = deferred<ReturnType<typeof acceptance>>(); const f = fixture({ prompt: () => response.promise }); f.composer.edit("Original"); const sent = f.composer.submit();
@@ -137,6 +156,24 @@ test("pending Edit waits for withdrawal then merges latest originating text and 
   expect(f.texts.get("one")).toBe("Draft"); f.composer.edit("Newer"); removed.resolve({ removed: true }); await edited;
   expect(f.texts.get("one")).toBe("Pending\nNewer"); expect(f.composer.pendingAttachments()[0]?.previewUrl).toBe("/attachment/stored");
   f.composer.removeAttachment(f.composer.pendingAttachments()[0]!); expect(f.released).toEqual([]);
+});
+
+test("pending Edit appends available references and unavailable placeholders in their original order without owning stored URLs", async () => {
+  const f = fixture(); await f.composer.attach([image("draft.png")]); f.composer.edit("Draft");
+  const previousMissing: MessageAttachment = { name: "previous-missing.png", mimeType: "image/png" };
+  f.setProjection({ queued: [entry({ text: "Previous", attachments: [previousMissing] })] }); await f.composer.pending("native-original", "edit");
+  const first = { id: "first", name: "first.png", mimeType: "image/png" };
+  const missing: MessageAttachment = { name: "missing.png", mimeType: "image/png" };
+  const second = { id: "second", name: "second.png", mimeType: "image/png" };
+  f.setProjection({ queued: [entry({ attachments: [first, missing, second] })] }); await f.composer.pending("native-original", "edit");
+  expect(f.texts.get("one")).toBe("Pending\nPrevious\nDraft");
+  expect(f.composer.pendingAttachments()).toEqual([
+    { id: "upload-1", name: "draft.png", mimeType: "image/png", previewUrl: "blob:preview-0" },
+    { ...first, previewUrl: "/attachment/first" }, { ...second, previewUrl: "/attachment/second" },
+  ]);
+  expect(f.composer.unavailableAttachments()).toEqual([previousMissing, missing]); expect(f.released).toEqual([]);
+  f.composer.removeAttachment(f.composer.pendingAttachments()[1]!); expect(f.released).toEqual([]);
+  f.composer.dispose(); expect(f.released).toEqual(["blob:preview-0"]);
 });
 
 test("explicit terminal evidence before unknown withdrawal prevents recreating uncertain ownership", async () => {
@@ -177,6 +214,65 @@ test("conversion preserves draft and leaves queue state to committed evidence", 
   expect(converted).toBe("native-original:steer"); expect(f.texts.get("one")).toBe("Private"); expect(f.projection().queued[0]?.id).toBe("native-original");
 });
 
+for (const action of ["steer", "send-now"] as const) {
+  for (const status of [undefined, 502]) {
+    test(`${action} keeps initiating steering uncertainty after switching to a nonsteering conversation (${status ?? "no status"})`, async () => {
+      const response = deferred<Awaited<ReturnType<ComposerTransport["sendNow"]>>>();
+      const mutations: unknown[][] = [], reads: string[] = [];
+      const f = fixture({
+        changeDelivery: async (...args) => { mutations.push(args); return response.promise; },
+        sendNow: async (...args) => { mutations.push(args); return response.promise; },
+      });
+      f.steering.set("two", false);
+      f.refresh(async id => { reads.push(id); return true; });
+      f.setProjection({ queued: [entry({ delivery: "queue" })] }); f.composer.edit("Original draft");
+      const result = f.composer.pending("native-original", action);
+      f.select("two"); f.setProjection({ queued: [] }); f.composer.edit("Other draft");
+      const other = f.projection();
+      response.reject(new ChatTransportError("Response lost", status)); await result;
+      expect(reads).toEqual(["one"]);
+      expect(f.composer.feedback("one")).toContain(action === "steer" ? "Queue → Steer" : "Send now");
+      expect(f.composer.feedback("one")).toContain("Status checked; acceptance still unconfirmed");
+      expect(f.composer.feedback("one")).toContain("Do not repeat");
+      expect(f.composer.feedback("two")).toBe("");
+      expect(f.texts.get("one")).toBe("Original draft"); expect(f.texts.get("two")).toBe("Other draft");
+      expect(f.projection()).toBe(other); expect(f.prompts).toEqual([]);
+      expect(mutations).toEqual([["one", "native-original", expect.any(String), ...(action === "steer" ? ["steer"] : [])]]);
+      expect(f.composer.pendingActions("one")).toBeUndefined();
+    });
+
+    test(`${action} does not manufacture steering uncertainty after leaving a nonsteering conversation (${status ?? "no status"})`, async () => {
+      const response = deferred<Awaited<ReturnType<ComposerTransport["sendNow"]>>>();
+      let mutations = 0; const reads: string[] = [];
+      const f = fixture({
+        changeDelivery: async () => { mutations++; return response.promise; },
+        sendNow: async () => { mutations++; return response.promise; },
+      });
+      f.steering.set("one", false); f.refresh(async id => { reads.push(id); return true; });
+      f.setProjection({ queued: [entry({ delivery: "queue" })] }); f.composer.edit("Original draft");
+      const result = f.composer.pending("native-original", action);
+      f.select("two"); f.composer.edit("Other draft");
+      response.reject(new ChatTransportError("Refused", status)); await result;
+      expect(reads).toEqual([]); expect(mutations).toBe(1);
+      expect(f.composer.feedback("one")).toBe(""); expect(f.composer.feedback("two")).toBe("");
+      expect(f.texts.get("one")).toBe("Original draft"); expect(f.texts.get("two")).toBe("Other draft");
+    });
+  }
+}
+
+test("paused Send now captures steering eligibility before presentation can switch conversations", async () => {
+  const response = deferred<Awaited<ReturnType<ComposerTransport["sendNow"]>>>();
+  const f = fixture({ sendNow: () => response.promise }); const reads: string[] = [];
+  f.steering.set("two", false); f.refresh(async id => { reads.push(id); return false; });
+  f.setProjection({ queued: [entry({ paused: true })] }); f.composer.edit("Original draft");
+  f.presentation.changed = change => { if (change === "pending") f.select("two"); };
+  const result = f.composer.pending("native-original", "send-now");
+  response.reject(new ChatTransportError("Response lost")); await result;
+  expect(reads).toEqual(["one"]);
+  expect(f.composer.feedback("one")).toContain("Status check unavailable; acceptance unconfirmed");
+  expect(f.composer.feedback("two")).toBe(""); expect(f.texts.get("one")).toBe("Original draft");
+});
+
 test("side question failure preserves newer text and never enters ordinary admission", async () => {
   const answer = deferred<{ text: string }>(); const f = fixture({ generate: () => answer.promise });
   f.composer.edit("/btw Why?"); const asking = f.composer.submit(); f.composer.edit("Newer"); answer.reject(new Error("Unavailable")); await asking;
@@ -189,6 +285,21 @@ test("history result survives failed refresh; retry refreshes without another mu
   f.refresh(async () => false); await f.composer.submit(); expect(f.texts.get("one")).toBe("/undo"); expect(f.released).toEqual([]);
   f.composer.edit("Newer"); f.refresh(async () => true); await f.composer.history("undo", "one");
   expect(mutations).toBe(1); expect(f.texts.get("one")).toBe("Restored"); expect(f.released).toEqual(f.created); expect(f.composer.pendingAttachments()[0]?.id).toBe("stored");
+});
+
+test("history replaces available references and unavailable placeholders while releasing only replaced owned previews", async () => {
+  const f = fixture(); await f.composer.attach([image("draft.png")]);
+  f.setProjection({ queued: [entry({ attachments: [{ id: "old", name: "old.png", mimeType: "image/png" }, { name: "old-missing.png", mimeType: "image/png" }] })] });
+  await f.composer.pending("native-original", "edit");
+  const first = { id: "first", name: "first.png", mimeType: "image/png" };
+  const missing: MessageAttachment = { name: "missing.png", mimeType: "image/png" };
+  const second = { id: "second", name: "second.png", mimeType: "image/png" };
+  f.transport.undo = async () => ({ outcome: "changed", state: { canUndo: false, canRedo: true, staged: true, revertedMessages: [] }, restoredDraft: { text: "Restored", attachments: [first, missing, second] } });
+  await f.composer.history("undo", "one");
+  expect(f.texts.get("one")).toBe("Restored");
+  expect(f.composer.pendingAttachments()).toEqual([{ ...first, previewUrl: "/attachment/first" }, { ...second, previewUrl: "/attachment/second" }]);
+  expect(f.composer.unavailableAttachments()).toEqual([missing]); expect(f.released).toEqual(["blob:preview-0"]);
+  f.composer.dispose(); expect(f.released).toEqual(["blob:preview-0"]);
 });
 
 test("history invalidates late uploads and preserves another conversation's draft", async () => {

@@ -779,7 +779,9 @@ Its browser-facing interface covers editing, attachment intake, submission,
 pending-message actions, side questions and reversible history. Private workflows
 own capture/restoration, upload draining, attachment reservations and preview
 lifetimes, request identity, action locks, operation-scoped uncertainty, and
-history results awaiting a successful refresh.
+history results awaiting a successful refresh. Pending actions capture the
+initiating agent's steering eligibility before dispatch, so selecting another
+agent cannot change how a late transport failure is classified.
 
 `ui.ts` retains rendering, dialogs, focus, scrolling, keyboard/hold gestures and
 conversation selection. Its adapters supply conversation facts, draft storage,
