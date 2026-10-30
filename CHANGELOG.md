@@ -4,6 +4,22 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.9.0](https://github.com/tjakobsson/uatu/compare/v0.8.0...v0.9.0) (2026-10-30)
+
+
+### Features
+
+* **chat:** add OpenCode v2 steering, worker controls and compact chat workflows ([5585b5b](https://github.com/tjakobsson/uatu/commit/5585b5b09c11b15aac464a29e52504835dfd06d6))
+
+
+### Bug Fixes
+
+* **chat:** readable token scales, named skill loads, and multi-question forms ([#533](https://github.com/tjakobsson/uatu/issues/533)) ([71e4700](https://github.com/tjakobsson/uatu/commit/71e4700752d6c16dc8a7e41787e6698d35aa5c1a))
+* **chat:** recover verified worker states across history and retries ([#559](https://github.com/tjakobsson/uatu/issues/559)) ([11bec5e](https://github.com/tjakobsson/uatu/commit/11bec5ea201d61d73c2c55f56f857752b76fec0e))
+* **deps:** patch body-parser 2.4.0 for GHSA-27r3-jxmh-p828 (denial of service via compressed request bodies) ([5585b5b](https://github.com/tjakobsson/uatu/commit/5585b5b09c11b15aac464a29e52504835dfd06d6))
+* **hub:** remove workspaces whose files were deleted outside Uatu ([#515](https://github.com/tjakobsson/uatu/issues/515)) ([bef981e](https://github.com/tjakobsson/uatu/commit/bef981e6aa86dedc8dd69fe1980ef42c0fee0acb)), closes [#504](https://github.com/tjakobsson/uatu/issues/504)
+* **watch:** report changes made before a polled path's baseline stat ([#511](https://github.com/tjakobsson/uatu/issues/511)) ([e813edd](https://github.com/tjakobsson/uatu/commit/e813eddb977a2976c1ea183a47be6874dd33df43))
+
 ## [0.8.0](https://github.com/tjakobsson/uatu/compare/v0.7.0...v0.8.0) (2026-10-12)
 
 
