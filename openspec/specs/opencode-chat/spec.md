@@ -2226,6 +2226,13 @@ SHALL refresh this metadata without adding per-render history polling. Wide desk
 rows SHALL remain aligned single lines; touch SHALL retain 44px Stop targets and
 use minimal metadata wrapping on very narrow screens without hiding tokens/model.
 
+#### Scenario: Latest effort and cumulative session cost remain truthful
+- **WHEN** a child runs high then medium and produces multiple priced assistant calls
+- **THEN** medium is shown with the latest model and cost uses the authoritative cumulative session snapshot
+- **AND** a later model lacking effort clears medium rather than inheriting it
+- **AND** missing cost shows not reported while explicit reported zero shows zero
+- **AND** history recovery/inspection retains the same model/effort and cost semantics
+
 #### Scenario: Latest execution changes effort or model
 - **WHEN** a child runs high then medium, followed by another model with no reported effort
 - **THEN** its row shows medium after the second execution and not-reported effort with the new model after the third
@@ -3517,3 +3524,14 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **WHEN** a previously consumed invocation is identified by matching native identity, stamp, semantic fingerprint and its established occurrence link
 - **THEN** that proven replay does not invalidate an otherwise verified target
 - **AND** a first-seen ambiguous report or new/contradictory invocation is not treated as historical merely because its timestamp looks old
+
+### Requirement: Receipt token figures read at their scale
+A receipt's token figures SHALL render with compact scale formatting whose
+suffix matches the count's magnitude — billion-scale sums included, with a
+`B` suffix — and each compact figure SHALL keep the exact count reachable
+through the cell's title.
+
+#### Scenario: A billion-scale line item reads in billions
+- **WHEN** a receipt line's token sum reaches one billion
+- **THEN** the cell reads with the `B` suffix rather than thousands of millions
+- **AND** the exact figure remains in the cell's title
