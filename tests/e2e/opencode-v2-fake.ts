@@ -21,6 +21,9 @@
 //     cancelled (and announced); a delivered or missing one is a silent no-op.
 
 import path from "node:path";
+import type { FormCreated, PermissionAsked } from "@opencode/client";
+
+export type NativeWorkerRequestReply = { kind: "permission" | "question"; childId: string; requestId: string; body: Record<string, unknown> };
 
 type InboxDelivery = "steer" | "queue";
 type InboxFile = { mime: string; name: string; source: { type: "uri"; uri: string } };
@@ -70,6 +73,9 @@ export type OpenCodeV2Fake = {
   /** The next cancel of `inboxId` finds it already delivered (the too-late race). */
   raceDeliverOnCancel(inboxId: string): void;
   launchWorker(sessionId: string, background: boolean, existingChildId?: string): { childId: string; taskId: string; callId: string };
+  launchRequestWorker(sessionId: string): { childId: string; taskId: string; callId: string };
+  workerObservation(childId: string, observed: boolean): void;
+  workerRequest(childId: string, kind: "permission" | "question"): { requestId: string; childId: string; messageId: string; toolId: string; kind: "permission" | "question" };
   launchShell(sessionId: string, background: boolean): { shellId: string; taskId: string };
   shellPhase(shellId: string, phase: "exit" | "capture" | "captureBeforeRemove"): void;
   settleWorker(childId: string, state: "completed" | "error" | "cancelled", text: string): void;
@@ -88,7 +94,7 @@ export type OpenCodeV2Fake = {
   launchShellOnNextSteer(sessionId: string): void;
   loseNextWorkerResponse(): void;
   wakeParent(sessionId: string): void;
-  state(): { eventSubscribers: number; heldMessageRead: string | null; sessions: Record<string, OpenCodeV2FakeSessionState>; shells: Record<string, { removed: boolean; waiter: string; captured: boolean; outputAvailable: boolean }>; unhandled: string[]; calls: string[] };
+  state(): { eventSubscribers: number; heldMessageRead: string | null; sessions: Record<string, OpenCodeV2FakeSessionState>; shells: Record<string, { removed: boolean; waiter: string; captured: boolean; outputAvailable: boolean }>; unhandled: string[]; calls: string[]; requestReplies: NativeWorkerRequestReply[]; requestEvidence: Array<{ type: string; sessionID?: string; durable?: { aggregateID: string; seq: number; version: number } }> };
   stop(): Promise<void>;
 };
 
@@ -126,6 +132,12 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
   const unhandled: string[] = [];
   const calls: string[] = [];
   const workers = new Map<string, { parent: SessionState; child: SessionState; message: StoredMessage; background: boolean; settled: boolean }>();
+  const hiddenWorkerObservations = new Set<string>();
+  const permissions = new Map<string, PermissionAsked["data"]>();
+  const forms = new Map<string, FormCreated["data"]["form"]>();
+  const requestReplies: NativeWorkerRequestReply[] = [];
+  const requestEvidence: Array<{ type: string; sessionID?: string; durable?: { aggregateID: string; seq: number; version: number } }> = [];
+  const durableSequences = new Map<string, number>();
   const shells = new Map<string, { parent: SessionState; message: StoredMessage; background: boolean; removed: boolean; exited: boolean; waiter: "pending" | "exited" | "failed"; captured: boolean; captureBeforeRemove: boolean; output: string | null }>();
   let loseBackground = false;
   let losePrompt = false, loseResume = false, refuseBackground = false;
@@ -145,9 +157,13 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
       subscribers.delete(controller);
     }
   };
-  function emit(type: string, data: Record<string, unknown>, located = true): number {
+  function emit(type: string, data: Record<string, unknown>, located = true, durableVersion?: number): number {
     const created = now();
-    const frame = { id: mint("evt"), created, type, ...(located ? { location: { directory } } : {}), data };
+    const aggregateID = typeof data.sessionID === "string" ? data.sessionID : undefined;
+    const durable = durableVersion && aggregateID ? { aggregateID, seq: (durableSequences.get(aggregateID) ?? 0) + 1, version: durableVersion } : undefined;
+    if (durable) durableSequences.set(durable.aggregateID, durable.seq);
+    if (durable || type === "form.created" || type === "permission.asked") requestEvidence.push({ type, ...(aggregateID ? { sessionID: aggregateID } : {}), ...(durable ? { durable } : {}) });
+    const frame = { id: mint("evt"), created, type, ...(located ? { location: { directory } } : {}), ...(durable ? { durable } : {}), data };
     for (const subscriber of [...subscribers]) write(subscriber, `data: ${JSON.stringify(frame)}\n\n`);
     return created;
   }
@@ -226,7 +242,7 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     return { assistantMessageId: assistantMessageID, delivered };
   }
 
-  function createSession(body: Record<string, unknown>): SessionState {
+  function createSession(body: Record<string, unknown>, durable = false): SessionState {
     const created = now();
     const model = body.model as { id?: string; providerID?: string; variant?: string } | undefined;
     const info: SessionState["info"] = {
@@ -243,7 +259,7 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     };
     const session: SessionState = { info, running: false, inbox: [], messages: [] };
     sessions.set(info.id, session);
-    emit("session.created", { sessionID: info.id, parentID: info.parentID, title: info.title, location: info.location, projectID: info.projectID, version: "2.0.28" });
+    emit("session.created", { sessionID: info.id, parentID: info.parentID, title: info.title, location: info.location, projectID: info.projectID, version: durable ? "2.1.2" : "2.0.28" }, true, durable ? 1 : undefined);
     return session;
   }
 
@@ -265,6 +281,53 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     workers.set(childId, { parent, child, message, background, settled: false });
     emit("session.message.content.updated", { sessionID: sessionId, messageID: message.id, content: message.content });
     return { childId, callId, taskId: `v2:${sessionId}:${callId}` };
+  }
+
+  // Isolated 2.1.2 request fixture: retain actual durable launcher/child tool
+  // tuples; pending permission/form creation remains an ephemeral event.
+  function launchRequestWorker(sessionID: string) {
+    const parent = sessions.get(sessionID);
+    if (!parent) throw new Error("Unknown fixture parent");
+    const callId = mint("call"), messageId = mint("msg");
+    const common = { sessionID, assistantMessageID: messageId, id: callId };
+    const input = { agent: "explore", description: "Native request fixture worker", prompt: "Ask the fixture question", background: true };
+    const created = emit("session.tool.input.started", { ...common, name: "subagent" }, true, 1);
+    const ran = emit("session.tool.called", { ...common, input, executed: true }, true, 1);
+    const child = createSession({ parentID: sessionID, title: "Native request fixture child" }, true);
+    child.messages.push({ id: mint("msg"), type: "user", text: input.prompt, time: { created: now() } });
+    child.running = true;
+    emit("session.execution.started", { sessionID: child.info.id }, false, 1);
+    const metadata = { sessionID: child.info.id, status: "running" };
+    const content = [{ type: "text", text: "The subagent is working in the background. You will be notified automatically." }];
+    const completed = now();
+    const message: StoredMessage = { id: messageId, type: "assistant", time: { created }, content: [{ type: "tool", id: callId, name: "subagent", time: { created, ran, completed }, state: { status: "completed", input, metadata, content } }] };
+    parent.messages.push(message);
+    workers.set(child.info.id, { parent, child, message, background: true, settled: false });
+    emit("session.message.content.updated", { sessionID, messageID: messageId, content: message.content }, true, 1);
+    emit("session.tool.success", { ...common, executed: true, content, metadata }, true, 2);
+    return { childId: child.info.id, callId, taskId: `v2:${sessionID}:${callId}` };
+  }
+
+  function workerRequest(childId: string, kind: "permission" | "question") {
+    const worker = workers.get(childId);
+    if (!worker || worker.settled || !worker.child.running) throw new Error("No current owned fixture worker");
+    hiddenWorkerObservations.delete(childId);
+    const messageId = mint("msg"), toolId = mint("call"), requestId = mint(kind === "permission" ? "per" : "form");
+    const common = { sessionID: childId, assistantMessageID: messageId, id: toolId };
+    const input = { questions: [{ header: "Choose", question: "Proceed with the native fixture?", options: [{ label: "Yes", description: "Proceed" }] }] };
+    const created = emit("session.tool.input.started", { ...common, name: "question" }, true, 1);
+    const ran = emit("session.tool.called", { ...common, input, executed: true }, true, 1);
+    worker.child.messages.push({ id: messageId, type: "assistant", time: { created }, content: [{ type: "tool", id: toolId, name: "question", time: { created, ran }, state: { status: "running", input } }] });
+    if (kind === "permission") {
+      const permission: PermissionAsked["data"] = { id: requestId, sessionID: childId, action: "question", resources: ["fixture"], source: { type: "tool", messageID: messageId, id: toolId } };
+      permissions.set(requestId, permission);
+      emit("permission.asked", permission);
+    } else {
+      const form: FormCreated["data"]["form"] = { id: requestId, sessionID: childId, title: "Questions", fields: [{ key: "q0", type: "string", title: "Choose", description: "Proceed with the native fixture?", custom: true, options: [{ value: "Yes", label: "Yes", description: "Proceed" }] }], metadata: { kind: "question", tool: { messageID: messageId, id: toolId } } };
+      forms.set(requestId, form);
+      emit("form.created", { form });
+    }
+    return { requestId, childId, messageId, toolId, kind };
   }
 
   function settleWorker(childId: string, state: "completed" | "error" | "cancelled", text: string) {
@@ -362,9 +425,11 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     calls.push(`${route}${url.search}`);
     const body = request.method === "GET" || request.method === "DELETE" ? {} : await request.json().catch(() => ({})) as Record<string, unknown>;
     if (route === "GET /api/event") return eventsPaused ? new Response("Fixture event connection unavailable", { status: 503 }) : eventStream(request.signal);
-    if (route === "GET /api/session/active") return enveloped(Object.fromEntries([...sessions.values()].filter(session => session.running).map(session => [session.info.id, { status: "running" }])));
+    if (route === "GET /api/session/active") return enveloped(Object.fromEntries([...sessions.values()].filter(session => session.running && !hiddenWorkerObservations.has(session.info.id)).map(session => [session.info.id, { status: "running" }])));
     if (route === "GET /api/agent") return scoped(AGENTS);
-    if (route === "GET /api/command" || route === "GET /api/skill" || route === "GET /api/mcp" || route === "GET /api/form" || route === "GET /api/permission/request") return scoped([]);
+    if (route === "GET /api/form") return scoped([...forms.values()]);
+    if (route === "GET /api/permission/request") return scoped([...permissions.values()]);
+    if (route === "GET /api/command" || route === "GET /api/skill" || route === "GET /api/mcp") return scoped([]);
     if (route === "GET /api/model") return scoped(MODELS);
     if (route === "GET /api/model/default") return scoped({ id: MODEL.modelID, ...MODEL });
     if (route === "GET /api/provider") return scoped(PROVIDERS);
@@ -417,6 +482,31 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     const session = sessions.get(sessionID);
     if (!session) return sessionNotFound(sessionID);
     const sub = `${request.method} ${rest}`;
+
+    const permissionReply = /^POST permission\/([^/]+)\/reply$/.exec(sub);
+    if (permissionReply) {
+      const requestId = decodeURIComponent(permissionReply[1]!);
+      const permission = permissions.get(requestId);
+      if (!permission || permission.sessionID !== sessionID || !["once", "always", "reject"].includes(String(body.decision))) return notFound("No pending permission in this child");
+      requestReplies.push({ kind: "permission", childId: sessionID, requestId, body });
+      permissions.delete(requestId);
+      emit("permission.replied", { sessionID, requestID: requestId, reply: body.decision });
+      return noContent();
+    }
+    const formRequest = /^(GET|POST) form\/([^/]+)(\/reply)?$/.exec(sub);
+    if (formRequest) {
+      const requestId = decodeURIComponent(formRequest[2]!);
+      const form = forms.get(requestId);
+      if (!form || form.sessionID !== sessionID) return notFound("No pending form in this child");
+      if (formRequest[1] === "GET" && !formRequest[3]) return enveloped({ ...form, state: { status: "pending" } });
+      if (formRequest[1] === "POST" && formRequest[3] && body.answer && typeof body.answer === "object") {
+        requestReplies.push({ kind: "question", childId: sessionID, requestId, body });
+        forms.delete(requestId);
+        emit("form.replied", { sessionID, id: requestId, answer: body.answer });
+        return noContent();
+      }
+      return notFound("Unsupported fixture form operation");
+    }
 
     if (sub === "GET ") return enveloped(session.info);
     // Pinned SessionGenerate makes one inference, admits no inbox/history
@@ -592,6 +682,7 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
       unhandled.length = 0;
       calls.length = 0;
       workers.clear();
+      hiddenWorkerObservations.clear(); permissions.clear(); forms.clear(); requestReplies.length = 0; requestEvidence.length = 0; durableSequences.clear();
       shells.clear();
       loseBackground = false;
       losePrompt = loseResume = refuseBackground = false;
@@ -601,6 +692,12 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
       eventsPaused = false;
     },
     launchWorker,
+    launchRequestWorker,
+    workerObservation(childId, observed) {
+      if (!workers.has(childId)) throw new Error("Unknown fixture worker");
+      if (observed) hiddenWorkerObservations.delete(childId); else hiddenWorkerObservations.add(childId);
+    },
+    workerRequest,
     launchShell,
     shellPhase,
     settleWorker,
@@ -667,7 +764,7 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
           messages: session.messages.map(message => ({ id: message.id, type: message.type, ...(message.type === "user" ? { text: message.text } : {}) })),
         };
       }
-      return { eventSubscribers: subscribers.size, heldMessageRead: messageReadHold?.claimed ? messageReadHold.sessionId : null, sessions: result, shells: Object.fromEntries([...shells].map(([id, shell]) => [id, { removed: shell.removed, waiter: shell.waiter, captured: shell.captured, outputAvailable: shell.output !== null }])), unhandled: [...unhandled], calls: [...calls] };
+      return { eventSubscribers: subscribers.size, heldMessageRead: messageReadHold?.claimed ? messageReadHold.sessionId : null, sessions: result, shells: Object.fromEntries([...shells].map(([id, shell]) => [id, { removed: shell.removed, waiter: shell.waiter, captured: shell.captured, outputAvailable: shell.output !== null }])), unhandled: [...unhandled], calls: [...calls], requestReplies: structuredClone(requestReplies), requestEvidence: structuredClone(requestEvidence) };
     },
     async stop() {
       releaseMessageRead();

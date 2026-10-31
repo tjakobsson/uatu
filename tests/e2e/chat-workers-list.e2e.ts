@@ -61,7 +61,7 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`canonical w
       await expect(row).toHaveAttribute("data-state", "unknown");
       await expect(stop).toHaveCount(0);
       await expect(inspect).toHaveRole("button");
-      await expect(inspect).toHaveAccessibleName(/Focused B · unknown/);
+      await expect(inspect).toHaveAccessibleName("Focused B · Status unavailable · last seen unknown · Reasoning effort not reported · Subagent session cost not reported");
       await expect(inspect).toBeVisible();
       await expect(inspect).toBeEnabled();
       await expect(inspect).toBeFocused();
@@ -113,7 +113,9 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`canonical w
     await summary.tap();
     await expect(track.locator(".chat-worker-model-name")).toHaveText("gpt-6-astra");
     await expect(track.locator(".chat-worker-tokens")).toHaveText("Σ 230k");
-    for (const theme of ["light", "dark"] as const) for (const width of [390, 320]) {
+    // Return to 390 explicitly: a previous narrow allocation must not pin the
+    // finished card to 78px after its row shrinks back to 28px.
+    for (const theme of ["light", "dark"] as const) for (const width of [390, 320, 390]) {
       await page.emulateMedia({ colorScheme: theme });
       await page.setViewportSize({ width, height: 844 });
       await page.evaluate(width => {
@@ -121,7 +123,18 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`canonical w
         window.visualViewport!.dispatchEvent(new Event("resize"));
       }, width);
       await expect(track.locator("[data-worker-id]")).toHaveCount(1);
-      expect(await trackHeight(track)).toBeLessThanOrEqual(width <= 360 ? 80 : 60);
+      await expect(track.locator("[data-dismiss-worker]")).toHaveCount(0);
+      const geometry = await track.evaluate(node => {
+        const row = node.querySelector<HTMLElement>(".chat-worker-row")!;
+        const inspect = row.querySelector<HTMLElement>(".chat-worker-inspect")!;
+        const dock = node.parentElement!;
+        return { viewport: innerWidth, card: node.getBoundingClientRect().toJSON(), row: row.getBoundingClientRect().toJSON(),
+          inspect: inspect.getBoundingClientRect().toJSON(), individualDismiss: row.querySelectorAll("[data-dismiss-worker]").length,
+          gridColumns: getComputedStyle(inspect).gridTemplateColumns, gridRows: getComputedStyle(inspect).gridTemplateRows,
+          dockWidth: dock.getBoundingClientRect().width, container: getComputedStyle(dock).container, root: document.documentElement.outerHTML.split(">")[0] };
+      });
+      if (geometry.card.height > (width <= 360 ? 80 : 60)) await info.attach(`workers-${engine}-${theme}-${width}-geometry`, { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+      expect(geometry.card.height, JSON.stringify(geometry)).toBeLessThanOrEqual(width <= 360 ? 80 : 60);
       const header = (await summary.boundingBox())!;
       const action = (await dismiss.boundingBox())!;
       expect(action.y).toBe(header.y);
@@ -363,12 +376,14 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`canonical w
     // Unknown state is a retained warning, never authority for a stop.
     await request.post("/__e2e/chat", { data: { action: "item", conversationId: snapshot.conversation.id, item: { ...items.find(item => item.id === "job:18"), stateUncertain: true } } });
     await summary.tap();
-    await expect(label).toHaveText("1 working · 1 unknown");
+    await expect(label).toHaveText("1 working · 1 unresolved");
     const unknown = track.locator('[data-worker-id="job:18"]');
     await expect(unknown).toHaveAttribute("data-state", "unknown");
     await expect(unknown.locator("[data-stop-task]")).toHaveCount(0);
-    await expect(unknown.getByRole("button", { name: /Build independent theme module.*unknown/ })).toBeVisible();
-    await expect(unknown.getByRole("button", { name: /Build independent theme module.*unknown/ })).toBeEnabled();
+    const unknownInspect = unknown.locator(".chat-worker-inspect");
+    await expect(unknownInspect).toHaveAccessibleName("Build independent theme module with accessible palettes and persistent preferences · Status unavailable · last seen unknown · GPT-6.1 Sol · Reasoning effort not reported · 229,000 cumulative tokens · Subagent session cost not reported");
+    await expect(unknownInspect).toBeVisible();
+    await expect(unknownInspect).toBeEnabled();
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator("#chat-input").blur();
     await page.evaluate(() => {

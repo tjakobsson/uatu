@@ -63,6 +63,10 @@ export function personalChatPreferencesPath(stateRoot: string): string {
   return path.join(stateRoot, "personal-chat-preferences.json");
 }
 
+export function workerDismissalsPath(stateRoot: string): string {
+  return path.join(stateRoot, "worker-dismissals.json");
+}
+
 export function onboardingJournalPath(stateRoot: string): string {
   return path.join(stateRoot, "pending-onboarding.json");
 }

@@ -444,7 +444,25 @@ reading budget applies to collapsed cards whenever whole actions and headers
 physically fit; expanded cards use the small conversation strip above. A smaller
 band prioritizes the pane being used without overlapping the composer.
 Worker counts distinguish
-confirmed working, finished (including failed/stopped), and unknown occurrences.
+**Working**, **Unresolved**, and **Finished** (including confirmed failed/stopped)
+occurrences. A request positively linked to the current execution reads
+**Needs your answer** and counts under Working. It reveals the existing main-session
+permission/question card, with the same request ID, notification and answer flow;
+it does not create a second request. A request that cannot be attributed to a
+particular task remains available in the main session without being assigned to
+an old task merely because they share a child session.
+
+**Checking status…** counts under Unresolved and lasts at most ten seconds per
+recovery cycle; repaints, unrelated updates and retries do not extend it.
+**Session active · task unverified** means the child session is
+active but its current execution cannot be assigned to that task. Unobservable
+work reads **Status unavailable · last seen …**, using the last positive task
+observation, or explicitly unknown time when none exists. A positively identified
+execution end without a correlated outcome reads **Ended · result unavailable**;
+it remains Unresolved, not successful, failed or cancelled. Unobservable,
+ambiguous and ended work has no running animation or growing execution timer.
+Recovery is automatic; there is no worker **Check again** control.
+
 Counts and rows use the same deduplicated executions: actual background shell
 tasks count, ordinary foreground commands do not. Zero-count categories are
 omitted. Dismissed counts are not shown; when no visible workers remain the whole
@@ -471,8 +489,23 @@ agent/model/usage/effort/cost is not invented. Touch **Stop** remains a separate
 44px target with an 8px gap; unknown execution state disables it. Settled rows
 retain the approved compact inspection density and narrow-width fallback.
 **Dismiss finished**
-stays on the right of the same compact header, not in a footer, and hides only this device's per-conversation
-view using the existing persisted dismissal state, never provider history.
+stays on the right of the same compact header, not in a footer. Unavailable and
+ended-without-result rows also offer an individual **Dismiss**. In a Hub these
+are personal account state, synchronized across that account's devices and
+scoped to the stable workspace, conversation and exact execution. Proven launch
+aliases preserve identity across history/replay; a reused child session alone
+does not. New executions never inherit an old dismissal. Dismissal changes only
+summary visibility, never provider history, work, requests or a task's outcome.
+Finished rows use immutable native task, launcher or result anchors even when
+they have no current-activity observation. If exact identity is unavailable, the
+row stays visible with dismissal guidance; **Dismiss finished** still processes
+other supported rows and reports skipped entries.
+Verified activity and positively linked pending requests automatically resurface.
+Save/read failures are reported rather than silently claimed as synchronized
+success. Chat remains available if retirement of an old mark cannot be saved;
+an old dismissal can then reapply to an unavailable row after restart, but never
+hide currently verified activity or pending requests. Non-Hub source/test
+presentation remains device-local; its old marks are not migrated into Hub state.
 There is no Restore finished control. Results and their inspection remain in
 the timeline; summaries count only visible rows.
 Σ usage is cumulative, not context occupancy.
@@ -485,7 +518,7 @@ unavailable and unknown guidance remains tied to its source operation; unrelated
 Remove, delivery changes or later successful steers cannot clear it. A Settings
 read failure means that page cannot confirm the saved preference, not that the
 server has disabled a saved ON policy in another tab or device. In desktop UI
-mode, Workers opens when visible working or unknown work first appears; Pending
+mode, Workers opens when visible Working or Unresolved work first appears; Pending
 opens when entries first appear, including paused entries. A deliberate collapse
 holds throughout that nonempty active-work or pending batch, including further
 arrivals. Once that batch is empty, the next batch opens again. Settlement alone
@@ -539,8 +572,12 @@ inspection action rather than the parent composer.
 Reconnect reads history, pending results and current execution evidence.
 Complete history is reused only within a connected event generation, invalidated
 by session events, and reread after disconnection; execution/inbox evidence stays fresh.
-Missing evidence means **Status unavailable**, not finished or cancelled; an
-unverified worker cannot be stopped. This is not a promise of execution survival
+Missing evidence means **Status unavailable**, not finished or cancelled.
+Activity and Stop authorization are independent: an owned task with positively
+verified current activity can show **Working** while Stop is unavailable. Task
+details explain the unavailable control in ordinary text, including on mobile;
+a Working label is never permission to interrupt an unverified native target.
+This is not a promise of execution survival
 across service restarts. Reused child sessions can have ambiguous results, and
 the native interruption API cannot atomically lock a particular execution
 generation against an external continuation.
@@ -548,7 +585,8 @@ generation against an external continuation.
 Stop also depends on bounded safety records identifying the particular worker
 run. Cleaning up display records does not disable targets whose verification
 evidence remains retained. If that evidence is missing, revoked or cannot fit,
-the target stays uncertain with Stop unavailable—even if a status read succeeds.
+the target's control stays unverified with Stop unavailable—even if a status read
+succeeds. Separately established task activity can still show Working.
 History alone does not recreate lost control proof. Unretained targets can remain
 unavailable for the provider runtime's lifetime; reconnect does not erase known
 revocations. These internal limits do not prevent workers running or messages
@@ -563,6 +601,16 @@ be matched to the launcher, that target stays uncertain with Stop unavailable.
 User-command shell transcript notes are kept separate from
 background-worker report retention; ordinary shell use does not spend that
 worker-control budget.
+
+A first child may be born while its launcher is executing, and its first native
+execution may start after that launcher returns. These orderings alone do not
+revoke the task: association requires positive parent/workspace, compatible
+accepted invocation and first-execution evidence. Competing invocations,
+intervening execution boundaries and contradictory identity remain vetoes; a
+fresh active-session lookup does not clear old revocations. Native event-envelope
+clocks are distinct from stored session timestamps and tool-part clocks. Tests
+exercise these timing shapes through the public provider seam, not a claim that
+an exclusive cause was captured for every historical screenshot.
 
 If a response is lost, Chat reports **Outcome unknown** and refreshes without
 replaying the mutation. Same-request retries are deduplicated only while the

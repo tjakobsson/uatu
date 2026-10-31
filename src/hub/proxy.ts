@@ -118,7 +118,8 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
   return headers;
 }
 
-export async function proxyHttp(request: Request, session: RunningSession, policy?: VerifiedChatPolicy): Promise<Response> {
+export async function proxyHttp(request: Request, session: RunningSession, policy?: VerifiedChatPolicy,
+  observeSnapshot?: (conversationId: string, value: unknown) => void): Promise<Response> {
   const requestUrl = new URL(request.url);
   const target = childUrlFor(session, requestUrl);
   const transport = classifyProxyTransport(requestUrl.pathname);
@@ -224,6 +225,36 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
   }
 
   statusCategory = statusCategoryOf(upstream.status);
+  // Bounded tap on the existing response body, not a tee/background reader:
+  // observes history/initial snapshots without changing bytes or backpressure.
+  // Oversized/invalid content is simply not trusted for retirement.
+  const snapshotPath = request.method === "GET" && requestUrl.pathname.startsWith(session.basePath)
+    ? /^api\/chat\/conversations\/([^/]+)$/.exec(requestUrl.pathname.slice(session.basePath.length)) : null;
+  if (observeSnapshot && snapshotPath && upstream.ok && upstream.body && upstream.headers.get("content-type")?.includes("application/json")) {
+    let conversationId: string | null = null;
+    try { conversationId = decodeURIComponent(snapshotPath[1]!); } catch { /* Child owns malformed-route refusal. */ }
+    if (conversationId !== null) {
+      const id = conversationId; const chunks: Uint8Array[] = []; let bytes = 0; let oversized = false;
+      const tap = new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          bytes += chunk.byteLength;
+          if (bytes > 4 * 1024 * 1024 || chunks.length >= 4096) { oversized = true; chunks.length = 0; }
+          if (!oversized && chunk.byteLength) chunks.push(chunk.slice());
+          controller.enqueue(chunk);
+        },
+        flush() {
+          if (oversized) return;
+          try {
+            const data = new Uint8Array(bytes); let offset = 0;
+            for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+            observeSnapshot(id, JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data)));
+          } catch { /* Personal observation never fails chat delivery. */ }
+          finally { chunks.length = 0; }
+        },
+      });
+      upstream = new Response(upstream.body.pipeThrough(tap), { status: upstream.status, statusText: upstream.statusText, headers: upstream.headers });
+    }
+  }
   if (policyUnavailable && upstream.ok && upstream.headers.get("content-type")?.includes("application/json")) {
     try {
       const value = await upstream.json();

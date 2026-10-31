@@ -1,13 +1,14 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 11.31.0-experimental
+  version: 12.32.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 11 and workspace revision 31
+  summary: Hub revision 12 and workspace revision 32
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
-    Under `/s/{workspaceId}/` the Hub serves one family itself, personal
-    state, and it is part of this contract. Everything else under that
+    Under `/s/{workspaceId}/` the Hub serves personal state, worker
+    dismissals and activity-viewed acknowledgements itself, and those are
+    part of this contract. Other routes under that
     prefix is the internal protocol between the Hub, the workspace child,
     and the web client shipped in the same build, and `exclusions.yaml`
     lists it. Workspace payloads reach public clients
@@ -20,8 +21,8 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 11
-    workspaceApiRevision: 31
+    hubApiRevision: 12
+    workspaceApiRevision: 32
 servers:
   - url: https://{hubHost}
     variables:
@@ -1107,6 +1108,51 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+  /s/{workspaceId}/api/personal-worker-dismissals:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: hubGetWorkerDismissals
+      tags: [Hub]
+      summary: Read personal worker-summary dismissals
+      description: "The Hub derives the account from authentication and reconciles exact executions against an authoritative workspace conversation read. Response is no-store. No username selector, provider mutation or shared workspace state is involved. The workspace must currently answer; unavailable storage or evidence returns 503 rather than empty marks."
+      parameters:
+        - name: conversationId
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 512, pattern: '^[a-z][a-z0-9-]*:.+' }
+      responses:
+        '200':
+          description: Current authenticated account's execution-scoped dismissals
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WorkerDismissalState' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+        '507': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: hubUpdateWorkerDismissal
+      tags: [Hub]
+      summary: Dismiss one execution or retire its stale dismissal
+      description: "Cookie mutations require the existing same-origin protection. Dismiss is allowed only for an authoritatively dismissible execution at expectedRevision; retire only for positively verified activity. Writes merge per entry and acknowledge only durable saves. A stale revision returns 409; refetch instead of overwriting. Repeated identical operations are idempotent while the evidence revision is unchanged. No provider work, results or canonical interaction requests are changed. No generic Restore operation exists."
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/WorkerDismissalMutation' } }
+      responses:
+        '200':
+          description: Durable personal state after the conditional operation
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WorkerDismissalState' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+        '507': { $ref: '#/components/responses/Error' }
   /s/{workspaceId}/api/activity-viewed:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     post:
@@ -2384,7 +2430,16 @@ components:
             taskType: { type: string }
             toolUseId: { type: string, minLength: 1, maxLength: 512 }
             status: { enum: [running, completed, failed, stopped] }
-            stateUncertain: { type: boolean, description: "Last-known state only; current execution is unverified and must not authorize Stop." }
+            stateUncertain: { type: boolean, description: "Compatibility uncertainty for occurrence/control proof; never authorizes Stop. Independently verified current activity is carried in activity." }
+            activity: { $ref: '#/components/schemas/WorkerActivity' }
+            control:
+              type: object
+              required: [available]
+              description: "Presentation of retained Stop availability only. A native Stop always revalidates private occurrence proof; Working alone grants no control authority."
+              properties:
+                available: { type: boolean }
+                reason: { type: string, maxLength: 512 }
+              additionalProperties: false
             resultId: { type: string, minLength: 1, maxLength: 512, description: "Provider notification identity, stable across enqueue, delivery and history." }
             terminalReportedAt: { type: number, minimum: 0, description: "Provider terminal-report clock in Unix epoch milliseconds, not execution completion. OpenCode V2 live events use inbox admission; stored synthetic messages use delivery, so recovery can change this clock and finished ordering. Absent without a valid provider timestamp; zero is valid. Never synthesize from local receipt time, launcher completion or missing-time fallbacks, or infer worker state, duration, usage or cost from it." }
             toolUseIds: { type: array, minItems: 1, items: { type: string, minLength: 1, maxLength: 512 }, description: "Launch calls known to share this worker occurrence; do not count each alias as another running worker." }
@@ -2407,6 +2462,64 @@ components:
           additionalProperties: false
         - { type: object, required: [id, type, createdAt, wakeupId, prompt, recurring, schedule, status], description: "One future turn the agent scheduled for itself (a self-paced wakeup, a cron, a loop), as its session reports it, updated in place through its life. `pending` rows are listed with the conversation's scheduled state and shown in the timeline; a one-shot that fired reads `fired` with `firedTurnId` naming the `user_message` (origin `wakeup`) that opened its turn; a recurring one stays `pending` across fires with `nextFireAt` moving on. `cancelled`: the agent removed it, or the user cancelled it or released the session; the workspace blocks a cancelled wakeup from firing again even if the agent's tooling later rebuilds it. `paused`: the session ended, but the agent's tooling rebuilds this wakeup (a cron) when the conversation runs again; `message` says so, and a conversation opened without a live session lists its paused wakeups. `lost`: the session ended some other way and the schedule ended with it; `message` says so. A reopened conversation whose session is gone replays no pending row. Only for agents declaring `scheduled-wakeups`.", properties: { id: { type: string }, type: { const: scheduled_wakeup }, createdAt: { type: number }, wakeupId: { type: string, minLength: 1, maxLength: 512 }, prompt: { type: string, description: "The prompt the wakeup submits when it fires, as the agent reports it (possibly clipped by the agent)." }, recurring: { type: boolean }, schedule: { type: string, minLength: 1, description: "Five-field cron expression in the workspace host's local time; a one-shot encodes a single fire time." }, nextFireAt: { type: number, minimum: 0, description: "The workspace's reading of the next fire time (epoch ms), for display only: the agent fires on its own clock. Only on a pending row, and absent when the expression could not be read." }, status: { enum: [pending, fired, cancelled, paused, lost] }, firedTurnId: { type: string, minLength: 1, maxLength: 512 }, message: { type: string, description: "What happened to a wakeup that did not fire, when that needs saying (a lost or paused schedule)." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt], description: "The agent compacted the conversation at this point. Content before the marker stays in the timeline; the figures are the agent's own pre/post token counts when it reported them.", properties: { id: { type: string }, type: { const: compaction }, createdAt: { type: number }, trigger: { enum: [manual, auto] }, preTokens: { type: integer, minimum: 0 }, postTokens: { type: integer, minimum: 0 } }, additionalProperties: false }
+    WorkerDismissalState:
+      type: object
+      required: [version, conversationId, entries]
+      properties:
+        version: { const: 1 }
+        conversationId: { type: string, minLength: 1, maxLength: 512 }
+        entries:
+          type: array
+          maxItems: 8192
+          items:
+            type: object
+            required: [executionId, revision, dismissed]
+            properties:
+              executionId: { type: string, minLength: 1, maxLength: 512 }
+              revision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+              dismissed: { type: boolean }
+            additionalProperties: false
+      additionalProperties: false
+    WorkerDismissalMutation:
+      type: object
+      required: [version, conversationId, executionId, expectedRevision, operation]
+      properties:
+        version: { const: 1 }
+        conversationId: { type: string, minLength: 1, maxLength: 512, pattern: '^[a-z][a-z0-9-]*:.+' }
+        executionId: { type: string, minLength: 1, maxLength: 512 }
+        expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        operation: { enum: [dismiss, retire] }
+      additionalProperties: false
+    WorkerActivity:
+      type: object
+      required: [kind]
+      description: "Current task observation independent of Stop authorization. Historical running metadata or an active reused session alone is not task activity; ended is not a successful result."
+      properties:
+        kind: { enum: [working, needs-answer, checking, session-active, unavailable, ended] }
+        observedAt: { type: number, minimum: 0, description: "Last positive server observation of this task in Unix epoch milliseconds, not launch time or unrelated session progress." }
+        endedAt: { type: number, minimum: 0, description: "Positively correlated execution end in Unix epoch milliseconds; does not establish a result outcome." }
+        executionId: { type: string, minLength: 1, maxLength: 512, description: "Stable occurrence identity when established, never child-session identity alone." }
+        executionAliases:
+          type: array
+          minItems: 1
+          maxItems: 2048
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 512 }
+          description: "Immutable launch anchors positively proven to name the same execution, including executionId. Enables exact dismissal/revision continuity as aliases are discovered; a shared child session never establishes an alias."
+        generation: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        reason: { type: string, maxLength: 512 }
+        request:
+          type: object
+          required: [id, kind]
+          properties:
+            id: { type: string, minLength: 1, maxLength: 512 }
+            kind: { enum: [permission, question] }
+          additionalProperties: false
+      allOf:
+        - if: { properties: { kind: { const: needs-answer } } }
+          then: { properties: { request: {} }, required: [request] }
+          else: { not: { properties: { request: {} }, required: [request] } }
+      additionalProperties: false
     WorkerSessionReport:
       type: object
       required: [effort, costUsd]
@@ -2640,6 +2753,11 @@ components:
           properties:
             topic: { type: string, const: worktrees }
           additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: personal }
+          additionalProperties: false
     LiveSubscription:
       description: A subscription and the cursor to resume it from.
       oneOf:
@@ -2668,6 +2786,12 @@ components:
           properties:
             topic: { type: string, const: worktrees }
             cursor: { $ref: '#/components/schemas/LiveCursor', description: "Ignored. The worktrees topic has no replay cursor; every attach receives a fresh invalidation." }
+          additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: personal }
+            cursor: { $ref: '#/components/schemas/LiveCursor', description: "Ignored. Personal state is fetched authoritatively after each account-private invalidation." }
           additionalProperties: false
     LiveSubscriptionList:
       type: array

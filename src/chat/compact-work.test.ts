@@ -258,7 +258,7 @@ test("canonical executions fold launcher aliases but keep repeated occurrences a
   const workers = compactWorkers(items);
   expect(workers).toHaveLength(4);
   expect(workers.find(worker => worker.id === "first")?.references).toEqual(["tool:one", "tool:two"]);
-  expect(workerSummary(workers)).toBe("1 working · 2 finished · 1 unknown");
+  expect(workerSummary(workers)).toBe("1 working · 1 unresolved · 2 finished");
   expect(workers.find(worker => worker.id === "first")?.state).toBe("failed");
   expect(workers.find(worker => worker.id === "third")?.state).toBe("stopped");
   expect(workerSummary([])).toBe("No workers");
@@ -309,7 +309,7 @@ test("pending/generating is not confirmed working and failed tools are finished,
     { type: "command", id: "shell", command: "fixture", status: "error" },
     { type: "text", id: "text", text: "generating" },
   ] as ConversationItem[]);
-  expect(workerSummary(workers)).toBe("1 unknown");
+  expect(workerSummary(workers)).toBe("1 unresolved");
 });
 
 test("worker summaries describe only visible work without losing terminal outcomes", () => {

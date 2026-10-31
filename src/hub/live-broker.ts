@@ -106,6 +106,7 @@ export type LiveAttachment = {
 };
 
 export type LiveBrokerOptions = {
+  observeConversation?(workspaceId: string, conversationId: string, data: unknown): void;
   lingerMs?: number;
   replayBufferBytes?: number;
   retryMinMs?: number;
@@ -258,10 +259,12 @@ const INVENTORY_OPEN_GRACE_MS = 250;
 
 type UpstreamState = "idle" | "opening" | "live" | "failed" | "unsupported" | "closed";
 
+// Personal state never enters shared workspace/topic maps, replay or metrics.
+type BrokerTopic = Exclude<LiveTopic, "personal">;
 type Subscriber = {
   sink: LiveSink;
   workspaceId: string;
-  topic: LiveTopic;
+  topic: BrokerTopic;
   key: string | undefined;
   // The last cursor this subscriber applied: presented on attach, advanced
   // on every `data` written to it.
@@ -319,19 +322,19 @@ class Upstream {
   constructor(
     readonly id: string,
     readonly workspaceId: string,
-    readonly topic: LiveTopic,
+    readonly topic: BrokerTopic,
     readonly key: string | undefined,
   ) {}
 }
 
-function upstreamId(workspaceId: string, topic: LiveTopic, key: string | undefined): string {
+function upstreamId(workspaceId: string, topic: BrokerTopic, key: string | undefined): string {
   return `${workspaceId}\n${topic}\n${key ?? ""}`;
 }
 
 // The upstream metrics describe subscriptions to a CHILD. `worktrees` has
 // none, so it is deliberately absent from the counters rather than reported
 // as an upstream that never opens.
-function childUpstreamTopic(topic: LiveTopic): UpstreamTopic | null {
+function childUpstreamTopic(topic: BrokerTopic): UpstreamTopic | null {
   return topic === "worktrees" ? null : topic;
 }
 
@@ -415,7 +418,7 @@ export class LiveBroker implements PresenceSource {
   private readonly presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly presenceListeners = new Set<(user: string) => void>();
 
-  constructor(private readonly source: LiveUpstreamSource, options: LiveBrokerOptions = {}) {
+  constructor(private readonly source: LiveUpstreamSource, private readonly options: LiveBrokerOptions = {}) {
     this.lingerMs = options.lingerMs ?? LIVE_LINGER_MS;
     this.replayBufferBytes = options.replayBufferBytes ?? LIVE_REPLAY_BUFFER_BYTES;
     this.retryMinMs = options.retryMinMs ?? RETRY_MIN_MS;
@@ -485,11 +488,16 @@ export class LiveBroker implements PresenceSource {
   // Attaches a client sink to one workspace topic. The subscription's
   // cursor is where the sink resumes from (absent: the current position).
   subscribe(sink: LiveSink, workspaceId: string, subscription: LiveSubscription): LiveAttachment {
+    if (subscription.topic === "personal") throw new Error("personal topics belong to the authenticated endpoint");
     if (this.disposed) throw new Error("live broker is disposed");
     return this.attachSink(sink, workspaceId, subscription.topic, subscription.key, subscription.cursor);
   }
 
-  private attachSink(sink: LiveSink, workspaceId: string, topic: LiveTopic, key: string | undefined, cursor: string | undefined): LiveAttachment {
+  observeWorkerConversations(observer: LiveBrokerOptions["observeConversation"]): void {
+    this.options.observeConversation = observer;
+  }
+
+  private attachSink(sink: LiveSink, workspaceId: string, topic: BrokerTopic, key: string | undefined, cursor: string | undefined): LiveAttachment {
     const subscriber: Subscriber = {
       sink,
       workspaceId,
@@ -675,7 +683,7 @@ export class LiveBroker implements PresenceSource {
   // ---------------------------------------------------------------------
   // Subscriptions
 
-  private attachSubscriber(subscriber: Subscriber, topic: LiveTopic, key: string | undefined): void {
+  private attachSubscriber(subscriber: Subscriber, topic: BrokerTopic, key: string | undefined): void {
     const id = upstreamId(subscriber.workspaceId, topic, key);
     let upstream = this.upstreams.get(id);
     if (!upstream) {
@@ -961,7 +969,9 @@ export class LiveBroker implements PresenceSource {
               return;
             }
             if (frame.event !== "chat" || frame.id === undefined) continue;
-            this.emitData(subscriber, parseJson(frame.data), frame.id);
+            const data = parseJson(frame.data);
+            this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
+            this.emitData(subscriber, data, frame.id);
             if (this.mergeCatchUp(upstream, subscriber, frame.id)) {
               release();
               await reader.cancel().catch(() => undefined);
@@ -1205,6 +1215,7 @@ export class LiveBroker implements PresenceSource {
           return false;
         }
         if (frame.event !== "chat" || frame.id === undefined) return false;
+        this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
         upstream.head = frame.id;
         this.bufferPush(upstream, frame.id, data, frame.data.length);
         this.fanOut(upstream, data, frame.id);
@@ -1220,6 +1231,10 @@ export class LiveBroker implements PresenceSource {
         // Unreachable: no child stream feeds a hub-local topic.
         return false;
     }
+  }
+
+  private observeConversation(workspaceId: string, conversationId: string, data: unknown): void {
+    try { this.options.observeConversation?.(workspaceId, conversationId, data); } catch { /* Personal persistence never interrupts chat. */ }
   }
 
   private recordActivity(upstream: Upstream, activity: WorkspaceActivity): void {

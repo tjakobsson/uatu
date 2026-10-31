@@ -3,6 +3,23 @@ import { parseHTML } from "linkedom";
 import { compactWorkers, workerSummary, type CompactWorker } from "./compact-work";
 import { CompactWorkersView } from "./compact-workers-view";
 
+test("only unavailable and ended rows offer individual presentation dismissal; requests remain canonical links", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const kinds = ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"] as const;
+    const workers = compactWorkers(kinds.map((kind, index) => ({ type: "background_task" as const, id: kind, taskId: kind, description: kind, status: "running" as const, createdAt: index + 1,
+      activity: { kind, executionId: `exec:${kind}`, ...(kind === "needs-answer" ? { request: { id: "canonical", kind: "question" as const } } : {}) } })));
+    new CompactWorkersView(host).paint("parent", workers, new Set(), true);
+    expect([...host.querySelectorAll<HTMLElement>("[data-dismiss-worker]")].map(button => button.dataset.dismissWorker)).toEqual(["unavailable", "ended"]);
+    expect(host.querySelector('[data-worker-id="needs-answer"] [data-worker-request]')?.getAttribute("data-worker-request")).toBe("canonical");
+    expect(host.querySelector('[data-worker-id="needs-answer"] [data-elapsed-since]')).toBeNull();
+    expect(host.querySelector('[data-worker-id="ended"] .chat-worker-clock')?.textContent).toContain("End time unknown");
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
 test.each(["agent", "shell"] as const)("uncertain %s stays inspectable without Stop or a confirmed-working indicator", taskType => {
   const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
   const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
@@ -19,11 +36,12 @@ test.each(["agent", "shell"] as const)("uncertain %s stays inspectable without S
     expect(row.querySelector("[data-stop-task]")).not.toBeNull();
     const uncertain = compactWorkers(items.map(item => item.id === "active" ? { ...item, stateUncertain: true } : item));
     view.paint("parent", uncertain, new Set(), true);
-    expect(workerSummary(uncertain)).toBe("1 finished · 1 unknown");
+    expect(workerSummary(uncertain)).toBe("1 unresolved · 1 finished");
     expect(row.dataset.state).toBe("unknown");
     expect(row.querySelector("[data-inspect-task]")).not.toBeNull();
     expect(row.querySelector(".chat-worker-glyph")!.textContent).toBe("◌");
-    expect(row.querySelector(".chat-worker-inspect")!.getAttribute("aria-label")).toMatch(/ · unknown(?: ·|$)/);
+    expect(row.querySelector(".chat-worker-inspect")!.getAttribute("aria-label")).toContain("Status unavailable · last seen unknown");
+    expect(row.querySelector("[data-elapsed-since]")).toBeNull();
     expect(row.querySelector(".chat-worker-inspect")!.getAttribute("aria-label")).not.toContain("working");
     expect(row.querySelectorAll("[data-stop-task]").length).toBe(0);
     const coldHost = document.createElement("div") as unknown as HTMLElement;
@@ -83,13 +101,34 @@ test("active kind and shell elapsed time survive the clock suffix structure with
     expect(agent.textContent).toBe("explore");
     expect(agent.querySelector(".chat-worker-time")).toBeNull();
     view.paint("parent", workers.map(worker => ({ ...worker, state: "unknown" })), new Set(), true);
-    expect(shell.textContent).toBe("Shell · 1:00");
-    expect(shell.title).toBe("Shell · 1:00 · unknown");
+    expect(shell.textContent).toBe("Shell · Status unavailable · last seen unknown");
+    expect(shell.title).toBe("Shell · Status unavailable · last seen unknown");
+    expect(shell.querySelector("[data-elapsed-since]")).toBeNull();
     expect(shell.textContent).not.toContain("Reported");
   } finally {
     now.mockRestore();
     for (const [key, value] of previous) Reflect.set(globalThis, key, value);
   }
+});
+
+test("verified activity displays Working with disabled Stop and unresolved activity never grows a timer", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    for (const kind of ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"] as const) {
+      const workers = compactWorkers([{ id: "worker", type: "background_task", taskId: "worker", description: "Worker", taskType: "shell", status: "running", createdAt: 5,
+        stateUncertain: true, activity: { kind, ...(kind === "needs-answer" ? { request: { id: "q", kind: "question" as const } } : {}) }, control: { available: false, reason: "Stop proof unavailable" } }]);
+      view.paint("parent", workers, new Set(), true);
+      expect(host.textContent).toContain(kind === "working" ? "Working" : kind === "needs-answer" ? "Needs your answer" : kind === "checking" ? "Checking status…" : kind === "session-active" ? "Session active · task unverified" : kind === "ended" ? "Ended · result unavailable" : "Status unavailable · last seen unknown");
+      const stop = host.querySelector<HTMLButtonElement>("[data-stop-task]");
+      if (kind === "working" || kind === "needs-answer") expect(stop?.disabled).toBe(true);
+      else expect(stop).toBeNull();
+      expect(host.querySelector("[data-elapsed-since]") !== null).toBe(kind === "working");
+    }
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
 });
 
 test("native terminal clocks say Reported, including zero/equal-launch, while missing clocks say Started", () => {
@@ -181,6 +220,7 @@ test("finished dismissal is view-only and exposes no Restore control", () => {
     const view = new CompactWorkersView(host, () => choices++);
     const workers = compactWorkers([{ type: "background_task", id: "done", taskId: "done", description: "Finished task", status: "completed", createdAt: 1 }]);
     view.paint("parent", workers, new Set(), true);
+    expect(host.querySelector("[data-dismiss-worker]")).toBeNull();
     const button = host.parentElement!.querySelector<HTMLButtonElement>(".chat-workers-dismiss")!;
     expect(button.textContent).toBe("Dismiss finished"); button.click();
     view.paint("parent", [], new Set(), true);
@@ -188,6 +228,37 @@ test("finished dismissal is view-only and exposes no Restore control", () => {
     expect(host.textContent).not.toContain("Restore finished");
     expect(choices).toBe(1);
     expect(workers[0]?.state).toBe("completed");
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("worker body measurement shrinks from narrow to wide intrinsic content despite a stale allocated scroll height", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element", "getComputedStyle"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    view.paint("parent", compactWorkers([{ type: "background_task", id: "done", taskId: "done", description: "Finished", status: "completed", createdAt: 1 }]), new Set(), true);
+    const list = host.querySelector("ul")!;
+    let intrinsic = 48;
+    Object.defineProperty(list, "getBoundingClientRect", { value: () => ({ height: intrinsic }) });
+    // The old 78px card floor leaves 48px allocated to the body even after
+    // its only row returns to the approved 28px density at 390px.
+    Object.defineProperty(host, "scrollHeight", { get: () => 48 });
+    Reflect.set(globalThis, "getComputedStyle", (element: HTMLElement) => element.style);
+    expect(view.contentHeight()).toBe(48);
+    intrinsic = 28;
+    expect(view.contentHeight()).toBe(28);
+    // Read one direct content box, including its own borders/row gaps, plus
+    // outer list margins and the scrollport's padding/borders. No row walk.
+    host.style.paddingTop = "2px"; host.style.paddingBottom = "3px";
+    host.style.borderTopWidth = "1px"; host.style.borderBottomWidth = "1px";
+    list.style.marginTop = "4px"; list.style.marginBottom = "5px";
+    intrinsic = 44 + 8 + 44; // Two independently reachable actions and their gap.
+    expect(view.contentHeight()).toBe(112);
+    host.style.cssText = ""; list.style.cssText = "";
+    view.paint("parent", [], new Set(), true); intrinsic = 0;
+    expect(view.contentHeight()).toBe(0);
   } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
 });
 

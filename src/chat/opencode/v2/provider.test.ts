@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClientError } from "@opencode/client";
+import type { FormCancelled, FormCreated, FormReplied, PermissionAsked, PermissionReplied, ShellInfo, SessionCreated, SessionExecutionStarted, SessionExecutionSucceeded, SessionToolInputStarted, SessionToolCalled, SessionToolSuccess, SessionMessageContentUpdated } from "@opencode/client";
 
 import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../../provider";
 import { createOpenCodeV2Provider, formAnswerFromChoices, type OpenCodeV2Provider } from "./provider";
@@ -76,6 +77,167 @@ const scoped = <T>(data: T) => ({ location: { directory: WORKSPACE }, data });
 const skillInfo = (id: string, overrides: { name?: string; description?: string } = {}) => ({ id, name: overrides.name ?? id, ...(overrides.description ? { description: overrides.description } : {}), path: `/ws/.opencode/skills/${id}/SKILL.md`, content: `# ${id}` });
 const notFound = (sessionID: string) => Response.json({ _tag: "SessionNotFoundError", sessionID, message: `Session not found: ${sessionID}` }, { status: 404 });
 
+// Fresh native reads legitimately advance last-positive-observation clocks;
+// projection/filtering assertions still compare every other task/control fact.
+const withoutObservationClock = (tasks: import("../../types").BackgroundTaskItem[]) => tasks.map(task => ({ ...task,
+  ...(task.activity ? { activity: { ...task.activity, observedAt: undefined } } : {}) }));
+
+describe("newborn worker activity", () => {
+  type Native = FormCancelled | FormCreated | FormReplied | PermissionAsked | PermissionReplied | SessionCreated | SessionExecutionStarted | SessionExecutionSucceeded | SessionToolInputStarted | SessionToolCalled | SessionToolSuccess | SessionMessageContentUpdated;
+  for (const timing of [
+    { created: 20, ran: 20, birth: 20, completed: 30, started: 23 },
+    { created: 20, ran: 20, birth: 22, completed: 30, started: 23 },
+    { created: 20, ran: 20, birth: 20, completed: 30, started: 31 },
+    { created: 100, ran: 292, birth: 308, completed: 317, started: 318 },
+    { created: 1_790_000_000_100, ran: 1_790_000_000_292, birth: 1_790_000_000_308, completed: 1_790_000_000_317, started: 1_790_000_000_318 },
+  ]) for (const historyFirst of [false, true]) for (const order of ["content-first", "success-first", "start-between-success-content", "snapshot"] as const) test(`first native execution ${JSON.stringify(timing)} historyFirst=${historyFirst} ${order}`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const launch = fixture.launch, tool = launch.content[0];
+    launch.time.created = timing.created;
+    tool.time = { created: timing.created, ran: timing.ran, completed: timing.completed };
+    let history: unknown[] = [], wire!: ReadableStreamDefaultController<Uint8Array>, sequence = 0, lastFrame!: Uint8Array;
+    let activeUnavailable = false;
+    let permissions: PermissionAsked["data"][] = [];
+    let forms: FormCreated["data"]["form"][] = [];
+    const sequences = new Map<string, number>();
+    const frame = (type: string, data: unknown, created: number) => {
+      const aggregateID = (data as { sessionID?: string }).sessionID;
+      const seq = aggregateID ? (sequences.get(aggregateID) ?? 0) + 1 : undefined;
+      if (aggregateID) sequences.set(aggregateID, seq!);
+      lastFrame = new TextEncoder().encode(`data: ${JSON.stringify({ id: `evt_newborn_${++sequence}`, type, data, created,
+        ...(aggregateID && type.startsWith("session.") ? { durable: { aggregateID, seq, version: type === "session.tool.success" ? 2 : 1 } } : {}), location: { directory: WORKSPACE } })}\n\n`);
+      wire.enqueue(lastFrame);
+    };
+    const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
+      "GET /api/session/active": () => activeUnavailable ? new Response(null, { status: 500 }) : ({ ses_child: { type: "running" } }),
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent", time: { created: timing.birth, updated: timing.started } } : { time: { created: 2, updated: 3 } }),
+      "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/permission/request": () => scoped(permissions),
+      "GET /api/form": () => scoped(forms),
+    });
+    const provider = server.provider(), abort = new AbortController();
+    const canonical: import("../../types").ConversationItem[] = [], workers: import("../../types").BackgroundTaskItem[] = [];
+    let ack: { session: string; type: string; done: () => void } | undefined;
+    const pump = (async () => { for await (const event of provider.events(abort.signal)) {
+      for (const update of event.updates) if (update.kind === "upsert") {
+        if (update.item.type === "permission" || update.item.type === "question") canonical.push(update.item);
+        if (update.item.type === "background_task") workers.push(update.item);
+      }
+      if (event.eventType === ack?.type && event.conversationId === ack.session) { const done = ack.done; ack = undefined; done(); }
+    } })();
+    const send = <K extends Native["type"]>(type: K, data: Extract<Native, { type: K }>["data"], at: number) => new Promise<void>(resolve => { ack = { session: "sessionID" in data ? data.sessionID : data.form.sessionID, type, done: resolve }; frame(type, data, at); });
+    const common = { sessionID: "ses_parent", assistantMessageID: launch.id, id: tool.id };
+    const creation = { projectID: "global", slug: "synthetic-newborn", version: "2.1.2", location: { directory: WORKSPACE } };
+    try {
+      await provider.waitForEventStream(abort.signal);
+      await send("session.created", { ...creation, sessionID: "ses_parent" }, 2);
+      if (order !== "snapshot") {
+        await send("session.tool.input.started", { ...common, name: "subagent" }, timing.created);
+        await send("session.tool.called", { ...common, input: tool.state.input, executed: true }, timing.ran);
+      }
+      await send("session.created", { ...creation, sessionID: "ses_child", parentID: "ses_parent" }, timing.birth);
+      let startFrame!: Uint8Array;
+      const start = async () => { await send("session.execution.started", { sessionID: "ses_child" }, timing.started); startFrame = lastFrame; };
+      if (timing.started <= timing.completed) await start();
+      history = [launch];
+      if (historyFirst) await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      const content = () => send("session.message.content.updated", { sessionID: "ses_parent", messageID: launch.id, content: launch.content }, timing.completed);
+      const success = () => send("session.tool.success", { ...common, executed: true, content: tool.state.content, metadata: tool.state.metadata }, timing.completed);
+      if (order !== "success-first" && order !== "start-between-success-content") await content();
+      if (order !== "snapshot") await success();
+      if (order === "start-between-success-content" && timing.started > timing.completed) await start();
+      if (order === "success-first" || order === "start-between-success-content") await content();
+      if (timing.started > timing.completed && order !== "start-between-success-content") await start();
+      const rows = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: "running", activity: { kind: "working" } });
+      if (order === "snapshot") expect(rows[0]?.stateUncertain).toBe(false);
+      await new Promise<void>(resolve => { ack = { session: "ses_child", type: "session.execution.started", done: resolve }; wire.enqueue(startFrame); });
+      const repeat = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(repeat[0]?.activity).toMatchObject({ kind: "working", executionId: rows[0]?.activity?.executionId });
+      const childTool = { sessionID: "ses_child", assistantMessageID: "child-message", id: "child-tool" };
+      await send("session.tool.input.started", { ...childTool, name: "question" }, timing.started + 1);
+      const permission: PermissionAsked["data"] = { id: "canonical-permission", sessionID: "ses_child", action: "question", resources: ["*"], source: { type: "tool", messageID: childTool.assistantMessageID, id: childTool.id } };
+      const unlinkedPermission = { ...permission, id: "unlinked-permission", source: { ...permission.source!, messageID: "old-message" } };
+      permissions = [unlinkedPermission];
+      await send("permission.asked", unlinkedPermission, timing.started + 2);
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("working");
+      expect(canonical).toContainEqual(expect.objectContaining({ type: "permission", requestId: unlinkedPermission.id, status: "pending" }));
+      permissions = [permission];
+      await send("permission.asked", permission, timing.started + 3);
+      const blocked = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(blocked[0]?.activity).toMatchObject({ kind: "needs-answer", request: { id: permission.id, kind: "permission" } });
+      expect(workers.at(-1)?.activity).toMatchObject({ kind: "needs-answer", request: { id: permission.id, kind: "permission" } });
+      expect(canonical).toContainEqual(expect.objectContaining({ type: "permission", requestId: permission.id, conversationId: "ses_child", status: "pending" }));
+      expect(canonical.filter(item => item.type === "permission" && item.requestId === permission.id && item.status === "pending")).toHaveLength(1);
+      activeUnavailable = true;
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]).toMatchObject({ activity: { kind: "needs-answer", request: { id: permission.id, kind: "permission" } }, control: { available: false } });
+      activeUnavailable = false;
+      permissions = [];
+      await send("permission.replied", { sessionID: "ses_child", requestID: permission.id, reply: "once" }, timing.started + 4);
+      const resumed = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(resumed[0]?.activity?.kind).toBe("working");
+      expect(workers.at(-1)?.activity?.request).toBeUndefined();
+      expect(canonical).toContainEqual(expect.objectContaining({ type: "permission", requestId: permission.id, status: "resolved" }));
+      await send("session.tool.called", { ...childTool, input: { questions: [{ header: "Choose", question: "Proceed?", options: [{ label: "Yes", description: "Proceed" }] }] }, executed: true }, timing.started + 5);
+      // QuestionTool producer at a517687f: native ephemeral permission/form
+      // events reference the durable tool via this exact context tuple.
+      const question: FormCreated["data"]["form"] = { id: "canonical-question", sessionID: "ses_child", title: "Questions", fields: [{ key: "q0", type: "string", title: "Choose", description: "Proceed?", custom: true, options: [{ value: "Yes", label: "Yes", description: "Proceed" }] }],
+        metadata: { kind: "question", tool: { messageID: childTool.assistantMessageID, id: childTool.id } } };
+      forms = [question];
+      await send("form.created", { form: question }, timing.started + 5);
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toMatchObject({ kind: "needs-answer", request: { id: question.id, kind: "question" } });
+      expect(workers.at(-1)?.activity).toMatchObject({ kind: "needs-answer", request: { id: question.id, kind: "question" } });
+      expect(canonical).toContainEqual(expect.objectContaining({ type: "question", requestId: question.id, conversationId: "ses_child", status: "pending" }));
+      expect(canonical.filter(item => item.type === "question" && item.requestId === question.id && item.status === "pending")).toHaveLength(1);
+      forms = [];
+      if (order === "snapshot") await send("form.cancelled", { sessionID: "ses_child", id: question.id }, timing.started + 6);
+      else await send("form.replied", { sessionID: "ses_child", id: question.id, answer: { q0: "Yes" } }, timing.started + 6);
+      const answered = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(answered[0]?.activity?.kind).toBe("working");
+      expect(workers.at(-1)?.activity?.request).toBeUndefined();
+      expect(canonical).toContainEqual(expect.objectContaining({ type: "question", requestId: question.id, status: "resolved" }));
+      const unrelated = { ...question, id: "unlinked-question", metadata: { kind: "question", tool: { messageID: "old-message", id: childTool.id } } };
+      forms = [unrelated];
+      await send("form.created", { form: unrelated }, timing.started + 7);
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("working");
+      expect(canonical).toContainEqual(expect.objectContaining({ type: "question", requestId: unrelated.id, status: "pending" }));
+      const arbitraryMetadata = { ...question, id: "arbitrary-form-metadata", metadata: { ...question.metadata, kind: "unrelated" } };
+      forms = [arbitraryMetadata];
+      await send("form.created", { form: arbitraryMetadata }, timing.started + 8);
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("working");
+      const lastPositive = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(rows[0]?.activity?.observedAt).toBeGreaterThan(timing.completed);
+      activeUnavailable = true;
+      const unavailable = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(unavailable[0]?.activity).toMatchObject({ kind: "unavailable", observedAt: lastPositive[0]?.activity?.observedAt });
+      activeUnavailable = false;
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("working");
+      if (order === "snapshot" && timing.birth === 22 && !historyFirst) {
+        await send("session.execution.succeeded", { sessionID: "ses_child" }, timing.started + 10);
+        const ended = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+        expect(ended[0]).toMatchObject({ status: "running", activity: { kind: "ended", endedAt: timing.started + 10 }, control: { available: false } });
+      } else {
+        // Current child activity must not redirect the old task to a new run.
+        await send("session.execution.started", { sessionID: "ses_child" }, timing.started + 10);
+        const reused = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+        expect(reused[0]).toMatchObject({ activity: { kind: "session-active" }, control: { available: false } });
+        permissions = [permission];
+        await send("permission.asked", permission, timing.started + 11);
+        expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("session-active");
+        forms = [question];
+        await send("form.created", { form: question }, timing.started + 12);
+        expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("session-active");
+      }
+      await expect(provider.stopTask("ses_parent", rows[0]!.taskId)).rejects.toThrow();
+      expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    } finally { abort.abort(); await pump; await provider.dispose(); }
+  });
+});
+
 function historyWorkerLaunch(id: string, at: number) {
   return { id: `msg_${id}`, type: "assistant", time: { created: at }, content: [
     { id, type: "tool", name: "subagent", time: { created: at, ran: at + 1, completed: at + 2 }, state: {
@@ -83,6 +245,126 @@ function historyWorkerLaunch(id: string, at: number) {
     } },
   ] };
 }
+
+test("proven execution aliases bridge reversed live arrival and chronological history without merging reuse", async () => {
+  const run = async (reverse: boolean) => {
+    const first = historyWorkerLaunch("alias_a", 20), second = historyWorkerLaunch("alias_b", 25);
+    let history: unknown[] = [first, second], idle: unknown[] = [], wire!: ReadableStreamDefaultController<Uint8Array>, seq = 0;
+    const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `alias-event-${++seq}`, created: 30,
+      type, data, location: { directory: WORKSPACE }, ...(type === "server.connected" ? {} : { durable: { aggregateID: "ses_parent", seq, version: 1 } }) })}\n\n`));
+    const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}); } }), { headers: { "content-type": "text/event-stream" } }),
+      "GET /api/session/active": () => ({ ses_child: { type: "running" } }),
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+      "GET /api/session/ses_child/message": () => ({ data: idle, cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    });
+    const provider = server.provider(), stream = observedNativeStream(provider);
+    try {
+      await stream.seen(event => event.eventType === "server.connected");
+      let initial: string | undefined, final: import("../../types").WorkerActivity | undefined;
+      for (const message of reverse ? [second, first] : [first, second]) {
+        frame("session.message.content.updated", { sessionID: "ses_parent", messageID: message.id, content: message.content });
+        await stream.seen(event => event.updates.some(update => {
+          if (update.kind !== "upsert" || update.item.type !== "background_task" || !update.item.toolUseIds?.includes(message.content[0]!.id) && update.item.toolUseId !== message.content[0]!.id) return false;
+          final = update.item.activity;
+          initial ??= final?.executionId;
+          return true;
+        }));
+      }
+      const recovered = (await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity;
+      expect(final?.executionAliases).toHaveLength(2);
+      expect(final?.executionAliases).toContain(initial!);
+      expect(recovered?.executionAliases).toEqual(final?.executionAliases);
+      expect(recovered?.executionId).toBe(final?.executionId);
+      history = [first, second, historyWorkerResult("old-result", 40), historyWorkerLaunch("separate", 50)];
+      idle = [{ id: "idle-boundary", type: "idle", time: { created: 40 } }];
+      const later = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      const settled = later.find(task => task.status === "completed");
+      expect(settled?.activity).toMatchObject({ kind: "ended", executionId: recovered?.executionId, executionAliases: recovered?.executionAliases });
+      expect(settled?.activity?.endedAt).toBeUndefined();
+      const current = later.find(task => task.status === "running");
+      expect(current?.activity?.executionId).toBeDefined();
+      expect(final?.executionAliases).not.toContain(current?.activity?.executionId!);
+      expect(current?.activity?.executionAliases).toHaveLength(1);
+      expect(server.calls.every(call => call.method === "GET")).toBe(true);
+      return recovered;
+    } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
+  };
+  const chronological = await run(false), reversed = await run(true);
+  expect(reversed?.executionAliases).toEqual(chronological?.executionAliases);
+  expect(reversed?.executionId).toBe(chronological?.executionId);
+});
+
+for (const scenario of ["activity revocation", "canonical request linkage", "contradictory canonical ran", "partial alias set"] as const) test(`reversed proven aliases retain ${scenario} across chronological recovery`, async () => {
+  const request = scenario === "canonical request linkage";
+  const first = historyWorkerLaunch("alias_a", 20), second = historyWorkerLaunch("alias_b", 21);
+  first.content[0]!.time.completed = 30; second.content[0]!.time.completed = 31;
+  let history = [first, second];
+  let wire!: ReadableStreamDefaultController<Uint8Array>, seq = 0, pending = false;
+  const sequences = new Map<string, number>();
+  const permission: PermissionAsked["data"] = { id: "alias-permission", sessionID: "ses_child", action: "question", resources: ["*"], source: { type: "tool", messageID: "child-message", id: "child-tool" } };
+  const frame = (type: string, data: Record<string, unknown>, created: number) => {
+    const aggregateID = String(data.sessionID ?? ""), next = (sequences.get(aggregateID) ?? 0) + 1;
+    sequences.set(aggregateID, next);
+    wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `reversed-${++seq}`, type, data, created, location: { directory: WORKSPACE },
+      ...(type.startsWith("session.") ? { durable: { aggregateID, seq: next, version: 1 } } : {}) })}\n\n`));
+  };
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/active": () => ({ ses_child: { type: "running" } }),
+    "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+    "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    "GET /api/permission/request": () => scoped(pending ? [permission] : []),
+  });
+  const provider = server.provider(), abort = new AbortController();
+  let ack: { type: string; session: string; done: () => void } | undefined, now = 1_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const pump = (async () => { for await (const event of provider.events(abort.signal)) if (event.eventType === ack?.type && event.conversationId === ack.session) { const done = ack.done; ack = undefined; done(); } })();
+  const send = (type: string, data: Record<string, unknown>, created: number) => new Promise<void>(done => { ack = { type, session: String(data.sessionID), done }; frame(type, data, created); });
+  try {
+    await provider.waitForEventStream(abort.signal);
+    await send("session.execution.started", { sessionID: "ses_child" }, 25);
+    for (const message of [second, first]) await send("session.message.content.updated", { sessionID: "ses_parent", messageID: message.id, content: message.content }, 31);
+    if (request) {
+      await send("session.tool.input.started", { sessionID: "ses_child", assistantMessageID: "child-message", id: "child-tool", name: "question" }, 26);
+      pending = true;
+      await send("permission.asked", permission, 27);
+    }
+    const initial = (await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]!;
+    expect(initial.taskId).toBe("v2:ses_parent:alias_a");
+    expect(initial.activity).toMatchObject({ kind: request ? "needs-answer" : "working", observedAt: 1_000,
+      ...(request ? { request: { id: permission.id, kind: "permission" } } : {}) });
+    if (request) {
+      pending = false;
+      await send("permission.replied", { sessionID: "ses_child", requestID: permission.id, reply: "once" }, 28);
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toMatchObject({ kind: "working", observedAt: 1_000 });
+    }
+    now = 2_000;
+    if (scenario === "contradictory canonical ran" || scenario === "partial alias set") {
+      const changed = structuredClone(first); changed.content[0]!.time.ran = 29;
+      history = scenario === "partial alias set" ? [first] : [changed, second];
+      const changedOccurrence = (await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]!;
+      expect(changedOccurrence.activity?.kind).toBe("session-active");
+      expect(changedOccurrence.activity?.observedAt).toBeUndefined();
+      expect(server.calls.every(call => call.method === "GET")).toBe(true);
+      return;
+    }
+    await send("session.execution.started", { sessionID: "ses_child" }, 40);
+    if (request) { pending = true; await send("permission.asked", permission, 41); }
+    for (let index = 0; index < 2; index++) {
+      const recovered = (await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]!;
+      expect(recovered).toMatchObject({ taskId: "v2:ses_parent:alias_a", activity: { kind: "session-active", observedAt: 1_000 }, control: { available: false } });
+      expect(recovered.activity?.request).toBeUndefined();
+      now++;
+    }
+    await expect(provider.stopTask("ses_parent", initial.taskId)).rejects.toThrow();
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { abort.abort(); await pump; await provider.dispose(); clock.mockRestore(); }
+});
 const historyWorkerResult = (id: string, at: number) => ({ id, type: "synthetic", time: { created: at }, text: "Fixture done.", metadata: { source: "subagent", childID: "ses_child", state: "completed" } });
 function workerHistoryServer(messages: unknown[], idle: unknown[], pending: unknown[] = []) {
   return fakeOpenCode({
@@ -149,7 +431,17 @@ function nativeBackgroundStack() {
   const fetch = (async (input: Request | URL | string, init?: RequestInit) => {
     const request = new Request(input, init);
     expect(new URL(request.url).origin).toBe(fake.url);
-    return handle(request);
+    const response = await handle(request);
+    if (request.method === "GET" && /^\/api\/shell\/[^/]+$/.test(new URL(request.url).pathname) && response.ok) {
+      // The shared browser fake omits required ShellInfo fields. Supply the
+      // same synthetic command as its launcher so these provider tests exercise
+      // the native schema rather than teaching product code a sparse fallback.
+      const body = await response.json();
+      const data: ShellInfo = { ...body.data, command: "printf 'safe shell output'", cwd: WORKSPACE,
+        shell: "/bin/sh", file: "/fixture/shell.out", time: { started: 1 } };
+      return Response.json({ ...body, data });
+    }
+    return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory: WORKSPACE, fetch }) as OpenCodeV2Provider;
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, generation: "native-bootstrap", coalesceWindowMs: 0 });
@@ -725,13 +1017,14 @@ for (const kind of ["running", "shell", "reused-child"] as const) test(`public r
     expect(publicRows.filter(item => item.status === "running")).toEqual([expect.objectContaining({ stateUncertain: false })]);
     expect(publicRows.filter(item => !history.revertVisibility!.excludedItemIds.includes(item.id)).map(item => [item.id, item.status, item.toolUseIds])).toEqual(history.completeItems!.filter(item => item.type === "background_task").map(item => [item.id, item.status, item.toolUseIds]));
     // Filtering never mutates/clears the full fold, occurrences or Stop witnesses.
-    expect(await privateRead()).toEqual(full);
+    const reread = await privateRead();
+    expect({ ...reread, tasks: withoutObservationClock(reread.tasks) }).toEqual({ ...full, tasks: withoutObservationClock(full.tasks) });
     if (kind === "reused-child") {
       await expect(provider.stopTask(parent, kept.taskId)).rejects.toThrow();
       expect(fake.state().calls.filter(call => call.startsWith(`POST /api/session/${kept.childId}/interrupt`))).toEqual([]);
     }
     fake.externalRevert(parent, null);
-    expect(await provider.reconcileBackgroundTasks(parent, { fresh: true })).toEqual(full.tasks);
+    expect(withoutObservationClock(await provider.reconcileBackgroundTasks(parent, { fresh: true }))).toEqual(withoutObservationClock(full.tasks));
     expect(fake.state().unhandled).toEqual([]);
   } finally { await provider.dispose(); await fake.stop(); }
 });
@@ -757,11 +1050,12 @@ test("public revert visibility uses the visible prefix of a folded alias without
     expect(prefix[0]?.taskId).toBe("v2:ses_parent:call_worker");
     expect(prefix[0]?.toolUseId).toBe("call_worker");
     expect(prefix[0]?.toolUseIds).toBeUndefined();
-    expect(await privateRead()).toEqual(full);
+    const reread = await privateRead();
+    expect({ ...reread, tasks: withoutObservationClock(reread.tasks) }).toEqual({ ...full, tasks: withoutObservationClock(full.tasks) });
     boundary = fixture.launch.id;
     expect(await provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).toEqual([expect.objectContaining({ taskId: "v2:ses_parent:call_worker", status: "running", stateUncertain: false })]);
     boundary = undefined;
-    expect(await provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).toEqual(full.tasks);
+    expect(withoutObservationClock(await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))).toEqual(withoutObservationClock(full.tasks));
   } finally { await provider.dispose(); }
 });
 
@@ -1026,6 +1320,16 @@ describe("native bootstrap admission through the real adapter", () => {
       fake.settleWorker(first.childId, "completed", "Safe native report");
       await adapter.history(parent);
       expect(workerSummary(compactWorkers(adapter.projectionForTests(parent).items()))).toBe("2 working · 1 finished");
+      // Working is no longer a Stop-readiness signal. Wait for this separate
+      // native control cohort rather than making activity depend on its ledger.
+      let controllable = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const rows = await provider.reconcileBackgroundTasks(parent, { fresh: true });
+        controllable = [active.taskId, shell.taskId].every(id => rows.find(row => row.taskId === id)?.control?.available === true);
+        if (controllable) break;
+        await Bun.sleep(1);
+      }
+      expect(controllable).toBe(true);
       await provider.stopTask(parent, active.taskId);
       await provider.stopTask(parent, shell.taskId);
       expect(fake.state().sessions[parent]?.running).toBe(true);

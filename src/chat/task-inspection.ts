@@ -11,7 +11,7 @@
 // Timers are injected so the lifecycle can be tested without waiting.
 
 import { formatTokens } from "./usage";
-import { workerStateLabel } from "./worker-state";
+import { workerCanStop, workerExecutionClockRuns, workerState, workerStateLabel } from "./worker-state";
 import type { BackgroundTaskItem, BackgroundTaskOutput, BackgroundTaskUsage, ConversationItem } from "./types";
 
 /** Where selecting a running task's row leads. */
@@ -74,7 +74,7 @@ export function taskUsageLabel(usage: BackgroundTaskUsage): string {
 
 /** Outcome only: the report body belongs to the canonical timeline result. */
 export function taskSettledLabel(task: BackgroundTaskItem): string {
-  return workerStateLabel(task.status, task.stateUncertain);
+  return workerStateLabel(task.status, task.stateUncertain, task.activity);
 }
 
 // How often the output pane re-reads the tail while the task runs. The file
@@ -201,17 +201,18 @@ export class TaskInspectionPanel {
     const wasRunning = this.task?.status === "running";
     this.task = task;
     const running = task?.status === "running";
+    const clockRunning = task !== undefined && workerExecutionClockRuns(task);
     const signature = task
-      ? [task.taskId, task.status, task.stateUncertain ? "uncertain" : "", task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
+      ? [task.taskId, task.status, task.stateUncertain ? "uncertain" : "", JSON.stringify(task.activity), JSON.stringify(task.control), task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
       : "";
     if (signature !== this.painted) {
       this.painted = signature;
       this.paintStrip(task, stopping);
     }
-    if (running && this.elapsedTimer === null) {
+    if (clockRunning && this.elapsedTimer === null) {
       this.elapsedTimer = this.timers.setInterval(() => this.tickElapsed(), 1_000);
     }
-    if (!running && this.elapsedTimer !== null) {
+    if (!clockRunning && this.elapsedTimer !== null) {
       this.timers.clearInterval(this.elapsedTimer);
       this.elapsedTimer = null;
     }
@@ -254,7 +255,7 @@ export class TaskInspectionPanel {
       return;
     }
     strip.dataset.taskId = task.taskId;
-    strip.dataset.taskState = task.status === "running" ? "running" : "settled";
+    strip.dataset.taskState = task.status !== "running" ? "settled" : workerExecutionClockRuns(task) ? "running" : "unresolved";
     strip.classList.toggle("is-settled", task.status !== "running");
     const line = document.createElement("div");
     line.className = "chat-drilldown-task-line";
@@ -272,7 +273,8 @@ export class TaskInspectionPanel {
     // A foreground run (a typed command's) is the turn's own work: the turn's
     // Cancel stops it, and the per-task stop the CLI offers is for background
     // work only, so the strip offers none.
-    if (task.status === "running" && !task.stateUncertain && task.foreground !== true) {
+    const canStop = workerCanStop(task);
+    if (task.status === "running" && task.foreground !== true && (canStop || task.control !== undefined && workerState(task.status, task.stateUncertain, task.activity) === "working")) {
       const stop = document.createElement("button");
       stop.type = "button";
       stop.className = "chat-task-stop";
@@ -280,15 +282,19 @@ export class TaskInspectionPanel {
       stop.dataset.stopItem = task.id;
       const nativeWorker = task.taskType === "agent" || task.taskType === "shell";
       stop.textContent = stopping ? "Stopping…" : nativeWorker ? "Stop worker" : "Stop";
-      stop.disabled = stopping;
+      stop.disabled = stopping || !canStop;
       stop.setAttribute("aria-label", nativeWorker ? `Stop worker: ${task.description}` : `Stop ${task.description}`);
       line.append(stop);
     }
     const facts = document.createElement("div");
     facts.className = "chat-drilldown-task-facts";
-    if (task.stateUncertain) {
-      facts.textContent = "Status unavailable — reconnecting";
+    if (task.status === "running" && !workerExecutionClockRuns(task)) {
+      facts.textContent = workerStateLabel(task.status, task.stateUncertain, task.activity);
+      if (task.activity?.kind === "ended" && task.activity.endedAt !== undefined) {
+        facts.append(` · Ended ${new Date(task.activity.endedAt).toLocaleString()}`);
+      }
     } else if (task.status === "running") {
+      if (task.activity) facts.append("Working · ");
       const elapsed = document.createElement("span");
       elapsed.className = "chat-drilldown-task-elapsed";
       elapsed.dataset.taskElapsed = "";
@@ -323,12 +329,18 @@ export class TaskInspectionPanel {
       facts.append(result);
     }
     strip.replaceChildren(line, facts);
+    if (task.status === "running" && !canStop && task.foreground !== true) {
+      const reason = document.createElement("p");
+      reason.className = "chat-drilldown-task-control-reason";
+      reason.textContent = task.control?.reason ?? "Stop unavailable: this execution's control proof is unverified";
+      strip.append(reason);
+    }
     strip.hidden = false;
   }
 
   private tickElapsed(): void {
     const task = this.task;
-    if (!task || task.status !== "running") return;
+    if (!task || !workerExecutionClockRuns(task)) return;
     const readout = this.hosts.strip.querySelector<HTMLElement>("[data-task-elapsed]");
     if (readout) readout.textContent = formatTaskElapsed(this.now() - task.createdAt);
   }

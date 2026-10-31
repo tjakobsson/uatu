@@ -5,7 +5,7 @@ import { realpath } from "node:fs/promises";
 import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage } from "./claude/normalization";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
-import type { ChatAgent, ChatActionContext } from "./types";
+import type { BackgroundTaskItem, ChatAgent, ChatActionContext } from "./types";
 import type {
   InboxDelta,
   NormalizedProviderEvent,
@@ -28,6 +28,129 @@ import type { AgentNotificationEvent } from "./notifications";
 import { notificationPipeline } from "../../tests/notification-pipeline";
 import { startOpenCodeV2Fake } from "../../tests/e2e/opencode-v2-fake";
 import { addAcceptedDraft, applyChatEvent, projectionFromSnapshot } from "./projection";
+
+describe("production recovery Checking presentation", () => {
+  const unavailable: BackgroundTaskItem = { id: "task:checking", type: "background_task", taskId: "checking", toolUseId: "checking-call",
+    description: "Worker", createdAt: 1, status: "running", stateUncertain: true,
+    activity: { kind: "unavailable", executionId: "execution:checking", executionAliases: ["launch:checking"], generation: 7, observedAt: 1234 },
+    control: { available: false, reason: "No current proof" } };
+
+  test("a hanging real read publishes Checking, expires despite unrelated updates, and accepts a late current result", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const working: BackgroundTaskItem = { ...unavailable, stateUncertain: false, activity: { ...unavailable.activity!, kind: "working", observedAt: 2345 } };
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; await gate; return [working]; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(reads).toBe(1);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { ...unavailable.activity!, kind: "checking" }, control: unavailable.control });
+      const activityBefore = adapter.activity();
+      jest.advanceTimersByTime(9000);
+      provider.eventQueue.push({ normalized: { conversationId: "session", eventType: "session.message.content.updated", updates: [], outcome: "handled" } });
+      projection.upsert({ id: "message:unrelated", type: "assistant_message", markdown: "Unrelated update", createdAt: 2 });
+      await flushRecoveryIo();
+      jest.advanceTimersByTime(1000); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity, control: unavailable.control });
+      expect(adapter.activity()).toEqual(activityBefore); expect(reads).toBe(1);
+      release(); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: working.activity, stateUncertain: false });
+      expect(reads).toBe(1); // Presentation expiry did not invalidate its read fence.
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+      expect(provider.permissionReplies).toEqual([]); expect(provider.questionReplies).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  for (const result of ["failed", "inconclusive"] as const) test(`${result} read ends Checking without resetting on retry reads`, async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      if (++reads === 1) await gate;
+      if (result === "failed") throw new Error("Unavailable");
+      return [];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
+      release(); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      jest.advanceTimersByTime(1000); await flushRecoveryIo(); expect(reads).toBe(2);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      jest.advanceTimersByTime(2000); await flushRecoveryIo(); expect(reads).toBe(3);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  test("scheduled reads do not downgrade Working, canonical Needs your answer, or Ended", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, reads = 0; const gate = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; await gate; return []; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session");
+    const workers = (["working", "needs-answer", "ended"] as const).map(kind => ({ ...unavailable, id: `task:${kind}`,
+      activity: { ...unavailable.activity!, kind, ...(kind === "needs-answer" ? { request: { id: "canonical", kind: "permission" as const } } : {}) } }));
+    workers.forEach(item => projection.upsert(item));
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo(); expect(reads).toBe(1);
+      jest.advanceTimersByTime(10000); await flushRecoveryIo();
+      for (const item of workers) expect(projection.get(item.id)).toEqual(item);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  test("reconnect cancels the old presentation and result without increasing read concurrency", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let reads = 0; const releases: Array<() => void> = [];
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      const read = ++reads; await new Promise<void>(resolve => releases.push(resolve));
+      return [{ ...unavailable, activity: { ...unavailable.activity!, kind: "working", observedAt: read } }];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      jest.advanceTimersByTime(9000);
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(reads).toBe(1); expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      releases.shift()!(); await flushRecoveryIo(); expect(reads).toBe(2);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking", observedAt: 1234 } });
+      jest.advanceTimersByTime(1000); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
+      releases.shift()!(); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "working", observedAt: 2 } });
+    } finally { const disposing = adapter.dispose(); releases.splice(0).forEach(release => release()); await disposing; await pump; jest.useRealTimers(); }
+  });
+
+  for (const cancellation of ["ended", "disposed"] as const) test(`${cancellation} cancels a hanging Checking window and rejects its obsolete result`, async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { await gate; return [{ ...unavailable, activity: { ...unavailable.activity!, kind: "working" } }]; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
+      const ended: BackgroundTaskItem = { ...unavailable, activity: { ...unavailable.activity!, kind: "ended", endedAt: 3456 } };
+      const disposing = cancellation === "disposed" ? adapter.dispose() : undefined;
+      if (cancellation === "ended") projection.upsert(ended);
+      jest.advanceTimersByTime(20000); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: cancellation === "ended" ? ended.activity : unavailable.activity });
+      release(); await flushRecoveryIo(); await disposing;
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: cancellation === "ended" ? ended.activity : unavailable.activity });
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+});
 
 test("covered V2 snapshot preserves a rename published during its history read", async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
@@ -4794,6 +4917,29 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(adapter.activity().working).toBe(false);
     await adapter.dispose();
   });
+  test("verified uncontrollable activity survives recovery but a stream gap withdraws its live clock and authority", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const worker: BackgroundTaskItem = { id: "task:worker", type: "background_task", taskId: "worker", description: "Worker", childConversationId: "child", createdAt: 1, status: "running", stateUncertain: true,
+      activity: { kind: "working", executionId: "fixture-execution", observedAt: 50 }, control: { available: false, reason: "Retained Stop proof unavailable" } };
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "parent" ? [worker] : [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await waitUntil(() => adapter.projectionForTests("parent").find(item => item.type === "background_task" && item.activity?.kind === "working") !== undefined);
+      expect(adapter.activity().working).toBe(true);
+      expect(adapter.projectionForTests("parent").find(item => item.id === worker.id)).toMatchObject({ stateUncertain: true, activity: { kind: "working" }, control: { available: false } });
+      provider.eventQueue.close();
+      await waitUntil(() => adapter.projectionForTests("parent").find(item => item.type === "background_task" && item.activity?.kind === "unavailable") !== undefined);
+      expect(adapter.projectionForTests("parent").find(item => item.id === worker.id)).toMatchObject({ activity: { kind: "unavailable", executionId: "fixture-execution", observedAt: 50 }, control: { available: false } });
+      // Inconclusive disappearance does not manufacture a workspace-finished transition.
+      expect(adapter.activity().working).toBe(true);
+      expect(provider.prompts).toEqual([]);
+      expect(provider.interrupts).toEqual([]);
+    } finally { await adapter.dispose(); await pump; }
+  });
+
   test("connected-before-read recovery discovers unselected parents with at most four reads and no text-delta rereads", async () => {
     const provider = new FakeProvider();
     provider.sessions = Array.from({ length: 6 }, (_, i) => fixtureSession(`parent-${i}`));
@@ -8275,6 +8421,39 @@ describe("pending permission recovery", () => {
     await adapter.history("parent");
     await adapter.respondQuestion("child", "que_child", "client-1", { kind: "answered", answers: [["A"]] });
     expect(provider.questionReplies).toEqual([{ sessionId: "child", requestId: "que_child", answers: [["A"]] }]);
+  });
+
+  for (const kind of ["permission", "question"] as const) test(`a positively linked worker ${kind} keeps one canonical parent card and one native answer`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listPermissions = async () => kind === "permission"
+      ? [{ conversationId: "child", requestId: "canonical", action: "read", resources: ["safe-fixture"] }] : [];
+    provider.listQuestions = async () => kind === "question"
+      ? [{ conversationId: "child", requestId: "canonical", questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }] : [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    try {
+      await adapter.history("parent");
+      // Provider occurrence proof is verified separately through the native V2
+      // seam. This adapter test consumes its DTO without inventing a second ask.
+      adapter.projectionForTests("parent").upsert({ id: "task:worker", type: "background_task", taskId: "worker", createdAt: 1,
+        description: "Worker", childConversationId: "child", status: "running", stateUncertain: true,
+        activity: { kind: "needs-answer", executionId: "execution:worker", request: { id: "canonical", kind } }, control: { available: false } });
+      const cards = adapter.projectionForTests("parent").items().filter(item => item.type === kind);
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ id: `${kind}:canonical`, requestId: "canonical", conversationId: "child", status: "pending" });
+      expect(adapter.projectionForTests("parent").find(item => item.id === "task:worker")).toMatchObject({ activity: { request: { id: "canonical", kind } } });
+      if (kind === "permission") {
+        await adapter.respondPermission("child", "canonical", "client-1", "approved-once");
+        expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "canonical", reply: "once" }]);
+        expect(provider.questionReplies).toEqual([]);
+      } else {
+        await adapter.respondQuestion("child", "canonical", "client-1", { kind: "answered", answers: [["A"]] });
+        expect(provider.questionReplies).toEqual([{ sessionId: "child", requestId: "canonical", answers: [["A"]] }]);
+        expect(provider.permissionReplies).toEqual([]);
+      }
+      expect(provider.prompts).toEqual([]);
+      expect(provider.interrupts).toEqual([]);
+    } finally { await adapter.dispose(); }
   });
 
   test("a provider without the list simply never recovers, and does not throw", async () => {

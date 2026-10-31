@@ -755,8 +755,26 @@ export type CompactionItem = TimelineItemBase & {
  * tasks never become items; an ambient agent run with no launching tool use
  * becomes a `foreground` item (see the field).
  */
+/** Current task observation, independently of permission to stop its execution.
+ * An active session without an occurrence match is not a working task.
+ */
+export type WorkerActivity = {
+  kind: "working" | "needs-answer" | "checking" | "session-active" | "unavailable" | "ended";
+  observedAt?: number;
+  endedAt?: number;
+  executionId?: string;
+  // Immutable launch anchors positively proven to name this same occurrence.
+  executionAliases?: string[];
+  generation?: number;
+  reason?: string;
+  request?: { id: string; kind: "permission" | "question" };
+};
+
 export type BackgroundTaskItem = TimelineItemBase & {
   type: "background_task";
+  activity?: WorkerActivity;
+  // Presentation only. Native Stop still revalidates its private occurrence proof.
+  control?: { available: boolean; reason?: string };
   // Known history is retained, but current execution/occurrence is unverified.
   // Never use an uncertain row as authority for a worker stop.
   stateUncertain?: boolean;

@@ -104,10 +104,29 @@ describe("task inspection panel", () => {
     const view = panel();
     const task = item({ taskId: "uncertain", taskType: "agent", childConversationId: "child", stateUncertain: true });
     view.show({ conversationId: "one", taskId: task.taskId, view: "transcript" }, task);
-    expect(hosts().strip.textContent).toContain("Status unavailable — reconnecting");
+    expect(hosts().strip.textContent).toContain("Status unavailable · last seen unknown");
+    expect(live().filter(entry => entry.kind === "interval")).toHaveLength(0);
     expect(hosts().strip.querySelector("[data-stop-task]")).toBeNull();
     view.sync({ ...task, stateUncertain: false });
     expect(hosts().strip.querySelector("[data-stop-task]")).not.toBeNull();
+    view.close();
+  });
+
+  test("activity and disabled Stop reasons are visible without hover while uncertain clocks stay stopped", () => {
+    const view = panel();
+    const task = item({ taskType: "agent", stateUncertain: true, activity: { kind: "working", observedAt: 50_000 }, control: { available: false, reason: "Stop unavailable: this execution's control proof is missing" } });
+    view.show({ conversationId: "parent", taskId: task.taskId, view: "transcript" }, task);
+    expect(hosts().strip.textContent).toContain("Working");
+    expect(hosts().strip.textContent).toContain(task.control!.reason!);
+    expect(hosts().strip.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(true);
+    expect(live().filter(entry => entry.kind === "interval")).toHaveLength(1);
+    for (const kind of ["needs-answer", "checking", "session-active", "unavailable", "ended"] as const) {
+      view.sync({ ...task, activity: { kind, observedAt: 50_000, endedAt: 60_000, ...(kind === "needs-answer" ? { request: { id: "q", kind: "question" as const } } : {}) } });
+      expect(live().filter(entry => entry.kind === "interval")).toHaveLength(0);
+      expect(hosts().strip.querySelector("[data-task-elapsed]")).toBeNull();
+      expect(hosts().strip.textContent).toContain(task.control!.reason!);
+    }
+    expect(hosts().strip.textContent).toContain("Ended · result unavailable");
     view.close();
   });
 

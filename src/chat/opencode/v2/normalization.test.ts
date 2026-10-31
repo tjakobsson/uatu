@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import type { ShellExited } from "@opencode/client";
 
 import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, storedAccounting, type OpenCodeV2Memory } from "./normalization";
@@ -8,6 +9,14 @@ import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
+
+test("native shell exit evidence uses the typed identity and terminal process status", () => {
+  const normalize = createOpenCodeV2Normalizer("/ws");
+  const event: ShellExited = { id: "shell-exit", created: 30, type: "shell.exited", location: { directory: "/ws" }, data: { id: "shell", status: "exited", exit: 0 } };
+  expect(normalize.prepare(event).evidence.shellExit).toMatchObject({ id: "shell", proof: { id: "shell-exit", created: 30 } });
+  expect(normalize.prepare({ ...event, data: { ...event.data, status: "running" } }).evidence.shellExit).toBeUndefined();
+  expect(normalize.prepare({ ...event, data: { shellID: "shell", status: "exited" } }).evidence.shellExit).toBeUndefined();
+});
 
 test("only assistant execution metadata reports effort, live and stored, not parent/user selection", () => {
   const normalize = createOpenCodeV2Normalizer(process.cwd());

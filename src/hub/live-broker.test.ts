@@ -15,6 +15,16 @@ import {
   type LiveUpstreamSource,
 } from "./live-broker";
 
+test("personal subscriptions are refused before shared broker cache/fanout or diagnostics", () => {
+  let opened = 0;
+  const broker = new LiveBroker({ isRunning: () => true, workspaceIds: () => [], async open() { opened++; throw new Error("must not open"); } });
+  try {
+    expect(() => broker.subscribe({ write() { throw new Error("must not fan out"); } }, "ws", { topic: "personal" })).toThrow("personal topics belong to the authenticated endpoint");
+    expect(opened).toBe(0);
+    expect(broker.upstreamCount()).toBe(0);
+  } finally { broker.dispose(); }
+});
+
 // A child stand-in: every upstream the broker opens is a controllable SSE
 // response the test writes frames into and can end or refuse. Nothing
 // crosses a socket, so timing is the broker's alone.
@@ -221,6 +231,32 @@ describe("refcounted upstreams (2.1)", () => {
 });
 
 describe("cursors, replay, and topic-scoped resync (2.2)", () => {
+  test("trusted observation precedes live and catch-up delivery and never interrupts canonical chat", async () => {
+    const observed: unknown[] = [];
+    const child = fakeSource({ refuse: path => {
+      if (!path.includes(`?cursor=${encodeURIComponent(cursorOf("g1", 1))}`)) return null;
+      const frames = [2, 3, 4, 5, 6].map(sequence => chatFrame("g1", sequence)).join("");
+      return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(frames)); } }), { headers: { "content-type": "text/event-stream" } });
+    } });
+    const live = broker(child.source, { replayBufferBytes: 260, observeConversation(workspace, parent, data) {
+      expect(workspace).toBe("ws"); expect(parent).toBe("c"); observed.push(data);
+      throw new Error("synthetic personal persistence failure");
+    } });
+    const first = sink(); live.subscribe(first, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 3) });
+    await waitFor(() => child.opened.length === 1, "live upstream");
+    child.opened[0]!.push(": open\n\n");
+    for (const sequence of [4, 5, 6]) child.opened[0]!.push(chatFrame("g1", sequence));
+    await waitFor(() => first.envelopes.length === 4, "live delivery despite observation failure");
+    const behind = sink();
+    live.subscribe({ write(envelope) {
+      if (envelope.event.kind === "data") expect(observed).toContainEqual(envelope.event.data);
+      behind.write(envelope);
+    } }, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 1) });
+    await waitFor(() => behind.envelopes.some(envelope => envelope.event.kind === "ready"), "replay merge");
+    expect(behind.envelopes.filter(envelope => envelope.event.kind === "data").map(envelope => envelope.cursor)).toEqual([2, 3, 4, 5, 6].map(sequence => cursorOf("g1", sequence)));
+    expect(observed.some(value => (value as { sequence: number }).sequence === 2)).toBe(true);
+    expect(child.opened).toHaveLength(1); // No observation-owned upstream.
+  });
   test("document joiners receive a materialized snapshot after live patches", async () => {
     const child = fakeSource();
     const live = broker(child.source);

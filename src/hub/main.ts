@@ -43,6 +43,7 @@ import {
   onboardingJournalPath,
   personalWorkspaceStatePath,
   personalChatPreferencesPath,
+  workerDismissalsPath,
   registryPath,
   resolveHubStateRoot,
   sessionsPath,
@@ -51,6 +52,7 @@ import {
 } from "./state-dir";
 import { HubPreferencesStore } from "./preferences";
 import { PersonalChatPreferencesStore } from "./personal-chat-preferences";
+import { WorkerDismissalsStore } from "./worker-dismissals";
 import { createWorktreeRenameGuard } from "./worktree-rename-guard";
 import { WorktreeJournal, WorktreeProvenanceStore } from "./worktree-journal";
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
@@ -334,13 +336,14 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   const personalChatPreferences = new PersonalChatPreferencesStore(personalChatPreferencesPath(stateRoot));
   await personalChatPreferences.load();
   const personalState = new PersonalWorkspaceStateStore(personalWorkspaceStatePath(stateRoot));
+  const workerDismissals = new WorkerDismissalsStore(workerDismissalsPath(stateRoot));
   // What finished where, and who has seen it. Read before the live broker is
   // assembled: the broker adopts the marks at construction and resumes its
   // stamp counter above them, and this hub's broker starts watching there
   // too, before any page connects.
   const activityMarks = new ActivityMarkStore(activityMarksPath(stateRoot));
   const credentialMetadata = new CredentialMetadataStore(credentialsPath(stateRoot));
-  await Promise.all([personalState.load(), credentialMetadata.load(), activityMarks.load()]);
+  await Promise.all([personalState.load(), credentialMetadata.load(), activityMarks.load(), workerDismissals.load()]);
   const credentialTokens = new CredentialTokenStore(credentialTokenStorePath(stateRoot));
   const credentialToolStore = new CredentialToolOverrideStore(credentialToolsPath(stateRoot));
   const credentialTools = new CredentialToolManager(
@@ -568,7 +571,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await onboarding.recover();
   await personalState.recoverPendingForgets(
     workspaceId => registry.byId(workspaceId) !== undefined,
-    async workspaceId => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
+    async workspaceId => { await workerDismissals.forgetWorkspace(workspaceId); await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
   );
   const worktrees = new WorktreeService({
     registry,
@@ -583,7 +586,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
       await personalState.forgetWorkspace(
         workspaceId,
         () => registry.remove(workspaceId),
-        async () => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
+        async () => { await workerDismissals.forgetWorkspace(workspaceId); await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
       );
     },
     // The same Hub-wide path fence every other folder mutation takes, so a
@@ -655,6 +658,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     notifications,
     preferences,
     personalChatPreferences,
+    workerDismissals,
     onboarding,
     gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
     cloneCredentials,

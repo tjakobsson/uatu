@@ -21,6 +21,7 @@ import {
   LIVE_KEEPALIVE_MS,
   LIVE_MAX_SUBSCRIPTIONS,
   LIVE_OPEN_FRAME,
+  PERSONAL_INVALIDATION,
   liveSubscriptionId,
   parseLiveStreamQuery,
   parseLiveSubscriptionChange,
@@ -116,8 +117,8 @@ class ClientStream {
     if (envelope.event.kind === "resync" && subscriptionId !== null) this.subscriptions.delete(subscriptionId);
     // Only a complete baseline can replace an undelivered document frame.
     // Patches name their predecessor, so dropping one creates a replay gap.
-    const coalescible = envelope.topic === "document" && envelope.event.kind === "data"
-      && !(envelope.event.data && typeof envelope.event.data === "object" && "kind" in envelope.event.data && envelope.event.data.kind === "patch");
+    const coalescible = (envelope.topic === "personal" && envelope.event.kind === "data") || (envelope.topic === "document" && envelope.event.kind === "data"
+      && !(envelope.event.data && typeof envelope.event.data === "object" && "kind" in envelope.event.data && envelope.event.data.kind === "patch"));
     this.enqueue(subscriptionId, formatLiveEnvelope(envelope), coalescible);
   }
 
@@ -346,6 +347,28 @@ export class LiveEndpoint {
     for (const stream of [...this.streams.values()]) stream.end("completed");
   }
 
+  // Committed changes or private storage-health changes call this; the
+  // authoritative read distinguishes them. Private scopes never enter the
+  // broker's shared upstream/cache keys or activity payloads.
+  invalidatePersonal(user: string, workspaceId: string, notice: "changed" | "unavailable" | "ready" = "changed"): void {
+    for (const stream of this.streams.values()) {
+      if (stream.principal.user === user && stream.workspaceId === workspaceId
+        && stream.subscriptions.has(liveSubscriptionId({ topic: "personal" }))) {
+        if (notice !== "changed") {
+          // Health is a latest-state signal, not replay. Drop undelivered
+          // personal frames so recovery remains ready→data, never data→ready.
+          stream.purge(liveSubscriptionId({ topic: "personal" }));
+          stream.write({ ws: stream.workspaceId, topic: "personal", cursor: "", event: { kind: notice } });
+        }
+        if (notice !== "unavailable") this.writePersonal(stream);
+      }
+    }
+  }
+
+  private writePersonal(stream: ClientStream): void {
+    stream.write({ ws: stream.workspaceId, topic: "personal", cursor: "", event: { kind: "data", data: PERSONAL_INVALIDATION } });
+  }
+
   // The broker's subscribe writes synchronously (the latest document
   // snapshot and its `ready`, a replay, the activity snapshot) and returns
   // its handle afterwards. If a write ended the stream, `end()` has already
@@ -358,6 +381,11 @@ export class LiveEndpoint {
     // `add` of a subscribed key replaces it: re-attach from the new cursor,
     // and nothing queued for the old attachment survives.
     this.detach(stream, id);
+    if (subscription.topic === "personal") {
+      stream.subscriptions.set(id, { detach() {} });
+      this.writePersonal(stream);
+      return;
+    }
     const attachment = this.deps.broker.subscribe(stream, stream.workspaceId, subscription);
     if (stream.ended) {
       attachment.detach();

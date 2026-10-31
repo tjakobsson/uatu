@@ -81,6 +81,9 @@ export type V2Evidence = Readonly<{
   execution?: Readonly<{ phase: "started" | "ended"; proof?: NativeProof; historical: boolean }>;
   notification?: Readonly<{ child: string; id: string; proof?: NativeProof; historical: boolean }>;
   shellBirth?: Readonly<{ id: string; parent?: string; proof?: NativeProof; commandFingerprint?: string }>;
+  shellExit?: Readonly<{ id: string; proof?: NativeProof }>;
+  requestTool?: Readonly<{ child: string; source: { message: string; tool: string }; proof?: NativeProof }>;
+  requestSource?: Readonly<{ child: string; kind: "permission" | "question"; source: { message: string; tool: string } }>;
   userShell?: Readonly<{ id: string; parent: string }>;
   launchers: readonly LauncherEvidence[];
 }>;
@@ -132,10 +135,27 @@ function prepareV2Event(value: unknown, memory?: OpenCodeV2Memory, controls?: Ba
   const shellBirth = eventType === "shell.created" && shellId && event.durable === undefined
     ? Object.freeze({ id: shellId, parent: optionalString(record(shell.metadata).sessionID), proof: nativeProof(event, { type: eventType, info: shell }), commandFingerprint: shellCommandFingerprint(shell.command) }) : undefined;
   const userShellId = optionalString(record(data.shell).id);
+  const toolMessage = optionalString(data.assistantMessageID), toolId = optionalString(data.id);
+  const requestTool = session && toolMessage && toolId && (eventType === "session.tool.input.started" || eventType === "session.tool.called")
+    ? { child: session, source: { message: toolMessage, tool: toolId }, proof: nativeProof(event, { type: eventType, session, message: toolMessage, tool: toolId }) } : undefined;
+  const form = record(data.form), formMetadata = record(form.metadata);
+  // Native question-tool producer (2.1.2): metadata.kind=question and its
+  // context's exact message/tool tuple. Arbitrary form metadata is not proof.
+  const source = eventType === "permission.asked" && record(data.source).type === "tool" ? record(data.source)
+    : eventType === "form.created" && formMetadata.kind === "question" ? record(formMetadata.tool) : undefined;
+  const requestChild = eventType === "form.created" ? optionalString(form.sessionID) : session;
+  const requestSource = source && requestChild && optionalString(source.messageID) && optionalString(source.id)
+    ? { child: requestChild, kind: eventType === "permission.asked" ? "permission" as const : "question" as const,
+      source: { message: text(source.messageID), tool: text(source.id) } } : undefined;
+  const shellExit = eventType === "shell.exited" && optionalString(data.id) && ["exited", "timeout", "killed"].includes(text(data.status))
+    ? Object.freeze({ id: text(data.id), proof: nativeProof(event, { type: eventType, data }) }) : undefined;
   const userShell = (eventType === "session.shell.started" || eventType === "session.shell.ended") && session && userShellId
     ? Object.freeze({ id: userShellId, parent: session }) : undefined;
   return { envelope, tools, notification, notificationId: noticeId, notificationProof: noticeProof, evidence: Object.freeze({ session, directory: optionalString(record(event.location).directory), lifecycle,
     ...(shellBirth ? { shellBirth } : {}),
+    ...(shellExit ? { shellExit } : {}),
+    ...(requestTool ? { requestTool } : {}),
+    ...(requestSource ? { requestSource } : {}),
     ...(userShell ? { userShell } : {}),
     shutdown: eventType === "location.shutdown", launchers: Object.freeze([...tools.values()].map(tool => tool.fact)),
     ...(executionPhase ? { execution: Object.freeze({ phase: executionPhase, proof: executionProof, historical: controls?.historical(executionPhase, executionProof) === true || !!session && (executionPhase === "ended" ? memory?.workers.terminalReplay(session, executionProof) : memory?.workers.startReplay(session, executionProof)) === true }) } : {}),

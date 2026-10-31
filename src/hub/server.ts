@@ -71,6 +71,9 @@ import { HubPreferencesError, type HubPreferencesStore } from "./preferences";
 import { isChildPolicyAction, type VerifiedChatPolicy } from "./child-policy";
 import { PersonalChatPreferencesError, type PersonalChatPreferencesStore } from "./personal-chat-preferences";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
+import type { WorkerDismissalsStore } from "./worker-dismissals";
+import { handleWorkerDismissals, readAuthoritativeWorkerEvidence, WORKER_DISMISSALS_PATH } from "./worker-dismissals-api";
+import { observeWorkerProjection } from "./worker-dismissals-observation";
 import type { ActivityMarkSink } from "./activity-marks";
 import type { SessionManager } from "./sessions";
 import { PAGE_ORIGIN_HEADER } from "../terminal/auth";
@@ -101,6 +104,7 @@ export type HubDeps = {
   watchActivityFromStart?: boolean;
   preferences?: HubPreferencesStore;
   personalChatPreferences?: PersonalChatPreferencesStore;
+  workerDismissals?: WorkerDismissalsStore;
   onboarding?: WorkspaceOnboardingCoordinator;
   folderManager?: Pick<FolderManager, "create" | "rename" | "remove" | "assertNoPendingMutation">;
   reservations?: PathReservationCoordinator;
@@ -1633,6 +1637,24 @@ export function createHubFetchHandler(deps: HubDeps) {
         return json(400, { error: "malformed workspace id" });
       }
       const suffix = pathname.slice(sessionMatch[0].endsWith("/") ? sessionMatch[0].length - 1 : sessionMatch[0].length);
+      if (suffix === WORKER_DISMISSALS_PATH) {
+        // Shares the session route's authenticated principal and cookie-origin
+        // protection. The lifecycle lock excludes concurrent forget/restart.
+        if (!registry.byId(workspaceId)) return json(404, { error: "unknown workspace" }, NO_STORE_HEADERS);
+        return sessions.runExclusive(workspaceId, async () => {
+          if (!registry.byId(workspaceId)) return json(404, { error: "unknown workspace" }, NO_STORE_HEADERS);
+          return handleWorkerDismissals(request, {
+            user: session.user, workspaceId, store: deps.workerDismissals,
+            read: async conversationId => {
+              const running = sessions.get(workspaceId);
+              if (!running) throw new Error("workspace unavailable");
+              const evidence = await readAuthoritativeWorkerEvidence(running, conversationId);
+              if (sessions.get(workspaceId) !== running) throw new Error("workspace generation changed");
+              return evidence;
+            },
+          });
+        });
+      }
       if (suffix === "/api/personal-state") {
         if (!registry.byId(workspaceId)) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
@@ -1715,7 +1737,9 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
         return proxyHttp(request, running, policy);
       }
-      return proxyHttp(request, running);
+      return proxyHttp(request, running, undefined, deps.workerDismissals
+        ? (conversationId, value) => observeWorkerProjection(deps.workerDismissals!, workspaceId, conversationId, value)
+        : undefined);
     }
 
     // Dashboard + its APIs.
@@ -2123,7 +2147,10 @@ export function createHubFetchHandler(deps: HubDeps) {
             await personalState.forgetWorkspace(
               workspaceId,
               () => registry.remove(workspaceId),
-              async () => { await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId); },
+              async () => {
+                await deps.workerDismissals?.forgetWorkspace(workspaceId);
+                await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId);
+              },
             );
             return "forgotten";
           });
@@ -2166,7 +2193,23 @@ function assembleLive(deps: HubDeps): { live: LiveEndpoint; liveBroker: LiveBrok
     },
     metrics,
   });
+  if (deps.workerDismissals) liveBroker.observeWorkerConversations((workspaceId, conversationId, value) => {
+    observeWorkerProjection(deps.workerDismissals!, workspaceId, conversationId, value);
+  });
+  // Installed once per endpoint/store pair, including the separately assembled
+  // production endpoint. Changed marks notify after atomic commits; storage
+  // health invalidations make personal reads report failure without touching chat.
+  if (deps.workerDismissals) bindWorkerDismissals(deps.workerDismissals, live);
   return { live, liveBroker };
+}
+
+const dismissalBindings = new WeakMap<LiveEndpoint, WeakSet<WorkerDismissalsStore>>();
+function bindWorkerDismissals(store: WorkerDismissalsStore, live: LiveEndpoint): void {
+  let stores = dismissalBindings.get(live);
+  if (!stores) { stores = new WeakSet(); dismissalBindings.set(live, stores); }
+  if (stores.has(store)) return;
+  stores.add(store);
+  store.subscribe((scope, notice) => live.invalidatePersonal(scope.user, scope.workspaceId, notice));
 }
 
 // Starts the hub's Bun.serve with TLS when configured and the WebSocket

@@ -539,7 +539,37 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectContextWindow(record.window);
       break;
     case "background_task":
-      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground", "stateUncertain", "resultId", "toolUseIds", "workerSession", "terminalReportedAt"], type);
+      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground", "stateUncertain", "resultId", "toolUseIds", "workerSession", "terminalReportedAt", "activity", "control"], type);
+      if (record.activity !== undefined) {
+        const activity = expectRecord(record.activity, "worker activity");
+        expectKeys(activity, ["kind", "observedAt", "endedAt", "executionId", "executionAliases", "generation", "reason", "request"], "worker activity");
+        expectOneOf(activity.kind, ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"], "worker activity kind");
+        expectOptionalTimestamp(activity.observedAt, "worker observation time");
+        expectOptionalTimestamp(activity.endedAt, "worker end time");
+        expectOptionalCount(activity.generation, "worker observation generation");
+        expectOptionalIdentity(activity.executionId, "worker execution id");
+        if (activity.executionAliases !== undefined) {
+          expectStringArray(activity.executionAliases, "worker execution aliases", true);
+          const aliases = activity.executionAliases as string[];
+          if (aliases.length > 2048 || aliases.length !== new Set(aliases).size || !aliases.includes(activity.executionId as string)) throw new Error("invalid worker execution aliases");
+          for (const alias of aliases) expectIdentity(alias, "worker execution alias");
+        }
+        expectOptionalString(activity.reason, "worker activity reason");
+        if (typeof activity.reason === "string" && activity.reason.length > 512) throw new Error("worker activity reason is too long");
+        if (activity.kind === "needs-answer") {
+          const request = expectRecord(activity.request, "worker request");
+          expectKeys(request, ["id", "kind"], "worker request");
+          expectIdentity(request.id, "worker request id");
+          expectOneOf(request.kind, ["permission", "question"], "worker request kind");
+        } else if (activity.request !== undefined) throw new Error("only needs-answer activity can link a request");
+      }
+      if (record.control !== undefined) {
+        const control = expectRecord(record.control, "worker control");
+        expectKeys(control, ["available", "reason"], "worker control");
+        if (typeof control.available !== "boolean") throw new Error("worker control availability must be a boolean");
+        expectOptionalString(control.reason, "worker control reason");
+        if (typeof control.reason === "string" && control.reason.length > 512) throw new Error("worker control reason is too long");
+      }
       expectOptionalTimestamp(record.terminalReportedAt, "terminalReportedAt");
       expectWorkerSession(record.workerSession);
       if (record.stateUncertain !== undefined && typeof record.stateUncertain !== "boolean") throw new Error("background task uncertainty must be a boolean");

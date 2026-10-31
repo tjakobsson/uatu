@@ -73,6 +73,7 @@ import {
 } from "../../src/hub/credential-context";
 import { PersonalWorkspaceStateStore } from "../../src/hub/personal-state";
 import { PersonalChatPreferencesStore } from "../../src/hub/personal-chat-preferences";
+import { WorkerDismissalsStore } from "../../src/hub/worker-dismissals";
 import { WorkspaceRegistry, type WorkspaceEntry } from "../../src/hub/registry";
 import { startHubServer } from "../../src/hub/server";
 import { SessionManager } from "../../src/hub/sessions";
@@ -143,6 +144,7 @@ const CREDENTIALS = process.env.UATU_E2E_HUB_CREDENTIALS === "1";
 const PUSH = process.env.UATU_E2E_HUB_PUSH === "1";
 const AGENT_ACCOUNTS = process.env.UATU_E2E_HUB_AGENT_ACCOUNTS === "1";
 const CHAT_POLICY = process.env.UATU_E2E_HUB_CHAT_POLICY === "1";
+const WORKER_DISMISSALS = process.env.UATU_E2E_HUB_WORKER_DISMISSALS === "1";
 const EXIT_ON_STDIN_CLOSE = process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1";
 const PRESENCE_GRACE_MS = Number.parseInt(process.env.UATU_E2E_HUB_PRESENCE_GRACE_MS ?? "1500", 10);
 
@@ -282,7 +284,7 @@ const config: HubConfig = {
   tls: null,
   users: [
     { name: HUB_E2E_USER.name, passwordHash: await hashPassword(HUB_E2E_USER.password) },
-    ...(CHAT_POLICY ? [{ name: POLICY_OTHER_USER.name, passwordHash: await hashPassword(POLICY_OTHER_USER.password) }] : []),
+    ...(CHAT_POLICY || WORKER_DISMISSALS ? [{ name: POLICY_OTHER_USER.name, passwordHash: await hashPassword(POLICY_OTHER_USER.password) }] : []),
   ],
   stateDir: path.join(tempRoot, "state"),
 };
@@ -292,6 +294,9 @@ const personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "perso
 await personalState.load();
 const personalChatPreferences = new PersonalChatPreferencesStore(path.join(tempRoot, "personal-chat-preferences.json"));
 await personalChatPreferences.load();
+const workerDismissalsPath = path.join(tempRoot, "worker-dismissals.json");
+let workerDismissals = WORKER_DISMISSALS ? new WorkerDismissalsStore(workerDismissalsPath) : undefined;
+await workerDismissals?.load();
 const sessionStore = new HubSessionStore(path.join(tempRoot, "sessions.json"));
 await sessionStore.load();
 const backend = new HarnessBackend();
@@ -446,13 +451,15 @@ const accountsControl = fakeAccounts ? Bun.serve({
   },
 }) : null;
 
-const server = startHubServer({ config, registry, sessions, sessionStore, personalState, personalChatPreferences, notifications,
+const startServer = () => startHubServer({ config, registry, sessions, sessionStore, personalState, personalChatPreferences, notifications,
+  ...(workerDismissals ? { workerDismissals } : {}),
   ...(agentAccounts ? { agentAccounts } : {}),
   ...(PUSH ? { presenceGraceMs: PRESENCE_GRACE_MS } : {}),
   ...(WORKTREES ? { onboarding, worktrees: worktreesService,
     worktreeReconcilerOptions: { minIntervalMs: 100, periodMs: 500 } } : {}),
   ...(credentialApi ? { credentialApi } : {}),
 });
+let server = startServer();
 const origin = `http://127.0.0.1:${server.port}`;
 for (const workspace of workspaces) {
   workspace.sessionUrl = `${origin}/s/${encodeURIComponent(workspace.id)}/`;
@@ -462,7 +469,7 @@ if (PUSH) notifications.start();
 const info: HubE2EInfo = {
   origin,
   user: HUB_E2E_USER,
-  ...(CHAT_POLICY ? { otherUser: POLICY_OTHER_USER } : {}),
+  ...(CHAT_POLICY || WORKER_DISMISSALS ? { otherUser: POLICY_OTHER_USER } : {}),
   workspaces,
   ...(PUSH ? { pushLog, notificationStore: notificationStorePath } : {}),
   ...(accountsControl ? { agentAccountsControl: `http://127.0.0.1:${accountsControl.port}/` } : {}),
@@ -503,6 +510,18 @@ async function resetForTest(): Promise<void> {
     await sessions.start(workspace.id);
   }));
   for (const entry of registry.list()) await personalState.removeWorkspace(entry.id);
+  for (const entry of registry.list()) await workerDismissals?.forgetWorkspace(entry.id);
+}
+
+async function restartWorkerDismissals(): Promise<void> {
+  if (!WORKER_DISMISSALS) throw new Error("worker dismissal fixture is not enabled");
+  server.worktreeReconciler?.dispose();
+  server.live.endAll();
+  server.liveBroker.dispose();
+  await server.stop(true);
+  workerDismissals = new WorkerDismissalsStore(workerDismissalsPath);
+  await workerDismissals.load();
+  server = startServer();
 }
 
 let controlBuffer = "";
@@ -514,8 +533,8 @@ process.stdin.on("data", (chunk: string) => {
     const [command, serial] = controlBuffer.slice(0, newline).trim().split(" ");
     controlBuffer = controlBuffer.slice(newline + 1);
     newline = controlBuffer.indexOf("\n");
-    if (command !== "reset") continue;
-    void resetForTest().then(
+    if (command !== "reset" && command !== "restart-worker-dismissals") continue;
+    void (command === "reset" ? resetForTest() : restartWorkerDismissals()).then(
       () => console.log(`${HUB_E2E_RESET_PREFIX}${serial} ok`),
       error => console.log(`${HUB_E2E_RESET_PREFIX}${serial} error ${JSON.stringify(String(error))}`),
     );

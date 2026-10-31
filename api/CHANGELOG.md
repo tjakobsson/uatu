@@ -2,6 +2,21 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 12 / Workspace 32 - Unreleased (worker activity and private dismissal)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- Closed background-task payloads can carry independent `activity` and `control` observations. Verified task activity, active-session-only evidence and occurrence-specific end without a result are distinct. Working does not authorize Stop; current ownership and retained exact-occurrence proof still govern every native mutation. Unresolved never implies successful completion.
+- The existing single live stream accepts an opt-in, no-cursor `personal` topic carrying only `{category:"worker-dismissals"}`. Its account/workspace-scoped invalidations bypass shared child-topic fanout. Fetch personal state on attachment/reconnect and invalidation; never put personal marks in shared activity or conversation events.
+- Authenticated workspace-prefixed personal worker-dismissal GET/POST operations persist exact-execution marks privately per account. Conditional per-entry revisions merge concurrent device dismissals without changing provider history, work, terminal outcomes or canonical requests. The API rejects principal selectors, invalid scope, stale evidence and full/unavailable storage.
+- Verified activity and pending requests remain visible despite old dismissals. Successful retirement is durable. If retirement persistence fails or is unconfirmed, chat stays available with personal-storage failure guidance; an old mark can reapply to an unavailable row after restart during that failure, never to currently verified activity or pending requests.
+
+### Migration
+
+Strict clients must regenerate the expanded Hub live-topic vocabulary and workspace background-task schemas. Interpret activity independently of Stop availability, preserve last-seen/end provenance and treat missing evidence conservatively. Do not create another EventSource, infer task ownership from a reused child session, reply to requests twice or replay native mutations. Personal dismissal revisions are not Stop authorization tokens. Existing device-local dismissal IDs are not migrated into Hub account state. Bundled-web revision remains 3; the workspace API revision participates in asset matching.
+
 ## Hub 11 / Workspace 31 - Unreleased (explicit local discard)
 
 Compatibility: breaking (workspace)

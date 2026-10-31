@@ -3,6 +3,7 @@ import { workerIsActive, workerStateLabel } from "./worker-state";
 import { formatTaskElapsed } from "./task-inspection";
 import { formatTokens } from "./usage";
 import { formatWorkerCost } from "./worker-session";
+import { workerDismissible } from "./worker-dismissal-client";
 
 const glyphs = { working: "●", unknown: "◌", completed: "✓", failed: "×", stopped: "■" };
 
@@ -24,6 +25,19 @@ export class CompactWorkersView {
     });
     host.replaceChildren(this.list);
     host.parentElement?.querySelector(":scope > summary")?.append(this.dismiss);
+  }
+
+  /** Intrinsic body extent, not the scrollport space allocated by the dock.
+   * Reading scrollHeight here would preserve a stale minimum after rows shrink
+   * (for example 320→390px), because it cannot be smaller than clientHeight.
+   * The single unconstrained list box already includes row borders and gaps.
+   */
+  contentHeight(): number {
+    const css = (element: HTMLElement) => typeof getComputedStyle === "function" ? getComputedStyle(element) : element.style;
+    const host = css(this.host), list = css(this.list);
+    const pixels = (value: string) => parseFloat(value) || 0;
+    return this.list.getBoundingClientRect().height + pixels(list.marginTop) + pixels(list.marginBottom)
+      + pixels(host.paddingTop) + pixels(host.paddingBottom) + pixels(host.borderTopWidth) + pixels(host.borderBottomWidth);
   }
 
   paint(conversation: string | null, workers: readonly CompactWorker[], stopping: ReadonlySet<string>, canStop: boolean): void {
@@ -54,14 +68,17 @@ export class CompactWorkersView {
       if (worker.taskId) row.dataset.backgroundTask = worker.taskId;
       const inspect = row.firstElementChild as HTMLButtonElement;
       inspect.dataset.workerItem = worker.id;
+      if (worker.activity?.kind === "needs-answer" && worker.activity.request) inspect.dataset.workerRequest = worker.activity.request.id;
+      else delete inspect.dataset.workerRequest;
       if (worker.taskId) {
         inspect.dataset.inspectTask = worker.taskId;
         inspect.dataset.inspectView = worker.kind === "shell" ? "output" : "transcript";
       }
       inspect.title = worker.name;
+      const stateLabel = workerStateLabel(worker.state, false, worker.activity);
       const effortLabel = worker.effort == null ? "Reasoning effort not reported" : `Last-used reasoning effort: ${worker.effort}`;
       const costLabel = worker.costUsd == null ? "Subagent session cost not reported" : `Cumulative subagent session cost: ${worker.costUsd} USD`;
-      inspect.setAttribute("aria-label", [worker.name, worker.agent, workerStateLabel(worker.state), worker.model, worker.kind === "agent" ? effortLabel : undefined, worker.tokens === undefined ? undefined : `${worker.tokens.toLocaleString()} cumulative tokens`, worker.kind === "agent" ? costLabel : undefined].filter(Boolean).join(" · "));
+      inspect.setAttribute("aria-label", [worker.name, worker.agent, stateLabel, worker.model, worker.kind === "agent" ? effortLabel : undefined, worker.tokens === undefined ? undefined : `${worker.tokens.toLocaleString()} cumulative tokens`, worker.kind === "agent" ? costLabel : undefined].filter(Boolean).join(" · "));
       // The handler looks up the current row model, not a stale closure.
       inspect.querySelector(".chat-worker-glyph")!.textContent = glyphs[worker.state];
       inspect.querySelector(".chat-worker-name")!.textContent = worker.name;
@@ -70,10 +87,24 @@ export class CompactWorkersView {
       kind.className = "chat-worker-kind";
       kind.textContent = worker.kind === "shell" ? "Shell" : worker.agent ?? "Agent";
       meta.replaceChildren(kind);
-      if (worker.since || worker.completedAt !== undefined || worker.terminalReportedAt !== undefined) {
+      const showStatus = worker.state === "unknown" || worker.activity !== undefined && worker.state === "working";
+      if (showStatus) {
+        const status = document.createElement("span");
+        status.className = "chat-worker-status";
+        status.textContent = stateLabel;
+        meta.append(" · ", status);
+      }
+      const clockRunning = worker.state === "working" && worker.clockRunning !== false && worker.activity?.kind !== "needs-answer";
+      if (worker.activity?.kind === "ended") {
+        const end = document.createElement("span");
+        end.className = "chat-worker-clock";
+        end.textContent = worker.activity.endedAt === undefined ? "End time unknown" : `Ended ${new Date(worker.activity.endedAt).toLocaleString()}`;
+        meta.append(" · ", end);
+      }
+      if ((clockRunning || !workerIsActive(worker.state)) && (worker.since || worker.completedAt !== undefined || worker.terminalReportedAt !== undefined)) {
         const time = document.createElement("span");
         time.className = "chat-worker-clock";
-        if (workerIsActive(worker.state)) {
+        if (clockRunning) {
           time.dataset.elapsedSince = String(worker.since);
           time.textContent = formatTaskElapsed(Date.now() - worker.since);
         } else {
@@ -87,7 +118,7 @@ export class CompactWorkersView {
           meta.append(suffix);
         }
       }
-      meta.title = [meta.textContent, workerStateLabel(worker.state), worker.progress].filter(Boolean).join(" · ");
+      meta.title = [meta.textContent, showStatus ? undefined : stateLabel, worker.progress].filter(Boolean).join(" · ");
       const model = inspect.querySelector<HTMLElement>(".chat-worker-model")!;
       const modelName = document.createElement("span");
       modelName.className = "chat-worker-model-name";
@@ -119,10 +150,22 @@ export class CompactWorkersView {
         stop.dataset.stopTask = worker.taskId;
         stop.dataset.stopItem = worker.id;
         stop.textContent = stopping.has(worker.taskId) ? "Stopping…" : "Stop";
-        stop.disabled = stopping.has(worker.taskId);
+        stop.disabled = stopping.has(worker.taskId) || worker.controlAvailable === false;
         stop.setAttribute("aria-label", `Stop worker: ${worker.name}`);
-        stop.title = `Stop worker: ${worker.name}`;
+        stop.title = worker.controlAvailable === false ? worker.controlReason ?? "Stop unavailable: execution proof is unverified" : `Stop worker: ${worker.name}`;
       } else stop?.remove();
+      let dismiss = row.querySelector<HTMLButtonElement>("[data-dismiss-worker]");
+      if (workerDismissible(worker) && worker.state === "unknown") {
+        if (!dismiss) {
+          dismiss = document.createElement("button");
+          dismiss.type = "button";
+          dismiss.className = "chat-worker-dismiss";
+          row.append(dismiss);
+        }
+        dismiss.dataset.dismissWorker = worker.id;
+        dismiss.textContent = "Dismiss";
+        dismiss.setAttribute("aria-label", `Dismiss worker from summary: ${worker.name}`);
+      } else dismiss?.remove();
     }
     // Reorder siblings around the focused row. Moving that row itself with
     // insertBefore drops native focus even though its buttons remain connected.

@@ -134,7 +134,7 @@ export function liveSubscriptionsPath(streamId: string): string {
   return `${LIVE_STREAM_PATH}/${encodeURIComponent(streamId)}/subscriptions`;
 }
 
-export const LIVE_TOPICS = ["document", "inventory", "conversation", "activity", "worktrees"] as const;
+export const LIVE_TOPICS = ["document", "inventory", "conversation", "activity", "worktrees", "personal"] as const;
 export type LiveTopic = (typeof LIVE_TOPICS)[number];
 // Topics a client subscribes to per workspace; `activity` is stream-wide and
 // opted into with `activity=1`.
@@ -168,6 +168,9 @@ export const WORKTREE_INVALIDATION: WorktreeInventoryEvent = { type: "worktree.i
 // The topic takes no replay cursor: every attach sends a fresh invalidation,
 // so there is nothing to resume from and nothing a stale cursor could skip.
 export const WORKTREE_TOPIC_CURSOR = "";
+
+// Endpoint-local, authenticated account/workspace routing; never broker data.
+export const PERSONAL_INVALIDATION = { category: "worker-dismissals" } as const;
 
 export type LiveEvent =
   | { kind: "data"; data: unknown }
@@ -215,19 +218,20 @@ function byteLength(value: string): number {
 }
 
 function isSubscribableTopic(value: unknown): value is LiveSubscribableTopic {
-  return value === "document" || value === "inventory" || value === "conversation" || value === "worktrees";
+  return value === "document" || value === "inventory" || value === "conversation" || value === "worktrees" || value === "personal";
 }
 
 function parseSubscriptionKey(value: unknown): LiveSubscriptionKey | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "subscription must be an object";
   const record = value as Record<string, unknown>;
-  if (!isSubscribableTopic(record.topic)) return "subscription topic must be document, inventory, conversation, or worktrees";
+  if (!isSubscribableTopic(record.topic)) return "subscription topic must be document, inventory, conversation, worktrees, or personal";
   const topic = record.topic;
   if (topic === "conversation" && (typeof record.key !== "string" || record.key === "")) {
     return "conversation subscription needs a key";
   }
   if (topic === "inventory" && record.key !== undefined) return "inventory subscription takes no key";
   if (topic === "worktrees" && record.key !== undefined) return "worktrees subscription takes no key";
+  if (topic === "personal" && (record.key !== undefined || Object.keys(record).some(key => !["topic", "cursor"].includes(key)))) return "personal subscription takes no selectors";
   if (record.key !== undefined) {
     if (typeof record.key !== "string") return "subscription key must be a string";
     if (byteLength(record.key) > LIVE_MAX_KEY_BYTES) return "subscription key is too large";
@@ -241,7 +245,7 @@ function parseSubscription(value: unknown): LiveSubscription | string {
   // The worktrees topic has no replay cursor. A presented one is dropped
   // rather than refused, so a client that retained one from an older build
   // still attaches — and still receives the fresh invalidation.
-  if (key.topic === "worktrees") return key;
+  if (key.topic === "worktrees" || key.topic === "personal") return key;
   const cursor = (value as Record<string, unknown>).cursor;
   if (cursor === undefined || cursor === null || cursor === "") return key;
   if (typeof cursor !== "string") return "subscription cursor must be a string";
@@ -361,6 +365,16 @@ export function parseLiveEnvelope(raw: string): LiveEnvelope | null {
   if (record.key !== undefined && typeof record.key !== "string") return null;
   const event = record.event as Record<string, unknown> | null;
   if (typeof event !== "object" || event === null) return null;
+  if (record.topic === "personal") {
+    if (record.key !== undefined || record.cursor !== "") return null;
+    if ((event.kind === "unavailable" || event.kind === "ready") && Object.keys(event).length === 1) {
+      return { ws: record.ws, topic: "personal", cursor: "", event: { kind: event.kind } };
+    }
+    if (event.kind !== "data"
+      || typeof event.data !== "object" || event.data === null || Array.isArray(event.data)
+      || Object.keys(event.data).length !== 1 || (event.data as Record<string, unknown>).category !== "worker-dismissals") return null;
+    return { ws: record.ws, topic: "personal", cursor: "", event: { kind: "data", data: PERSONAL_INVALIDATION } };
+  }
   let parsed: LiveEvent;
   switch (event.kind) {
     case "data":

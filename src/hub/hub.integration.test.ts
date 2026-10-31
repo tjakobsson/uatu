@@ -31,6 +31,7 @@ import { WorkspaceOnboardingCoordinator } from "./onboarding";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { HubPreferencesStore } from "./preferences";
 import { PersonalChatPreferencesStore } from "./personal-chat-preferences";
+import { WorkerDismissalsStore } from "./worker-dismissals";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -1345,8 +1346,10 @@ describe("hub end to end", () => {
       headers,
       body: JSON.stringify({ path: source, name: path.basename(renamedPath), stop: true }),
     });
-    expect(confirmed.status).toBe(200);
-    expect(await confirmed.json()).toEqual({ path: renamedPath, workspaceIds: [running.id, starting.id] });
+    expect({ status: confirmed.status, body: await confirmed.json() }).toEqual({
+      status: 200,
+      body: { path: renamedPath, workspaceIds: [running.id, starting.id] },
+    });
     expect(sessions.isRunning(running.id)).toBe(false);
     expect(sessions.isRunning(starting.id)).toBe(false);
   }, 60_000);
@@ -3390,6 +3393,64 @@ describe("hub end to end", () => {
     expect(refreshed.status).toBe(200);
     await assertContract("GET", "/api/hub/settings/chat-preferences", refreshed.clone());
     expect(await refreshed.json()).toEqual({ version: 1, revision: state.revision + 1, autoBackgroundOnSteer: false });
+  });
+
+  test("personal worker dismissals black-box contracts include successful reads and durable writes", async () => {
+    // Exercise the actual Hub with a controlled child snapshot, without
+    // starting a real agent runtime or depending on machine credentials.
+    const root = path.join(tempRoot, "worker-dismissal-contract");
+    await mkdir(root);
+    const ownRegistry = new WorkspaceRegistry(path.join(root, "registry.json"));
+    const ownPersonal = new PersonalWorkspaceStateStore(path.join(root, "personal.json"));
+    const ownSessions = new HubSessionStore(path.join(root, "sessions.json"));
+    const dismissals = new WorkerDismissalsStore(path.join(root, "dismissals.json"));
+    await Promise.all([ownRegistry.load(), ownPersonal.load(), ownSessions.load(), dismissals.load()]);
+    await ownRegistry.register(path.join(root, "contract-workers"));
+    let nativeMutations = 0;
+    const child = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+      if (request.method !== "GET") { nativeMutations++; return new Response(null, { status: 405 }); }
+      const url = new URL(request.url);
+      if (url.pathname !== "/s/contract-workers/api/chat/conversations/opencode%3Acontract" || url.searchParams.get("t") !== "contract-token") return new Response(null, { status: 404 });
+      return Response.json({
+        conversation: { id: "opencode:contract", title: "Contract fixture", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } },
+        configuration: {}, generation: "contract", cursor: "contract-cursor",
+        items: [{ id: "task:contract", type: "background_task", taskId: "contract", description: "Contract worker", createdAt: 1, status: "running", activity: { kind: "unavailable", executionId: "contract-execution" } }],
+      });
+    } });
+    const manager = new SessionManager(ownRegistry, { local: { start: async () => ({
+      workspaceId: "contract-workers", instanceId: "contract", policyTrust: "unavailable", basePath: "/s/contract-workers/",
+      endpoint: { hostname: "127.0.0.1", port: child.port! }, token: "contract-token",
+      exited: new Promise<number | null>(() => {}), stop: async () => {},
+    }) } }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    let hub: ReturnType<typeof startHubServer> | undefined;
+    try {
+      await manager.start("contract-workers");
+      hub = startHubServer({ config: { host: "127.0.0.1", port: 0, tls: null, users: [{ name: "contract", passwordHash: "unused" }] },
+        registry: ownRegistry, sessions: manager, sessionStore: ownSessions, personalState: ownPersonal, workerDismissals: dismissals });
+      const session = await ownSessions.issue("contract", "contract device");
+      const headers = { authorization: `Bearer ${session.id}` };
+      const url = `http://127.0.0.1:${hub.port}/s/contract-workers/api/personal-worker-dismissals`;
+      const template = "/s/{workspaceId}/api/personal-worker-dismissals";
+      const read = await fetch(`${url}?conversationId=opencode%3Acontract`, { headers });
+      expect(read.status).toBe(200);
+      expect(read.headers.get("cache-control")).toBe("no-store");
+      await assertContract("GET", template, read.clone());
+      const saved = await fetch(url, { method: "POST", headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ version: 1, conversationId: "opencode:contract", executionId: "contract-execution", expectedRevision: 0, operation: "dismiss" }) });
+      expect(saved.status).toBe(200);
+      await assertContract("POST", template, saved.clone());
+      expect((await saved.json()).entries).toContainEqual({ executionId: "contract-execution", revision: 0, dismissed: true });
+      await dismissals.load();
+      const restored = await fetch(`${url}?conversationId=opencode%3Acontract`, { headers });
+      expect(restored.status).toBe(200);
+      await assertContract("GET", template, restored.clone());
+      expect((await restored.json()).entries).toContainEqual({ executionId: "contract-execution", revision: 0, dismissed: true });
+      expect(nativeMutations).toBe(0);
+    } finally {
+      if (hub) await hub.stop(true);
+      await manager.stopAll();
+      await child.stop(true);
+    }
   });
 
   test("every documented HTTP operation was black-box validated", () => {

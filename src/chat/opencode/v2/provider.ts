@@ -21,7 +21,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { pendingPermissionFields, number as numberField } from "../normalization";
-import { BackgroundControls, BackgroundWorkers, launcherChanged, retainLauncherEvidence, sameLauncherIdentity, type ControlRead, type LauncherEvidence, type WorkerOccurrenceEvidence } from "./background";
+import { BackgroundControls, BackgroundWorkers, launcherChanged, retainLauncherEvidence, sameLauncherIdentity, shellCommandFingerprint, workerExecutionIds, type ControlRead, type LauncherEvidence, type WorkerOccurrenceEvidence } from "./background";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, pendingInboxEntry, prepareStoredMessage, storedAccounting, storedPromptId, supportedFormFields, type V2Evidence } from "./normalization";
 import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 import { TASK_OUTPUT_TAIL_MAX_BYTES } from "../../types";
@@ -467,6 +467,8 @@ export class OpenCodeV2Provider implements ChatProvider {
       const entry = normalized.get(update.item.id);
       if (entry) normalized.set(update.item.id, { ...entry, item: update.item });
     }
+    for (const [id, entry] of normalized) if (entry.item.type === "background_task" && entry.item.status !== "running") normalized.set(id, { ...entry,
+      item: { ...entry.item, activity: this.terminalWorkerActivity(entry.item.taskId, workers.occurrence(entry.item.taskId)) } });
     if (overlay) for (const [id, entry] of normalized) if (entry.item.type === "background_task") normalized.set(id, { ...entry,
       item: this.controls.project(entry.item, workers.occurrence(entry.item.taskId), controlRead, workers.controlWitnesses(entry.item.taskId)) });
     this.eventMemory?.workers.enforceBudget();
@@ -598,29 +600,101 @@ export class OpenCodeV2Provider implements ChatProvider {
     const notifications = (pending as unknown as StoredMessage[]).filter(entry => entry.type === "synthetic" && !stored.has(entry.id))
       .map(entry => ({ ...asRecord(entry.payload), id: entry.id, type: "synthetic", time: entry.time }));
     const folded = await this.backgroundHistory(sessionId, [...history, ...notifications], signal, controlRead, false);
+    const retainedRequests = [...folded.occurrences.keys()].flatMap(id => {
+      const request = this.eventMemory?.workers.linkedRequest(id, folded.occurrences.get(id));
+      return request ? [request] : [];
+    });
+    const [pendingPermissions, pendingForms] = await Promise.all([
+      retainedRequests.some(request => request.kind === "permission")
+        ? this.client.permission.request.list(this.scope, { signal }).then(result => result.data).catch(() => undefined) : undefined,
+      retainedRequests.some(request => request.kind === "question")
+        ? this.client.form.list(this.scope, { signal }).then(result => result.data).catch(() => undefined) : undefined,
+    ]);
     const tasks: import("../../types").BackgroundTaskItem[] = [];
+    const observedAt = Date.now();
     for (const { item } of folded.values()) {
       if (item.type !== "background_task") continue;
-      if (item.status !== "running") { tasks.push({ ...item, stateUncertain: false }); continue; }
+      if (item.status !== "running") { tasks.push({ ...item, stateUncertain: false, activity: this.terminalWorkerActivity(item.taskId, folded.occurrences.get(item.taskId)) }); continue; }
+      const occurrence = folded.occurrences.get(item.taskId);
       let confirmed = !!item.childConversationId && active?.[item.childConversationId] !== undefined;
+      let shellExecuting = false;
+      let shellEndedAt: number | undefined;
       if (item.taskType === "shell" && item.outputFile?.startsWith("shell:")) {
         const shell = await this.client.shell.get({ id: item.outputFile.slice(6), ...this.scope }, { signal }).catch(() => undefined);
         // Exit is not job settlement: capture may still be pending. The
         // unique owned shell remains controllable until its job result arrives.
         confirmed = shell?.data.metadata.sessionID === sessionId;
+        const native = asRecord(shell?.data), time = asRecord(native.time);
+        const command = shellCommandFingerprint(native.command);
+        const matched = confirmed && command !== undefined && occurrence?.launches.every(launch => launch.commandFingerprint === command);
+        shellExecuting = matched === true && native.status === "running";
+        shellEndedAt = matched && ["exited", "timeout", "killed"].includes(String(native.status)) ? numberField(time.completed) : undefined;
       }
       // Neither a successful but inconclusive lookup nor an absent active
       // child is positive verification for an overlapping transcript caller.
       if (!confirmed) this.controls.incompleteRead(controlRead);
-      tasks.push({ ...item, stateUncertain: item.stateUncertain === true || !confirmed });
+      const live = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
+      // A complete scoped fold with one compatible occurrence plus fresh native
+      // inventory is independent positive evidence, even without Stop retention.
+      // Missing child history, intervening boundaries and live contradictions
+      // keep this path closed; historical running metadata alone never opens it.
+      const unique = occurrence && !occurrence.uncertain && !item.stateUncertain
+        && [...folded.occurrences.values()].filter(other => other.worker === occurrence.worker && other.kind === occurrence.kind).length === 1;
+      const liveOccurrence = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
+      const coveredColdRead = this.streamGeneration === 0 || this.streamGeneration === 1 && this.streamConnected;
+      const compatibleCurrent = !liveOccurrence && coveredColdRead || !!live && !live.uncertain;
+      const verified = confirmed && unique && compatibleCurrent
+        && (item.taskType === "shell" ? shellExecuting : true);
+      const lastSeen = this.eventMemory?.workers.lastActivity(item.taskId, occurrence)?.observedAt;
+      const executionAliases = workerExecutionIds(occurrence), executionId = executionAliases[0];
+      const activity: import("../../types").WorkerActivity = live?.executionEnd || shellEndedAt !== undefined
+        ? { kind: "ended", observedAt: lastSeen, endedAt: live?.executionEnd?.created ?? shellEndedAt, executionId, generation: this.streamGeneration }
+        : verified || confirmed && live && !live.uncertain && live.executionStart
+          ? { kind: "working", observedAt, executionId, generation: this.streamGeneration }
+          : { kind: confirmed && item.taskType === "agent" ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
+      if (executionAliases.length) activity.executionAliases = executionAliases;
+      const request = live && this.eventMemory?.workers.linkedRequest(item.taskId, occurrence);
+      const pendingRequests = request?.kind === "permission" ? pendingPermissions : pendingForms;
+      if (request && pendingRequests?.some(entry => entry.id === request.id && entry.sessionID === occurrence?.worker)
+        && activity.kind !== "ended") { activity.kind = "needs-answer"; activity.request = request; activity.observedAt = observedAt; }
+      else if (request && pendingRequests && !pendingRequests.some(entry => entry.id === request.id && entry.sessionID === occurrence?.worker)) this.eventMemory?.workers.resolveRequest(request.id, request.kind, occurrence?.worker);
+      if (live) this.eventMemory?.workers.rememberActivity(item.taskId, activity, occurrence);
+      tasks.push({ ...item, activity, stateUncertain: item.stateUncertain === true || !confirmed });
     }
     signal.throwIfAborted();
-    const projected = tasks.map(item => this.controls.project(item, folded.occurrences.get(item.taskId), controlRead, folded.workers.controlWitnesses(item.taskId)));
+    const projected = tasks.map(original => {
+      let item = original;
+      // Later shell/ownership awaits can overlap a newer child boundary. Keep
+      // that independent activity fence as well as the control read guard.
+      const occurrence = folded.occurrences.get(item.taskId);
+      const raw = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
+      const current = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
+      if (item.activity?.kind === "needs-answer") {
+        const request = this.eventMemory?.workers.linkedRequest(item.taskId, occurrence);
+        if (!request || request.id !== item.activity.request?.id || request.kind !== item.activity.request?.kind)
+          item = { ...item, activity: { ...item.activity, kind: "working", request: undefined } };
+      }
+      if ((item.activity?.kind === "working" || item.activity?.kind === "needs-answer") && raw && (!current || current.uncertain)) item = { ...item,
+        activity: { ...item.activity, kind: current?.executionEnd ? "ended" : item.taskType === "agent" && active?.[item.childConversationId ?? ""] ? "session-active" : "unavailable",
+          request: undefined,
+          ...(current?.executionEnd ? { endedAt: current.executionEnd.created } : {}) } };
+      const projected = this.controls.project(item, folded.occurrences.get(item.taskId), controlRead, folded.workers.controlWitnesses(item.taskId));
+      return { ...projected, control: { available: item.status === "running" && !projected.stateUncertain,
+        ...(projected.stateUncertain ? { reason: "Worker control is unverified" } : {}) } };
+    });
     this.eventMemory?.workers.enforceBudget();
     return { tasks: projected, occurrences: folded.occurrences, controls: new Map(projected.flatMap(item => {
       const proof = this.controls.proof(item.taskId);
       return proof ? [[item.taskId, proof] as const] : [];
     })) };
+  }
+
+  private terminalWorkerActivity(taskId: string, occurrence?: WorkerOccurrenceEvidence): import("../../types").WorkerActivity {
+    const executionAliases = workerExecutionIds(occurrence);
+    const live = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
+    return { kind: "ended", executionId: executionAliases[0], ...(executionAliases.length ? { executionAliases } : {}),
+      observedAt: this.eventMemory?.workers.lastActivity(taskId, occurrence)?.observedAt,
+      endedAt: live?.executionEnd?.created ?? occurrence?.executionEnd?.created, generation: this.streamGeneration };
   }
 
   private beginControlRead(parent: string, inventory = false): ControlRead {
@@ -1026,7 +1100,14 @@ export class OpenCodeV2Provider implements ChatProvider {
           if (evidence.lifecycle?.kind === "session.created") {
             const id = evidence.lifecycle.id;
             if (id) this.invalidateChildParents(id);
+            if (id && evidence.lifecycle.parent && evidence.lifecycle.directory && path.resolve(evidence.lifecycle.directory) === this.workspace) {
+              memory.workers.observeBirth(id, evidence.lifecycle.parent, evidence.lifecycle.proof);
+            } else if (id) memory.workers.invalidateActivity(id);
           }
+          if (evidence.shellBirth?.parent && (!evidence.directory || path.resolve(evidence.directory) === this.workspace)) {
+            memory.workers.observeBirth(evidence.shellBirth.id, evidence.shellBirth.parent, evidence.shellBirth.proof, evidence.shellBirth.commandFingerprint);
+          } else if (evidence.shellBirth) memory.workers.invalidateActivity(evidence.shellBirth.id);
+          if (evidence.shellExit && (!evidence.directory || path.resolve(evidence.directory) === this.workspace)) memory.workers.shellEnded(evidence.shellExit.id, evidence.shellExit.proof);
           // Membership changes invalidate even when the new location is
           // foreign or absent; a sparse deletion cannot authorize old facts.
           // Revoke ownership only: terminal occurrences, consumed notices,
@@ -1034,6 +1115,7 @@ export class OpenCodeV2Provider implements ChatProvider {
           if (evidence.shutdown || evidence.lifecycle && evidence.lifecycle.kind !== "session.created") {
             this.invalidateChildParents();
             memory.workers.invalidateOwnership(evidence.shutdown ? undefined : evidence.lifecycle?.id);
+            memory.workers.invalidateActivity(evidence.shutdown ? undefined : evidence.lifecycle?.id);
           }
           const location = evidence.directory;
           if (!location || path.resolve(location) === this.workspace) {
@@ -1053,8 +1135,52 @@ export class OpenCodeV2Provider implements ChatProvider {
           }
           if (streamReadSignal.aborted) break;
           normalized = this.normalize.prepared(prepared, memory);
+          const requestChanges = new Set<string>();
+          if (!evidence.directory || path.resolve(evidence.directory) === this.workspace) {
+            if (evidence.directory && evidence.requestTool) memory.workers.observeRequestTool(evidence.requestTool.child, evidence.requestTool.source, evidence.requestTool.proof);
+            for (const update of normalized.updates) {
+              if (update.kind === "upsert" && (update.item.type === "permission" || update.item.type === "question")) {
+                const item = update.item;
+                if (item.status === "resolved") for (const child of memory.workers.resolveRequest(item.requestId, item.type, normalized.conversationId)) requestChanges.add(child);
+                else if (evidence.directory && item.status === "pending" && evidence.requestSource?.kind === item.type
+                  && normalized.conversationId === evidence.requestSource.child && item.conversationId === evidence.requestSource.child
+                  && memory.workers.linkRequest(evidence.requestSource.child, item.requestId, item.type, evidence.requestSource.source)) requestChanges.add(evidence.requestSource.child);
+              } else if (update.kind === "remove") {
+                for (const kind of ["permission", "question"] as const) if (update.itemId.startsWith(`${kind}:`))
+                  for (const child of memory.workers.resolveRequest(update.itemId.slice(kind.length + 1), kind, normalized.conversationId)) requestChanges.add(child);
+              }
+            }
+          }
+          const projectWorker = (item: import("../../types").BackgroundTaskItem) => {
+            const occurrence = memory.workers.occurrence(item.taskId);
+            const live = occurrence && memory.workers.activityEvidence(occurrence);
+            const executionAliases = workerExecutionIds(occurrence), executionId = executionAliases[0];
+            const lastSeen = memory.workers.lastActivity(item.taskId, occurrence)?.observedAt;
+            const projected = this.controls.project(item, occurrence, undefined, memory.workers.controlWitnesses(item.taskId));
+            const activity: import("../../types").WorkerActivity = live?.executionEnd
+              ? { kind: "ended", observedAt: lastSeen, endedAt: live.executionEnd.created, executionId, generation: this.streamGeneration }
+              : live && !live.uncertain && (live.executionStart || memory.workers.shellActivity(live))
+                ? { kind: "working", observedAt: Date.now(), executionId, generation: this.streamGeneration }
+                : { kind: evidence.execution?.phase === "started" ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
+            if (executionAliases.length) activity.executionAliases = executionAliases;
+            const request = live && memory.workers.linkedRequest(item.taskId, occurrence);
+            if (request && activity.kind === "working") { activity.kind = "needs-answer"; activity.request = request; }
+            if (item.status === "running") memory.workers.rememberActivity(item.taskId, activity, occurrence);
+            return { ...projected, activity: item.status === "running" ? activity : this.terminalWorkerActivity(item.taskId, occurrence),
+              control: { available: item.status === "running" && !projected.stateUncertain,
+                ...(projected.stateUncertain ? { reason: "Worker control is unverified" } : {}) } };
+          };
           normalized.updates = normalized.updates.map(update => update.kind === "upsert" && update.item.type === "background_task"
-            ? { ...update, item: this.controls.project(update.item, memory.workers.occurrence(update.item.taskId), undefined, memory.workers.controlWitnesses(update.item.taskId)) } : update);
+            ? { ...update, item: projectWorker(update.item) } : update);
+          const workerChange = evidence.execution ? evidence.session : evidence.shellExit?.id;
+          if (workerChange) requestChanges.add(workerChange);
+          for (const child of requestChanges) for (const task of memory.workers.childTasks(child)) {
+            const item = projectWorker(task.item);
+            const prior = controlUpdates.findIndex(update => update.item.taskId === item.taskId);
+            if (prior >= 0) controlUpdates[prior] = { parent: task.parent, item };
+            else controlUpdates.push({ parent: task.parent, item });
+          }
+          controlUpdates = controlUpdates.map(update => ({ ...update, item: projectWorker(update.item) }));
           for (const { parent, item } of controlUpdates) if (parent === normalized.conversationId && !normalized.updates.some(update => update.kind === "upsert" && update.item.id === item.id)) normalized.updates.push({ kind: "upsert", item });
           memory.workers.enforceBudget();
           this.observeStopWorkerUpdates(normalized, memory);

@@ -16,6 +16,7 @@ import { isLiveConversationStatus } from "./types";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
+import { unverifyWorkerTask } from "./worker-state";
 import type {
   BackgroundTaskOutput,
   BackgroundTaskItem,
@@ -85,6 +86,8 @@ type BackgroundRecovery = {
   sourceProgressLost?: true;
   sourceStartedAt?: number;
   timer?: ReturnType<typeof setTimeout>;
+  checkingStarted?: true;
+  checking?: { finish: () => void };
 };
 
 function workerRecoveryProgress(item: BackgroundTaskItem): WorkerRecoveryProgress {
@@ -941,7 +944,7 @@ export class ChatAdapter {
           if (index >= 0) items.splice(index, 1);
           continue;
         }
-        byId.set(known.id, known.status === "running" ? { ...known, stateUncertain: true } : known);
+        byId.set(known.id, known.status === "running" ? unverifyWorkerTask(known) : known);
       }
       for (const task of byId.values()) {
         const index = items.findIndex(item => item.id === task.id);
@@ -1290,6 +1293,7 @@ export class ChatAdapter {
   // its activity is re-derived from new events.
   private forgetActivity(conversationId: string): void {
     const recovery = this.backgroundRecoveries.get(conversationId);
+    recovery?.checking?.finish();
     if (recovery) clearTimeout(recovery.timer);
     this.backgroundRecoveries.delete(conversationId);
     for (const [key, admission] of this.admittingSteers) if (admission.conversationId === conversationId) {
@@ -1352,7 +1356,7 @@ export class ChatAdapter {
     this.disposed = true;
     for (const admission of this.admittingSteers.values()) admission.retired = true;
     this.admittingSteers.clear();
-    for (const recovery of this.backgroundRecoveries.values()) clearTimeout(recovery.timer);
+    for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.checking?.finish(); }
     this.backgroundRecoveries.clear();
     this.backgroundRecoveryFloorUntil = 0;
     this.backgroundRecoverySourceStartedAt = -Infinity;
@@ -2948,7 +2952,7 @@ export class ChatAdapter {
     if (this.provider.waitForEventStream && this.provider.reconcileBackgroundTasks) {
       let live: BackgroundTaskItem[];
       try { live = await this.provider.reconcileBackgroundTasks(conversationId); }
-      catch { live = this.projection(conversationId).filter(item => item.type === "background_task" && item.status === "running" && !item.foreground).map(item => ({ ...item, stateUncertain: true })) as BackgroundTaskItem[]; }
+      catch { live = this.projection(conversationId).items().filter((item): item is BackgroundTaskItem => item.type === "background_task" && item.status === "running" && !item.foreground).map(unverifyWorkerTask); }
       if (isCurrent && !isCurrent()) throw new Error("reversible history reconciliation was cancelled");
       for (const task of live) if (task.status === "running" && !task.foreground && !items.some(item => item.id === task.id)) items.push(task);
     }
@@ -3142,7 +3146,7 @@ export class ChatAdapter {
           const ids = new Set(tasks.map(task => task.id));
           items = [
             ...evidence.values(),
-            ...current.filter((item): item is BackgroundTaskItem => item.type === "background_task" && !ids.has(item.id)).map(item => item.status === "running" ? { ...item, stateUncertain: true } : item),
+            ...current.filter((item): item is BackgroundTaskItem => item.type === "background_task" && !ids.has(item.id)).map(item => item.status === "running" ? unverifyWorkerTask(item) : item),
             ...tasks.map(task => {
               const settled = current.find(item => item.id === task.id && item.type === "background_task" && item.status !== "running");
               return task.status === "running" && settled ? settled : task;
@@ -3823,7 +3827,7 @@ export class ChatAdapter {
           try { await this.history(conversationId); }
           catch {
             if (!signal.aborted && this.projections.get(conversationId) === projection) for (const item of projection.items()) {
-              if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: { ...item, stateUncertain: true } });
+              if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: unverifyWorkerTask(item) });
             }
           }
           return;
@@ -3874,6 +3878,8 @@ export class ChatAdapter {
           this.backgroundRecoveryFloorUntil = 0;
           this.backgroundRecoverySourceStartedAt = -Infinity;
           for (const [id, recovery] of this.backgroundRecoveries) {
+            recovery.checking?.finish();
+            delete recovery.checkingStarted;
             clearTimeout(recovery.timer);
             recovery.timer = undefined;
             recovery.failures = 0;
@@ -4010,10 +4016,10 @@ export class ChatAdapter {
       this.backgroundReadyResolve = undefined;
       this.backgroundStreamGeneration++;
       if (this.provider.waitForEventStream) this.invalidateNativeHistoryAccounting();
-      for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.timer = undefined; }
+      for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.timer = undefined; recovery.checking?.finish(); delete recovery.checkingStarted; }
       if (this.provider.reconcileBackgroundTasks && !this.disposed) {
         for (const projection of this.projections.values()) {
-          for (const item of projection.items()) if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: { ...item, stateUncertain: true } });
+          for (const item of projection.items()) if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: unverifyWorkerTask(item) });
         }
       }
       if (this.eventCoalescer === coalescer) this.eventCoalescer = null;
@@ -4028,6 +4034,7 @@ export class ChatAdapter {
         if (!workerProgress && Date.now() - existing.exhaustedAt < BACKGROUND_EXHAUSTED_COOLDOWN_MS) return;
         delete existing.exhaustedAt;
         existing.inconclusiveReads = 0;
+        delete existing.checkingStarted;
       }
       if (workerProgress) existing.inconclusiveReads = 0;
       existing.dirty = true;
@@ -4052,6 +4059,7 @@ export class ChatAdapter {
 
   private retireBackgroundRecovery(id: string): void {
     const recovery = this.backgroundRecoveries.get(id);
+    recovery?.checking?.finish();
     if (recovery?.exhaustedAt !== undefined) {
       if (Date.now() >= this.backgroundRecoveryFloorUntil) this.backgroundRecoverySourceStartedAt = -Infinity;
       this.backgroundRecoveryFloorUntil = Math.max(this.backgroundRecoveryFloorUntil, recovery.exhaustedAt + BACKGROUND_EXHAUSTED_COOLDOWN_MS);
@@ -4169,6 +4177,30 @@ export class ChatAdapter {
       const generation = this.backgroundStreamGeneration;
       const interactionTick = this.interactionClock;
       const readProjection = this.projection(id);
+      // One presentation window per admitted cycle, never per retry or paint.
+      // This is not native evidence and must not touch the read's source fences.
+      if (!recovery.checkingStarted) {
+        recovery.checkingStarted = true;
+        const checking = readProjection.items().flatMap(item => {
+          if (item.type !== "background_task" || item.status !== "running"
+            || item.activity && item.activity.kind !== "unavailable" && item.activity.kind !== "session-active"
+            || !item.activity && !item.stateUncertain) return [];
+          const next = readProjection.workerCheckingPresentation(item, "checking");
+          return next ? [next] : [];
+        });
+        if (checking.length) {
+          const finish = () => {
+            clearTimeout(timer);
+            if (recovery.checking?.finish !== finish) return;
+            delete recovery.checking;
+            for (const item of checking) readProjection.workerCheckingPresentation(item, "unavailable");
+          };
+          const timer = setTimeout(finish, 10_000);
+          timer.unref?.();
+          recovery.checking = { finish };
+        }
+      }
+      const checking = recovery.checking;
       const fence = readProjection.beginHistoryRead();
       const pending = this.requireSession(id).then(() => {
         if (this.disposed) throw new Error("Background recovery disposed");
@@ -4202,7 +4234,7 @@ export class ChatAdapter {
             projection.apply({ kind: "remove", itemId: known.id });
             continue;
           }
-          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) projection.apply({ kind: "upsert", item: { ...known, stateUncertain: true } });
+          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) projection.apply({ kind: "upsert", item: unverifyWorkerTask(known) });
         }
         for (const item of safeTasks) projection.apply({ kind: "upsert", item });
         // At most one retained marker per projected worker row, including
@@ -4238,10 +4270,11 @@ export class ChatAdapter {
       }, () => {
         if (this.disposed || this.backgroundRecoveries.get(id) !== recovery || generation !== this.backgroundStreamGeneration) return;
         for (const known of this.projection(id).items()) {
-          if (known.type === "background_task" && known.status === "running" && !fence.changed(known.id)) this.projection(id).apply({ kind: "upsert", item: { ...known, stateUncertain: true } });
+          if (known.type === "background_task" && known.status === "running" && !fence.changed(known.id)) this.projection(id).apply({ kind: "upsert", item: unverifyWorkerTask(known) });
         }
         recovery.failures++;
       }).finally(() => {
+        checking?.finish();
         fence.release();
         this.backgroundPending.delete(pending);
         this.backgroundRecoveryCount--;
@@ -4870,6 +4903,21 @@ export class ConversationProjection {
 
   get(itemId: string): ConversationItem | undefined {
     return this.timeline.get(itemId);
+  }
+
+  /** Adapter-owned presentation only: no native progress or history invalidation.
+   * Activity object matching prevents a deadline from overwriting newer evidence,
+   * while allowing unrelated attribution updates to preserve the same window.
+   */
+  workerCheckingPresentation(expected: BackgroundTaskItem, kind: "checking" | "unavailable"): BackgroundTaskItem | undefined {
+    const current = this.timeline.get(expected.id);
+    if (current?.type !== "background_task" || current.activity !== expected.activity || current.status !== "running"
+      || current.activity && !["checking", "unavailable", "session-active"].includes(current.activity.kind)
+      || !current.activity && !current.stateUncertain) return undefined;
+    const item: BackgroundTaskItem = { ...current, activity: { ...current.activity, kind } };
+    this.timeline.set(item.id, item);
+    this.replay.publish({ type: "item.upsert", item });
+    return item;
   }
 
   items(): ConversationItem[] {

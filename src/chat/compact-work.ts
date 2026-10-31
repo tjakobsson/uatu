@@ -1,9 +1,10 @@
 import { boundedSet } from "../shared/bounded-map";
 import { backgroundTasksByTool } from "./background-tasks";
 import { subagentEntries } from "./timeline-renderer";
-import type { BackgroundTaskItem, ConversationItem } from "./types";
-import { workerIsActive, workerState, type WorkerState } from "./worker-state";
+import type { BackgroundTaskItem, ConversationItem, WorkerActivity } from "./types";
+import { workerCanStop, workerExecutionClockRuns, workerIsActive, workerState, type WorkerState } from "./worker-state";
 import { totalTokens } from "./usage";
+import { workerDismissalIdentities } from "./worker-dismissal-identity";
 
 type DisclosureState = { open: boolean; active: boolean; collapsed: boolean };
 type DisclosureMode = "touch" | "desktop";
@@ -66,6 +67,11 @@ export type CompactWorker = {
   progress?: string;
   taskId?: string;
   stoppable?: boolean;
+  activity?: WorkerActivity;
+  dismissalIds?: string[];
+  controlAvailable?: boolean;
+  controlReason?: string;
+  clockRunning?: boolean;
   conversationId?: string;
   model?: string;
   tokens?: number;
@@ -100,7 +106,10 @@ export function compactWorkers(items: readonly ConversationItem[]): CompactWorke
     // particular its local display fallback must not become a worker clock.
     const since = item.resultId && !item.toolUseId && !item.toolUseIds?.length ? 0 : item.createdAt;
     workers.set(item.id, {
-      id: item.id, state: workerState(item.status, item.stateUncertain), references: [],
+      id: item.id, state: workerState(item.status, item.stateUncertain, item.activity), references: [],
+      activity: item.activity, controlAvailable: workerCanStop(item), controlReason: item.control?.reason,
+      dismissalIds: workerDismissalIdentities(item),
+      clockRunning: workerExecutionClockRuns(item),
       name: item.description, kind: shellTask(item.taskType) ? "shell" : "agent", agent: item.subagentType,
       since, settledAt: terminalReportedAt ?? since + (item.usage?.durationMs ?? 0), terminalReportedAt,
       progress: item.progress, taskId: item.taskId, stoppable: !item.foreground && latestTasks.get(item.taskId)?.id === item.id, conversationId: item.childConversationId,
@@ -113,7 +122,7 @@ export function compactWorkers(items: readonly ConversationItem[]): CompactWorke
     if (workers.has(entry.id)) continue;
     const item = itemsById.get(entry.id)?.first;
     if (item?.type === "background_task" && shellTask(item.taskType) && item.foreground) continue;
-    const canonical = aliases.get(entry.id);
+    const canonical = aliases.get(entry.id) ?? (!entry.id.startsWith("tool:") ? aliases.get(`tool:${entry.id}`) : undefined);
     if (canonical) {
       const worker = workers.get(canonical.id);
       if (worker) {
@@ -128,6 +137,8 @@ export function compactWorkers(items: readonly ConversationItem[]): CompactWorke
     const completedAt = item?.type === "tool" ? item.completedAt : undefined;
     workers.set(entry.id, {
       id: entry.id, state: workerState(entry.status), references: [entry.id],
+      dismissalIds: workerDismissalIdentities(item),
+      clockRunning: workerState(entry.status) === "working",
       name: entry.description, kind: "agent", agent: entry.subagent, since: item?.createdAt ?? 0,
       settledAt: completedAt ?? item?.createdAt ?? 0, completedAt, progress: entry.progress, conversationId: entry.conversationId,
       model: entry.model, tokens: entry.usage ? totalTokens(entry.usage) : undefined,
@@ -154,5 +165,5 @@ export function workerSummary(workers: readonly CompactWorker[]): string {
   const working = count("working");
   const unknown = count("unknown");
   const finished = workers.filter(worker => !workerIsActive(worker.state)).length;
-  return [working && `${working} working`, finished && `${finished} finished`, unknown && `${unknown} unknown`].filter(Boolean).join(" · ") || "No workers";
+  return [working && `${working} working`, unknown && `${unknown} unresolved`, finished && `${finished} finished`].filter(Boolean).join(" · ") || "No workers";
 }

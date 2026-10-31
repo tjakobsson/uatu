@@ -58,6 +58,33 @@ test("background terminal report timestamps are optional finite non-negative fac
   expect(() => parseConversationItem({ ...item, completedAt: 1 })).toThrow();
 });
 
+test("background activity and control evidence round trip independently", () => {
+  const item = { id: "task", type: "background_task", taskId: "task", createdAt: 1, description: "Worker", status: "running", stateUncertain: true } as const;
+  expect(parseConversationItem(item)).toEqual(item);
+  for (const kind of ["working", "checking", "session-active", "unavailable", "ended"] as const) {
+    const value = { ...item, activity: { kind, observedAt: 3, endedAt: 4, generation: 1, executionId: "execution:fixture", executionAliases: ["execution:fixture", "execution:alias"], reason: "Fixture evidence" }, control: { available: false, reason: "Occurrence proof unavailable" } };
+    expect(parseConversationItem(value)).toEqual(value);
+    expect(parseChatEvent({ type: "item.upsert", conversationId: "opencode:parent", generation: "g", sequence: 1, item: value })).toBeDefined();
+  }
+  const request = { ...item, activity: { kind: "needs-answer", request: { kind: "question", id: "request" } } } as const;
+  expect(parseConversationItem(request)).toEqual(request);
+});
+
+test("background activity rejects malformed or unbounded evidence", () => {
+  const item = { id: "task", type: "background_task", taskId: "task", createdAt: 1, description: "Worker", status: "running" } as const;
+  for (const activity of [null, { kind: "running" }, { kind: "working", observedAt: -1 }, { kind: "ended", endedAt: Infinity },
+    { kind: "working", generation: 0.5 }, { kind: "working", executionId: "" }, { kind: "unavailable", reason: "x".repeat(513) },
+    { kind: "working", granted: true }, { kind: "working", executionAliases: ["alias"] },
+    { kind: "working", executionId: "id", executionAliases: ["alias"] }, { kind: "working", executionId: "id", executionAliases: ["id", "id"] },
+    { kind: "working", executionId: "id", executionAliases: ["id", ""] }, { kind: "needs-answer" }, { kind: "needs-answer", request: { id: "q", kind: "approval" } },
+    { kind: "needs-answer", request: { id: "", kind: "question" } }, { kind: "working", request: { id: "q", kind: "question" } }]) {
+    expect(() => parseConversationItem({ ...item, activity })).toThrow();
+  }
+  for (const control of [null, { available: "yes" }, { available: true, token: "not-authority" }, { available: false, reason: "x".repeat(513) }]) {
+    expect(() => parseConversationItem({ ...item, control })).toThrow();
+  }
+});
+
 const summary = {
   id: "opencode:session-1",
   title: "Implement chat",

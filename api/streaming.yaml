@@ -84,6 +84,16 @@ channels:
           credentials, or conversation content, and never changes the active
           workspace or its selections. The topic does not depend on the
           workspace's session running.
+      personal:
+        domain: hub
+        dataSchema: PersonalStateInvalidation
+        cursor: none
+        description: >-
+          Account-private invalidation for the stream's workspace. Emitted on
+          attach/reconnect and after a committed personal worker-dismissal change.
+          Fetch authoritative personal state; this event contains no account,
+          conversation, execution, dismissal mark or credential. It bypasses
+          shared child-topic fanout and uses the page's existing single stream.
     signals:
       ready: >-
         The subscription is attached to a live upstream, and the Hub has
@@ -175,7 +185,7 @@ schemas:
     required: [ws, topic, cursor, event]
     properties:
       ws: { type: string, minLength: 1, description: "The workspace the event belongs to. For the activity topic, the workspace the summary describes, which may be any workspace the caller may access." }
-      topic: { enum: [document, inventory, conversation, activity, worktrees] }
+      topic: { enum: [document, inventory, conversation, activity, worktrees, personal] }
       key: { type: string, description: "The subscription key. The watch context for document and the conversation id for conversation. Absent for inventory, activity, and worktrees." }
       cursor: { type: string, description: "The subscription's cursor. It advances only on data events." }
       event: { $ref: '#/schemas/LiveEvent' }
@@ -193,6 +203,12 @@ schemas:
       type: { const: worktree.inventory }
     additionalProperties: false
     description: A content-free invalidation of the worktree inventory. Read the inventory again.
+  PersonalStateInvalidation:
+    type: object
+    required: [category]
+    properties:
+      category: { const: worker-dismissals }
+    additionalProperties: false
   WorkspaceActivity:
     type: object
     required: [running, working, awaiting, finished]
