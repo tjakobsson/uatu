@@ -26,6 +26,20 @@ test("a blocking request counts as Working but has no productive execution clock
   expect(workerExecutionClockRuns({ ...task, activity })).toBe(false);
 });
 
+test("only an explicitly verified unsettled shell job remains removable after execution ends", () => {
+  const ended: BackgroundTaskItem = { ...task, taskType: "shell", activity: { kind: "ended", endedAt: 50 }, control: { available: true } };
+  expect(workerCanStop(ended)).toBe(true);
+  expect(workerState(ended.status, ended.stateUncertain, ended.activity)).toBe("unknown");
+  expect(workerStateLabel(ended.status, ended.stateUncertain, ended.activity)).toBe("Ended · result unavailable");
+  expect(workerExecutionClockRuns(ended)).toBe(false);
+  for (const denied of [
+    { ...ended, control: undefined }, { ...ended, control: { available: false } },
+    { ...ended, taskType: "agent" }, { ...ended, foreground: true }, { ...ended, stateUncertain: true },
+    ...(["completed", "failed", "stopped"] as const).map(status => ({ ...ended, status })),
+    ...(["checking", "session-active", "unavailable"] as const).map(kind => ({ ...ended, activity: { kind } })),
+  ]) expect(workerCanStop(denied)).toBe(false);
+});
+
 test("activity labels distinguish checks, ambiguous sessions and missing results", () => {
   expect(workerStateLabel("running", false, { kind: "checking" })).toBe("Checking status…");
   expect(workerStateLabel("running", false, { kind: "session-active" })).toBe("Session active · task unverified");

@@ -16,7 +16,7 @@ import { isLiveConversationStatus } from "./types";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
-import { unverifyWorkerTask } from "./worker-state";
+import { unverifyWorkerTask, workerState } from "./worker-state";
 import type {
   BackgroundTaskOutput,
   BackgroundTaskItem,
@@ -480,7 +480,11 @@ export class ChatAdapter {
   // composer's Cancel and held prompts, and a background conversation must
   // still accept a prompt — while the hub's activity summary, by spec, counts
   // live background work as working.
-  private readonly backgroundWork = new Set<string>();
+  // Retain the evidence source alongside the existing per-conversation fact:
+  // a stream gap must withdraw verified work even after projection eviction,
+  // without changing providers' authoritative legacy background behavior.
+  private readonly backgroundWork = new Map<string, { legacy: boolean; verified: boolean }>();
+  private readonly unresolvedBackgroundWork = new Set<string>();
   private readonly backgroundRecoveries = new Map<string, BackgroundRecovery>();
   // Losing disposable scheduling ownership never waives an exhausted floor.
   // Scalars conservatively cover untracked conversations without a second
@@ -498,7 +502,7 @@ export class ChatAdapter {
   // exactly the one an LRU pass evicts, and its request must still count.
   private readonly pendingInteractions = new Map<string, Set<string>>();
   private readonly onActivityChange: (() => void) | undefined;
-  private lastActivity: ChatActivity = { working: false, awaiting: false };
+  private lastActivity: ChatActivity = { working: false, awaiting: false, unresolved: false };
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
@@ -1252,7 +1256,7 @@ export class ChatAdapter {
    * answer on every change.
    */
   activity(): ChatActivity {
-    return { working: this.liveTurns.size > 0 || this.backgroundWork.size > 0, awaiting: this.pendingInteractions.size > 0 };
+    return { working: this.liveTurns.size > 0 || this.backgroundWork.size > 0, awaiting: this.pendingInteractions.size > 0, unresolved: this.unresolvedBackgroundWork.size > 0 };
   }
 
   pendingNotifications() { return this.notifications.pendingSnapshot(); }
@@ -1261,7 +1265,7 @@ export class ChatAdapter {
   // already runs does not change the summary.
   private activityMayHaveChanged(): void {
     const next = this.activity();
-    if (next.working === this.lastActivity.working && next.awaiting === this.lastActivity.awaiting) return;
+    if (next.working === this.lastActivity.working && next.awaiting === this.lastActivity.awaiting && next.unresolved === this.lastActivity.unresolved) return;
     this.lastActivity = next;
     this.onActivityChange?.();
   }
@@ -1315,6 +1319,7 @@ export class ChatAdapter {
     this.liveTurns.delete(conversationId);
     this.settledTurns.delete(conversationId);
     this.backgroundWork.delete(conversationId);
+    this.unresolvedBackgroundWork.delete(conversationId);
     this.forgetInteractions(conversationId);
   }
 
@@ -3829,6 +3834,7 @@ export class ChatAdapter {
             if (!signal.aborted && this.projections.get(conversationId) === projection) for (const item of projection.items()) {
               if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: unverifyWorkerTask(item) });
             }
+            if (this.provider.reconcileBackgroundTasks) this.syncBackgroundState(conversationId);
           }
           return;
         }
@@ -4018,9 +4024,17 @@ export class ChatAdapter {
       if (this.provider.waitForEventStream) this.invalidateNativeHistoryAccounting();
       for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.timer = undefined; recovery.checking?.finish(); delete recovery.checkingStarted; }
       if (this.provider.reconcileBackgroundTasks && !this.disposed) {
-        for (const projection of this.projections.values()) {
+        for (const [id, projection] of this.projections) {
           for (const item of projection.items()) if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: unverifyWorkerTask(item) });
+          this.trackBackgroundActivity(id, projection, projection.status);
         }
+        for (const [id, work] of this.backgroundWork) {
+          if (!work.verified) continue;
+          this.unresolvedBackgroundWork.add(id);
+          if (work.legacy) this.backgroundWork.set(id, { legacy: true, verified: false });
+          else this.backgroundWork.delete(id);
+        }
+        this.activityMayHaveChanged();
       }
       if (this.eventCoalescer === coalescer) this.eventCoalescer = null;
     }
@@ -4159,11 +4173,29 @@ export class ChatAdapter {
 
   private syncBackgroundState(id: string): void {
     const projection = this.projection(id);
+    this.trackBackgroundActivity(id, projection, projection.status);
     const running = projection.find(item => item.type === "background_task" && !item.foreground && item.status === "running") !== undefined;
-    if (running) this.backgroundWork.add(id); else this.backgroundWork.delete(id);
     if (running && !isLiveConversationStatus(projection.status) && projection.status !== "background") projection.statusUpdate("background");
     else if (!running && projection.status === "background") projection.statusUpdate("completed", undefined, false);
     this.activityMayHaveChanged();
+  }
+
+  private trackBackgroundActivity(id: string, projection: ConversationProjection, status: ConversationStatus): void {
+    let legacy = false, verified = false, unresolved = false, hasActivity = false;
+    for (const item of projection.filter(item => item.type === "background_task" && !item.foreground)) {
+      if (item.type !== "background_task" || item.foreground) continue;
+      if (item.activity) {
+        hasActivity = true;
+        const state = workerState(item.status, item.stateUncertain, item.activity);
+        verified ||= state === "working";
+        unresolved ||= state === "unknown";
+      } else if (this.provider.reconcileBackgroundTasks && item.status === "running") legacy = true;
+    }
+    // Providers without independent observations retain their authoritative
+    // background-status behavior; uncertainty must not turn it off globally.
+    legacy ||= status === "background" && !hasActivity;
+    if (legacy || verified) this.backgroundWork.set(id, { legacy, verified }); else this.backgroundWork.delete(id);
+    if (unresolved) this.unresolvedBackgroundWork.add(id); else this.unresolvedBackgroundWork.delete(id);
   }
 
   private drainBackgroundRecoveries(): void {
@@ -4189,6 +4221,8 @@ export class ChatAdapter {
           return next ? [next] : [];
         });
         if (checking.length) {
+          this.trackBackgroundActivity(id, readProjection, readProjection.status);
+          this.activityMayHaveChanged();
           const finish = () => {
             clearTimeout(timer);
             if (recovery.checking?.finish !== finish) return;
@@ -4272,6 +4306,7 @@ export class ChatAdapter {
         for (const known of this.projection(id).items()) {
           if (known.type === "background_task" && known.status === "running" && !fence.changed(known.id)) this.projection(id).apply({ kind: "upsert", item: unverifyWorkerTask(known) });
         }
+        this.syncBackgroundState(id);
         recovery.failures++;
       }).finally(() => {
         checking?.finish();
@@ -4714,8 +4749,7 @@ export class ChatAdapter {
       } else this.liveTurns.delete(id);
       // Background work still counts as working for the workspace summary,
       // through its own set so the composer rules above stay untouched.
-      if (status === "background" || this.provider.reconcileBackgroundTasks && projection.find(item => item.type === "background_task" && !item.foreground && item.status === "running")) this.backgroundWork.add(id);
-      else this.backgroundWork.delete(id);
+      this.trackBackgroundActivity(id, projection, status);
       // The conversation settling strands its pending steers (D3);
       // a live turn takes its inbox at its boundaries, so nothing is stranded
       // while one runs.

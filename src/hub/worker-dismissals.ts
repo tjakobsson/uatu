@@ -43,17 +43,22 @@ export class WorkerDismissalsStore {
   private readonly fences = new Map<string, CausalFence>();
   // Exact admitted conditional targets only; bounded independently of events.
   private readonly authorities = new Map<string, MutationAuthority>();
+  private pendingAdmissions = 0;
+  private readonly maxPending: number;
+  private generation = {};
   private fence(id: string): CausalFence {
     let fence = this.fences.get(id);
     if (!fence) { fence = { dismissal: 0n, activity: 0n }; this.fences.set(id, fence); }
     return fence;
   }
-  constructor(private readonly filePath: string, options: { maxEntries?: number; maxBytes?: number } = {}) {
+  constructor(private readonly filePath: string, options: { maxEntries?: number; maxBytes?: number; maxPending?: number } = {}) {
     this.maxEntries = options.maxEntries ?? 8192;
     this.maxBytes = options.maxBytes ?? 4 * 1024 * 1024;
+    this.maxPending = options.maxPending ?? 8192;
   }
   async load(): Promise<void> {
     this.available = false;
+    this.generation = {};
     this.authorities.clear(); this.fences.clear();
     this.pendingObservations.clear(); this.observationFailures.clear();
     try {
@@ -211,6 +216,15 @@ export class WorkerDismissalsStore {
     });
   }
   reconcile(scope: WorkerDismissalScope, read: () => Promise<WorkerDismissalEvidence[]>, mutation?: WorkerDismissalMutation): Promise<WorkerDismissalState> {
+    return this.withAdmission(scope, mutation, reconcile => reconcile(read));
+  }
+  // The Hub validates the exact target before taking its workspace lifecycle
+  // queue. Keep that admission alive across BOTH queues, without moving reads
+  // or writes out of the lifecycle critical section. Abandoned waiters release
+  // authority immediately but retain their queue slot until the wait drains.
+  async withAdmission<T>(scope: WorkerDismissalScope, mutation: WorkerDismissalMutation | undefined,
+    run: (reconcile: (read: () => Promise<WorkerDismissalEvidence[]>) => Promise<WorkerDismissalState>) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    scope = { ...scope }; mutation = mutation && { ...mutation };
     // Private reads fail visibly while a retirement is unconfirmed. A read
     // also offers one bounded retry, never a timer-driven polling loop.
     const failures = [...this.observationFailures].filter(([, observation]) => sameScope(scope, observation.record));
@@ -220,102 +234,122 @@ export class WorkerDismissalsStore {
         if (!pending || pending.order < observation.order) this.pendingObservations.set(id, observation);
       }
       this.scheduleObservations();
-      return Promise.reject(new WorkerDismissalsError("unavailable", "failed to retire worker dismissals; chat remains available"));
+      throw new WorkerDismissalsError("unavailable", "failed to retire worker dismissals; chat remains available");
     }
     let authority: MutationAuthority | undefined;
     let authorityId: string | undefined;
-    try {
-      this.assertAvailable();
-      if (![scope.user, scope.workspaceId, scope.conversationId].every(dismissalIdentifier)) fail("invalid-input", "invalid dismissal scope");
-      if (mutation && (!dismissalIdentifier(mutation.executionId) || !Number.isSafeInteger(mutation.expectedRevision)
-        || mutation.expectedRevision < 0 || (mutation.operation !== "dismiss" && mutation.operation !== "retire"))) fail("invalid-input", "invalid dismissal mutation");
-      if (mutation) {
-        authorityId = key(scope, mutation.executionId);
-        authority = this.authorities.get(authorityId);
-        if (!authority) {
-          if (this.authorities.size >= this.maxEntries) fail("capacity", "worker dismissal pending target capacity reached");
-          authority = { scope, executionId: mutation.executionId, pending: 0 };
-          this.authorities.set(authorityId, authority);
-        }
-        authority.pending++;
+    this.assertAvailable();
+    if (![scope.user, scope.workspaceId, scope.conversationId].every(dismissalIdentifier)) fail("invalid-input", "invalid dismissal scope");
+    if (mutation && (!dismissalIdentifier(mutation.executionId) || !Number.isSafeInteger(mutation.expectedRevision)
+      || mutation.expectedRevision < 0 || (mutation.operation !== "dismiss" && mutation.operation !== "retire"))) fail("invalid-input", "invalid dismissal mutation");
+    if (this.pendingAdmissions >= this.maxPending) fail("capacity", "worker dismissal pending request capacity reached");
+    if (signal?.aborted) fail("unavailable", "worker dismissal request abandoned");
+    if (mutation) {
+      authorityId = key(scope, mutation.executionId);
+      authority = this.authorities.get(authorityId);
+      if (!authority) {
+        if (this.authorities.size >= this.maxEntries) fail("capacity", "worker dismissal pending target capacity reached");
+        authority = { scope, executionId: mutation.executionId, pending: 0 };
+        this.authorities.set(authorityId, authority);
       }
-    } catch (error) { return Promise.reject(error); }
+      authority.pending++;
+    }
     // Admission, not eventual read start, orders the user's explicit action.
     const admissionOrder = ++this.order;
-    return this.enqueue(async () => {
-      try {
-        this.assertAvailable();
-        if (authority && this.authorities.get(authorityId!) !== authority) fail("unavailable", "worker dismissal authority was cleared");
-        const evidence = await read();
-        if (authority && this.authorities.get(authorityId!) !== authority) fail("unavailable", "worker dismissal authority was cleared");
-        const next = new Map(this.records); const changed: WorkerDismissalScope[] = [];
-        const matching = new Map<string, string[]>();
-        for (const [id, record] of next) {
-          if (record.workspaceId !== scope.workspaceId || record.conversationId !== scope.conversationId) continue;
-          const ids = matching.get(record.executionId);
-          if (ids) ids.push(id); else matching.set(record.executionId, [id]);
-        }
-        const seen = new Map<string, WorkerDismissalEvidence>();
-        for (const item of evidence) {
-          if (!dismissalIdentifier(item.executionId) || !dismissalIdentifier(item.signature)) fail("unavailable", "invalid authoritative worker identity");
-          const duplicate = seen.get(item.executionId);
-          if (duplicate && (duplicate.signature !== item.signature || duplicate.active !== item.active || duplicate.dismissible !== item.dismissible)) fail("unavailable", "ambiguous authoritative worker identity");
-          seen.set(item.executionId, item);
-          // Positive observations retire marks for every account, not just the
-          // device making this read. Retired revisions are never evicted.
-          for (const id of matching.get(item.executionId) ?? []) {
-            const previous = next.get(id)!;
-            if (previous.signature !== item.signature || (item.active && previous.dismissed)) {
-              if (previous.revision >= Number.MAX_SAFE_INTEGER - 1) fail("capacity", "worker dismissal revision exhausted");
-              next.set(id, { ...previous, signature: item.signature, revision: previous.revision + 1, dismissed: item.active ? false : previous.dismissed });
-              changed.push(previous);
-            }
-          }
-          const id = key(scope, item.executionId);
-          if (!next.has(id)) {
-            if (next.size >= this.maxEntries) fail("capacity", "worker dismissal entry capacity reached");
-            next.set(id, { ...scope, executionId: item.executionId, signature: item.signature, revision: 0, dismissed: false }); changed.push(scope);
+    const generation = this.generation;
+    this.pendingAdmissions++;
+    let released = false; let used = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (authority && this.authorities.get(authorityId!) === authority) {
+        const id = key(scope, authority.executionId); const record = this.records.get(id);
+        if (record && authority.activity && authority.activity.order > admissionOrder) {
+          const fence = this.fence(id); fence.activity = authority.activity.order;
+          if (record.dismissed || record.signature !== authority.activity.signature) {
+            this.pendingObservations.set(id, { record, fence, ...authority.activity });
+            this.scheduleObservations();
           }
         }
-        // Commit activity fences even when the submitted operation is stale.
-        if (changed.length) { await this.commit(next); this.notify(changed); }
-        if (authority && this.authorities.get(authorityId!) !== authority) fail("unavailable", "worker dismissal authority was cleared");
-        if (mutation) {
-          const item = seen.get(mutation.executionId); const id = key(scope, mutation.executionId); const current = this.records.get(id);
-          if (!item || !current) throw new WorkerDismissalsError("not-found", "execution not present in authoritative conversation");
-          const fence = this.fence(id);
-          const newerActivity = fence.activity > admissionOrder || (authority?.activity?.order ?? 0n) > admissionOrder;
-          if (current.revision !== mutation.expectedRevision || (mutation.operation === "dismiss" && (!item.dismissible || newerActivity))) fail("conflict", "worker evidence changed; read current dismissals");
-          // Retirement is conditional on positively verified active evidence;
-          // the client cannot turn this into a generic Restore endpoint.
-          if (mutation.operation === "retire" && !item.active) fail("conflict", "worker activity is not verified");
-          const dismissed = mutation.operation === "dismiss";
-          if (current.dismissed !== dismissed) {
-            const updated = new Map(this.records).set(id, { ...current, dismissed });
-            await this.commit(updated); this.notify([scope]);
-          }
-          // Activity after admission must still retire a save completing later.
-          if (dismissed) fence.dismissal = admissionOrder;
-        }
-        return { version: 1, conversationId: scope.conversationId, entries: [...this.records.values()].filter(record => sameScope(scope, record))
-          .map(({ executionId, revision, dismissed }) => ({ executionId, revision, dismissed })) };
-      } finally {
-        if (authority && this.authorities.get(authorityId!) === authority) {
-          const id = key(scope, authority.executionId); const record = this.records.get(id);
-          if (record && authority.activity && authority.activity.order > admissionOrder) {
-            const fence = this.fence(id); fence.activity = authority.activity.order;
-            if (record.dismissed || record.signature !== authority.activity.signature) {
-              this.pendingObservations.set(id, { record, fence, ...authority.activity });
-              this.scheduleObservations();
-            }
-          }
-          if (--authority.pending === 0) this.authorities.delete(authorityId!);
-        }
+        if (--authority.pending === 0) this.authorities.delete(authorityId!);
       }
-    });
+    };
+    const assertAdmission = () => {
+      this.assertAvailable();
+      if (released || (authority && (generation !== this.generation || this.authorities.get(authorityId!) !== authority))) fail("unavailable", "worker dismissal authority was cleared");
+    };
+    signal?.addEventListener("abort", release, { once: true });
+    try {
+      return await run(read => {
+        assertAdmission();
+        if (used) fail("unavailable", "worker dismissal admission already used");
+        used = true;
+        return this.enqueue(async () => {
+          assertAdmission();
+          const evidence = await read();
+          assertAdmission();
+          const next = new Map(this.records); const changed: WorkerDismissalScope[] = [];
+          const matching = new Map<string, string[]>();
+          for (const [id, record] of next) {
+            if (record.workspaceId !== scope.workspaceId || record.conversationId !== scope.conversationId) continue;
+            const ids = matching.get(record.executionId);
+            if (ids) ids.push(id); else matching.set(record.executionId, [id]);
+          }
+          const seen = new Map<string, WorkerDismissalEvidence>();
+          for (const item of evidence) {
+            if (!dismissalIdentifier(item.executionId) || !dismissalIdentifier(item.signature)) fail("unavailable", "invalid authoritative worker identity");
+            const duplicate = seen.get(item.executionId);
+            if (duplicate && (duplicate.signature !== item.signature || duplicate.active !== item.active || duplicate.dismissible !== item.dismissible)) fail("unavailable", "ambiguous authoritative worker identity");
+            seen.set(item.executionId, item);
+            // Positive observations retire marks for every account, not just the
+            // device making this read. Retired revisions are never evicted.
+            for (const id of matching.get(item.executionId) ?? []) {
+              const previous = next.get(id)!;
+              if (previous.signature !== item.signature || (item.active && previous.dismissed)) {
+                if (previous.revision >= Number.MAX_SAFE_INTEGER - 1) fail("capacity", "worker dismissal revision exhausted");
+                next.set(id, { ...previous, signature: item.signature, revision: previous.revision + 1, dismissed: item.active ? false : previous.dismissed });
+                changed.push(previous);
+              }
+            }
+            const id = key(scope, item.executionId);
+            if (!next.has(id)) {
+              if (next.size >= this.maxEntries) fail("capacity", "worker dismissal entry capacity reached");
+              next.set(id, { ...scope, executionId: item.executionId, signature: item.signature, revision: 0, dismissed: false }); changed.push(scope);
+            }
+          }
+          // Commit activity fences even when the submitted operation is stale.
+          if (changed.length) { await this.commit(next); this.notify(changed); }
+          assertAdmission();
+          if (mutation) {
+            const item = seen.get(mutation.executionId); const id = key(scope, mutation.executionId); const current = this.records.get(id);
+            if (!item || !current) throw new WorkerDismissalsError("not-found", "execution not present in authoritative conversation");
+            const fence = this.fence(id);
+            const newerActivity = fence.activity > admissionOrder || (authority?.activity?.order ?? 0n) > admissionOrder;
+            if (current.revision !== mutation.expectedRevision || (mutation.operation === "dismiss" && (!item.dismissible || newerActivity))) fail("conflict", "worker evidence changed; read current dismissals");
+            // Retirement is conditional on positively verified active evidence;
+            // the client cannot turn this into a generic Restore endpoint.
+            if (mutation.operation === "retire" && !item.active) fail("conflict", "worker activity is not verified");
+            const dismissed = mutation.operation === "dismiss";
+            if (current.dismissed !== dismissed) {
+              const updated = new Map(this.records).set(id, { ...current, dismissed });
+              await this.commit(updated); this.notify([scope]);
+            }
+            // Activity after admission must still retire a save completing later.
+            if (dismissed) fence.dismissal = admissionOrder;
+          }
+          return { version: 1, conversationId: scope.conversationId, entries: [...this.records.values()].filter(record => sameScope(scope, record))
+            .map(({ executionId, revision, dismissed }) => ({ executionId, revision, dismissed })) };
+        });
+      });
+    } finally {
+      signal?.removeEventListener("abort", release);
+      release(); this.pendingAdmissions--;
+    }
   }
   forgetWorkspace(workspaceId: string): Promise<void> {
     return this.enqueue(async () => {
+      // Even a failed forget must invalidate pre-forget conditional handles.
+      for (const [id, authority] of this.authorities) if (authority.scope.workspaceId === workspaceId) this.authorities.delete(id);
       this.assertAvailable(); const next = new Map(this.records); const changed: RecordEntry[] = [];
       for (const [id, record] of next) if (record.workspaceId === workspaceId) { next.delete(id); changed.push(record); }
       if (changed.length) { await this.commit(next); this.notify(changed); }

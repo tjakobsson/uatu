@@ -29,7 +29,7 @@
 
 ## 4. Private durable dismissal state
 
-- [x] 4.1 Implement versioned deterministic execution dismissal keys and positive alias resolution without child-only identity; verify stable recovery/pagination/restart identity, notification-to-launch convergence and isolation of new/reused/contradictory executions.
+- [x] 4.1 Implement versioned deterministic execution dismissal keys and positive alias resolution without child-only identity, including a separate notification-scoped provisional identity. Preserve completed qualified-identity safeguards; verify provisional dismissal before launch, replay/restart stability, source/worker contradiction isolation, exclusion of clocks/status/display text, refusal of unproven notification-to-launch transfer, current-activity/request visibility precedence and existing alias/entry/byte budgets without eviction. Exact launches may reappear when the consumed native data cannot prove the association.
 - [x] 4.2 Add a dedicated private Hub store with serialized per-entry writes, conditional revision retirement, bounded payload/entries and atomic mode-0600 persistence; verify concurrent additions, idempotence, restart, corrupt/unsafe files, save failures and explicit full-store refusal without silent eviction.
 - [x] 4.3 Add Hub-intercepted personal dismissal reads/mutations using authenticated account/stable workspace scope and existing origin protection; verify principal-selector rejection, malformed/oversized/foreign targets, no-store responses, base-path routing and zero provider mutations.
 - [x] 4.4 Implement activity/request visibility precedence and durable stale-mark retirement using authoritative child evidence and conditional revisions; verify delayed stale dismissals/responses, active-then-unavailable transitions, alias changes and restart cannot reactivate successfully retired marks. On failed/unconfirmed retirement, preserve chat availability, report the storage failure and verify the user-approved limited restart exception never hides currently verified activity or pending requests.
@@ -50,7 +50,7 @@
 - [x] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
 - [x] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
 - [x] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
-- [x] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
+- [ ] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
 
 ## Verification evidence (2026-10-30)
 

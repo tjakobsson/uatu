@@ -34,7 +34,7 @@ Expanded pending details SHALL retain delivery order and existing edit/remove/co
 
 In selected desktop UI mode, Workers SHALL automatically open when a new batch of visible Working or Unresolved occurrences first appears, and Pending SHALL automatically open for a new nonempty batch, including paused entries. Deliberate collapse SHALL hold until that card's visible Working/Unresolved or pending batch becomes empty; further arrivals SHALL NOT reopen it. Ending a batch SHALL leave its current open state alone and clear the collapse veto for the next batch. Finished-only history SHALL NOT invent a new active batch. Choices SHALL be retained separately per conversation and UI mode in a page-local cache bounded to 200 conversations, without inheriting another conversation's choice or treating automatic expansion, mode changes or delayed programmatic toggle echoes as user gestures. Null selection during refresh SHALL NOT end a batch. Native pointer/keyboard changes SHALL survive a live repaint before their deferred toggle event arrives. Policy SHALL follow `data-ui-mode`, not fine-pointer density; tablet desktop mode SHALL use desktop defaults. Canonical rows, independent pane offsets, focus and reading-anchor ownership SHALL remain unchanged.
 
-Expanded worker details SHALL show Working and Unresolved workers first, followed by Finished history ordered newest first from available execution timestamps. Each occurrence SHALL have one whole-row inspection target, readable names of at least 14px and metadata of at least 13px, with state-specific glyphs distinguishing working, unresolved, finished, failed and stopped. Unresolved and settled glyphs SHALL NOT imply live execution. Headers and inspection/Stop targets SHALL remain at least 44px tall with 8px separation from Stop. Only current owned, confirmed live background workers with retained occurrence authorization SHALL offer enabled Stop worker. Unverified control SHALL disable Stop independently of activity wording. Settled results SHALL remain accessible. Only verified live workers SHALL cause the parent Stop label to read Stop parent. Known successful automatic-background acknowledgements MAY clear on status change or complete settlement; failed, unavailable and unknown operation outcomes SHALL remain persistent. Desktop and touch SHALL use the same worker state groups and visible-row counts.
+Expanded worker details SHALL show Working and Unresolved workers first, followed by Finished history ordered newest first from available execution timestamps. Each occurrence SHALL have one whole-row inspection target, readable names of at least 14px and metadata of at least 13px, with state-specific glyphs distinguishing working, unresolved, finished, failed and stopped. Unresolved and settled glyphs SHALL NOT imply live execution. Headers and inspection/Stop targets SHALL remain at least 44px tall with 8px separation from Stop. Enabled Stop worker SHALL require current ownership, retained exact-occurrence authorization and fresh native validation. Only confirmed live background workers or verified unsettled native shell jobs after process exit SHALL offer this action. Unverified control SHALL disable Stop independently of activity wording. Settled results SHALL remain accessible. Only verified live workers SHALL cause the parent Stop label to read Stop parent. Known successful automatic-background acknowledgements MAY clear on status change or complete settlement; failed, unavailable and unknown operation outcomes SHALL remain persistent. Desktop and touch SHALL use the same worker state groups and visible-row counts.
 
 #### Scenario: Loaded touch chat starts compact
 - **WHEN** a touch conversation has two pending steers, one queued message, two working and four confirmed terminal worker occurrences
@@ -106,6 +106,13 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **AND** separately verified current task activity can show Working without restoring missing Stop proof
 - **AND** workers continue running and message delivery remains available
 
+#### Scenario: Verified shell job remains removable after process exit
+- **WHEN** a native shell process has exited but its job remains unsettled and current ownership and retained exact-occurrence authorization remain valid
+- **THEN** the row keeps Ended · result unavailable under Unresolved without live animation or a growing execution timer
+- **AND** the existing Stop/removal flow remains available subject to fresh native validation of that exact job
+- **AND** task details and explicit confirmation explain that removal can delete its job record/output and prevent final result capture
+- **AND** a settled job or missing, revoked, gap-invalidated or overflowed proof withholds the action without retargeting another occurrence
+
 #### Scenario: Control proof has a bounded share of the live evidence budget
 - **WHEN** the provider retains control evidence alongside live display/correlation records
 - **THEN** control evidence uses at most 1 MiB and 2,048 entries within the existing aggregate 4 MiB and 8,192 live-entry budget
@@ -154,6 +161,19 @@ Worker presentation SHALL distinguish verified task activity from active-session
 - **WHEN** current native evidence independently verifies the owned task's activity but retained Stop proof is unavailable
 - **THEN** the row shows Working and contributes once to Working
 - **AND** Stop remains disabled with its reason accessible in task details on desktop and mobile
+
+#### Scenario: Unresolved workers do not fabricate workspace completion
+- **WHEN** a previously verified background worker becomes unavailable, session-active without task attribution, checking, or ended without a result after its parent settles
+- **THEN** it contributes to Unresolved rather than verified workspace Working
+- **AND** child-to-Hub activity preserves a bounded content-free unresolved fact so loss of verification does not create a workspace-finished badge or successful completion notification
+- **AND** canonical pending requests retain their attention priority
+
+#### Scenario: Genuine settlement follows an unresolved interval
+- **WHEN** a workspace observed Working later becomes unresolved without awaiting attention and eventually settles with no verified work, pending request or unresolved worker
+- **THEN** the Hub can record its genuine finish without requiring an intervening return to Working
+- **AND** observing only unresolved or quiet state after startup does not invent a prior observed-work epoch
+- **AND** the existing Awaiting policy remains unchanged: attention cancels prior completion eligibility, and merely clearing a request does not create a finish without later positive Working
+- **AND** the public workspace-summary shape remains unchanged
 
 #### Scenario: Reused session is active but task attribution is ambiguous
 - **WHEN** a child session is currently active but evidence cannot establish which old task owns that execution

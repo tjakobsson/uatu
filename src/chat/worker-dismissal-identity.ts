@@ -11,9 +11,10 @@ const anchor = (kind: string, value: unknown): string[] => {
 };
 
 /** Immutable provider occurrence anchors, never a child id or display clock.
- * Tool-use ids survive live/history/restart and bridge launcher-only pages.
- * Native task/result ids cover executions without a launcher. Activity remains
- * separate: adding an identity makes no claim about outcome or current work.
+ * Strong provider aliases are the complete namespace when present: a native
+ * call/task id alone can recur with contradictory immutable launch facts.
+ * Legacy and finished rows without that envelope retain their recorded
+ * task/launcher/result anchors. Identity makes no claim about current work.
  */
 export function workerDismissalIdentities(value: unknown): string[] {
   const item = record(value);
@@ -42,10 +43,13 @@ export function workerDismissalIdentities(value: unknown): string[] {
   if (calls !== undefined && (!Array.isArray(calls) || calls.length > 2048 || !calls.every(identifier))) return [];
   if (item.toolUseId !== undefined && !identifier(item.toolUseId)) return [];
   const launchers = [...new Set([...(calls as string[] | undefined ?? []), ...(identifier(item.toolUseId) ? [item.toolUseId] : [])])];
-  // V2 withholds its positive execution aliases above 64 immutable launches.
-  // An absent optional primary alone is valid, but must not bypass that bound
-  // by replacing a deliberately withheld complete set with fallback anchors.
-  if (item.activity !== undefined && !activityIds.length && launchers.length > 64) return [];
+  // Do not bridge a strong occurrence to an unqualified call/task/result.
+  // Old bare marks remain stored, but cannot safely hide these V2 rows; a
+  // fresh dismissal saves only a provider-proven immutable execution alias.
+  // The public V2 provider always emits this envelope, including terminal and
+  // notification-only history. No primary means proof was withheld, not that
+  // a reusable native call/result/task id can replace the missing proof.
+  if (item.activity !== undefined) return [...new Set(activityIds)];
   const ids: string[] = [];
   for (const call of launchers) ids.push(...anchor("tool", call));
   if (item.resultId !== undefined) ids.push(...anchor("result", item.resultId));
@@ -54,7 +58,7 @@ export function workerDismissalIdentities(value: unknown): string[] {
   // Retain it even after recovering a launcher/result: an earlier page may
   // already have saved a dismissal against this native task occurrence.
   if (item.taskId !== item.childConversationId) ids.push(...anchor("task", item.taskId));
-  // Prefer the launcher/native anchor when saving: terminal DTOs need not
-  // retain the optional current-activity envelope.
-  return [...new Set([...ids, ...activityIds])];
+  // Compatibility for providers without the activity envelope. Public V2
+  // history (including terminal rows) takes the proof-only branch above.
+  return [...new Set(ids)];
 }

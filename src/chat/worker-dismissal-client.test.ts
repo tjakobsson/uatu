@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { WorkerDismissalClient, visibleWorkers } from "./worker-dismissal-client";
-import type { CompactWorker } from "./compact-work";
+import { compactWorkers, type CompactWorker } from "./compact-work";
+import type { BackgroundTaskItem } from "./types";
 import type { LiveTopicConsumer } from "../shell/live-channel";
 
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -28,6 +29,30 @@ test("visibility uses exact execution and current activity always wins", () => {
   const marks = new Set(["exec:one"]);
   expect(visibleWorkers([worker("unavailable"), worker("ended")], marks)).toHaveLength(0);
   expect(visibleWorkers([worker("working"), worker("needs-answer"), worker("unavailable", "exec:two")], marks)).toHaveLength(3);
+});
+
+test("legacy bare marks cannot re-hide strong V2 after reconnect and reordered positive aliases", async () => {
+  let consumer: LiveTopicConsumer = {};
+  const bare = { executionId: "worker-dismissal:tool:call", dismissed: true, revision: 3 };
+  const entries = [bare];
+  const client = new WorkerDismissalClient({ changed: () => {}, channel: {
+    subscribe: (_subscription, handlers) => { consumer = handlers; return { close: () => {}, resubscribe: () => {} }; },
+  }, fetcher: async () => Response.json({ version: 1, conversationId: "opencode:parent", entries }) });
+  const task: BackgroundTaskItem = { type: "background_task", id: "task:run", taskId: "run", toolUseId: "call", status: "running", createdAt: 10, description: "Review",
+    activity: { kind: "unavailable", executionId: "v1:A", executionAliases: ["v1:A", "v1:B"] } };
+  try {
+    client.select("opencode:parent"); await flush();
+    expect(client.dismissed.has(bare.executionId)).toBe(true);
+    expect(visibleWorkers(compactWorkers([task]), client.dismissed)).toHaveLength(1);
+    consumer.dropped!(1); consumer.ready!(2); await flush();
+    const reordered = { ...task, activity: { ...task.activity!, executionId: "v1:B", executionAliases: ["v1:B", "v1:A"] } };
+    client.observe(compactWorkers([reordered]));
+    expect(visibleWorkers(compactWorkers([reordered]), client.dismissed)).toHaveLength(1);
+    entries.push({ executionId: "v1:A", dismissed: true, revision: 0 });
+    client.refresh(); await flush();
+    expect(visibleWorkers(compactWorkers([reordered]), client.dismissed)).toHaveLength(0);
+    expect(entries[0]).toEqual(bare);
+  } finally { client.dispose(); }
 });
 
 test("reversed proven aliases and alias expansion retain dismissal without matching reused child or UI aliases", () => {

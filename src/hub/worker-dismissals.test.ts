@@ -345,6 +345,72 @@ test("a genuinely later admitted dismissal survives an older observation coalesc
   } finally { blocked.release(); rename.mockRestore(); }
 });
 
+test.each(["read", "same target", "other target"] as const)("lifecycle waits bound every %s admission including abandoned waiters", async kind => {
+  const { store } = await fixture({ maxPending: 2 });
+  const blocked = gate(); const controller = new AbortController();
+  const mutation = { executionId: "execution-1", expectedRevision: 0, operation: "dismiss" as const };
+  const wait = store.withAdmission(scope, mutation, async reconcile => {
+    await blocked.waiting; return reconcile(async () => evidence());
+  }, controller.signal);
+  const abandoned = wait.then(() => undefined, error => error);
+  controller.abort();
+  // Abandonment drops authority now, but cannot free an undrained queue slot.
+  const second = store.withAdmission(scope, undefined, async reconcile => { await blocked.waiting; return reconcile(async () => []); });
+  let entered = false;
+  await expect(store.withAdmission(scope, kind === "read" ? undefined : { ...mutation, executionId: kind === "same target" ? "execution-1" : "other" }, async () => { entered = true; })).rejects.toMatchObject({ code: "capacity" });
+  expect(entered).toBe(false);
+  store.observe("ws", "opencode:parent", evidence("execution-1", true));
+  blocked.release(); expect(await abandoned).toMatchObject({ code: "unavailable" }); await second;
+  expect((await store.reconcile(scope, async () => evidence(), mutation)).entries[0]?.dismissed).toBe(true);
+});
+
+test("abandonment frees exact-target authority before an undrained lifecycle wait finishes", async () => {
+  const { store } = await fixture({ maxEntries: 1, maxPending: 2 });
+  const blocked = gate(); const controller = new AbortController();
+  let reads = 0;
+  const old = store.withAdmission(scope, { executionId: "old", expectedRevision: 0, operation: "dismiss" }, async reconcile => {
+    await blocked.waiting;
+    return reconcile(async () => { reads++; return evidence("old"); });
+  }, controller.signal).then(() => undefined, error => error);
+  controller.abort();
+  try {
+    const fresh = await store.reconcile(scope, async () => evidence("new"), { executionId: "new", expectedRevision: 0, operation: "dismiss" });
+    expect(fresh.entries).toEqual([{ executionId: "new", revision: 0, dismissed: true }]);
+  } finally { blocked.release(); }
+  expect(await old).toMatchObject({ code: "unavailable" });
+  expect(reads).toBe(0);
+});
+
+test.each(["wait error", "unused callback", "load", "forget", "failed forget"] as const)("pre-lifecycle admission releases authority after %s", async kind => {
+  const { store } = await fixture({ maxEntries: 1 });
+  const mutation = { executionId: "execution-1", expectedRevision: 0, operation: "dismiss" as const };
+  if (kind === "failed forget") await store.reconcile(scope, async () => evidence());
+  const blocked = gate(); const entered = gate();
+  const waiting = store.withAdmission(scope, mutation, async reconcile => {
+    entered.release(); await blocked.waiting;
+    if (kind === "wait error") throw new Error("synthetic lifecycle failure");
+    if (kind === "unused callback") return;
+    return reconcile(async () => evidence());
+  });
+  const result = waiting.then(() => undefined, error => error);
+  await entered.waiting;
+  store.observe("ws", "opencode:parent", evidence("execution-1", true));
+  if (kind === "load") await store.load();
+  if (kind === "forget") await store.forgetWorkspace("ws");
+  if (kind === "failed forget") {
+    // Drain activity first, then fail the forget's own disk operation.
+    await store.reconcile({ ...scope, user: "bob" }, async () => []);
+    const rename = spyOn(fs, "rename").mockRejectedValueOnce(new Error("synthetic forget failure"));
+    try { await expect(store.forgetWorkspace("ws")).rejects.toMatchObject({ code: "unavailable" }); }
+    finally { rename.mockRestore(); }
+  }
+  blocked.release();
+  if (kind === "unused callback") expect(await result).toBeUndefined();
+  else expect(await result).toBeInstanceOf(Error);
+  const current = await store.reconcile(scope, async () => evidence());
+  expect((await store.reconcile(scope, async () => evidence(), { ...mutation, expectedRevision: current.entries[0]!.revision })).entries[0]?.dismissed).toBe(true);
+});
+
 test("same-target queued admissions share bounded authority until all older requests finish", async () => {
   const { store } = await fixture({ maxEntries: 1 });
   const entered = gate(); const blocked = gate();

@@ -28,6 +28,151 @@ import type { AgentNotificationEvent } from "./notifications";
 import { notificationPipeline } from "../../tests/notification-pipeline";
 import { startOpenCodeV2Fake } from "../../tests/e2e/opencode-v2-fake";
 import { addAcceptedDraft, applyChatEvent, projectionFromSnapshot } from "./projection";
+import { LiveBroker } from "../hub/live-broker";
+import type { LiveEnvelope } from "../shared/live-protocol";
+
+describe("independent background workspace activity", () => {
+  for (const legacy of [false, true]) test(`stream loss withdraws evicted verified activity while preserving legacy work (${legacy})`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), fixtureSession("other")];
+    const worker: BackgroundTaskItem = { id: "task:evicted", type: "background_task", taskId: "evicted", description: "Worker", createdAt: 1,
+      status: "running", activity: { kind: "working", executionId: "execution:evicted" } };
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "parent" ? [worker,
+      ...(legacy ? [{ ...worker, id: "task:legacy", taskId: "legacy", stateUncertain: true, activity: undefined }] : [])] : [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+    try {
+      await adapter.history("parent");
+      await adapter.history("other");
+      expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+      const pump = adapter.startEventPump();
+      provider.eventQueue.close();
+      await pump;
+      expect(adapter.activity()).toEqual({ working: legacy, awaiting: false, unresolved: true });
+    } finally { await adapter.dispose(); }
+  });
+  for (const kind of ["checking", "unavailable", "session-active", "ended"] as const) {
+    test(`settled parent withdraws Working for ${kind} without inventing completion, then recovers`, async () => {
+      const provider = new FakeProvider();
+      provider.sessions = [fixtureSession("parent")];
+      let worker: BackgroundTaskItem = { id: "task:workspace-activity", type: "background_task", taskId: "workspace-activity",
+        description: "Worker", createdAt: 1, status: "running", stateUncertain: true,
+        activity: { kind: "working", executionId: "execution:workspace-activity", observedAt: 2 },
+        control: { available: false, reason: "No retained Stop proof" } };
+      Object.assign(provider, { reconcileBackgroundTasks: async () => [worker] });
+      const notifications: AgentNotificationEvent[] = [];
+      let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const encoder = new TextEncoder();
+      const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "workspace-activity", coalesceWindowMs: 0,
+        onNotification: event => notifications.push(event),
+        // The actual child route serializes exactly these three internal facts.
+        onActivityChange: () => controller?.enqueue(encoder.encode(`event: activity\ndata: ${JSON.stringify(adapter.activity())}\n\n`)),
+      });
+      const envelopes: LiveEnvelope[] = [];
+      const broker = new LiveBroker({ isRunning: () => true, workspaceIds: () => ["workspace-activity"],
+        async open({ path }) {
+          expect(path).toBe("/api/activity");
+          return new Response(new ReadableStream<Uint8Array>({ start(value) {
+            controller = value;
+            value.enqueue(encoder.encode(`: open\n\nevent: activity\ndata: ${JSON.stringify(adapter.activity())}\n\n`));
+          } }), { headers: { "content-type": "text/event-stream" } });
+        },
+      });
+      const attachment = broker.subscribeActivity({ write: envelope => envelopes.push(envelope) }, "fixture-user");
+      const pump = adapter.startEventPump();
+      try {
+        provider.eventQueue.push({ type: "server.connected", data: {} });
+        await adapter.history("parent");
+        provider.eventQueue.push({ normalized: { conversationId: "parent", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "running" }] } });
+        provider.eventQueue.push({ normalized: { conversationId: "parent", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "completed" }] } });
+        await waitUntil(() => provider.eventQueue.waiting);
+        await waitUntil(() => envelopes.some(envelope => envelope.event.kind === "data" && (envelope.event.data as { working?: boolean }).working === true));
+        const baselineNotifications = notifications.length;
+        const notificationCount = () => notifications.slice(baselineNotifications).filter(event => event.type === "notification" && event.notification.kind === "turn-completed").length;
+        const samples: Array<{ phase: string; working: boolean; awaiting: boolean; unresolved: boolean; status: string; inventedTerminal: boolean; successfulNotifications: number }> = [];
+        for (const phase of [kind, "working"] as const) {
+          worker = { ...worker, activity: { ...worker.activity!, kind: phase, ...(phase === "ended" ? { endedAt: 3 } : {}) } };
+          const snapshot = await adapter.history("parent");
+          await flushRecoveryIo();
+          samples.push({ phase, ...adapter.activity(), status: snapshot.conversation.status,
+            inventedTerminal: snapshot.items.some(item => item.type === "background_task" && item.status !== "running"), successfulNotifications: notificationCount() });
+        }
+        expect(envelopes.some(envelope => envelope.event.kind === "data" && (envelope.event.data as { finished?: boolean }).finished === true)).toBe(false);
+        expect(samples).toEqual([
+          { phase: kind, working: false, awaiting: false, unresolved: true, status: "background", inventedTerminal: false, successfulNotifications: 0 },
+          { phase: "working", working: true, awaiting: false, unresolved: false, status: "background", inventedTerminal: false, successfulNotifications: 0 },
+        ]);
+        expect(provider.prompts).toEqual([]);
+        expect(provider.interrupts).toEqual([]);
+      } finally {
+        attachment.detach(); broker.dispose(); await adapter.dispose(); await pump;
+      }
+    });
+  }
+
+  test("parent work and canonical attention remain independent of unresolved workers and uncertainty-only ticks", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), fixtureSession("active")];
+    let worker: BackgroundTaskItem = { id: "task:activity", type: "background_task", taskId: "activity", description: "Worker", createdAt: 1,
+      status: "running", activity: { kind: "unavailable" } };
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "parent" ? [worker] : [] });
+    let changes = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0, onActivityChange: () => changes++ });
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await adapter.history("parent");
+      provider.eventQueue.push({ normalized: { conversationId: "active", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "running" }] } });
+      await waitUntil(() => adapter.activity().working);
+      expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: true });
+      const before = changes;
+      worker = { ...worker, stateUncertain: true, control: { available: false, reason: "No retained Stop proof" }, activity: { kind: "working" } };
+      await adapter.history("parent");
+      expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+      expect(changes).toBeGreaterThan(before);
+      provider.eventQueue.push({ normalized: { conversationId: "active", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "completed" }] } });
+      await waitUntil(() => provider.eventQueue.waiting);
+      provider.listQuestions = async () => [{ conversationId: "parent", requestId: "canonical", questions: [{ prompt: "Proceed?", header: "", options: [], multiple: false, allowFreeForm: true }] }];
+      worker = { ...worker, activity: { kind: "needs-answer", request: { kind: "question", id: "canonical" } } };
+      const snapshot = await adapter.history("parent");
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ type: "question", requestId: "canonical", status: "pending" }));
+      expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
+      worker = { ...worker, activity: { kind: "unavailable" } };
+      await adapter.history("parent");
+      expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: true });
+      for (const status of ["completed", "failed", "stopped"] as const) {
+        worker = { ...worker, status, stateUncertain: false, activity: undefined };
+        await adapter.history("parent");
+        expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: false });
+      }
+    } finally { await adapter.dispose(); await pump; }
+  });
+
+  test("existing child boolean transport interprets verification withdrawal exactly like genuine completion", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const encoder = new TextEncoder();
+    const envelopes: LiveEnvelope[] = [];
+    const broker = new LiveBroker({ isRunning: () => true, workspaceIds: () => ["workspace-activity"],
+      async open() {
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; value.enqueue(encoder.encode(": open\n\n")); } }),
+          { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const attachment = broker.subscribeActivity({ write: envelope => envelopes.push(envelope) }, "fixture-user");
+    const last = () => envelopes.at(-1)?.event;
+    const latest = () => { const event = last(); return event?.kind === "data" ? event.data as { working: boolean; finished: boolean } : undefined; };
+    try {
+      await waitUntil(() => controller !== undefined);
+      controller.enqueue(encoder.encode('event: activity\ndata: {"working":true,"awaiting":false}\n\n'));
+      await waitUntil(() => latest()?.working === true);
+      controller.enqueue(encoder.encode('event: activity\ndata: {"working":false,"awaiting":false}\n\n'));
+      await waitUntil(() => latest()?.working === false && latest()?.finished === true);
+      expect(latest()).toMatchObject({ working: false, finished: true });
+      controller.enqueue(encoder.encode('event: activity\ndata: {"working":true,"awaiting":false}\n\n'));
+      await waitUntil(() => latest()?.working === true);
+      expect(latest()).toMatchObject({ working: true, finished: false });
+    } finally { attachment.detach(); broker.dispose(); }
+  });
+});
 
 describe("production recovery Checking presentation", () => {
   const unavailable: BackgroundTaskItem = { id: "task:checking", type: "background_task", taskId: "checking", toolUseId: "checking-call",
@@ -4934,7 +5079,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await waitUntil(() => adapter.projectionForTests("parent").find(item => item.type === "background_task" && item.activity?.kind === "unavailable") !== undefined);
       expect(adapter.projectionForTests("parent").find(item => item.id === worker.id)).toMatchObject({ activity: { kind: "unavailable", executionId: "fixture-execution", observedAt: 50 }, control: { available: false } });
       // Inconclusive disappearance does not manufacture a workspace-finished transition.
-      expect(adapter.activity().working).toBe(true);
+      expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: true });
       expect(provider.prompts).toEqual([]);
       expect(provider.interrupts).toEqual([]);
     } finally { await adapter.dispose(); await pump; }
@@ -5001,7 +5146,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.eventQueue.push({ type: "server.connected", data: {} });
     await waitUntil(() => adapter.activity().working);
     expect(reads).toBeGreaterThan(0);
-    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     expect(adapter.projectionForTests("parent").find(item => item.id === `${kind}:pending`)).toMatchObject({ type: kind, status: "pending", conversationId: "child" });
     expect(provider.prompts).toEqual([]);
     expect(provider.interrupts).toEqual([]);
@@ -5049,7 +5194,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     fail = true;
     provider.eventQueue.push({ normalized: { conversationId: "child", eventType: "session.execution.succeeded", outcome: "handled", updates: [] } } as unknown as ProviderEvent);
     await waitUntil(() => reads >= 2);
-    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     fail = false; pending = false;
     await waitUntil(() => reads >= 3 && !adapter.activity().awaiting);
     expect(adapter.activity().working).toBe(true);
@@ -8977,30 +9122,30 @@ describe("workspace activity summary", () => {
 
   test("a turn in flight in any conversation is working, and only a change of the summary is reported", () => {
     const { adapter, changes } = activityAdapter();
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
     // A second live turn, and the first ending while the second runs, leave
     // the summary where it was.
     adapter.projectionForTests("b").apply({ kind: "status", status: "compacting" });
     adapter.projectionForTests("a").apply({ kind: "status", status: "completed" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
     adapter.projectionForTests("b").apply({ kind: "status", status: "idle" });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes()).toBe(2);
   });
 
   test("a turn that ends into live background work keeps the workspace working without a change", () => {
     const { adapter, changes } = activityAdapter();
     adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
     // The turn ended but the agent still holds a backgrounded task: the
     // summary reads the same, so nothing is reported.
     adapter.projectionForTests("a").apply({ kind: "status", status: "background" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
   });
 
@@ -9010,7 +9155,7 @@ describe("workspace activity summary", () => {
     adapter.projectionForTests("a").apply({ kind: "status", status: "background" });
     expect(changes()).toBe(1);
     adapter.projectionForTests("a").apply({ kind: "status", status: "idle" });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes()).toBe(2);
   });
 
@@ -9021,13 +9166,13 @@ describe("workspace activity summary", () => {
     const pump = adapter.startEventPump();
     adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
     adapter.projectionForTests("a").apply({ kind: "status", status: "background" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     const before = changes();
     provider.sessions = [];
     provider.eventQueue.push({ type: "session.deleted", data: { info: local } });
     await waitUntil(() => changes() > before);
     await Bun.sleep(20);
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes() - before).toBe(1);
     await adapter.dispose();
     await pump;
@@ -9036,14 +9181,14 @@ describe("workspace activity summary", () => {
   test("a pending permission or question awaits the user until it settles or is withdrawn", () => {
     const { adapter, changes } = activityAdapter();
     adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1") });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: false });
     expect(changes()).toBe(1);
     adapter.projectionForTests("b").apply({ kind: "upsert", item: question("q1") });
     adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1", "resolved") });
     expect(adapter.activity().awaiting).toBe(true);
     expect(changes()).toBe(1);
     adapter.projectionForTests("b").apply({ kind: "remove", itemId: "question:q1" });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes()).toBe(2);
     // A resync rewrite rebuilds the timeline from history, which carries no
     // requests: what it drops no longer counts.
@@ -9081,7 +9226,7 @@ describe("workspace activity summary", () => {
         const pump = adapter.startEventPump();
         adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
         adapter.projectionForTests("a").apply({ kind: "upsert", item: request });
-        expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+        expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
         const before = changes();
 
         if (leave === "deleted") {
@@ -9094,7 +9239,7 @@ describe("workspace activity summary", () => {
         }
         await waitUntil(() => changes() > before);
         await Bun.sleep(20);
-        expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+        expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
         expect(changes() - before).toBe(1);
 
         if (leave === "moved out of the workspace") {
@@ -9104,7 +9249,7 @@ describe("workspace activity summary", () => {
           provider.eventQueue.push({ type: "session.updated", data: { info: local } });
           provider.eventQueue.push({ type: "session.status", data: { sessionID: "a", status: { type: "busy" } } });
           await waitUntil(() => adapter.activity().working);
-          expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+          expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
           expect(changes() - before).toBe(2);
         }
 
@@ -9125,7 +9270,7 @@ describe("workspace activity summary", () => {
       const before = changes();
       provider.sessions = [fixtureSession("a", `${process.cwd()}-moved`)];
       await lookup(adapter);
-      expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+      expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
       expect(changes() - before).toBe(1);
     }
   });
@@ -9144,7 +9289,7 @@ describe("workspace activity summary", () => {
     await expectInventorySignal(inventory);
     await adapter.listConversations();
     await adapter.getConversation("a");
-    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     expect(changes()).toBe(before);
     inventory.cancel();
     await adapter.dispose();

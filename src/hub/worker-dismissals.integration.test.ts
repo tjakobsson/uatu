@@ -11,9 +11,118 @@ import { WorkspaceRegistry } from "./registry";
 import { SessionManager } from "./sessions";
 import { startHubServer } from "./server";
 import { WorkerDismissalsStore } from "./worker-dismissals";
+import { createOpenCodeV2Provider } from "../chat/opencode/v2/provider";
+import { compactWorkers } from "../chat/compact-work";
+import { WorkerDismissalClient, visibleWorkers } from "../chat/worker-dismissal-client";
+import { workerDismissalIdentities } from "../chat/worker-dismissal-identity";
+import { workerDismissalEvidenceForItem } from "./worker-dismissals-observation";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+// Reconstruct separate history reads, not two mutable rows in one runtime.
+// The native fingerprint must distinguish contradictory immutable launches.
+async function recoveredLaunch(ran = 10, message = "owner", prompt = "Review"): Promise<BackgroundTaskItem> {
+  const launch = { id: message, type: "assistant", time: { created: 10 }, content: [{ id: "call", type: "tool", name: "subagent", time: { created: 10, ran, completed: 30 }, state: {
+    status: "completed", input: { description: "Review", prompt }, metadata: { sessionID: "child", status: "running" },
+  } }] };
+  const provider = createOpenCodeV2Provider({ endpoint: "http://opencode.test", password: "fixture", directory: "/ws", fetch: (async (input, init) => {
+    const request = new Request(input, init), url = new URL(request.url);
+    expect(request.method).toBe("GET");
+    if (/\/api\/session\/[^/]+$/.test(url.pathname)) {
+      const id = url.pathname.split("/").at(-1)!;
+      return Response.json({ data: { id, projectID: "global", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 100, updated: 200 }, title: id, location: { directory: "/ws" }, ...(id === "child" ? { parentID: "parent" } : {}) } });
+    }
+    if (url.pathname.endsWith("/message")) return Response.json({ data: url.pathname.includes("/parent/") ? [launch] : [], cursor: {} });
+    if (url.pathname.endsWith("/inbox")) return Response.json({ data: [] });
+    if (url.pathname === "/api/session/active") return Response.json({});
+    return Response.json({ _tag: "NotFoundError", message: url.pathname }, { status: 404 });
+  }) as typeof fetch });
+  try {
+    const rows = (await provider.listMessages("parent", { limit: 100 })).items.filter((item): item is BackgroundTaskItem => item.type === "background_task");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.activity?.executionAliases).toHaveLength(1);
+    return rows[0]!;
+  } finally { await provider.dispose?.(); }
+}
+
+// Delivered synthetic messages retain their native inbox ID. These DTOs come
+// from the public provider; tests never insert an activity identity envelope.
+async function recoveredNotification(launch?: { owner: string; ran: number; prompt: string }): Promise<BackgroundTaskItem> {
+  const result = { id: "native-inbox-result", type: "synthetic", time: { created: 40 }, text: "Done", metadata: { source: "subagent", childID: "child", state: "completed" } };
+  const messages: unknown[] = [result];
+  if (launch) messages.push({ id: launch.owner, type: "assistant", time: { created: 10 }, content: [{ id: "same-call", type: "tool", name: "subagent", time: { created: 10, ran: launch.ran, completed: 30 }, state: {
+    status: "completed", input: { description: "Review", prompt: launch.prompt }, metadata: { sessionID: "child", status: "running" },
+  } }] });
+  const provider = createOpenCodeV2Provider({ endpoint: "http://opencode.test", password: "fixture", directory: "/ws", fetch: (async (input, init) => {
+    const request = new Request(input, init), url = new URL(request.url);
+    expect(request.method).toBe("GET");
+    if (url.pathname === "/api/session/active") return Response.json({});
+    if (/\/api\/session\/[^/]+$/.test(url.pathname)) {
+      const id = url.pathname.split("/").at(-1)!;
+      return Response.json({ data: { id, projectID: "global", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 1, updated: 2 }, title: id, location: { directory: "/ws" }, ...(id === "child" ? { parentID: "parent" } : {}) } });
+    }
+    if (url.pathname.endsWith("/message")) return Response.json({ data: url.pathname.includes("/parent/") ? messages : [], cursor: {} });
+    if (url.pathname.endsWith("/inbox")) return Response.json({ data: [] });
+    return new Response(null, { status: 404 });
+  }) as typeof fetch });
+  try {
+    const rows = (await provider.listMessages("parent", { limit: 100 })).items.filter((item): item is BackgroundTaskItem => item.type === "background_task");
+    expect(rows).toHaveLength(1);
+    return rows[0]!;
+  } finally { await provider.dispose?.(); }
+}
+
+test.each([
+  ["ran", 11, "owner", "Review"], ["owner", 10, "new-owner", "Review"], ["input", 10, "owner", "Different review"],
+] as const)("dismissal disk restart separates reused call with contradictory %s", async (_field, ran, owner, prompt) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "uatu-dismissal-identity-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const scope = { user: "alice", workspaceId: "project", conversationId: "opencode:parent" };
+  const first = await recoveredLaunch(), next = await recoveredLaunch(ran, owner, prompt);
+  expect(first.activity!.executionId).not.toBe(next.activity!.executionId);
+  const file = path.join(root, "dismissals.json"), store = new WorkerDismissalsStore(file);
+  await store.load();
+  const key = workerDismissalIdentities(first)[0]!;
+  await store.reconcile(scope, async () => workerDismissalEvidenceForItem(first), { executionId: key, expectedRevision: 0, operation: "dismiss" });
+  const restart = new WorkerDismissalsStore(file); await restart.load();
+  const ready = Promise.withResolvers<void>();
+  const client = new WorkerDismissalClient({ changed: () => ready.resolve(), fetcher: async () => Response.json(await restart.reconcile(scope, async () => workerDismissalEvidenceForItem(next))) });
+  try {
+    client.select(scope.conversationId);
+    await ready.promise;
+    expect(client.error).toBe("");
+    expect(client.dismissed.has(key)).toBe(true);
+    expect(visibleWorkers(compactWorkers([first]), client.dismissed)).toHaveLength(0);
+    expect(visibleWorkers(compactWorkers([next]), client.dismissed)).toHaveLength(1);
+  } finally { client.dispose(); }
+});
+
+test("pre-fix version-one bare marks stay on disk but do not hide strong V2 after reload or reconnect", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "uatu-dismissal-legacy-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const scope = { user: "alice", workspaceId: "project", conversationId: "opencode:parent" };
+  const file = path.join(root, "dismissals.json"), task = await recoveredLaunch();
+  const legacy = { ...scope, executionId: "worker-dismissal:tool:call", revision: 3, dismissed: true, signature: "pre-fix-signature" };
+  await fs.writeFile(file, JSON.stringify({ version: 1, records: [legacy] }), { mode: 0o600 });
+  const store = new WorkerDismissalsStore(file); await store.load();
+  const read = () => Promise.resolve(workerDismissalEvidenceForItem(task));
+  for (let i = 0; i < 2; i++) {
+    const state = await store.reconcile(scope, read);
+    const marks = new Set(state.entries.filter(entry => entry.dismissed).map(entry => entry.executionId));
+    expect(state.entries).toContainEqual({ executionId: legacy.executionId, revision: 3, dismissed: true });
+    expect(visibleWorkers(compactWorkers([task]), marks)).toHaveLength(1);
+    await store.load();
+  }
+  const strong = workerDismissalIdentities(task)[0]!;
+  const current = await store.reconcile(scope, read);
+  const saved = await store.reconcile(scope, read, { executionId: strong, expectedRevision: current.entries.find(entry => entry.executionId === strong)!.revision, operation: "dismiss" });
+  expect(visibleWorkers(compactWorkers([task]), new Set(saved.entries.filter(entry => entry.dismissed).map(entry => entry.executionId)))).toHaveLength(0);
+  const persisted = JSON.parse(await fs.readFile(file, "utf8"));
+  expect(persisted.version).toBe(1);
+  expect(persisted.records.find((entry: { executionId: string }) => entry.executionId === legacy.executionId)).toEqual(legacy);
+});
+
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "uatu-worker-dismissals-api-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -56,6 +165,118 @@ async function fixture() {
   const post = (executionId: string, expectedRevision = 0, id = alice.id, extra = {}, requestOrigin = origin) => fetch(url, { method: "POST", headers: { cookie: cookie(id), origin: requestOrigin }, body: JSON.stringify({ version: 1, conversationId: "opencode:parent", operation: "dismiss", executionId, expectedRevision, ...extra }) });
   return { get, post, url, origin, alice, aliceOther, bob, cookie, items, extraItems, workerDismissals, root, registry, personalState, sessions, blockRead, reads: () => reads, mutations: () => nativeMutations, foreign: () => { foreign = true; } };
 }
+
+test("notification-only public DTO dismisses through the real Hub and disk reload without hiding an unproven late launch", async () => {
+  const f = await fixture(), provisional = await recoveredNotification();
+  f.items.splice(0, f.items.length, provisional);
+  const id = provisional.activity?.executionId;
+  expect(id).toMatch(/^v1:notification:[a-f0-9]{64}$/);
+  const connect = async () => {
+    const ready = Promise.withResolvers<void>();
+    let posts = 0;
+    const client = new WorkerDismissalClient({ changed: () => ready.resolve(), fetcher: async (_url, init) => {
+      if (init?.method === "POST") posts++;
+      const headers = new Headers(init?.headers);
+      headers.set("cookie", f.cookie(f.alice.id)); headers.set("origin", f.origin);
+      return fetch(`${f.url}${init?.method === "POST" ? "" : "?conversationId=opencode%3Aparent"}`, { ...init, headers });
+    } });
+    client.select("opencode:parent"); await ready.promise;
+    expect(client.error).toBe("");
+    return { client, posts: () => posts };
+  };
+  const first = await connect();
+  try {
+    await first.client.dismiss(id);
+    expect(first.client.error).toBe("");
+    expect(first.posts()).toBe(1);
+    expect(visibleWorkers(compactWorkers([provisional]), first.client.dismissed)).toHaveLength(0);
+  } finally { first.client.dispose(); }
+  await f.workerDismissals.load();
+  const persisted = JSON.parse(await fs.readFile(path.join(f.root, "dismissals.json"), "utf8"));
+  expect(persisted.version).toBe(1);
+  expect(persisted.records).toContainEqual(expect.objectContaining({ executionId: id, dismissed: true }));
+  f.items.splice(0, f.items.length, await recoveredNotification());
+  const reopened = await connect();
+  try {
+    expect(visibleWorkers(compactWorkers(f.items), reopened.client.dismissed)).toHaveLength(0);
+    // Every launch is recovered independently. A weak result fold (even a
+    // terminal one) supplies no positive notification-to-launch alias proof.
+    for (const facts of [{ owner: "owner", ran: 11, prompt: "Review" }, { owner: "other-owner", ran: 12, prompt: "Different review" }]) {
+      const exact = await recoveredNotification(facts);
+      expect(exact.status).toBe("completed");
+      expect(exact.activity?.executionId).toMatch(/^v1:[a-f0-9]{64}$/);
+      expect(workerDismissalIdentities(exact)).not.toContain(id!);
+      f.items.splice(0, f.items.length, exact);
+      expect((await f.get()).status).toBe(200);
+      expect(visibleWorkers(compactWorkers(f.items), reopened.client.dismissed)).toHaveLength(1);
+    }
+    expect(reopened.posts()).toBe(0);
+    expect(f.mutations()).toBe(0);
+  } finally { reopened.client.dispose(); }
+});
+
+test("POST queued behind the first GET is fenced before the workspace lifecycle wait", async () => {
+  const f = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const exclusive = f.sessions.runExclusive.bind(f.sessions);
+  let calls = 0;
+  const queued = spyOn(f.sessions, "runExclusive").mockImplementation((id, operation) => {
+    if (++calls === 2) entered.resolve();
+    return exclusive(id, operation);
+  });
+  const blocked = f.blockRead(); const get = f.get();
+  await blocked.readEntered;
+  const post = f.post("one");
+  try {
+    await entered.promise;
+    f.items[0]!.activity!.kind = "working";
+    const history = await fetch(`${f.origin}/s/project/api/chat/conversations/opencode%3Aparent`, { headers: { authorization: `Bearer ${f.alice.id}` } });
+    expect(history.status).toBe(200); await history.json();
+    f.items[0]!.activity!.kind = "unavailable";
+    blocked.release(); expect((await get).status).toBe(200);
+    expect((await post).status).toBe(409);
+    // Drain the durable retirement before simulating process recovery.
+    expect((await f.get()).status).toBe(200);
+    await f.workerDismissals.load();
+    const state = await (await f.get()).json();
+    const entry = state.entries.find((entry: { executionId: string }) => entry.executionId === "one");
+    expect(entry.dismissed).toBe(false);
+    // A genuinely new explicit action after activity and a fresh unavailable
+    // read remains admissible; the fence is not a permanent denial.
+    expect((await f.post("one", entry.revision)).status).toBe(200);
+    expect(f.mutations()).toBe(0);
+  } finally { blocked.release(); await Promise.all([get, post]); queued.mockRestore(); }
+});
+
+test.each(["restart", "reused registration", "lifecycle failure"] as const)("admitted POST cannot cross %s while waiting for the real lifecycle mutex", async kind => {
+  const f = await fixture();
+  const blocked = Promise.withResolvers<void>();
+  const held = f.sessions.runExclusive("project", () => blocked.promise);
+  const queued = Promise.withResolvers<void>();
+  const exclusive = f.sessions.runExclusive.bind(f.sessions);
+  const changed = kind === "restart" ? (async () => { await f.sessions.stop("project"); await f.sessions.start("project"); })()
+    : kind === "reused registration" ? exclusive("project", async () => {
+      await f.registry.remove("project");
+      await f.workerDismissals.forgetWorkspace("project");
+      await f.registry.register(path.join(f.root, "new-location", "project"));
+    }) : Promise.resolve();
+  const lock = spyOn(f.sessions, "runExclusive").mockImplementation((id, operation) => {
+    queued.resolve();
+    return exclusive(id, async () => {
+      if (kind === "lifecycle failure") throw new Error("synthetic lifecycle failure");
+      return operation();
+    });
+  });
+  const post = f.post("one");
+  try {
+    await queued.promise; blocked.resolve(); await held; await changed;
+    expect((await post).status).toBe(503);
+    expect(f.reads()).toBe(0);
+    lock.mockRestore();
+    expect((await f.post("one")).status).toBe(200);
+    expect(f.mutations()).toBe(0);
+  } finally { blocked.resolve(); await Promise.all([held, changed, post]); lock.mockRestore(); }
+});
 
 test("first personal POST before any GET conflicts with positive proxied history during its older read and stays visible after reload", async () => {
   const f = await fixture();
@@ -109,14 +330,10 @@ test("workspace-prefixed personal dismissal API merges devices, isolates account
   const initial = await f.get(); expect(initial.status).toBe(200); expect(initial.headers.get("cache-control")).toBe("no-store");
   expect((await Promise.all([f.post("one"), f.post("two", 0, f.aliceOther.id)])).map(response => response.status)).toEqual([200, 200]);
   const sameAccount = await (await f.get(f.aliceOther.id)).json();
-  // Reconciliation also exposes unused immutable task aliases. Assert the
-  // two explicit concurrent marks, not that every possible anchor was saved.
+  // Strong identities must not acquire unqualified native task aliases.
   expect(sameAccount.entries.filter((entry: { dismissed: boolean }) => entry.dismissed)
     .map((entry: { executionId: string }) => entry.executionId).sort()).toEqual(["one", "two"]);
-  expect(sameAccount.entries).toEqual(expect.arrayContaining([
-    { executionId: "worker-dismissal:task:one", revision: 0, dismissed: false },
-    { executionId: "worker-dismissal:task:two", revision: 0, dismissed: false },
-  ]));
+  expect(sameAccount.entries).toHaveLength(2);
   expect((await (await f.get(f.bob.id)).json()).entries.some((entry: { dismissed: boolean }) => entry.dismissed)).toBe(false);
   f.items[0]!.activity!.kind = "working";
   expect((await f.get()).status).toBe(200);
@@ -129,6 +346,8 @@ test("workspace-prefixed personal dismissal API merges devices, isolates account
 
 test("personal dismissal API rejects identity/origin/body/foreign execution claims before mutating", async () => {
   const f = await fixture();
+  const admissions = spyOn(f.workerDismissals, "withAdmission");
+  cleanups.push(async () => { admissions.mockRestore(); });
   expect((await fetch(`${f.url}?conversationId=opencode:parent`)).status).toBe(401);
   const before = f.reads();
   for (const extra of [{ user: "bob" }, { activity: { kind: "working" } }, { version: 2 }, { expectedRevision: -1 }]) expect((await f.post("one", 0, f.alice.id, extra)).status).toBe(400);
@@ -136,6 +355,7 @@ test("personal dismissal API rejects identity/origin/body/foreign execution clai
   expect((await f.get(f.alice.id, "&user=bob")).status).toBe(400);
   expect((await f.post("x".repeat(5000))).status).toBe(413);
   expect(f.reads()).toBe(before);
+  expect(admissions).not.toHaveBeenCalled();
   const foreignExecution = await f.post("foreign"); expect(foreignExecution.status).toBe(404); expect(foreignExecution.headers.get("cache-control")).toBe("no-store");
   f.foreign(); expect((await f.get()).status).toBe(503);
   expect(f.mutations()).toBe(0);
@@ -265,7 +485,8 @@ test("proven aliases retain an old primary dismissal, retire together, and never
     await f.workerDismissals.load();
     f.items[0]!.activity.kind = "unavailable";
     const retired = await (await f.get()).json();
-    for (const id of ["A", "B"]) expect(retired.entries.find((entry: { executionId: string }) => entry.executionId === id)).toMatchObject({ dismissed: false, revision: 2 });
+    // B also crossed a causal signature change when its alias set expanded.
+    for (const [executionId, revision] of [["A", 2], ["B", 3]]) expect(retired.entries.find((entry: { executionId: string }) => entry.executionId === executionId)).toMatchObject({ dismissed: false, revision });
     expect((await f.post("B", 0)).status).toBe(409);
     f.items[0]!.activity = { kind: "unavailable", executionId: "C" };
     const fresh = await (await f.get()).json();

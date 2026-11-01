@@ -189,12 +189,13 @@ export function isLiveConversationStatus(status: ConversationStatus | undefined)
 /**
  * A workspace's chat activity at a glance, for surfaces that describe the
  * workspace rather than a conversation (the hub's cross-workspace badge).
- * Exactly two facts and never an id, a title, or a count: `working` — some
+ * Three internal child-to-Hub facts, never an id, title, or count: `working` — some
  * conversation has a turn in flight (isLiveConversationStatus) or live
  * background work (`background`); `awaiting` — some permission request or
- * question waits on the user.
+ * question waits on the user; `unresolved` — background activity cannot be
+ * verified and must not manufacture a workspace-finished transition.
  */
-export type ChatActivity = { working: boolean; awaiting: boolean };
+export type ChatActivity = { working: boolean; awaiting: boolean; unresolved: boolean };
 export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type ModelSelection = {

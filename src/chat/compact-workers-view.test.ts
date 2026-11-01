@@ -79,6 +79,74 @@ test("reported clock has its own suffix and the full kind and provenance remain 
   }
 });
 
+test.each(["completed", "failed", "stopped"] as const)("confirmed %s with ended activity keeps exactly one terminal report clock", status => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  const format = spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(() => "19:43");
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    for (const endedAt of [undefined, 30]) {
+      view.paint("parent", compactWorkers([
+        { type: "background_task", id: "report", taskId: "report", taskType: "shell", description: "Correlated result", status, createdAt: 10, terminalReportedAt: 40,
+          activity: { kind: "ended", endedAt } },
+      ]), new Set(), true);
+      const meta = host.querySelector(".chat-worker-meta")!;
+      expect(meta.querySelectorAll(".chat-worker-clock").length).toBe(1);
+      expect(meta.textContent).toBe("Shell · Reported 19:43");
+      expect(meta.querySelector("[data-elapsed-since]")).toBeNull();
+    }
+  } finally {
+    format.mockRestore();
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test("verified post-exit shell removal stays available without Working counts or a running clock", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const task = { type: "background_task" as const, id: "ended", taskId: "ended", taskType: "shell", description: "Unsettled shell", status: "running" as const, createdAt: 10,
+      activity: { kind: "ended" as const, endedAt: 30 }, control: { available: true } };
+    const workers = compactWorkers([task]);
+    view.paint("parent", workers, new Set(), true);
+    expect(workerSummary(workers)).toBe("1 unresolved");
+    expect(host.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(false);
+    expect(host.querySelector("[data-elapsed-since]")).toBeNull();
+    expect(host.querySelector('[data-state="working"]')).toBeNull();
+    for (const control of [undefined, { available: false }]) {
+      view.paint("parent", compactWorkers([{ ...task, control }]), new Set(), true);
+      expect(host.querySelector("[data-stop-task]")).toBeNull();
+    }
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("unresolved ended workers keep one truthful fixed end clock until a correlated result arrives", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    for (const endedAt of [undefined, 30]) {
+      view.paint("parent", compactWorkers([
+        { type: "background_task", id: "ended", taskId: "ended", taskType: "shell", description: "Missing result", status: "running", createdAt: 10,
+          activity: { kind: "ended", endedAt } },
+      ]), new Set(), true);
+      const meta = host.querySelector(".chat-worker-meta")!;
+      expect(meta.textContent).toContain("Ended · result unavailable");
+      expect(meta.querySelectorAll(".chat-worker-clock").length).toBe(1);
+      expect(meta.querySelector(".chat-worker-clock")!.textContent).toBe(endedAt === undefined ? "End time unknown" : `Ended ${new Date(endedAt).toLocaleString()}`);
+      expect(meta.querySelector("[data-elapsed-since]")).toBeNull();
+      expect(meta.textContent).not.toContain("Reported");
+    }
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
 test("active kind and shell elapsed time survive the clock suffix structure without stale report titles", () => {
   const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
   const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));

@@ -559,7 +559,8 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     // Internal hub-to-child protocol (hub-brokered-live-stream D5): the
     // workspace's activity summary for the hub's cross-workspace badge —
     // whether any conversation is working and whether any interaction awaits
-    // the user, across every agent. Two booleans and nothing else: no id,
+    // the user, across every agent, plus unresolved background activity.
+    // Three booleans and nothing else: no id,
     // title, or count crosses here. The current summary is sent at once, then
     // again only when it changes. No stream metrics: the hub's broker holds
     // one of these per workspace and owns that picture.
@@ -605,8 +606,8 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   if (result.done) break;
                   const summary = await deps.chatService.activity();
                   // Rebuilt field by field, never spread: the wire shape is
-                  // exactly these two booleans whatever a service returns.
-                  const data = JSON.stringify({ working: summary.working === true, awaiting: summary.awaiting === true });
+                  // exactly these three booleans whatever a service returns.
+                  const data = JSON.stringify({ working: summary.working === true, awaiting: summary.awaiting === true, unresolved: summary.unresolved === true });
                   if (data === sent) continue;
                   sent = data;
                   controller.enqueue(encoder.encode(`event: ${CHILD_ACTIVITY_EVENT}\ndata: ${data}\n\n`));

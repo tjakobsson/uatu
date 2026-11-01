@@ -496,11 +496,38 @@ scoped to the stable workspace, conversation and exact execution. Proven launch
 aliases preserve identity across history/replay; a reused child session alone
 does not. New executions never inherit an old dismissal. Dismissal changes only
 summary visibility, never provider history, work, requests or a task's outcome.
-Finished rows use immutable native task, launcher or result anchors even when
-they have no current-activity observation. If exact identity is unavailable, the
-row stays visible with dismissal guidance; **Dismiss finished** still processes
-other supported rows and reports skipped entries.
+Finished rows without an activity envelope retain immutable native task,
+launcher or result anchors. OpenCode V2 rows match only provider-proven qualified
+identities and aliases. A complete launch identity names its execution. A
+notification-only row instead has a separate provisional identity naming that
+native notification, stable across replay and restart without depending on
+clocks, status or display text. Dismissing it does not establish a launch
+association or grant activity/Stop trust. The current native data supplies no
+proven notification-to-launch link: if an exact launch later replaces that row,
+it may reappear rather than inherit the provisional dismissal through a guessed
+child/time match. Contradictory notification source or worker evidence also
+does not inherit the old mark.
+Older unqualified call/task marks stay stored unchanged but no longer hide
+qualified V2 rows: some previously dismissed rows can reappear and may be
+dismissed again with their current qualified identity. Reusing a launcher
+identifier with contradictory native facts does not carry a dismissal to a new
+execution. If native identity is incomplete, the row stays visible with
+dismissal guidance; bare call/task/result keys are not substitutes. **Dismiss
+finished** still processes supported rows and reports skipped entries.
 Verified activity and positively linked pending requests automatically resurface.
+Workspace Working also uses verified background activity rather than a retained
+running job status. Unresolved work does not create a Finished badge when
+verification is lost. A content-free internal activity fact keeps an observed
+work epoch pending through uncertainty; genuine settlement can finish it later
+without a new Working interval. Existing attention behavior is unchanged:
+Awaiting cancels prior finish eligibility, and clearing a request alone does not
+create a finish. First-seen uncertainty or quiet does not invent prior work.
+Conditional dismissal intent is recorded before waiting for the workspace
+lifecycle lock; authoritative reads and durable saves still run inside that
+lock. Activity arriving during the wait therefore invalidates an older action,
+including an execution's first dismissal. Pending reads and mutations share an
+8,192-request admission limit. Abandoning a request releases its action authority
+immediately, but its capacity slot remains occupied until the queued wait drains.
 Save/read failures are reported rather than silently claimed as synchronized
 success. Chat remains available if retirement of an old mark cannot be saved;
 an old dismissal can then reapply to an unavailable row after restart, but never
@@ -561,6 +588,12 @@ neither recovery nor a worker's later completion restores the reverted turn.
 
 Stopping a shell removes its provider record and output. If removal prevents
 final capture, OpenCode can report **failed**, even after the process exited.
+An exited process whose native job is still unsettled remains **Ended · result
+unavailable**, with no running animation or growing execution timer. Its removal
+action remains available only with retained exact-occurrence authorization and
+fresh ownership/job validation. Task details and confirmation explain that it
+can delete the job/output and prevent final capture. Process exit alone never
+authorizes removal; settled jobs and unverified targets do not offer the action.
 An already confirmed completed report stays completed. Output already received
 can remain in the open view, but missing provider output cannot be recovered
 after reload; there is no persistent output archive.

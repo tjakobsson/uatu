@@ -95,7 +95,9 @@ export class CompactWorkersView {
         meta.append(" · ", status);
       }
       const clockRunning = worker.state === "working" && worker.clockRunning !== false && worker.activity?.kind !== "needs-answer";
-      if (worker.activity?.kind === "ended") {
+      // Terminal results retain their existing single report/completion clock.
+      // End provenance is a separate caption only while the result is missing.
+      if (worker.state === "unknown" && worker.activity?.kind === "ended") {
         const end = document.createElement("span");
         end.className = "chat-worker-clock";
         end.textContent = worker.activity.endedAt === undefined ? "End time unknown" : `Ended ${new Date(worker.activity.endedAt).toLocaleString()}`;
@@ -140,7 +142,8 @@ export class CompactWorkersView {
       cost.setAttribute("aria-label", cost.title);
       inspect.dataset.kind = worker.kind;
       let stop = row.querySelector<HTMLButtonElement>("[data-stop-task]");
-      if (worker.taskId && worker.stoppable && worker.state === "working" && canStop) {
+      const removableEndedShell = worker.kind === "shell" && worker.activity?.kind === "ended" && worker.controlAvailable === true;
+      if (worker.taskId && worker.stoppable && (worker.state === "working" || removableEndedShell) && canStop) {
         if (!stop) {
           stop = document.createElement("button");
           stop.type = "button";

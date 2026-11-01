@@ -86,20 +86,168 @@ test("canonical request links require current durable child-tool proof and retai
     expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
   }
   workers.observeRequestTool("child", source, proof("current-tool", 2));
+  checkBytes(workers);
   expect(workers.linkRequest("child", "pending", "permission", source)).toBe(true);
+  checkBytes(workers);
   expect(workers.linkedRequest("v2:parent:launch")).toEqual({ id: "pending", kind: "permission" });
   expect(workers.resolveRequest("pending", "permission", "foreign-child")).toEqual([]);
   expect(workers.linkedRequest("v2:parent:launch")).toBeDefined();
   expect(workers.resolveRequest("pending", "permission", "child")).toEqual(["child"]);
+  checkBytes(workers);
   expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
   expect(workers.linkRequest("child", "form", "question", source)).toBe(true);
   workers.resolveRequest("form", "question", "child");
   for (let index = 0; index < 15; index++) {
     expect(workers.linkRequest("child", `request-${index}`, "permission", source)).toBe(true);
+    checkBytes(workers);
     workers.resolveRequest(`request-${index}`, "permission", "child");
+    checkBytes(workers);
   }
   expect(workers.linkRequest("child", "beyond-resolution-capacity", "permission", source)).toBe(false);
   expect(workers.controlEvidenceAvailable).toBe(true);
+  checkBytes(workers);
+  // Updating the same task in place, folding an alias, and revoking activity
+  // must keep the cached request cost rather than count the record twice.
+  workers.launchPrepared("parent", prepareTool({ id: "alias", name: "subagent", time: { created: 10, ran: 10, completed: 12 }, state: {
+    status: "completed", input: { prompt: "fixture" }, metadata: { sessionID: "child", status: "running" },
+  } }, 12, "snapshot", "alias-message"), 12);
+  checkBytes(workers);
+  workers.invalidateActivity("child"); checkBytes(workers);
+  workers.notification("parent", "result", { text: "Done", metadata: { source: "subagent", childID: "child", state: "completed" } }, 100);
+  checkBytes(workers);
+  for (let index = 0; index < 8_192; index++) workers.verifyChild(`peer-${index}`, "parent");
+  expect(retained(workers).recoveryOnly).toBe(true);
+  checkBytes(workers);
+});
+
+for (const boundary of ["enrichment", "resolved-replay", "reuse", "unproven-reuse", "end", "gap"] as const) test(`prelaunch request adoption respects ${boundary}`, () => {
+  const workers = new BackgroundWorkers(), state = retained(workers);
+  const proof = (id: string, seq: number) => nativeProof({ id, created: 10 + seq, durable: { aggregateID: "child", seq, version: 1 } }, { id })!;
+  workers.verifyChild("child", "parent");
+  workers.observeBirth("child", "parent", nativeProof({ id: "birth", created: 10 }, {}));
+  const start = proof("start", 1);
+  workers.executionStarted("child", start);
+  const source = { message: "child-message", tool: "child-tool" };
+  workers.observeRequestTool("child", source, proof("tool", 2));
+  expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
+  checkBytes(workers);
+  const part = { id: "launch", name: "subagent", state: { status: "completed", input: { prompt: "fixture" }, metadata: { sessionID: "child", status: "running" } } };
+  if (boundary === "enrichment") {
+    workers.launchPrepared("parent", prepareTool(part, 14, "snapshot", "message"), 14);
+    expect(workers.linkedRequest("v2:parent:launch")).toBeUndefined();
+    expect(state.requestEntries).toBe(3);
+    // Exact consumed start replay must leave the provisional window intact.
+    workers.executionStarted("child", { ...start });
+  }
+  if (boundary === "resolved-replay") {
+    workers.resolveRequest("pending", "permission", "child");
+    expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
+  }
+  if (boundary === "reuse" || boundary === "unproven-reuse") {
+    workers.executionStarted("child", boundary === "reuse" ? proof("replacement", 3) : undefined);
+    workers.observeRequestTool("child", source, proof("later-tool", 4));
+    expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
+  }
+  if (boundary === "end") workers.executionEnded("child", 14, proof("end", 3));
+  if (boundary === "gap") workers.invalidateActivity();
+  workers.launchPrepared("parent", prepareTool({ ...part, time: { created: 9, ran: 9, completed: 14 } }, 14, "snapshot", "message"), 14);
+  expect(workers.linkedRequest("v2:parent:launch")).toEqual(boundary === "enrichment" ? { id: "pending", kind: "permission" } : undefined);
+  expect((state.terminalProofs.get("child") as { prelaunch?: unknown } | undefined)?.prelaunch).toBeUndefined();
+  if (boundary === "resolved-replay") expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
+  checkBytes(workers);
+});
+
+test("prelaunch request windows count nested tools, ephemeral requests and resolution fences", () => {
+  const workers = new BackgroundWorkers(), state = retained(workers);
+  const proof = (id: string, seq: number) => nativeProof({ id, created: 10 + seq, durable: { aggregateID: "child", seq, version: 1 } }, { id })!;
+  workers.verifyChild("child", "parent");
+  workers.observeBirth("child", "parent", nativeProof({ id: "birth", created: 10 }, {}));
+  workers.executionStarted("child", proof("start", 1));
+  const source = { message: "child-message", tool: "child-tool" };
+  workers.observeRequestTool("child", source, proof("tool", 2));
+  expect(workers.linkRequest("child", "pending", "question", source)).toBe(false);
+  expect(state.requestEntries).toBe(3); // Window, durable tool, ephemeral request.
+  checkBytes(workers);
+  workers.resolveRequest("pending", "question", "child");
+  expect(workers.linkRequest("child", "pending", "question", source)).toBe(false);
+  expect(state.requestEntries).toBe(3); // The retired request becomes a fence.
+  for (let index = 0; index < 30; index++) {
+    workers.observeRequestTool("child", { ...source, tool: `tool-${index}` }, proof(`tool-${index}`, index + 3));
+    checkBytes(workers);
+  }
+  expect(state.requestEntries).toBe(10); // Eight proofs, window and one fence.
+  for (let index = 0; index < 30; index++) { workers.resolveRequest(`retired-${index}`, "question", "child"); checkBytes(workers); }
+  expect(state.requestEntries).toBe(25); // Eight proofs and sixteen fences.
+  workers.invalidateActivity("unrelated");
+  expect(state.requestEntries).toBe(25);
+  workers.invalidateActivity("child");
+  expect(state.requestEntries).toBe(0);
+  checkBytes(workers);
+});
+
+for (const budget of [{ entries: 6 }, { bytes: 1_800 }]) test(`prelaunch request payload saturates the existing aggregate ${JSON.stringify(budget)}`, () => {
+  const workers = new BackgroundWorkers(budget), state = retained(workers);
+  const proof = (id: string, seq: number) => nativeProof({ id, created: 10 + seq, durable: { aggregateID: "child", seq, version: 1 } }, { id })!;
+  workers.verifyChild("child", "parent");
+  workers.observeBirth("child", "parent", nativeProof({ id: "birth", created: 10 }, {}));
+  workers.executionStarted("child", proof("start", 1));
+  const source = { message: "child-message", tool: "child-tool" };
+  workers.observeRequestTool("child", source, proof("tool", 2));
+  workers.linkRequest("child", "pending", "permission", source);
+  workers.observeRequestTool("child", { ...source, tool: "next-tool" }, proof("next-tool", 3));
+  expect(state.recoveryOnly).toBe(true);
+  expect(state.terminalProofs.size).toBe(0);
+  expect(state.requestEntries).toBe(0);
+  expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
+  checkBytes(workers);
+});
+
+test("nested request entry growth saturates the aggregate cap and clears cached costs", () => {
+  // Parent, birth, execution and task consume four entries; tool and request
+  // consume the remaining two. A second request tool must trip the same cap.
+  const workers = new BackgroundWorkers({ entries: 6 });
+  const proof = (id: string, seq: number) => nativeProof({ id, created: 10 + seq, durable: { aggregateID: "child", seq, version: 1 } }, { id })!;
+  workers.verifyChild("child", "parent");
+  workers.observeBirth("child", "parent", nativeProof({ id: "birth", created: 10 }, { child: "child" }));
+  workers.executionStarted("child", proof("start", 1));
+  workers.launchPrepared("parent", prepareTool({ id: "launch", name: "subagent", time: { created: 9, ran: 9, completed: 12 }, state: {
+    status: "completed", input: { prompt: "fixture" }, metadata: { sessionID: "child", status: "running" },
+  } }, 12, "snapshot", "message"), 12);
+  const source = { message: "child-message", tool: "child-tool" };
+  workers.observeRequestTool("child", source, proof("tool", 2));
+  expect(workers.linkRequest("child", "pending", "permission", source)).toBe(true);
+  expect(retained(workers).requestEntries).toBe(2); checkBytes(workers);
+  workers.enforceBudget();
+  expect(workers.controlEvidenceAvailable).toBe(true);
+  workers.observeRequestTool("child", { ...source, tool: "next-tool" }, proof("next", 3));
+  expect(workers.controlEvidenceAvailable).toBe(false);
+  expect(retained(workers).requestEntries).toBe(0); checkBytes(workers);
+  expect(workers.linkRequest("child", "pending", "permission", source)).toBe(false);
+});
+
+for (const kind of ["agent", "shell"] as const) for (const distinct of [false, true]) test(`prelaunch ${kind} births distinguish ${distinct ? "contradiction" : "exact replay"}`, () => {
+  const workers = new BackgroundWorkers();
+  workers.verifyChild("child", "parent");
+  const birth = nativeProof({ id: "birth-A", created: 10 }, { child: "child" })!;
+  workers.observeBirth("child", "parent", birth, kind === "shell" ? shellCommandFingerprint("fixture") : undefined);
+  // Fresh object/receipt with the exact native proof is still the same birth.
+  workers.observeBirth("child", "parent", { ...birth }, kind === "shell" ? shellCommandFingerprint("fixture") : undefined);
+  if (distinct) workers.observeBirth("child", "parent", nativeProof({ id: "birth-B", created: 20 }, { child: "child" }), shellCommandFingerprint("fixture"));
+  if (kind === "agent") workers.executionStarted("child", nativeProof({ id: "start", created: 11 }, { child: "child" }));
+  const part = { id: "call", name: kind === "shell" ? "shell" : "subagent", time: { created: 9, ran: 9, completed: 12 }, state: {
+    status: "completed", input: { command: "fixture" }, metadata: { ...(kind === "shell" ? { shellID: "child" } : { sessionID: "child" }), status: "running" },
+  } };
+  workers.launchPrepared("parent", prepareTool(part, 12, "snapshot", "message"), 12);
+  const occurrence = workers.occurrence("v2:parent:call")!;
+  if (distinct) {
+    expect(workers.activityEvidence(occurrence)).toBeUndefined();
+    expect(workers.shellActivity(occurrence)).toBe(false);
+  } else {
+    expect(workers.activityEvidence(occurrence)).toBeDefined();
+    // Once consumed, an exact native replay remains idempotent as well.
+    workers.observeBirth("child", "parent", { ...birth }, kind === "shell" ? shellCommandFingerprint("fixture") : undefined);
+    expect(workers.activityEvidence(occurrence)).toBeDefined();
+  }
   checkBytes(workers);
 });
 
@@ -817,6 +965,51 @@ test("initial cold shell admission preserves native zero and an empty input with
   controlOracle(uncovered);
 });
 
+for (const later of ["history", "user-shell", "gap", "projection-loss"] as const) test(`distinct pre-admission shell births retain their control contradiction through ${later}`, () => {
+  const controls = new BackgroundControls(), fixture = controlFixture("old", "parent", "SH"), normalize = createOpenCodeV2Normalizer("/ws");
+  const birth = (id: string, started: number) => normalize.prepare({ id, created: started, type: "shell.created", location: { directory: "/ws" }, data: { info: {
+    id: "SH", command: "fixture", metadata: { sessionID: "parent" }, time: { started } } } }).evidence;
+  controls.observe(birth("A", 5), true);
+  controls.observe(birth("B", 20), true);
+  if (later === "user-shell") controls.observe(normalize.prepare({ id: "user", created: 21, type: "session.shell.ended", location: { directory: "/ws" }, data: {
+    sessionID: "parent", shell: { id: "SH" }, output: { output: "User output" } } }).evidence, true);
+  if (later === "gap") {
+    controls.observationGap();
+    controls.observe(birth("B", 20), true);
+    controls.observe({ shutdown: false, session: "parent", launchers: fixture.evidence.launches }, true);
+  }
+  if (later === "projection-loss") controls.projectionSaturated();
+  expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(false);
+  expect(controls.unavailable(fixture.item.taskId)).toBe(true);
+  controls.observationGap();
+  expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(false);
+  controlOracle(controls);
+});
+
+test("a pre-admission foreign-scope birth cannot be laundered by replaying its owned proof", () => {
+  const controls = new BackgroundControls(), fixture = controlFixture("old", "parent", "SH"), normalize = createOpenCodeV2Normalizer("/ws");
+  const birth = normalize.prepare({ id: "birth", created: 5, type: "shell.created", location: { directory: "/ws" }, data: { info: {
+    id: "SH", command: "fixture", metadata: { sessionID: "parent" } } } }).evidence;
+  controls.observe(birth, true);
+  controls.observe({ ...birth, directory: "/foreign" }, false);
+  controls.observe(birth, true);
+  expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(false);
+  expect(controls.unavailable(fixture.item.taskId)).toBe(true);
+  controlOracle(controls);
+});
+
+test("saturation cannot erase a pre-admission activity contradiction and reopen cold attribution", () => {
+  const workers = new BackgroundWorkers({ entries: 3 });
+  workers.observeBirth("SH", "parent", nativeProof({ id: "A", created: 5 }, { child: "SH" }), shellCommandFingerprint("fixture"));
+  workers.observeBirth("SH", "parent", nativeProof({ id: "B", created: 20 }, { child: "SH" }), shellCommandFingerprint("fixture"));
+  const candidate = controlFixture("old", "parent", "SH").evidence;
+  expect(workers.hasRetainedReference(candidate)).toBe(true);
+  for (let index = 0; index < 3; index++) workers.verifyChild(`other-${index}`, "parent");
+  expect(workers.controlEvidenceAvailable).toBe(false);
+  expect(workers.hasRetainedReference(candidate)).toBe(true);
+  checkBytes(workers);
+});
+
 test("post-gap shell association consumes only a matching birth covered by that occurrence", () => {
   const controls = new BackgroundControls(), fixture = controlFixture("fresh", "parent", "SH"), normalize = createOpenCodeV2Normalizer("/ws");
   const birth = (id: string, command: unknown = "fixture") => normalize.prepare({ id, created: 5, type: "shell.created", location: { directory: "/ws" }, data: { info: {
@@ -999,8 +1192,8 @@ test("typed user-shell classifications share the aggregate ledger and have their
   expect(workers.isUserShell("parent", "shell139")).toBe(true);
   expect(workers.isUserShell("other", "shell139")).toBe(false);
   for (let index = 0; index < 140; index++) workers.observeUserShell("parent".padEnd(512, "x"), `shell${index}`.padEnd(512, "y"));
-  const sizes = state.sizes as Map<object, Map<string, number>>;
-  expect([...(sizes.get(state.userShells)?.values() ?? [])].reduce((sum, bytes) => sum + bytes, 0)).toBeLessThanOrEqual(64 * 1024);
+  const sizes = state.sizes as Map<object, Map<string, { bytes: number }>>;
+  expect([...(sizes.get(state.userShells)?.values() ?? [])].reduce((sum, size) => sum + size.bytes, 0)).toBeLessThanOrEqual(64 * 1024);
   expect(workers.controlEvidenceAvailable).toBe(true);
   checkBytes(workers);
   workers.observeUserShell("parent", "shell139");
@@ -1222,7 +1415,7 @@ function retained(workers: BackgroundWorkers) {
     parents: Map<string, unknown>; births: Map<string, unknown>; tasks: Map<string, unknown>; notices: Set<string>;
     unmatched: Map<string, unknown>; ended: Map<string, unknown>; aliases: Map<string, unknown>;
     invocations: Map<string, unknown>; terminalProofs: Map<string, unknown>; userShells: Map<string, unknown>;
-    bytes: number; recoveryOnly: boolean; sizes: Map<object, unknown>; boundaries: number;
+    bytes: number; recoveryOnly: boolean; sizes: Map<object, unknown>; boundaries: number; requestEntries: number;
   };
 }
 
@@ -1231,6 +1424,12 @@ function checkBytes(workers: BackgroundWorkers) {
   const actual = JSON.stringify([state.parents, state.births, state.tasks, state.notices, state.unmatched, state.ended, state.aliases, state.invocations, state.terminalProofs, state.userShells].map(values => [...values])).length * 2;
   expect(state.bytes).toBeGreaterThanOrEqual(actual);
   expect(state.bytes).toBeLessThanOrEqual(actual + 20);
+  const tasks = [...state.tasks.values()] as { requestTools?: unknown[]; resolvedRequests?: unknown[]; request?: unknown }[];
+  const pending = [...state.terminalProofs.values()] as { prelaunch?: { tools: unknown[]; resolved?: unknown[]; request?: unknown } }[];
+  expect(state.requestEntries).toBe(tasks.reduce((sum, task) => sum + (task.requestTools?.length ?? 0)
+    + (task.resolvedRequests?.length ?? 0) + (task.request ? 1 : 0), 0)
+    + pending.reduce((sum, entry) => sum + (entry.prelaunch ? 1 + entry.prelaunch.tools.length
+      + (entry.prelaunch.resolved?.length ?? 0) + (entry.prelaunch.request ? 1 : 0) : 0), 0));
 }
 
 test("occurrence-linked replay records share the worker ledger and its irreversible saturation latch", () => {
@@ -1316,6 +1515,93 @@ test("a revoked running agent cannot republish trusted worker facts until its ac
   checkBytes(workers);
 });
 
+test("notification-only fingerprints are singleton aliases inside the existing entry and payload ledger", () => {
+  const workers = new BackgroundWorkers({ entries: 5 }), state = retained(workers);
+  workers.verifyChild("child", "parent");
+  for (const id of ["first", "second"]) {
+    const updates = workers.notification("parent", id, { text: "Done", metadata: { source: "subagent", childID: "child", state: "completed" } }, 40)!;
+    const row = updates[0];
+    expect(row?.kind).toBe("upsert");
+    if (row?.kind === "upsert" && row.item.type === "background_task") {
+      expect(row.item.activity?.kind).toBe("ended");
+      expect(row.item.activity?.executionId).toMatch(/^v1:notification:[a-f0-9]{64}$/);
+      expect(row.item.activity?.executionAliases).toEqual([row.item.activity!.executionId!]);
+    }
+    expect(state.aliases.size).toBe(0); // No notification-to-launch index/cache.
+    expect(state.recoveryOnly).toBe(false);
+    checkBytes(workers);
+  }
+  workers.notification("parent", "third", { text: "Done", metadata: { source: "subagent", childID: "child", state: "completed" } }, 40);
+  expect(state.recoveryOnly).toBe(true);
+  expect(state.unmatched.size).toBe(0);
+  expect(state.notices.size).toBe(0);
+  expect(state.bytes).toBe(62);
+  expect(workers.notification("parent", "first", { text: "Done", metadata: { source: "subagent", childID: "child", state: "completed" } }, 41)).toEqual([]);
+  checkBytes(workers);
+
+  const byteBounded = new BackgroundWorkers({ bytes: 2_000 });
+  byteBounded.verifyChild("child", "parent");
+  byteBounded.notification("parent", "large", { text: "x".repeat(2_000), metadata: { source: "subagent", childID: "child", state: "completed" } }, 40);
+  expect(retained(byteBounded).recoveryOnly).toBe(true);
+  expect(retained(byteBounded).sizes.size).toBe(0);
+  checkBytes(byteBounded);
+});
+
+test("incomplete or malformed native notification identity never mints a provisional alias", () => {
+  for (const [parent, inbox, child] of [["", "result", "child"], ["parent", "", "child"], ["parent", "result", ""], ["parent", "result", "bad\u0000worker"], ["parent", "bad\u0000inbox", "child"]]) {
+    const workers = new BackgroundWorkers();
+    workers.verifyChild(child!, parent!);
+    expect(workers.notification(parent!, inbox!, { text: "Still readable as canonical provider context", metadata: { source: "subagent", childID: child, state: "completed" } }, 40)).toBeUndefined();
+    expect(retained(workers).unmatched.size).toBe(0);
+    expect(retained(workers).aliases.size).toBe(0);
+    checkBytes(workers);
+  }
+});
+
+test("first-seen activity invalidations retain accounted negative births without inventing native proof", () => {
+  const workers = new BackgroundWorkers(), state = retained(workers);
+  workers.invalidateActivity("foreign-shell");
+  expect(state.births.get("foreign-shell")).toEqual({ contradicted: true });
+  checkBytes(workers);
+  const bytes = state.bytes;
+  workers.invalidateActivity("foreign-shell");
+  workers.invalidateActivity("\u0000invalid");
+  expect(state.births.size).toBe(1);
+  expect(state.bytes).toBe(bytes);
+  checkBytes(workers);
+  // A later owned restatement cannot erase the observed contradiction.
+  workers.observeBirth("foreign-shell", "parent", nativeProof({ id: "owned-birth", created: 10 }, { worker: "foreign-shell" }));
+  workers.launch("parent", launch("old-call", "foreign-shell"), 9);
+  const occurrence = workers.occurrence("v2:parent:old-call")!;
+  expect(workers.hasRetainedReference(occurrence)).toBe(true);
+  expect(workers.shellActivity(occurrence)).toBe(false);
+  expect(workers.activityEvidence(occurrence)).toBeUndefined();
+  expect(state.births.get("foreign-shell")).toEqual({ contradicted: true });
+  checkBytes(workers);
+});
+
+test("negative-only birth saturation stays closed after discarding its payload", () => {
+  const history = new BackgroundWorkers();
+  history.launch("parent", launch("old-call", "foreign-shell"), 9);
+  const occurrence = history.occurrence("v2:parent:old-call")!;
+  for (const budget of [{ entries: 2 }, { bytes: 180 }]) {
+    const workers = new BackgroundWorkers(budget), state = retained(workers);
+    workers.invalidateActivity("foreign-shell");
+    expect(workers.hasRetainedReference(occurrence)).toBe(true);
+    for (let i = 0; i < 10; i++) workers.invalidateActivity(`foreign-shell-${i}`);
+    expect(state.recoveryOnly).toBe(true);
+    expect(state.births.size).toBe(0);
+    expect(state.bytes).toBe(62);
+    expect(state.sizes.size).toBe(0);
+    expect(workers.hasRetainedReference(occurrence)).toBe(true);
+    workers.invalidateActivity("foreign-shell");
+    workers.observeBirth("foreign-shell", "parent", nativeProof({ id: "later-birth", created: 10 }, {}));
+    expect(state.births.size).toBe(0);
+    expect(workers.hasRetainedReference(occurrence)).toBe(true);
+    checkBytes(workers);
+  }
+});
+
 test("incremental byte ledger bounds the serialized oracle through replacements, aliases, results and deletions", () => {
   const workers = new BackgroundWorkers();
   const check = () => checkBytes(workers);
@@ -1379,6 +1665,21 @@ test("byte and entry saturation clear the complete ledger and never resume parti
     expect(state.parents.size).toBe(0);
     expect(state.bytes).toBe(62);
     expect(workers.launch("parent", launch("later"), 20)).toEqual([]);
+  }
+});
+
+test("unchanged budget enforcement never traverses retained tasks as history grows", () => {
+  for (const count of [32, 128]) {
+    const workers = new BackgroundWorkers();
+    for (let i = 0; i < count; i++) workers.launch("parent", launch(`call${i}`, `shell${i}`), i);
+    const state = retained(workers);
+    expect(state.tasks.size).toBe(count);
+    const values = spyOn(state.tasks, "values");
+    try {
+      for (let i = 0; i < 20; i++) workers.enforceBudget();
+      expect(values).not.toHaveBeenCalled();
+      expect(state.recoveryOnly).toBe(false);
+    } finally { values.mockRestore(); }
   }
 });
 

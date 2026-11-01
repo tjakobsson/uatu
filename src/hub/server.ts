@@ -1640,19 +1640,24 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (suffix === WORKER_DISMISSALS_PATH) {
         // Shares the session route's authenticated principal and cookie-origin
         // protection. The lifecycle lock excludes concurrent forget/restart.
-        if (!registry.byId(workspaceId)) return json(404, { error: "unknown workspace" }, NO_STORE_HEADERS);
-        return sessions.runExclusive(workspaceId, async () => {
-          if (!registry.byId(workspaceId)) return json(404, { error: "unknown workspace" }, NO_STORE_HEADERS);
-          return handleWorkerDismissals(request, {
-            user: session.user, workspaceId, store: deps.workerDismissals,
-            read: async conversationId => {
-              const running = sessions.get(workspaceId);
-              if (!running) throw new Error("workspace unavailable");
-              const evidence = await readAuthoritativeWorkerEvidence(running, conversationId);
-              if (sessions.get(workspaceId) !== running) throw new Error("workspace generation changed");
-              return evidence;
-            },
-          });
+        const workspace = registry.byId(workspaceId);
+        if (!workspace) return json(404, { error: "unknown workspace" }, NO_STORE_HEADERS);
+        const admittedRunning = sessions.get(workspaceId);
+        // Parse and bound exact-action admission BEFORE waiting. The callback
+        // still holds the lifecycle lock throughout authoritative I/O and save.
+        return handleWorkerDismissals(request, {
+          user: session.user, workspaceId, store: deps.workerDismissals,
+          runExclusive: operation => sessions.runExclusive(workspaceId, async () => {
+            if (registry.byId(workspaceId) !== workspace || sessions.get(workspaceId) !== admittedRunning) throw new Error("workspace generation changed");
+            return operation();
+          }),
+          read: async conversationId => {
+            const running = sessions.get(workspaceId);
+            if (!running) throw new Error("workspace unavailable");
+            const evidence = await readAuthoritativeWorkerEvidence(running, conversationId);
+            if (sessions.get(workspaceId) !== running) throw new Error("workspace generation changed");
+            return evidence;
+          },
         });
       }
       if (suffix === "/api/personal-state") {

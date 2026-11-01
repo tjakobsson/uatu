@@ -26,7 +26,7 @@ export function workerDismissalEvidence(value: unknown): WorkerDismissalEvidence
     || (activity.endedAt !== undefined && (typeof activity.endedAt !== "number" || !Number.isFinite(activity.endedAt) || activity.endedAt < 0))) return null;
   const request = record(activity.request);
   if (activity.request !== undefined && (!request || !dismissalIdentifier(request.id) || (request.kind !== "permission" && request.kind !== "question"))) return null;
-  const signature = createHash("sha256").update(JSON.stringify([activity.kind, activity.generation ?? null, activity.endedAt ?? null, item.status,
+  const signature = createHash("sha256").update(JSON.stringify([[...ids].sort(), activity.kind, activity.generation ?? null, activity.endedAt ?? null, item.status,
     request ? { id: request.id, kind: request.kind } : null])).digest("hex");
   return { executionId: ids[0]!, signature, active, dismissible };
 }

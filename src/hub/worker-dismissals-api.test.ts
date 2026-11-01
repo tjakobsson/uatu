@@ -49,6 +49,31 @@ function terminalItems(): ConversationItem[] {
   return items;
 }
 
+test.each(["foreign execution", "failed read", "failed wait", "invalid scope", "oversized body", "identity selector"] as const)("%s leaves no conditional authority or lifecycle wait behind", async failure => {
+  const root = await mkdtemp(path.join(tmpdir(), "uatu-admission-cleanup-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const store = new WorkerDismissalsStore(path.join(root, "marks.json"), { maxEntries: 1, maxPending: 1 });
+  await store.load();
+  const body = { version: 1, conversationId, executionId: "foreign", expectedRevision: 0, operation: "dismiss" };
+  const evidence = [{ executionId: "exact", signature: "unavailable", active: false, dismissible: true }];
+  let waits = 0;
+  const request = new Request("http://hub.invalid/api/personal-worker-dismissals", { method: "POST", body: JSON.stringify({ ...body,
+    ...(failure === "invalid scope" ? { conversationId: "unqualified" } : {}),
+    ...(failure === "oversized body" ? { executionId: "x".repeat(5000) } : {}),
+    ...(failure === "identity selector" ? { user: "bob" } : {}),
+  }) });
+  const response = await handleWorkerDismissals(request, { user: "alice", workspaceId: "project", store,
+    read: async () => { if (failure === "failed read") throw new Error("synthetic read failure"); return evidence; },
+    runExclusive: async operation => { waits++; if (failure === "failed wait") throw new Error("synthetic wait failure"); return operation(); },
+  });
+  expect(response.status).toBe({ "foreign execution": 404, "failed read": 503, "failed wait": 503, "invalid scope": 400, "oversized body": 413, "identity selector": 400 }[failure]);
+  expect(waits).toBe(["invalid scope", "oversized body", "identity selector"].includes(failure) ? 0 : 1);
+  const fresh = await handleWorkerDismissals(new Request(request.url, { method: "POST", body: JSON.stringify({ ...body, executionId: "exact" }) }),
+    { user: "alice", workspaceId: "project", store, read: async () => evidence });
+  expect(fresh.status).toBe(200);
+  expect((await fresh.json()).entries).toEqual([{ executionId: "exact", revision: 0, dismissed: true }]);
+});
+
 test("actual terminal DTOs reach authoritative Hub evidence and real client POSTs, persist and isolate the next execution", async () => {
   const items = terminalItems();
   expect(items.map(item => item.type)).toEqual(["background_task", "tool", "background_task", "tool", "background_task", "tool"]);
@@ -83,20 +108,33 @@ test("actual terminal DTOs reach authoritative Hub evidence and real client POST
   store = new WorkerDismissalsStore(file); await store.load();
   const response = await fetcher(`/api/personal-worker-dismissals?conversationId=${conversationId}`);
   expect(response.status).toBe(200);
-  const recovered = new Set<string>((await response.json()).entries.filter((entry: { dismissed: boolean }) => entry.dismissed).map((entry: { executionId: string }) => entry.executionId));
+  const recoveredState = await response.json();
+  const recovered = new Set<string>(recoveredState.entries.filter((entry: { dismissed: boolean }) => entry.dismissed).map((entry: { executionId: string }) => entry.executionId));
   expect(visibleWorkers(compactWorkers(JSON.parse(JSON.stringify(items))), recovered)).toHaveLength(0);
   const prior = items.find((item): item is ToolItem => item.type === "tool")!;
   expect(visibleWorkers(compactWorkers([{ ...prior, id: "tool:new-execution", childConversationId: "same-child" }]), recovered)).toHaveLength(1);
   const returning = items.find((item): item is BackgroundTaskItem => item.type === "background_task")!;
   const anchor = workerExecutionIds(compactWorkers([returning])[0]!)[0]!;
+  const savedBare = recoveredState.entries.find((entry: { executionId: string }) => entry.executionId === anchor);
   returning.status = "running";
   returning.activity = { kind: "needs-answer", executionId: "positive-recovery", request: { kind: "question", id: "canonical" } };
   expect(visibleWorkers(compactWorkers([returning]), recovered)).toHaveLength(1);
-  expect((await fetcher(`/api/personal-worker-dismissals?conversationId=${conversationId}`)).status).toBe(200);
+  const active = await fetcher(`/api/personal-worker-dismissals?conversationId=${conversationId}`);
+  expect(active.status).toBe(200);
+  const activeState = await active.json();
+  // Strong activity cannot prove that an old bare mark names this occurrence.
+  expect(activeState.entries.find((entry: { executionId: string }) => entry.executionId === anchor)).toEqual(savedBare);
+  const current = activeState.entries.find((entry: { executionId: string }) => entry.executionId === "positive-recovery");
+  expect(current).toMatchObject({ dismissed: false });
+  const post = (executionId: string, expectedRevision: number) => fetcher("/api/personal-worker-dismissals", { method: "POST", body: JSON.stringify({ version: 1, conversationId, executionId, expectedRevision, operation: "dismiss" }) });
+  expect((await post(anchor, savedBare.revision)).status).toBe(404);
+  expect((await post(current.executionId, current.revision)).status).toBe(409);
   returning.status = "completed"; delete returning.activity;
   store = new WorkerDismissalsStore(file); await store.load();
   const retired = await (await fetcher(`/api/personal-worker-dismissals?conversationId=${conversationId}`)).json();
-  expect(retired.entries.find((entry: { executionId: string }) => entry.executionId === anchor).dismissed).toBe(false);
+  // Existing no-identity terminal fallback still reads its old mark; no
+  // strong-to-bare retirement or alias relationship may be inferred.
+  expect(retired.entries.find((entry: { executionId: string }) => entry.executionId === anchor).dismissed).toBe(true);
 });
 
 test("all-page launcher reconciliation suppresses false terminal evidence from completed async tool rows", async () => {
@@ -105,7 +143,7 @@ test("all-page launcher reconciliation suppresses false terminal evidence from c
   const requests = childPages([[tool], [task]]);
   const evidence = await readAuthoritativeWorkerEvidence(running, conversationId);
   expect(requests).toEqual(["first", "1"]);
-  expect(evidence.find(item => item.executionId === "worker-dismissal:tool:launch")).toMatchObject({ active: true, dismissible: false });
+  expect(evidence).toEqual([expect.objectContaining({ executionId: "exact", active: true, dismissible: false })]);
   expect(evidence.every(item => item.active && !item.dismissible)).toBe(true);
   tool.id = "launch"; // Legacy provider rows expose the native call directly.
   expect(await readAuthoritativeWorkerEvidence(running, conversationId)).toEqual(evidence);
@@ -124,12 +162,17 @@ test("terminal launcher evidence is page-order stable and contradictory identiti
   await expect(readAuthoritativeWorkerEvidence(running, conversationId)).rejects.toThrow("ambiguous authoritative worker identity");
 });
 
-test("accepted activity without optional executionId retires immutable-anchor marks in client and trusted Hub observation", async () => {
-  const item = parseConversationItem({ type: "background_task", id: "task:run", taskId: "run", toolUseId: "call", status: "running", createdAt: 1, description: "Review", childConversationId: "same-child", activity: { kind: "unavailable", executionId: "positive" } }) as BackgroundTaskItem;
+test("activity without execution proof refuses bare marks, posts and trusted retirement while preserving visibility", async () => {
+  const item = parseConversationItem({ type: "background_task", id: "task:run", taskId: "run", toolUseId: "call", status: "running", createdAt: 1, description: "Review", childConversationId: "same-child", activity: { kind: "unavailable" } }) as BackgroundTaskItem;
   childPages([[item]]);
   const root = await mkdtemp(path.join(tmpdir(), "uatu-optional-dismissal-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const store = new WorkerDismissalsStore(path.join(root, "marks.json")); await store.load();
+  const bareId = "worker-dismissal:tool:call";
+  // A pre-qualified mark saved before the V2 proof-withholding rule.
+  await store.reconcile({ user: "alice", workspaceId: "project", conversationId }, async () => [
+    { executionId: bareId, signature: "legacy", active: false, dismissible: true },
+  ], { executionId: bareId, expectedRevision: 0, operation: "dismiss" });
   const operations: string[] = [];
   let changed: () => void = () => {};
   const client = new WorkerDismissalClient({ changed: () => changed(), fetcher: async (url, init) => {
@@ -139,34 +182,32 @@ test("accepted activity without optional executionId retires immutable-anchor ma
   cleanups.push(() => client.dispose());
   const ready = new Promise<void>(resolve => { changed = resolve; });
   client.select(conversationId); await ready;
-  await client.dismiss("worker-dismissal:tool:call");
-  expect(client.dismissed.has("worker-dismissal:tool:call")).toBe(true);
+  expect(client.dismissed.has(bareId)).toBe(true);
+  expect(workerExecutionIds(compactWorkers([item])[0]!)).toEqual([]);
+  expect(visibleWorkers(compactWorkers([item]), client.dismissed)).toHaveLength(1);
+  await client.dismiss(workerExecutionIds(compactWorkers([item])[0]!)[0]);
+  expect(client.error).toContain("exact execution identity is unverified");
+  expect(operations).toEqual([]);
+  const refused = await handleWorkerDismissals(new Request("http://hub.invalid/api/personal-worker-dismissals", { method: "POST", body: JSON.stringify({ version: 1, conversationId, executionId: bareId, expectedRevision: 0, operation: "dismiss" }) }),
+    { user: "alice", workspaceId: "project", store, read: () => readAuthoritativeWorkerEvidence(running, conversationId) });
+  expect(refused.status).toBe(404);
   item.activity = { kind: "working" };
   expect(parseConversationItem(JSON.parse(JSON.stringify(item)))).toEqual(item);
   const observations: unknown[] = [];
   observeWorkerProjection({ observe: (...args: unknown[]) => observations.push(args) } as unknown as WorkerDismissalsStore,
     "project", conversationId, { type: "item.upsert", conversationId, item });
-  expect(observations).toHaveLength(1);
-  expect(observations[0]).toMatchObject(["project", conversationId, [
-    { executionId: "worker-dismissal:tool:call", active: true, dismissible: false },
-    { executionId: "worker-dismissal:task:run", active: true, dismissible: false },
-  ]]);
+  expect(observations).toHaveLength(0);
   observeWorkerProjection(store, "project", conversationId, { type: "item.upsert", conversationId, item });
   const hookOnly = await store.reconcile({ user: "alice", workspaceId: "project", conversationId }, async () => []);
-  expect(hookOnly.entries.find(entry => entry.executionId === "worker-dismissal:tool:call")?.dismissed).toBe(false);
-  const retired = new Promise<void>(resolve => { changed = resolve; });
+  expect(hookOnly.entries).toEqual([{ executionId: bareId, dismissed: true, revision: 0 }]);
   client.observe(compactWorkers([item]));
   expect(visibleWorkers(compactWorkers([item]), client.dismissed)).toHaveLength(1);
-  await retired;
-  expect(operations).toEqual(["dismiss", "retire"]);
-  // Positive evidence changes the durable signature, so the stale retirement
-  // POST may conflict; wait for its ordinary authoritative refresh to settle.
-  if (client.error) await new Promise<void>(resolve => { changed = resolve; });
-  expect(client.error).toBe("");
-  item.activity = { kind: "unavailable", executionId: "positive" };
+  expect(operations).toEqual([]);
+  expect(client.error).toContain("complete execution identity");
+  item.activity = { kind: "unavailable" };
   client.observe(compactWorkers([item]));
   expect(visibleWorkers(compactWorkers([item]), client.dismissed)).toHaveLength(1);
-  expect(client.error).toBe("");
+  expect(client.error).toContain("complete execution identity");
   const next = { ...item, id: "task:next", taskId: "next", toolUseId: "new-call", activity: { kind: "unavailable" as const } };
   expect(visibleWorkers(compactWorkers([next]), new Set(["worker-dismissal:tool:call"]))).toHaveLength(1);
 });

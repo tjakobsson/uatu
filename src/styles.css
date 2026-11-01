@@ -11003,7 +11003,7 @@ html[data-ui-mode="touch"] .chat-surface:has(#chat-work-dock > details[open]:not
 .chat-worker-dismiss { flex: 0 0 auto; min-height: 44px; min-width: 44px; padding: 4px 8px; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 0.8125rem; cursor: pointer; }
 .chat-worker-dismiss:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .chat-worker-dismiss:hover { text-decoration: underline; }
-.chat-worker-dismissal-notice { margin: 8px 0; color: var(--text-subtle); font-size: 0.8125rem; line-height: 1.5; overflow-wrap: anywhere; }
+.chat-worker-dismissal-notice { margin: 0; color: var(--text-subtle); font-size: 0.8125rem; line-height: 1.5; overflow-wrap: anywhere; }
 .chat-worker-dismissal-notice[hidden] { display: none; }
 .chat-worker-row:has(.chat-worker-dismiss) + .chat-worker-row,
 .chat-worker-row + .chat-worker-row:has(.chat-worker-dismiss) { margin-top: 8px; }

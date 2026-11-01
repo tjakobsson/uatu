@@ -82,6 +82,9 @@ export function taskSettledLabel(task: BackgroundTaskItem): string {
 // keeps the view honest without a stream (design D7, non-goal: streaming).
 export const TASK_OUTPUT_REFRESH_MS = 2_000;
 
+/** Shell Stop removes the retained job, not just a possibly ended process. */
+export const SHELL_WORKER_STOP_WARNING = "This removes its provider record and output and may prevent final result capture, even if execution has already ended. OpenCode may report failed rather than cancelled; missing output cannot be recovered after reload.";
+
 // A read that fails is not retried at the full cadence for as long as the
 // task runs: each consecutive failure doubles the wait, up to this cap, and
 // the next read that answers puts the cadence back. A workspace that has gone
@@ -329,6 +332,12 @@ export class TaskInspectionPanel {
       facts.append(result);
     }
     strip.replaceChildren(line, facts);
+    if (canStop && task.taskType === "shell") {
+      const warning = document.createElement("p");
+      warning.className = "chat-drilldown-task-control-reason";
+      warning.textContent = SHELL_WORKER_STOP_WARNING;
+      strip.append(warning);
+    }
     if (task.status === "running" && !canStop && task.foreground !== true) {
       const reason = document.createElement("p");
       reason.className = "chat-drilldown-task-control-reason";

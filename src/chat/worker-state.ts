@@ -38,7 +38,10 @@ export function workerStateLabel(status: string, uncertain = false, activity?: W
 /** These presentation checks never replace native Stop's private revalidation. */
 export function workerCanStop(task: BackgroundTaskItem): boolean {
   return task.status === "running" && task.foreground !== true && !task.stateUncertain
-    && task.control?.available !== false && workerState(task.status, task.stateUncertain, task.activity) === "working";
+    && (task.control?.available !== false && workerState(task.status, task.stateUncertain, task.activity) === "working"
+      // The shell process can end before its job/result settles. Removal of
+      // that exact retained job requires explicit private control verification.
+      || task.taskType === "shell" && task.activity?.kind === "ended" && task.control?.available === true);
 }
 
 export function workerExecutionClockRuns(task: BackgroundTaskItem): boolean {

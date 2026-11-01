@@ -817,6 +817,12 @@ for (const phase of ["running", "exit", "captureBeforeRemove"] as const) {
     await page.locator("#chat-drilldown-task [data-stop-task]").click();
     const confirmation = page.getByRole("dialog", { name: "Stop shell worker?" });
     await expect(confirmation).toContainText("removes its provider record and output");
+    await expect(confirmation).toContainText("may prevent final result capture, even if execution has already ended");
+    if (phase === "exit") {
+      await expect(page.locator("#chat-drilldown-task")).toContainText("Ended · result unavailable");
+      await expect(page.locator("#chat-drilldown-task")).toContainText("may prevent final result capture");
+      await expect(page.locator("#chat-drilldown-task [data-task-elapsed]")).toHaveCount(0);
+    }
     await page.keyboard.press("Escape");
     await expect(confirmation).toBeHidden();
     await expect(page.locator("#chat-drilldown")).toBeVisible();

@@ -32,7 +32,7 @@ import { revealWorkerRequest } from "./worker-dismissal-client-request";
 import { CompactWorkersView } from "./compact-workers-view";
 import { expandedWorkBudget } from "./work-budget";
 import { renderChatMarkdown } from "./markdown";
-import { SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
+import { SHELL_WORKER_STOP_WARNING, SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
@@ -1081,7 +1081,10 @@ export function initChat(api = new ChatApiClient()): void {
   dismissalNotice.className = "chat-worker-dismissal-notice";
   dismissalNotice.setAttribute("role", "status");
   dismissalNotice.hidden = true;
-  compactWorkersList?.after(dismissalNotice);
+  // Personal-state guidance has its own owner, but shares the composer's
+  // measured, bounded and keyboard-scrollable feedback band. An extra dock
+  // sibling would consume unallocated space between Workers and Pending.
+  document.querySelector("#chat-composer-notices")?.append(dismissalNotice);
   const personalDismissals = hubDismissals ? new WorkerDismissalClient({ channel: liveChannel(), changed: () => syncCompactWork() }) : null;
   registerLiveTeardown(() => { personalDismissals?.dispose(); checkingPresentation.dispose(); });
   const compactWorkerState = new CompactDisclosure();
@@ -1291,7 +1294,7 @@ export function initChat(api = new ChatApiClient()): void {
     const task = taskById(source.items, taskId);
     if (!task || itemId !== undefined && task.id !== itemId || task.status !== "running" || task.stateUncertain) return;
     if (declares("background-blocking-work") && task.taskType === "shell") {
-      if (!await confirmChatAction("Stop shell worker?", "This removes its provider record and output. OpenCode may report failed rather than cancelled; missing output cannot be recovered after reload.", "Stop shell worker", invoker)) return;
+      if (!await confirmChatAction("Stop shell worker?", SHELL_WORKER_STOP_WARNING, "Stop shell worker", invoker)) return;
       const current = taskById(projection?.items ?? [], taskId);
       if (projection?.conversationId !== source.conversationId || current?.id !== task.id || current.status !== "running" || current.stateUncertain || stoppingTasks.has(taskId)) return;
     }
@@ -4957,7 +4960,7 @@ export function initChat(api = new ChatApiClient()): void {
     }
   }
   function syncDesktopWorkLayout() {
-    if (!surface || !form || !input || typeof getComputedStyle !== "function") return;
+    if (!surface || !form || !input || !timeline || typeof getComputedStyle !== "function") return;
     const root = document.documentElement;
     const dock = surface.querySelector<HTMLElement>("#chat-work-dock");
     const toggle = surface.querySelector<HTMLButtonElement>("#chat-work-toggle");
@@ -4975,9 +4978,18 @@ export function initChat(api = new ChatApiClient()): void {
     const hasWork = [...dock.children].some(child => child !== close && !(child as HTMLElement).hidden && getComputedStyle(child).display !== "none");
     root.toggleAttribute("data-chat-has-work", hasWork);
     const fixed = measureSurfaceChromeHeight(surface, dock, 0, transcript);
-    const floor = dock.hasAttribute("data-work-content-expanded")
+    const allocatedReading = dock.hasAttribute("data-work-content-expanded")
       ? parseFloat(surface.style.getPropertyValue("--chat-expanded-reading")) || 0
       : parseFloat(getComputedStyle(transcript).minHeight) || 0;
+    // The expanded allocator may yield almost all reading space to work. A
+    // nonzero remainder is not necessarily usable: native scrolling cannot
+    // expose even one transcript action beneath its sticky header/insets.
+    // In that case use the existing desktop work sheet, not overlapping cards.
+    const transcriptAction = timeline.querySelector<HTMLElement>(".chat-message-revert");
+    const timelineCss = getComputedStyle(timeline);
+    const actionReading = transcriptAction ? transcriptAction.getBoundingClientRect().height
+      + (parseFloat(timelineCss.scrollPaddingTop) || 0) + (parseFloat(timelineCss.scrollPaddingBottom) || 0) : 0;
+    const floor = Math.max(allocatedReading, actionReading);
     const minimum = Math.max(52, parseFloat(dock.style.getPropertyValue("--chat-work-full-floor")) || 0);
     const constrained = hasWork && surface.clientHeight - fixed - floor < minimum;
     root.toggleAttribute("data-chat-work-constrained", constrained);

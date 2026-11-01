@@ -1,6 +1,6 @@
 import { appUrl } from "../shared/app-url";
 import { backgroundTasksByTool } from "./background-tasks";
-import { workerStateLabel } from "./worker-state";
+import { workerExecutionClockRuns, workerState, workerStateLabel } from "./worker-state";
 import type { BackgroundTaskItem } from "./types";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { loginActionMarkup, type LoginAction } from "./login-action";
@@ -216,7 +216,7 @@ export class TimelineRenderer {
         continue;
       }
       if (shellMetadata(item, this.conversationTitle ?? projection.conversationId)) {
-        const node = this.reconcileShell(item, entry, expanded, active, variant);
+        const node = this.reconcileShell(item, entry, expanded, active, variant, worker);
         this.entries.get(item.id)!.shellVariant = this.shellVariant(node, item.id);
         nodes.set(item.id, node);
         dirty.push(node);
@@ -486,7 +486,7 @@ export class TimelineRenderer {
       node.hasAttribute(READER_CLOSED), node.hasAttribute("data-chat-lazy"), this.shells.get(itemId)?.readerOpened ?? false]);
   }
 
-  private reconcileShell(item: ConversationItem, previous: RenderedEntry | undefined, expanded: Set<string>, active: boolean, variant: string): HTMLElement {
+  private reconcileShell(item: ConversationItem, previous: RenderedEntry | undefined, expanded: Set<string>, active: boolean, variant: string, worker?: BackgroundTaskItem): HTMLElement {
     const metadata = shellMetadata(item, this.conversationTitle ?? this.conversationId!)!;
     const output = item.type === "command" || item.type === "tool" ? item.output : undefined;
     const old = previous?.node;
@@ -496,8 +496,9 @@ export class TimelineRenderer {
     const open = (inspected && !closed) || (old ? old.hasAttribute("open") && !old.hasAttribute("data-auto-open") : retained?.open ?? expanded.has(item.id));
     const auto = autoOpen(metadata.status, output) && !closed;
     const label = item.type === "tool" ? describeToolDetail(item).label : "Shell";
-    const status = item.type === "tool" ? activityStatusText(item.status, item.elapsedMs) : metadata.status;
-    const template = buildNode(activityShell(escapeHtmlAttribute(item.id), metadata.status, label, metadata.command, "", open, auto, closed, timestampAttribute(item.createdAt), status));
+    const status = worker ? workerStateLabel(worker.status, worker.stateUncertain, worker.activity)
+      : item.type === "tool" ? activityStatusText(item.status, item.elapsedMs) : metadata.status;
+    const template = buildNode(activityShell(escapeHtmlAttribute(item.id), worker ? workerActivityStatus(worker) : metadata.status, label, metadata.command, "", open, auto, closed, timestampAttribute(item.createdAt), status));
     const node = old ?? template;
     if (old) {
       if (previous && !shellMetadata(previous.item, metadata.conversation)) {
@@ -1741,8 +1742,8 @@ function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: 
   // the child has reported a price; zero is an unpriced model, not free.
   const subagentCost = detail.kind === "agent" && item.usage?.costUsd ? ` · ${formatUsd(item.usage.costUsd)}` : "";
   const subject = detail.kind === "todo" ? todo?.task : `${toolSubject(detail) ?? ""}${subagentCost}` || undefined;
-  const outcome = worker?.status === "stopped" ? "cancelled" : worker?.status ?? item.status;
-  const state = worker ? worker.stateUncertain ? "unknown · Status unavailable — reconnecting" : worker.status === "running" ? "working · Started in background" : workerStateLabel(worker.status) : undefined;
+  const outcome = worker ? workerActivityStatus(worker) : item.status;
+  const state = worker ? workerStateLabel(worker.status, worker.stateUncertain, worker.activity) : undefined;
   return activityShell(escapeHtmlAttribute(item.id), outcome, label, subject, body, open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, timestampAttribute(item.createdAt), state ?? activityStatusText(item.status, item.elapsedMs));
 }
 
@@ -1782,7 +1783,7 @@ function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean, w
     case "agent":
       // The result is the subagent's report — prose, rendered like assistant
       // markdown rather than dumped as the raw task envelope.
-      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${allowSubagents && (worker?.childConversationId ?? detail.conversationId) ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute((worker?.childConversationId ?? detail.conversationId)!)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${worker ? worker.status === "running" ? `<p>Started in background</p>` : `<button type="button" data-chat-jump="${escapeHtmlAttribute(worker.id)}">View ${escapeHtml(worker.status)} worker result</button>` : detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
+      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${allowSubagents && (worker?.childConversationId ?? detail.conversationId) ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute((worker?.childConversationId ?? detail.conversationId)!)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${worker ? worker.status === "running" ? `<p>${escapeHtml(workerStateLabel(worker.status, worker.stateUncertain, worker.activity))}</p>` : `<button type="button" data-chat-jump="${escapeHtmlAttribute(worker.id)}">View ${escapeHtml(worker.status)} worker result</button>` : detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
     case "skill":
       // A skill Claude Code ran as a fork is a conversation of its own. The
       // subagents track lists the fork too (as a fork entry, beside the agent
@@ -1807,6 +1808,13 @@ function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean, w
       // An unknown tool: show its input, then bound its output like any other.
       return `${item.input ? `<pre>${escapeHtml(item.input)}</pre>` : ""}${outputBlock(item)}${error}`;
   }
+}
+
+/** Activity owns the glyph; a retained running job is not necessarily executing. */
+function workerActivityStatus(worker: BackgroundTaskItem): string {
+  const state = workerState(worker.status, worker.stateUncertain, worker.activity);
+  return state === "working" ? workerExecutionClockRuns(worker) ? "running" : "unknown"
+    : state === "stopped" ? "cancelled" : state;
 }
 
 function outputBlock(item: ToolItem, terminal = false): string {

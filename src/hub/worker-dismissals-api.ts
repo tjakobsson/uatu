@@ -6,7 +6,7 @@ import { childRequestHeaders, childUrlFor } from "./proxy";
 import { parseConversationSnapshot } from "../chat/validation";
 import type { ConversationItem } from "../chat/types";
 import { backgroundTasksByTool } from "../chat/background-tasks";
-import { dismissalIdentifier, WorkerDismissalsError, type WorkerDismissalEvidence, type WorkerDismissalMutation, type WorkerDismissalsStore } from "./worker-dismissals";
+import { dismissalIdentifier, WorkerDismissalsError, type WorkerDismissalEvidence, type WorkerDismissalMutation, type WorkerDismissalState, type WorkerDismissalsStore } from "./worker-dismissals";
 
 export const WORKER_DISMISSALS_PATH = "/api/personal-worker-dismissals";
 const NO_STORE = { "cache-control": "no-store" };
@@ -70,6 +70,7 @@ export async function readAuthoritativeWorkerEvidence(running: RunningSession, c
 export async function handleWorkerDismissals(request: Request, deps: {
   user: string; workspaceId: string; store?: WorkerDismissalsStore;
   read(conversationId: string): Promise<WorkerDismissalEvidence[]>;
+  runExclusive?(operation: () => Promise<WorkerDismissalState>): Promise<WorkerDismissalState>;
 }): Promise<Response> {
   if (request.method !== "GET" && request.method !== "POST") return new Response(null, { status: 405, headers: { ...NO_STORE, allow: "GET, POST" } });
   const url = new URL(request.url);
@@ -97,7 +98,8 @@ export async function handleWorkerDismissals(request: Request, deps: {
     if (!dismissalIdentifier(conversationId) || !/^[a-z][a-z0-9-]*:.+/.test(conversationId)) invalid();
     if (!deps.store) return json(503, { error: "worker dismissals are unavailable" });
     const parent = conversationId as string;
-    return json(200, await deps.store.reconcile({ user: deps.user, workspaceId: deps.workspaceId, conversationId: parent }, () => deps.read(parent), mutation));
+    return json(200, await deps.store.withAdmission({ user: deps.user, workspaceId: deps.workspaceId, conversationId: parent }, mutation,
+      reconcile => deps.runExclusive ? deps.runExclusive(() => reconcile(() => deps.read(parent))) : reconcile(() => deps.read(parent)), request.signal));
   } catch (error) {
     if (error instanceof WorkerDismissalsError) return json({ "invalid-input": 400, conflict: 409, capacity: 507, unavailable: 503, "not-found": 404 }[error.code], { error: error.message });
     return json(503, { error: "authoritative worker status or dismissal storage is unavailable" });

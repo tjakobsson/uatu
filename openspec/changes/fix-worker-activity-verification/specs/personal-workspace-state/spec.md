@@ -51,6 +51,24 @@ Dismissal identity SHALL remain stable through pagination, live/history reconcil
 - **THEN** it retains the same dismissal scope without hiding any unrelated occurrence
 - **AND** an ambiguous identity is not persisted as a broad session-level dismissal
 
+#### Scenario: Notification is dismissed before its launch is known
+- **WHEN** a V2 notification-only row has complete valid native notification identity but no proven launch association
+- **THEN** the user can dismiss that notification using a separate versioned identity scoped to the account, stable workspace and parent conversation
+- **AND** its identity derives from the parent conversation, notification source, native inbox ID and worker ID, not clocks, status or display text
+- **AND** the mark hides only that notification through replay and restart without supplying current activity or Stop authority
+
+#### Scenario: Launch appears without exact notification association proof
+- **WHEN** an exact launch row replaces or accompanies a dismissed provisional notification without positive proof that both identify the same occurrence
+- **THEN** the launch remains visible and does not inherit the notification's dismissal
+- **AND** child/time uniqueness, a UI fold or a shared bare call/task/result identifier does not authorize transfer
+- **AND** no automatic carry-over is claimed while the consumed native data lacks the required proof
+
+#### Scenario: Notification identity is contradictory or incomplete
+- **WHEN** notification source or worker evidence contradicts an earlier notification identity
+- **THEN** the new identity does not inherit the old mark and ambiguous aliases do not converge
+- **AND** incomplete native identity keeps the row visible with dismissal guidance
+- **AND** verified current activity and canonical pending requests retain visibility precedence over provisional marks
+
 #### Scenario: Activity wins a race with dismissal
 - **WHEN** verified activity or a linked blocking request is newer than the state the user dismissed
 - **THEN** that evidence remains visible despite a delayed dismissal response or stale client write

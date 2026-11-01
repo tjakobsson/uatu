@@ -21,7 +21,7 @@
 //     cancelled (and announced); a delivered or missing one is a silent no-op.
 
 import path from "node:path";
-import type { FormCreated, PermissionAsked } from "@opencode/client";
+import type { FormCreated, PermissionAsked, ShellDeleted, ShellExited, ShellInfo } from "@opencode/client";
 
 export type NativeWorkerRequestReply = { kind: "permission" | "question"; childId: string; requestId: string; body: Record<string, unknown> };
 
@@ -138,7 +138,7 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
   const requestReplies: NativeWorkerRequestReply[] = [];
   const requestEvidence: Array<{ type: string; sessionID?: string; durable?: { aggregateID: string; seq: number; version: number } }> = [];
   const durableSequences = new Map<string, number>();
-  const shells = new Map<string, { parent: SessionState; message: StoredMessage; background: boolean; removed: boolean; exited: boolean; waiter: "pending" | "exited" | "failed"; captured: boolean; captureBeforeRemove: boolean; output: string | null }>();
+  const shells = new Map<string, { parent: SessionState; message: StoredMessage; info: ShellInfo; background: boolean; removed: boolean; waiter: "pending" | "exited" | "failed"; captured: boolean; captureBeforeRemove: boolean; output: string | null }>();
   let loseBackground = false;
   let losePrompt = false, loseResume = false, refuseBackground = false;
   let unknownBeforeAdmission = false;
@@ -365,13 +365,17 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     const shellId = mint("sh");
     const callId = mint("call");
     const created = now();
-    const message: StoredMessage = { id: mint("msg"), type: "assistant", time: { created }, content: [{ type: "tool", id: callId, name: "shell", time: { created }, state: { status: background ? "completed" : "running", input: { command: "printf 'safe shell output'" }, metadata: { shellID: shellId, status: "running" }, content: background ? [{ type: "text", text: "Command moved to the background." }] : [] } }] };
-    shells.set(shellId, { parent, message, background, removed: false, exited: false, waiter: "pending", captured: false, captureBeforeRemove: false, output: "safe shell output" });
+    const input = { command: "printf 'safe shell output'" };
+    const message: StoredMessage = { id: mint("msg"), type: "assistant", time: { created }, content: [{ type: "tool", id: callId, name: "shell", time: { created }, state: { status: background ? "completed" : "running", input, metadata: { shellID: shellId, status: "running" }, content: background ? [{ type: "text", text: "Command moved to the background." }] : [] } }] };
+    // Keep the accepted native launch record: inventory must prove the same
+    // command and start, not reconstruct ownership-only evidence on each read.
+    const info: ShellInfo = { id: shellId, status: "running", command: input.command, cwd: directory,
+      shell: "/bin/sh", file: `/fixture/${shellId}.out`, metadata: { sessionID: sessionId, background }, time: { started: created } };
+    shells.set(shellId, { parent, message, info, background, removed: false, waiter: "pending", captured: false, captureBeforeRemove: false, output: "safe shell output" });
     parent.messages.push(message);
     // Native ephemeral birth, as captured in real-2.0.13.json. Metadata is
     // association only: the provider still verifies launcher and owned inventory.
-    emit("shell.created", { info: { id: shellId, status: "running", command: "printf 'safe shell output'", cwd: directory,
-      shell: "/bin/sh", file: `/fixture/${shellId}.out`, metadata: { sessionID: sessionId, background }, time: { started: created } } });
+    emit("shell.created", { info });
     emit("session.message.content.updated", { sessionID: sessionId, messageID: message.id, content: message.content });
     return { shellId, taskId: `v2:${sessionId}:${callId}` };
   }
@@ -383,9 +387,16 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     const shell = shells.get(shellId);
     if (!shell) throw new Error("Unknown fixture shell");
     if (phase === "captureBeforeRemove") { shell.captureBeforeRemove = true; return; }
-    shell.exited = true;
+    if (shell.info.status === "running") {
+      shell.info.status = "exited";
+      shell.info.exit = 0;
+      shell.info.time.completed = now();
+    }
     if (shell.waiter === "pending") shell.waiter = "exited";
-    if (phase === "exit") { emit("shell.exited", { shellID: shellId }); return; }
+    if (phase === "exit") {
+      const data: ShellExited["data"] = { id: shellId, status: shell.info.status, exit: shell.info.exit };
+      emit("shell.exited", data); return;
+    }
     if (shell.captured) return;
     shell.captured = true;
     const state = shell.output === null ? "error" : "completed";
@@ -456,7 +467,8 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
           if (shell.captureBeforeRemove) shellPhase(id, "capture");
           shell.removed = true; shell.output = null;
           if (shell.waiter === "pending") shell.waiter = "failed";
-          emit("shell.deleted", { shellID: id });
+          const data: ShellDeleted["data"] = { id };
+          emit("shell.deleted", data);
         }
         if (loseWorker) { loseWorker = false; return new Response("truncated response", { status: 502 }); }
         return noContent();
@@ -468,7 +480,7 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
         const limit = Number(url.searchParams.get("limit") ?? output.length);
         return scoped({ output: output.slice(cursor, cursor + limit), size: output.length, cursor: output.length, truncated: false });
       }
-      return scoped({ id, status: shell.exited ? "exited" : "running", metadata: { sessionID: shell.parent.info.id } });
+      return scoped(shell.info);
     }
     if (url.pathname.startsWith("/api/permission/request/") && request.method === "POST") return noContent();
 

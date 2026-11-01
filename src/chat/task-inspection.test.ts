@@ -112,6 +112,23 @@ describe("task inspection panel", () => {
     view.close();
   });
 
+  test("verified ended shell removal keeps ordinary destructive guidance and no execution timer", () => {
+    const view = panel();
+    const task = item({ taskType: "shell", activity: { kind: "ended", endedAt: 60_000 }, control: { available: true } });
+    view.show({ conversationId: "parent", taskId: task.taskId, view: "output" }, task);
+    expect(hosts().strip.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(false);
+    expect(hosts().strip.textContent).toContain("Ended · result unavailable");
+    expect(hosts().strip.textContent).toContain("removes its provider record and output");
+    expect(hosts().strip.textContent).toContain("may prevent final result capture");
+    expect(hosts().strip.textContent).toContain("even if execution has already ended");
+    expect(hosts().strip.querySelector("[data-task-elapsed]")).toBeNull();
+    expect(live().filter(entry => entry.kind === "interval")).toHaveLength(0);
+    view.sync({ ...task, control: { available: false, reason: "Exact job proof unavailable" } });
+    expect(hosts().strip.querySelector("[data-stop-task]")).toBeNull();
+    expect(hosts().strip.textContent).toContain("Exact job proof unavailable");
+    view.close();
+  });
+
   test("activity and disabled Stop reasons are visible without hover while uncertain clocks stay stopped", () => {
     const view = panel();
     const task = item({ taskType: "agent", stateUncertain: true, activity: { kind: "working", observedAt: 50_000 }, control: { available: false, reason: "Stop unavailable: this execution's control proof is missing" } });

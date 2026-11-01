@@ -54,8 +54,17 @@ test("terminal identities authorize private reads but the trusted hook still obs
   } });
   expect(calls).toHaveLength(1);
   expect(calls[0]).toMatchObject(["ws", "opencode:parent", [
-    { executionId: "worker-dismissal:tool:launch", active: true, dismissible: false },
-    { executionId: "worker-dismissal:task:run", active: true, dismissible: false },
     { executionId: "positive", active: true, dismissible: false },
   ]]);
+});
+
+test("strong occurrence identity changes the causal signature but alias order and display clocks do not", () => {
+  const task = { type: "background_task", taskId: "reused", toolUseId: "call", status: "running", activity: {
+    kind: "unavailable", executionId: "v1:A", executionAliases: ["v1:A", "v1:alias"], observedAt: 10,
+  } };
+  const original = workerDismissalEvidence(task)!;
+  const reordered = workerDismissalEvidence({ ...task, activity: { ...task.activity, executionId: "v1:alias", executionAliases: ["v1:alias", "v1:A"], observedAt: 999 } })!;
+  expect(reordered.signature).toBe(original.signature);
+  const next = workerDismissalEvidence({ ...task, activity: { ...task.activity, executionId: "v1:B", executionAliases: ["v1:B"] } })!;
+  expect(next.signature).not.toBe(original.signature);
 });

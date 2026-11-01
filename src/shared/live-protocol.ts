@@ -119,7 +119,7 @@ export function childConversationEventsPath(conversationId: string): string {
   return `/api/chat/conversations/${encodeURIComponent(conversationId)}/events`;
 }
 // Workspace activity summary stream (task 1.1): opening comment, then
-// `event: activity` with data {working, awaiting} on every change (the first
+// `event: activity` with internal data {working, awaiting, unresolved} on every change (the first
 // one immediately), 15 s keepalives.
 export const CHILD_ACTIVITY_PATH = "/api/activity";
 export const CHILD_NOTIFICATIONS_PATH = "/api/chat/notifications/events";

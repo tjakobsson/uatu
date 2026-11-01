@@ -124,6 +124,17 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`canonical w
       }, width);
       await expect(track.locator("[data-worker-id]")).toHaveCount(1);
       await expect(track.locator("[data-dismiss-worker]")).toHaveCount(0);
+      // Row CSS responds to width before ResizeObserver commits the card's
+      // measured minimum. Wait for that actual allocation, not a fixed frame
+      // count or the old 320px floor with an already-wide 28px row.
+      await expect.poll(() => track.evaluate(node => {
+        const heading = node.querySelector(":scope > summary")!.getBoundingClientRect().height;
+        const row = node.querySelector(".chat-worker-row")!.getBoundingClientRect().height;
+        const css = getComputedStyle(node);
+        const intrinsic = heading + row + parseFloat(css.borderTopWidth) + parseFloat(css.borderBottomWidth);
+        const measured = parseFloat((node.parentElement as HTMLElement).style.getPropertyValue("--chat-worker-floor"));
+        return Math.abs(measured - intrinsic) <= 1 ? true : { measured, intrinsic };
+      })).toBe(true);
       const geometry = await track.evaluate(node => {
         const row = node.querySelector<HTMLElement>(".chat-worker-row")!;
         const inspect = row.querySelector<HTMLElement>(".chat-worker-inspect")!;

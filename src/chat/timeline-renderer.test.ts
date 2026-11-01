@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import type { ChatProjection } from "./projection";
-import { RATE_LIMIT_ITEM_ID, type ConversationItem, type TokenUsage, type ToolItem } from "./types";
+import { RATE_LIMIT_ITEM_ID, type BackgroundTaskItem, type ConversationItem, type TokenUsage, type ToolItem } from "./types";
 
 const dom = parseHTML("<!doctype html><html><body><div id=\"items\"></div></body></html>");
 beforeAll(() => {
@@ -71,6 +71,105 @@ function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjec
     ...overrides,
   };
 }
+
+test("launcher shows independently verified Working when private Stop control is unavailable", () => {
+  const host = dom.document.createElement("div") as unknown as HTMLElement;
+  const renderer = new TimelineRenderer();
+  const launcher: ToolItem = { id: "tool:launch", type: "tool", createdAt: 1, name: "subagent", status: "completed", input: '{"description":"Review","prompt":"Read tests"}' };
+  const worker: BackgroundTaskItem = { id: "task:worker", taskId: "worker", type: "background_task", createdAt: 2, description: "Review", toolUseId: "launch", status: "running", stateUncertain: true, control: { available: false, reason: "Stop proof unavailable" }, activity: { kind: "working" }, childConversationId: "child" };
+  try {
+    renderer.render(host, projectionWith([launcher, worker]), new Set([launcher.id]));
+    renderer.render(host, projectionWith([launcher, { ...worker, activity: { kind: "unavailable" } }]), new Set());
+    renderer.render(host, projectionWith([launcher, worker]), new Set());
+    const row = host.querySelector('[data-chat-item-id="tool:launch"]')!;
+    expect(row.querySelector(".chat-activity-status")?.textContent).toBe("Working");
+    expect(row.classList.contains("is-running")).toBe(true);
+    expect(row.textContent).not.toContain("reconnecting");
+    expect(row.querySelector('[data-open-conversation="child"]')).not.toBeNull();
+    expect(row.hasAttribute("open")).toBe(true);
+    expect(row.querySelector("[data-stop-task]")).toBeNull();
+    expect(worker.control?.available).toBe(false);
+    expect(worker.status).toBe("running");
+  } finally { renderer.reset(); }
+});
+
+test("launcher renders an ended unsettled worker without working animation, result or execution clock, including activity-only updates", () => {
+  const launcher: ToolItem = { id: "tool:launch", type: "tool", createdAt: 1, name: "subagent", status: "completed", elapsedMs: 90_000, input: '{"description":"Review","prompt":"Read tests"}', output: "Not a worker result" };
+  const working: BackgroundTaskItem = { id: "task:worker", taskId: "worker", type: "background_task", createdAt: 2, description: "Review", toolUseId: "launch", taskType: "agent", status: "running", control: { available: true }, activity: { kind: "working" } };
+  const ended: BackgroundTaskItem = { ...working, activity: { kind: "ended", endedAt: 5 } };
+  for (const incremental of [false, true]) {
+    const host = dom.document.createElement("div") as unknown as HTMLElement;
+    const renderer = new TimelineRenderer();
+    try {
+      if (incremental) renderer.render(host, projectionWith([launcher, working]), new Set([launcher.id]));
+      renderer.render(host, projectionWith([launcher, ended], { status: "idle" }), new Set([launcher.id]));
+      const row = host.querySelector('[data-chat-item-id="tool:launch"]')!;
+      expect(row.querySelector(".chat-activity-status")?.textContent).toBe("Ended · result unavailable");
+      expect(row.classList.contains("is-unknown")).toBe(true);
+      expect(row.classList.contains("is-running")).toBe(false);
+      expect(row.textContent).not.toMatch(/Started in background|Not a worker result|90s|1m 30s/);
+      expect(row.querySelector("[data-chat-jump]")).toBeNull();
+      expect(row.querySelector("[data-working-since], [data-elapsed-start], [data-completed-at]")).toBeNull();
+      expect(host.querySelector('[data-chat-item-id="task:worker"]')).toBeNull();
+      expect(ended).not.toHaveProperty("completedAt");
+      expect(ended.status).toBe("running");
+    } finally { renderer.reset(); }
+  }
+});
+
+for (const kind of ["subagent", "shell tool", "command"]) test(`${kind} launcher follows shared activity labels and glyphs on full and activity-only renders`, () => {
+  const launcher: ConversationItem = kind === "command"
+    ? { id: "tool:launch", type: "command", createdAt: 1, command: "fixture", status: "completed" }
+    : { id: "tool:launch", type: "tool", createdAt: 1, name: kind === "subagent" ? "subagent" : "bash", status: "completed", input: kind === "subagent" ? '{"description":"Review","prompt":"Read"}' : '{"command":"fixture"}' };
+  const worker: BackgroundTaskItem = { id: "task:worker", taskId: "worker", type: "background_task", createdAt: 2, description: "Review", toolUseId: "launch", taskType: kind === "subagent" ? "agent" : "shell", status: "running", control: { available: true } };
+  const cases = [
+    { kind: "working", label: "Working", running: true },
+    { kind: "checking", label: "Checking status…", running: false },
+    { kind: "session-active", label: "Session active · task unverified", running: false },
+    { kind: "unavailable", label: "Status unavailable · last seen unknown", running: false },
+    { kind: "ended", label: "Ended · result unavailable", running: false },
+    { kind: "needs-answer", label: "Needs your answer", running: false },
+    { kind: "working", label: "Working", running: true },
+  ] as const;
+  for (const incremental of [false, true]) {
+    const host = dom.document.createElement("div") as unknown as HTMLElement;
+    const renderer = new TimelineRenderer();
+    // Keep shell output lazy: this seam checks the actual public launcher row,
+    // not the independent output-window controller's browser requirements.
+    renderer.deferClosedActivity = true;
+    try {
+      for (const entry of cases) {
+        if (!incremental) renderer.reset();
+        renderer.render(host, projectionWith([launcher, { ...worker, activity: { kind: entry.kind } }], { status: "idle" }), new Set(kind === "subagent" ? [launcher.id] : []));
+        const row = host.querySelector('[data-chat-item-id="tool:launch"]')!;
+        expect(row.querySelector(".chat-activity-status")?.textContent).toBe(entry.label);
+        expect(row.classList.contains("is-running")).toBe(entry.running);
+        expect(row.classList.contains("is-unknown")).toBe(!entry.running);
+        if (kind === "subagent") {
+          expect(row.textContent).not.toContain("Started in background");
+          expect(row.querySelector("[data-chat-jump], [data-question-form], [data-permission-reply]")).toBeNull();
+          expect(row.querySelector("summary")?.textContent).toContain(entry.label);
+        }
+      }
+    } finally { renderer.reset(); }
+  }
+});
+
+for (const status of ["completed", "failed", "stopped"] as const) test(`confirmed ${status} worker keeps its real launcher outcome despite ended activity DTO`, () => {
+  const host = dom.document.createElement("div") as unknown as HTMLElement;
+  const renderer = new TimelineRenderer();
+  const launcher: ToolItem = { id: "tool:launch", type: "tool", createdAt: 1, name: "subagent", status: "completed", input: '{"description":"Review","prompt":"Read"}' };
+  const worker: BackgroundTaskItem = { id: "task:worker", taskId: "worker", type: "background_task", createdAt: 2, description: "Review", toolUseId: "launch", status, activity: { kind: "ended" }, summary: "Canonical result" };
+  try {
+    renderer.render(host, projectionWith([launcher, worker]), new Set([launcher.id, worker.id]));
+    const row = host.querySelector('[data-chat-item-id="tool:launch"]')!;
+    expect(row.querySelector(".chat-activity-status")?.textContent).toBe(status === "completed" ? "finished" : status);
+    expect(row.classList.contains(`is-${status === "stopped" ? "cancelled" : status}`)).toBe(true);
+    expect(row.querySelector('[data-chat-jump="task:worker"]')?.textContent).toBe(`View ${status} worker result`);
+    expect(host.textContent!.match(/Canonical result/g)).toHaveLength(1);
+    expect(host.textContent).not.toContain("Ended · result unavailable");
+  } finally { renderer.reset(); }
+});
 
 for (const name of ["subagent", "shell"]) test(`${name} result follows its launcher even when the worker start timestamp predates the tool row`, () => {
   const host = dom.document.createElement("div") as unknown as HTMLElement;

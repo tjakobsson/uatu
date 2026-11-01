@@ -58,6 +58,8 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       // for the actual canonical rows/counts before opening or measuring it.
       await expect(card.locator("[data-worker-id]")).toHaveCount(6);
       await expect(page.locator("#chat-compact-workers-label")).toHaveText("3 working · 3 finished");
+      await expect(page.locator("#chat-composer-notices .chat-worker-dismissal-notice")).toHaveText("Worker dismissals apply only on this device.");
+      await expect(page.locator("#chat-work-dock .chat-worker-dismissal-notice")).toHaveCount(0);
       await expect(card).toBeVisible();
       await saveEvidence(info, "initial-disclosure-input.json", JSON.stringify(await card.evaluate(node => {
         const summary = node.querySelector("summary")!, r = summary.getBoundingClientRect();

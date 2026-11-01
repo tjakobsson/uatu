@@ -75,7 +75,7 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
     const states = async (context: BrowserContext) => {
       const response = await context.request.get(personalUrl);
       expect(response.status()).toBe(200); expect(response.headers()["cache-control"]).toContain("no-store");
-      return response.json() as Promise<{ entries: Array<{ executionId: string; dismissed: boolean }> }>;
+      return response.json() as Promise<{ entries: Array<{ executionId: string; revision: number; dismissed: boolean }> }>;
     };
     const lifecycleMutations: string[] = [];
     for (const page of pages) page.on("request", request => {
@@ -91,6 +91,7 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
     const saved = await dismissedResponse;
     expect(saved.status(), JSON.stringify(await saved.json())).toBe(200);
     const firstDismissedId = saved.request().postDataJSON().executionId as string;
+    expect(saved.request().postDataJSON()).toEqual({ version: 1, conversationId, executionId: worker.activity!.executionId, expectedRevision: 0, operation: "dismiss" });
     await expect(row(a1, worker.id)).toHaveCount(0); await expect(row(a2, worker.id)).toHaveCount(0);
     await expect(row(b, worker.id)).toBeVisible();
     await expect.poll(async () => (await frames(a2)).filter(frame => frame.kind === "data").length).toBeGreaterThan(initialA2Frames);
@@ -105,6 +106,7 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
     const endedSaved = await endedResponse;
     expect(endedSaved.status()).toBe(200);
     const endedDismissedId = endedSaved.request().postDataJSON().executionId as string;
+    expect(endedSaved.request().postDataJSON()).toEqual({ version: 1, conversationId, executionId: ended.activity!.executionId, expectedRevision: 0, operation: "dismiss" });
     await expect(a2.locator("#chat-compact-workers")).toBeHidden();
     await expect(b.locator("#chat-compact-workers-label")).toHaveText("2 unresolved");
     await captureScreenshot(a2, info, `${engine}-account-a-all-dismissed`);
@@ -126,6 +128,24 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
     for (const page of pages) await expect(row(page, fresh.id)).toBeVisible();
     await captureScreenshot(a2, info, `${engine}-retired-mark-new-execution-visible`);
 
+    // Capture authority before the fresh action, independently of its POST or
+    // the eventual stored mark. The same proven occurrence now has primary B.
+    const currentResponse = await contexts[0]!.request.get(`${workspace.sessionUrl}api/chat/conversations/${encodeURIComponent(conversationId)}`);
+    expect(currentResponse.status()).toBe(200);
+    const currentSnapshot = await currentResponse.json() as ConversationSnapshot;
+    const currentWorker = currentSnapshot.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.id === worker.id)!;
+    expect(currentWorker.activity?.kind).toBe("unavailable");
+    expect(currentWorker.activity?.executionAliases?.slice().sort()).toEqual(worker.activity!.executionAliases!.slice().sort());
+    const freshDismissedId = currentWorker.activity!.executionId!;
+    expect(currentWorker.activity!.executionAliases).toContain(firstDismissedId);
+    expect(freshDismissedId).toBe(recovered.activity!.executionId);
+    expect(freshDismissedId).not.toBe(firstDismissedId);
+    const beforeFreshDismissal = await states(contexts[0]!);
+    const retiredFirst = beforeFreshDismissal.entries.find(entry => entry.executionId === firstDismissedId)!;
+    const currentFresh = beforeFreshDismissal.entries.find(entry => entry.executionId === freshDismissedId)!;
+    expect(retiredFirst).toEqual({ executionId: firstDismissedId, revision: 2, dismissed: false });
+    expect(currentFresh).toEqual({ executionId: freshDismissedId, revision: 2, dismissed: false });
+
     const freshDismissalResponse = a1.waitForResponse(response => new URL(response.url()).pathname.endsWith("/api/personal-worker-dismissals") && response.request().method() === "POST", { timeout: 10_000 });
     const readsBeforeFreshDismissal = personalReads.get(a1)!;
     await row(a1, worker.id).getByRole("button", { name: "Dismiss worker from summary:", exact: false }).click();
@@ -142,6 +162,8 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
       freshSaved = await explicitRetry;
     }
     expect(freshSaved.status(), JSON.stringify(await freshSaved.json())).toBe(200);
+    const freshMutation = freshSaved.request().postDataJSON();
+    expect(freshMutation).toEqual({ version: 1, conversationId, executionId: freshDismissedId, expectedRevision: currentFresh.revision, operation: "dismiss" });
     await expect(row(a2, worker.id)).toHaveCount(0); await expect(row(a2, fresh.id)).toBeVisible();
     await contexts[1]!.setOffline(true);
     const newExecutionResponse = a1.waitForResponse(response => new URL(response.url()).pathname.endsWith("/api/personal-worker-dismissals") && response.request().method() === "POST", { timeout: 10_000 });
@@ -149,6 +171,7 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
     const newSaved = await newExecutionResponse;
     expect(newSaved.status()).toBe(200);
     const newDismissedId = newSaved.request().postDataJSON().executionId as string;
+    expect(newSaved.request().postDataJSON()).toEqual({ version: 1, conversationId, executionId: fresh.activity!.executionId, expectedRevision: 0, operation: "dismiss" });
     expect(newDismissedId).not.toBe(firstDismissedId);
     await expect(row(a1, fresh.id)).toHaveCount(0);
     await expect(row(a2, fresh.id)).toBeVisible(); // The offline device really missed this invalidation.
@@ -161,7 +184,20 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
     // store. It intentionally retains the harness OS process and child data.
     await a2.reload(); await chat(a2, conversationId);
     await expect(a2.locator("#chat-compact-workers")).toBeHidden();
-    expect((await states(contexts[1]!)).entries.filter(entry => entry.dismissed).map(entry => entry.executionId).sort()).toEqual([endedDismissedId, firstDismissedId, newDismissedId].sort());
+    const restartedState = await states(contexts[1]!);
+    await saveEvidence(info, `${engine}-dismissal-identity-chronology.json`, JSON.stringify({
+      initialMutation: saved.request().postDataJSON(), endedMutation: endedSaved.request().postDataJSON(),
+      authoritativeBeforeFreshAction: currentWorker, beforeFreshDismissal, freshMutation,
+      newExecutionMutation: newSaved.request().postDataJSON(), restartedState,
+    }, null, 2));
+    // Three logical dismissals persist; the old primary A stays durably
+    // retired while the fresh explicit action is stored against primary B.
+    expect(restartedState.entries.slice().sort((a, b) => a.executionId.localeCompare(b.executionId))).toEqual([
+      { executionId: endedDismissedId, revision: 0, dismissed: true },
+      { executionId: firstDismissedId, revision: 2, dismissed: false },
+      { executionId: freshDismissedId, revision: 2, dismissed: true },
+      { executionId: newDismissedId, revision: 0, dismissed: true },
+    ].sort((a, b) => a.executionId.localeCompare(b.executionId)));
     await b.reload(); await chat(b, conversationId); await openChatWorkers(b);
     for (const item of [worker, ended, fresh]) await expect(row(b, item.id)).toBeVisible();
     expect((await states(contexts[2]!)).entries.every(entry => !entry.dismissed)).toBe(true);

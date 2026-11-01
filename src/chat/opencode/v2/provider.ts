@@ -1,4 +1,5 @@
 import { OpenCode } from "@opencode/client";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -85,6 +86,10 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly readLifetime = new AbortController();
   private streamReads?: AbortController;
   private readonly backgroundReads = new Map<string, Promise<BackgroundSnapshot>>();
+  // Read-side observations are not live-event admission or Stop evidence.
+  // Fixed-size digests and at most 128 timestamps bound this separate cache;
+  // eviction loses only a last-seen caption, never an authorization fence.
+  private readonly coldActivityObservations = new Map<string, number>();
   private readonly controls = new BackgroundControls({ changed: () => this.eventMemory?.workers.enforceBudget() });
   private eventMemory?: ReturnType<typeof createOpenCodeV2Memory>;
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
@@ -467,8 +472,16 @@ export class OpenCodeV2Provider implements ChatProvider {
       const entry = normalized.get(update.item.id);
       if (entry) normalized.set(update.item.id, { ...entry, item: update.item });
     }
-    for (const [id, entry] of normalized) if (entry.item.type === "background_task" && entry.item.status !== "running") normalized.set(id, { ...entry,
-      item: { ...entry.item, activity: this.terminalWorkerActivity(entry.item.taskId, workers.occurrence(entry.item.taskId)) } });
+    for (const [id, entry] of normalized) if (entry.item.type === "background_task") {
+      const occurrence = workers.occurrence(entry.item.taskId), executionAliases = workerExecutionIds(occurrence);
+      // A complete historical launcher identifies its recorded occurrence even
+      // when it supplies no evidence of current activity. Do not force clients
+      // back onto a reusable call id just because this is a transcript read.
+      const activity: import("../../types").WorkerActivity = entry.item.status !== "running"
+        ? this.terminalWorkerActivity(entry.item.taskId, occurrence, entry.item.activity)
+        : { kind: "unavailable", ...(executionAliases.length ? { executionId: executionAliases[0], executionAliases } : {}) };
+      normalized.set(id, { ...entry, item: { ...entry.item, activity } });
+    }
     if (overlay) for (const [id, entry] of normalized) if (entry.item.type === "background_task") normalized.set(id, { ...entry,
       item: this.controls.project(entry.item, workers.occurrence(entry.item.taskId), controlRead, workers.controlWitnesses(entry.item.taskId)) });
     this.eventMemory?.workers.enforceBudget();
@@ -614,11 +627,11 @@ export class OpenCodeV2Provider implements ChatProvider {
     const observedAt = Date.now();
     for (const { item } of folded.values()) {
       if (item.type !== "background_task") continue;
-      if (item.status !== "running") { tasks.push({ ...item, stateUncertain: false, activity: this.terminalWorkerActivity(item.taskId, folded.occurrences.get(item.taskId)) }); continue; }
+      if (item.status !== "running") { tasks.push({ ...item, stateUncertain: false, activity: this.terminalWorkerActivity(item.taskId, folded.occurrences.get(item.taskId), item.activity) }); continue; }
       const occurrence = folded.occurrences.get(item.taskId);
       let confirmed = !!item.childConversationId && active?.[item.childConversationId] !== undefined;
       let shellExecuting = false;
-      let shellEndedAt: number | undefined;
+      let inventoryShellEnd: number | undefined;
       if (item.taskType === "shell" && item.outputFile?.startsWith("shell:")) {
         const shell = await this.client.shell.get({ id: item.outputFile.slice(6), ...this.scope }, { signal }).catch(() => undefined);
         // Exit is not job settlement: capture may still be pending. The
@@ -628,7 +641,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         const command = shellCommandFingerprint(native.command);
         const matched = confirmed && command !== undefined && occurrence?.launches.every(launch => launch.commandFingerprint === command);
         shellExecuting = matched === true && native.status === "running";
-        shellEndedAt = matched && ["exited", "timeout", "killed"].includes(String(native.status)) ? numberField(time.completed) : undefined;
+        inventoryShellEnd = matched && ["exited", "timeout", "killed"].includes(String(native.status)) ? numberField(time.completed) : undefined;
       }
       // Neither a successful but inconclusive lookup nor an absent active
       // child is positive verification for an overlapping transcript caller.
@@ -643,9 +656,15 @@ export class OpenCodeV2Provider implements ChatProvider {
       const liveOccurrence = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
       const coveredColdRead = this.streamGeneration === 0 || this.streamGeneration === 1 && this.streamConnected;
       const compatibleCurrent = !liveOccurrence && coveredColdRead || !!live && !live.uncertain;
+      // An end clock needs the same independent occurrence attribution as
+      // running inventory. Ownership/command alone also match a same-ID rebirth.
+      // A previously proven live execution end remains authoritative below.
+      const shellEndedAt = confirmed && unique && compatibleCurrent ? inventoryShellEnd : undefined;
       const verified = confirmed && unique && compatibleCurrent
         && (item.taskType === "shell" ? shellExecuting : true);
-      const lastSeen = this.eventMemory?.workers.lastActivity(item.taskId, occurrence)?.observedAt;
+      const coldIdentity = unique && !liveOccurrence && coveredColdRead ? this.coldActivityIdentity(occurrence) : undefined;
+      const lastSeen = this.eventMemory?.workers.lastActivity(item.taskId, occurrence)?.observedAt
+        ?? (coldIdentity ? this.coldActivityObservations.get(coldIdentity) : undefined);
       const executionAliases = workerExecutionIds(occurrence), executionId = executionAliases[0];
       const activity: import("../../types").WorkerActivity = live?.executionEnd || shellEndedAt !== undefined
         ? { kind: "ended", observedAt: lastSeen, endedAt: live?.executionEnd?.created ?? shellEndedAt, executionId, generation: this.streamGeneration }
@@ -659,6 +678,11 @@ export class OpenCodeV2Provider implements ChatProvider {
         && activity.kind !== "ended") { activity.kind = "needs-answer"; activity.request = request; activity.observedAt = observedAt; }
       else if (request && pendingRequests && !pendingRequests.some(entry => entry.id === request.id && entry.sessionID === occurrence?.worker)) this.eventMemory?.workers.resolveRequest(request.id, request.kind, occurrence?.worker);
       if (live) this.eventMemory?.workers.rememberActivity(item.taskId, activity, occurrence);
+      if (coldIdentity && activity.kind === "working") {
+        this.coldActivityObservations.delete(coldIdentity);
+        this.coldActivityObservations.set(coldIdentity, observedAt);
+        while (this.coldActivityObservations.size > 128) this.coldActivityObservations.delete(this.coldActivityObservations.keys().next().value!);
+      }
       tasks.push({ ...item, activity, stateUncertain: item.stateUncertain === true || !confirmed });
     }
     signal.throwIfAborted();
@@ -674,13 +698,12 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (!request || request.id !== item.activity.request?.id || request.kind !== item.activity.request?.kind)
           item = { ...item, activity: { ...item.activity, kind: "working", request: undefined } };
       }
-      if ((item.activity?.kind === "working" || item.activity?.kind === "needs-answer") && raw && (!current || current.uncertain)) item = { ...item,
+      if ((item.activity?.kind === "working" || item.activity?.kind === "needs-answer" || item.activity?.kind === "ended" && !current?.executionEnd)
+        && raw && (!current || current.uncertain)) item = { ...item,
         activity: { ...item.activity, kind: current?.executionEnd ? "ended" : item.taskType === "agent" && active?.[item.childConversationId ?? ""] ? "session-active" : "unavailable",
           request: undefined,
-          ...(current?.executionEnd ? { endedAt: current.executionEnd.created } : {}) } };
-      const projected = this.controls.project(item, folded.occurrences.get(item.taskId), controlRead, folded.workers.controlWitnesses(item.taskId));
-      return { ...projected, control: { available: item.status === "running" && !projected.stateUncertain,
-        ...(projected.stateUncertain ? { reason: "Worker control is unverified" } : {}) } };
+          endedAt: current?.executionEnd?.created } };
+      return this.controls.project(item, folded.occurrences.get(item.taskId), controlRead, folded.workers.controlWitnesses(item.taskId));
     });
     this.eventMemory?.workers.enforceBudget();
     return { tasks: projected, occurrences: folded.occurrences, controls: new Map(projected.flatMap(item => {
@@ -689,12 +712,25 @@ export class OpenCodeV2Provider implements ChatProvider {
     })) };
   }
 
-  private terminalWorkerActivity(taskId: string, occurrence?: WorkerOccurrenceEvidence): import("../../types").WorkerActivity {
-    const executionAliases = workerExecutionIds(occurrence);
+  private terminalWorkerActivity(taskId: string, occurrence?: WorkerOccurrenceEvidence, recorded?: import("../../types").WorkerActivity): import("../../types").WorkerActivity {
+    // A notification-only row retains its separate admitted-record identity.
+    // Once any launcher owns the row, only that launch's proof may name it,
+    // including withholding identity for incomplete immutable launch facts.
+    const provisionalId = recorded?.executionId;
+    const executionAliases = occurrence ? workerExecutionIds(occurrence)
+      : provisionalId && /^v1:notification:[a-f0-9]{64}$/.test(provisionalId) ? [provisionalId] : [];
     const live = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
     return { kind: "ended", executionId: executionAliases[0], ...(executionAliases.length ? { executionAliases } : {}),
       observedAt: this.eventMemory?.workers.lastActivity(taskId, occurrence)?.observedAt,
       endedAt: live?.executionEnd?.created ?? occurrence?.executionEnd?.created, generation: this.streamGeneration };
+  }
+
+  private coldActivityIdentity(occurrence: WorkerOccurrenceEvidence): string | undefined {
+    // Require a complete immutable launch namespace, not a child/session clock.
+    // Exact complete folds deliberately do not bridge partial/changed aliases.
+    const aliases = workerExecutionIds(occurrence);
+    if (!aliases.length || occurrence.launches.some(launch => launch.conflicted)) return;
+    return createHash("sha256").update(JSON.stringify([this.streamGeneration, occurrence])).digest("hex");
   }
 
   private beginControlRead(parent: string, inventory = false): ControlRead {
@@ -1043,6 +1079,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   async *events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent> {
+    this.coldActivityObservations.clear();
     this.historyReuse.invalidate();
     this.invalidateChildParents();
     this.backgroundReads.clear();
@@ -1166,9 +1203,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             const request = live && memory.workers.linkedRequest(item.taskId, occurrence);
             if (request && activity.kind === "working") { activity.kind = "needs-answer"; activity.request = request; }
             if (item.status === "running") memory.workers.rememberActivity(item.taskId, activity, occurrence);
-            return { ...projected, activity: item.status === "running" ? activity : this.terminalWorkerActivity(item.taskId, occurrence),
-              control: { available: item.status === "running" && !projected.stateUncertain,
-                ...(projected.stateUncertain ? { reason: "Worker control is unverified" } : {}) } };
+            return { ...projected, activity: item.status === "running" ? activity : this.terminalWorkerActivity(item.taskId, occurrence, item.activity) };
           };
           normalized.updates = normalized.updates.map(update => update.kind === "upsert" && update.item.type === "background_task"
             ? { ...update, item: projectWorker(update.item) } : update);
@@ -1437,6 +1472,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.historyReuse.dispose();
     this.childParents.dispose();
     await Promise.allSettled(this.backgroundReads.values());
+    this.coldActivityObservations.clear();
     this.controls.clear();
   }
 
