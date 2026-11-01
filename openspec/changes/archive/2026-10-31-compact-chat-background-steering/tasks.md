@@ -115,7 +115,7 @@ historical, not evidence for this amendment.
 - [x] Measure remaining panel pixels after in-flow chrome/composer/notices/safe areas; reserve 20% bounded to 32–96px, yielding to whole actions down to min(16px, 10% of remaining space). Keep independent scrolling, content-sized short lists and the existing collapsed policy.
 - [x] Update both active designs/specs and CHAT documentation with the explicit collapsed/expanded distinction; retain meaningful action, disclosure, focus and anchor tests.
 - [x] Verify the implementation with focused units, Chromium layout/action/anchor cases, an actual 005cb41 baseline comparison, typecheck/build and strict specifications; hand off evidence and runtime blockers without publication.
-- [ ] Complete fresh WebKit acceptance and independent review. Initial WebKit canonical worker counts did not converge; subsequent mobile activation stalled before layout assertions. No WebKit acceptance or independently validated completion is claimed.
+- [x] Reconcile WebKit acceptance and independent review for archival. The 2026-10-23 follow-up records 14 Chromium/WebKit desktop/touch browser passes, two clear independent reviews and passing remote CI for `6522fe5`. These scoped results do not establish that the earlier expanded-card WebKit acceptance completed: its worker-count and activation-stall limitations remain recorded. Further acceptance work is not required for archival under @addiberra's 2026-10-31 direction linked below; no blocked check is claimed to have passed.
 
 Evidence lives in `~/.cache/opencode/scratch/expanded-panel-budget-20261018/`.
 `baseline-red.log` runs archived **005cb41** product source with the focused
@@ -467,7 +467,7 @@ Primary final browser evidence is the completed Playwright report in `compact-re
 - [x] 10.4 Use the latest fixed-height viewport-owned pointer-transparent envelope: silent 500ms arming, then a full 104px extension with bottom-up green fill and an above-finger two-second countdown. Preserve fixed target, 2500ms exactly-once dispatch, all cancellation guards and reduced-motion information; this supersedes envelope growth.
 - [x] 10.5 Run all 202 steering/worker/hold/mobile-layout browser checks successfully, including all prior 47 hold checks. Capture light/dark phone, 380/450px portrait and 230px landscape frame/occlusion evidence; retain existing 480px desktop, safe-area, focus and anchor coverage.
 - [x] 10.6 Validate clean isolated unit CI (5,278 pass / 16 skip), API (208 pass), typecheck, build, contract structure and strict specs (60 valid). Native macOS watcher timing failures in intermediate runs passed isolated and in the final owned-temporary-directory CI run; no observer tests or product behavior were changed.
-- [ ] 10.7 Resolve wider-suite pre-existing blockers before declaring the entire chat suite green: 637 functional passes / five failures reproduced on unchanged c2641ce (desktop configuration-details expectation; two hidden-child responsiveness cases; two touch-child shell cases). Performance adds 16 passes / four touch-child setup failures using the same unchanged hidden desktop-worker selectors. Preserve these tests; lead review decides their separate correction. Native iPhone/Safari hold/callout verification remains unperformed.
+- [x] 10.7 Reconcile the historical wider-suite blockers against later verification. The 2026-10-19 upstream-merge note records 549 Chromium passes / 3 existing gallery skips / 0 failures and 11 performance passes, with independent review clear; the 2026-10-23 follow-up records passing remote CI and CodeQL for `6522fe5`. The earlier 637-pass/five-failure functional run and 16-pass/four-failure performance run remain historical evidence, not current blockers or an aggregate clean-suite claim. The later user-reported iPhone acceptance supersedes the earlier native-iPhone caveat within its reported scope. Supplementary native hold/callout checks are not required at @addiberra's request; no additional physical-device pass is claimed.
 
 Evidence is retained under the task-owned scratch directory
 `/private/var/folders/kd/gws6pqw92ss4lfbdk23n0jxc0000gn/T/opencode/currentfixes-evidence/`:
@@ -593,3 +593,9 @@ the images, captions, provenance and documentation. Title and ready status are
 unchanged. Remote CI and CodeQL passed for `6522fe5`; the second browser leg first
 timed out downloading Ubuntu dependencies before tests, then passed on a fresh
 runner without changing tests, workers, retries or timeouts.
+
+## Archive disposition (2026-10-31)
+
+[@addiberra confirmed that both remaining changes are implemented and should be archived](https://github.com/tjakobsson/uatu/pull/571#issuecomment-6542184300). The two stale checklist entries above are closed by reconciling their historical blockers with the later results and this explicit archival decision. No new runtime, browser, physical-device or independent-review run was performed for this bookkeeping update.
+
+Supplementary physical-device checks are not required at @addiberra's request. The user-reported iPhone acceptance remains limited to its original scope; it is not evidence that every later mobile correction, Android behavior, assistive technology or Dynamic Type was tested. Earlier WebKit activation stalls and uncompleted expanded-card acceptance remain testing limitations. Later scoped Chromium/WebKit passes and remote CI do not retroactively turn those blocked runs into passes. No additional audit or follow-up audit issue is required.

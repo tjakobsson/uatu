@@ -47,9 +47,9 @@
 
 ## 6. Integrated acceptance and independent review
 
-- [x] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
-- [x] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
-- [x] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
+- [ ] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
+- [ ] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
+- [ ] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
 - [ ] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
 
 ## Verification evidence (2026-10-30)
