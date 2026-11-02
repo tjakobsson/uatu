@@ -207,6 +207,7 @@ Uatu SHALL associate a uniquely owned new child and its first native execution w
 - **THEN** Uatu does not assign current activity or terminal results to the old task based only on a shared child ID
 - **AND** a stop of that old target never redirects to the newer execution
 - **AND** retained prelaunch birth or verified-ownership evidence already constitutes a known association: an ordinary positive contradiction before launcher success fences delayed admission rather than being forgotten until a row exists
+- **AND** identified session inventory records apply the same observation before workspace filtering, while true parent identity/workspace contradictions fence directly verified prelaunch children even without birth/task rows
 
 #### Scenario: Parent-only contradiction preserves a healthy nested worker cohort
 - **WHEN** an ordinary or occurrence-aware lookup changes C's parent from A to B within the same workspace while C independently owns a verified worker D

@@ -310,7 +310,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       const page = await this.client.session.list(cursor
         ? { directory: this.directory, limit: 100, cursor }
         : { directory: this.directory, order: "desc", limit: 100 });
-      for (const info of page.data) if (this.owns(info)) sessions.push(toSession(info));
+      for (const info of page.data) {
+        const observed = this.observeSessionRecord(info);
+        if (observed.info) sessions.push(toSession(observed.info));
+      }
       cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
     } while (cursor);
     return sessions;
@@ -326,7 +329,9 @@ export class OpenCodeV2Provider implements ChatProvider {
         ...(configuration.variant ? { variant: configuration.variant } : {}),
       } } : {}),
     });
-    return toSession(info);
+    const observed = this.observeSessionRecord(info);
+    if (!observed.info) throw new Error("OpenCode returned a created session without workspace confirmation");
+    return toSession(observed.info);
   }
 
   async getSession(id: string): Promise<ProviderSession | null> {
@@ -2109,11 +2114,22 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (isLookupMiss(error)) return { info: null, foreignWorkspace: false };
       throw new Error(`OpenCode session lookup failed: ${stringify(error)}`);
     }
-    const directory = stringValue(asRecord(asRecord(info).location).directory);
+    return this.observeSessionRecord(info, sessionId);
+  }
+
+  /** Consume authoritative native records before public filtering. Collection
+   * and create responses have no requested id: only their valid returned id
+   * can identify an existing association. This never admits new ownership. */
+  private observeSessionRecord(value: unknown, requestedId?: string): SessionLookup {
+    const info = asRecord(value);
+    const directory = stringValue(asRecord(info.location).directory);
     const foreignWorkspace = directory !== undefined && path.resolve(directory) !== this.workspace;
     const id = stringValue(info.id), actualParent = stringValue(info.parentID);
-    if (foreignWorkspace || id !== undefined && id !== sessionId) this.revokeKnownSessionOwnership(sessionId);
-    else if (this.owns(info) && id === sessionId && actualParent) this.revokeKnownSessionOwnership(sessionId, actualParent);
+    const subject = requestedId ?? (id !== undefined && id.length <= 512 && !/[\u0000-\u001f\u007f]/.test(id) ? id : undefined);
+    if (subject !== undefined) {
+      if (foreignWorkspace || requestedId !== undefined && id !== undefined && id !== requestedId) this.revokeKnownSessionOwnership(subject);
+      else if (this.owns(info) && id === subject && actualParent) this.revokeKnownSessionOwnership(subject, actualParent);
+    }
     return { info: this.owns(info) ? info : null, foreignWorkspace };
   }
 

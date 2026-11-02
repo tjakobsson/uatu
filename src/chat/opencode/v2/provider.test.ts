@@ -2213,8 +2213,8 @@ for (const view of ["none", "hidden", "prefix"] as const) test(`current control 
   } finally { await provider.dispose(); }
 });
 
-for (const site of ["ordinary", "configuration", "history", "stream", "reverted", "final"] as const)
-for (const change of ["parent", "workspace", "wrong-id", "missing-parent", "healthy"] as const)
+for (const site of ["ordinary", "configuration", "inventory", "create", "history", "stream", "reverted", "final"] as const)
+for (const change of (site === "inventory" || site === "create" ? ["parent", "workspace", "missing-parent", "healthy"] as const : ["parent", "workspace", "wrong-id", "missing-parent", "healthy"] as const))
 test(`parent-only ownership contradiction preserves independently proven nested workers (${site}/${change})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   const outer = structuredClone(fixture.launch), nested = structuredClone(fixture.launch);
@@ -2224,6 +2224,11 @@ test(`parent-only ownership contradiction preserves independently proven nested 
   nested.content[0].state.metadata.sessionID = "ses_nested";
   let changed = false, reverted = false, wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined, sequence = 0;
   const frame = (type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `nested-owner-${++sequence}`, type, data, created, location: { directory: WORKSPACE } })}\n\n`));
+  const record = (id: string) => session(id, id === "ses_child" ? {
+    parentID: changed && change === "parent" ? "ses_new_parent" : changed && change === "missing-parent" ? undefined : "ses_parent", time: { created: 22, updated: 23 },
+    ...(changed && change === "workspace" ? { location: { directory: "/foreign" } } : changed && change === "wrong-id" ? { id: "wrong_child" } : {}),
+  } : id === "ses_nested" ? { parentID: "ses_child", time: { created: 42, updated: 43 } }
+    : id === "ses_parent" && reverted ? { revert: { messageID: outer.id } } : {});
   const server = fakeOpenCode({
     "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
     "GET /api/session/active": () => ({ ses_child: { type: "running" }, ses_nested: { type: "running" } }),
@@ -2231,14 +2236,9 @@ test(`parent-only ownership contradiction preserves independently proven nested 
     "GET /api/session/ses_child/message": () => ({ data: [nested], cursor: {} }),
     "GET /api/session/ses_nested/message": () => ({ data: [], cursor: {} }),
     "GET /api/session/:id/inbox": () => ({ data: [] }),
-    "GET /api/session/:id": ({ path }) => {
-      const id = path.split("/").at(-1)!;
-      return session(id, id === "ses_child" ? {
-        parentID: changed && change === "parent" ? "ses_new_parent" : changed && change === "missing-parent" ? undefined : "ses_parent", time: { created: 22, updated: 23 },
-        ...(changed && change === "workspace" ? { location: { directory: "/foreign" } } : changed && change === "wrong-id" ? { id: "wrong_child" } : {}),
-      } : id === "ses_nested" ? { parentID: "ses_child", time: { created: 42, updated: 43 } }
-        : id === "ses_parent" && reverted ? { revert: { messageID: outer.id } } : {});
-    },
+    "GET /api/session": () => ({ data: [record("ses_child")], cursor: {} }),
+    "POST /api/session": () => record("ses_child"),
+    "GET /api/session/:id": ({ path }) => record(path.split("/").at(-1)!),
     "POST /api/session/:id/interrupt": () => ({ interrupted: true }),
   });
   const provider = server.provider(), lifetime = new AbortController();
@@ -2265,6 +2265,8 @@ test(`parent-only ownership contradiction preserves independently proven nested 
     changed = true;
     if (site === "ordinary") await provider.getSession("ses_child");
     else if (site === "configuration") await provider.getConversationConfiguration("ses_child");
+    else if (site === "inventory") await provider.listSessions();
+    else if (site === "create") await provider.createSession("server-generated-id").catch(() => undefined);
     else if (site === "history") await provider.listMessages("ses_parent", { limit: 100 });
     else if (site === "stream") await send("session.message.content.updated", { sessionID: "ses_parent", messageID: outer.id, content: outer.content }, 60);
     else if (site === "reverted") { reverted = true; await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }).catch(() => undefined); }
@@ -2287,7 +2289,7 @@ test(`parent-only ownership contradiction preserves independently proven nested 
     }
     const expected = subtree ? [] : ["/api/session/ses_nested/interrupt"];
     if (site === "final" && change === "healthy") expected.unshift("/api/session/ses_child/interrupt");
-    expect(server.calls.filter(call => call.method === "POST").map(call => call.path)).toEqual(expected);
+    expect(server.calls.filter(call => call.method === "POST" && call.path.endsWith("/interrupt")).map(call => call.path)).toEqual(expected);
   } finally { lifetime.abort(); await pump; await provider.dispose(); }
 });
 
@@ -4189,9 +4191,57 @@ describe("OpenCode 2.x provider: sessions", () => {
     await expect(lost.provider().backgroundBlockingWork("ses_parent")).rejects.toMatchObject({ name: "OperationOutcomeUnknownError" });
     expect(lost.requests("POST", "/api/session/ses_parent/background")).toHaveLength(1);
   });
-  for (const stage of ["birth", "verified-parent", "cache-only"] as const) for (const reader of ["session", "configuration"] as const)
-  for (const change of ["workspace", "parent", "wrong-id", "missing", "unrelated", "healthy"] as const)
-  test(`ordinary prelaunch observation fences only retained ownership facts (${stage}/${reader}/${change})`, async () => {
+  for (const method of ["inventory", "create", "rename"] as const)
+  for (const observation of (method === "inventory" ? ["parent", "workspace", "missing-parent", "missing-location", "absence", "unrelated", "malformed", "healthy"] as const
+    : method === "create" ? ["parent", "workspace", "unrelated", "healthy"] as const : ["parent", "workspace"] as const))
+  test(`all native SessionInfo inputs fence older owned Stop responses (${method}/${observation})`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let armed = false, reads = 0, renamed = false, entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const returned = () => session(observation === "unrelated" ? "unrelated" : "ses_child", {
+      parentID: observation === "parent" ? "foreign_parent" : observation === "missing-parent" ? undefined : "ses_parent",
+      ...(observation === "workspace" ? { title: "private-foreign-title", location: { directory: "/foreign/private" } } : observation === "missing-location" ? { location: {} } : observation === "malformed" ? { id: undefined, parentID: "foreign_parent" } : {}),
+    });
+    const server = fakeOpenCode({
+      "GET /api/session": () => ({ data: observation === "absence" ? [] : [returned()], cursor: {} }),
+      "POST /api/session": () => returned(),
+      "PATCH /api/session/ses_child": () => { renamed = true; return undefined; },
+      "GET /api/session/active": () => ({ ses_child: { type: "running" } }),
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "GET /api/session/ses_child": async () => {
+        const owned = session("ses_child", { parentID: "ses_parent" });
+        if (armed && ++reads === 2) { entered(); await gate; return owned; }
+        return renamed ? returned() : owned;
+      },
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch], cursor: {} }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
+    });
+    const provider = server.provider(); let stop: Promise<unknown> | undefined;
+    const contradiction = observation === "parent" || observation === "workspace";
+    try {
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.control?.available).toBe(true);
+      armed = true; stop = provider.stopTask("ses_parent", "v2:ses_parent:call_worker").catch(error => error); await started;
+      if (method === "inventory") {
+        const listed = await provider.listSessions();
+        if (observation === "workspace" || observation === "missing-location" || observation === "absence") expect(listed).toEqual([]);
+        if (observation === "parent") expect(listed[0]?.parentId).toBe("foreign_parent");
+      } else if (method === "create") {
+        const created = await provider.createSession("client-id-not-a-native-session-id").catch(error => error);
+        if (observation === "workspace") { expect(created).toBeInstanceOf(Error); expect(String(created)).not.toContain("private-foreign-title"); expect(String(created)).not.toContain("/foreign/private"); }
+        else expect(created.id).toBe(observation === "unrelated" ? "unrelated" : "ses_child");
+      } else await provider.renameSession("ses_child", "renamed").catch(() => undefined);
+      release(); const result = await stop;
+      expect(server.requests("POST", "/api/session/ses_child/interrupt")).toHaveLength(contradiction ? 0 : 1);
+      if (contradiction) expect(result).toMatchObject({ name: "BackgroundTaskUnavailableError" }); else expect(result).toBeUndefined();
+    } finally { release(); await stop; await provider.dispose(); }
+  });
+
+  for (const stage of ["birth", "verified-parent", "cache-only"] as const) for (const reader of ["session", "configuration", "inventory"] as const)
+  for (const target of (stage === "verified-parent" ? ["child", "parent"] as const : ["child"] as const))
+  for (const change of (reader === "inventory" ? ["workspace", "parent", "missing", "unrelated", "healthy"] as const : ["workspace", "parent", "wrong-id", "missing", "unrelated", "healthy"] as const))
+  test(`ordinary prelaunch observation fences only retained ownership facts (${stage}/${reader}/${target}/${change})`, async () => {
     const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
     const launch = structuredClone(fixture.launch); launch.content[0].time = { created: 20, ran: 20, completed: 30 };
     const foreground = structuredClone(launch); foreground.content[0].state.input.background = false; foreground.content[0].state.metadata.status = "completed"; foreground.content[0].state.content = [{ type: "text", text: "Foreground work" }];
@@ -4205,15 +4255,20 @@ describe("OpenCode 2.x provider: sessions", () => {
         ...(aggregateID && type.startsWith("session.") ? { durable: { aggregateID, seq, version: type === "session.tool.success" ? 2 : 1 } } : {}) };
     };
     const frame = (event: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    const observedId = change === "unrelated" ? "unrelated" : target === "parent" ? "ses_parent" : "ses_child";
+    const record = (id: string) => {
+      const selected = id === observedId;
+      return session(changed && selected && change === "wrong-id" ? "wrong_child" : id, {
+        parentID: changed && selected && change === "parent" ? "foreign_parent" : id === "ses_child" || id === "ses_healthy" ? "ses_parent" : undefined,
+        time: id === "ses_healthy" ? { created: 42, updated: 43 } : id === "ses_parent" ? { created: 2, updated: 3 } : { created: 22, updated: 23 },
+        ...(changed && selected && (change === "workspace" || change === "unrelated") ? { location: { directory: "/foreign" } } : changed && selected && change === "missing" ? { location: {} } : {}),
+      });
+    };
     const server = fakeOpenCode({
       "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame(raw("server.connected", {}, 1)); } }), { headers: { "content-type": "text/event-stream" } }),
       "GET /api/session/active": () => ({ ses_child: { type: "running" }, ses_healthy: { type: "running" } }),
-      "GET /api/session/ses_parent": () => session("ses_parent"),
-      "GET /api/session/:id": ({ path }) => {
-        const id = path.split("/").at(-1)!, selected = id === (change === "unrelated" ? "unrelated" : "ses_child");
-        return session(changed && selected && change === "wrong-id" ? "wrong_child" : id, { parentID: changed && selected && change === "parent" ? "foreign_parent" : "ses_parent",
-          time: id === "ses_healthy" ? { created: 42, updated: 43 } : { created: 22, updated: 23 }, ...(changed && selected && (change === "workspace" || change === "unrelated") ? { location: { directory: "/foreign" } } : changed && selected && change === "missing" ? { location: {} } : {}) });
-      },
+      "GET /api/session": () => ({ data: [record(observedId)], cursor: {} }),
+      "GET /api/session/:id": ({ path }) => record(path.split("/").at(-1)!),
       "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
       "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
       "GET /api/session/ses_healthy/message": () => ({ data: [], cursor: {} }),
@@ -4226,7 +4281,7 @@ describe("OpenCode 2.x provider: sessions", () => {
     const sendRaw = (event: unknown) => new Promise<void>(resolve => { acknowledge = resolve; frame(event); });
     const send = (type: string, data: unknown, at: number, proof = true) => sendRaw(raw(type, data, at, proof));
     const state = provider as unknown as { controls: { basis(id: string): unknown }; childParents: { size: number }; eventMemory: { workers: { births: Map<string, unknown>; parents: Map<string, string>; childTasks(id: string): unknown[] } } };
-    const contradiction = ["workspace", "parent", "wrong-id"].includes(change), taskId = "v2:ses_parent:call_worker";
+    const contradiction = change === "workspace" || change === "wrong-id" || change === "parent" && target === "child", taskId = "v2:ses_parent:call_worker";
     try {
       await provider.waitForEventStream(lifetime.signal);
       const common = { sessionID: "ses_parent", assistantMessageID: launch.id, id: "call_worker" };
@@ -4245,9 +4300,8 @@ describe("OpenCode 2.x provider: sessions", () => {
       expect(state.controls.basis(taskId)).toBeUndefined(); expect(state.eventMemory.workers.childTasks("ses_child")).toEqual([]);
       const births = state.eventMemory.workers.births.size;
       changed = true;
-      const id = change === "unrelated" ? "unrelated" : "ses_child";
-      const record = reader === "session" ? await provider.getSession(id) : await provider.getConversationConfiguration(id);
-      if (reader === "session" && ["workspace", "missing", "unrelated"].includes(change)) expect(record).toBeNull();
+      const observed = reader === "session" ? await provider.getSession(observedId) : reader === "configuration" ? await provider.getConversationConfiguration(observedId) : await provider.listSessions();
+      if (reader === "session" && ["workspace", "missing", "unrelated"].includes(change)) expect(observed).toBeNull();
       if (change === "unrelated") expect(state.eventMemory.workers.births.size).toBe(births);
       if (stage !== "cache-only") changed = false;
       if (contradiction && stage === "birth") { await sendRaw(calledFrame!); await sendRaw(birthFrame!); }

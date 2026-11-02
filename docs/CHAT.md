@@ -659,6 +659,10 @@ end clocks come only from native proof.
 Known associations include retained prelaunch births and verified parentage,
 not only admitted rows. A positive contradiction before launcher success fences
 delayed admission and replay; unrelated ordinary reads create no such state.
+Session detail, inventory and creation records share this observation before
+workspace filtering. Positive parent contradictions also fence directly verified
+children whose birth/task rows have not yet arrived, without recursive traversal
+into independently owned nested conversations.
 
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover

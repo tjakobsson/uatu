@@ -1070,6 +1070,12 @@ export class BackgroundWorkers {
     // negative-only entry in this same accounted ledger; it cannot supply
     // ownership, birth clocks or execution proof. Saturation fails closed.
     if (!this.recoveryOnly && identity(worker) && !this.births.has(worker)) this.set(this.births, worker, { contradicted: true });
+    // Native parent verification can precede both a birth witness and launcher
+    // admission. Fence only the same direct cohort as the loops below; do not
+    // recursively traverse independently owned nested conversations.
+    if (!this.recoveryOnly && worker !== undefined) for (const [child, parent] of this.parents) if (parent === worker && !this.births.has(child)) {
+      this.set(this.births, child, { parent, contradicted: true });
+    }
     for (const [child, boundary] of this.terminalProofs) if (boundary.prelaunch
       && (worker === undefined || child === worker || this.births.get(child)?.parent === worker))
       this.set(this.terminalProofs, child, { ...boundary, prelaunch: undefined });

@@ -24,6 +24,33 @@ test("activity contradiction projection requires native negative facts, not miss
   checkBytes(absent); checkBytes(saturated);
 });
 
+for (const contradiction of [true, false]) test(`parent identity invalidation covers verified prelaunch edges but not nested cohorts (${contradiction})`, () => {
+  const workers = new BackgroundWorkers();
+  workers.verifyChild("child", "outer");
+  workers.executionStarted("child", nativeProof({ id: "initial-start", created: 13 }, { child: "child" }));
+  const nested = { ...launch("nested-call", "nested"), time: { created: 20, completed: 30 } };
+  workers.observeBirth("nested", "child", nativeProof({ id: "nested-birth", created: 22 }, { shell: "nested" }), shellCommandFingerprint("fixture"));
+  workers.launchPrepared("child", prepareTool(nested, 30, "success", "nested-message", { id: "nested-success", created: 30 }), 30);
+  const nestedOccurrence = workers.occurrence("v2:child:nested-call")!;
+  if (contradiction) workers.invalidateActivity("outer"); else workers.invalidateChildActivity("outer", "replacement-parent");
+  const part = { id: "outer-call", name: "subagent", time: { created: 10, completed: 20 }, state: { status: "completed", input: { prompt: "fixture" }, metadata: { sessionID: "child", status: "running" } } };
+  workers.launchPrepared("outer", prepareTool(part, 20, "success", "outer-message", { id: "outer-success", created: 20 }), 20);
+  const outer = workers.occurrence("v2:outer:outer-call")!;
+  expect(workers.activityContradicted(outer)).toBe(contradiction);
+  expect(workers.activityContradicted(nestedOccurrence)).toBe(false); expect(workers.shellActivity(nestedOccurrence)).toBe(true);
+  checkBytes(workers);
+});
+
+test("verified-edge negative growth uses the existing aggregate fail-closed budget", () => {
+  const workers = new BackgroundWorkers({ entries: 2 }); workers.verifyChild("child", "outer");
+  workers.executionStarted("child", nativeProof({ id: "initial-start", created: 13 }, { child: "child" }));
+  workers.invalidateActivity("outer");
+  expect(workers.controlEvidenceAvailable).toBe(false);
+  const candidate = controlFixture("call", "outer", "child", "agent").evidence;
+  expect(workers.activityEvidence(candidate)).toBeUndefined(); expect(workers.hasRetainedReference(candidate)).toBe(true);
+  checkBytes(workers);
+});
+
 for (const actualParent of ["outer", "replacement"]) test(`parent-only activity invalidation preserves nested native births (${actualParent})`, () => {
   const workers = new BackgroundWorkers();
   workers.verifyChild("child", "outer");
