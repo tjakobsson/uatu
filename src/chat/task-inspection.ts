@@ -83,7 +83,7 @@ export function taskSettledLabel(task: BackgroundTaskItem): string {
 export const TASK_OUTPUT_REFRESH_MS = 2_000;
 
 /** Shell Stop removes the retained job, not just a possibly ended process. */
-export const SHELL_WORKER_STOP_WARNING = "This removes its provider record and output and may prevent final result capture, even if execution has already ended. OpenCode may report failed rather than cancelled; missing output cannot be recovered after reload.";
+export const SHELL_WORKER_STOP_WARNING = "Stopping also deletes this job’s saved record and output—even if it has already finished. Uatu may lose the final result, and the output won’t be available after reload. OpenCode may show “Failed” instead of “Cancelled”. Your project files are not deleted.";
 
 // A read that fails is not retried at the full cadence for as long as the
 // task runs: each consecutive failure doubles the wait, up to this cap, and

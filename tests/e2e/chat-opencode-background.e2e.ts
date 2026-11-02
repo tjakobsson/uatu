@@ -899,11 +899,14 @@ for (const phase of ["running", "exit", "captureBeforeRemove"] as const) {
     const removed = page.waitForResponse(response => response.url().includes("/tasks/") && response.url().endsWith("/stop"));
     await page.locator("#chat-drilldown-task [data-stop-task]").click();
     const confirmation = page.getByRole("dialog", { name: "Stop shell worker?" });
-    await expect(confirmation).toContainText("removes its provider record and output");
-    await expect(confirmation).toContainText("may prevent final result capture, even if execution has already ended");
+    await expect(confirmation).toContainText("deletes this job’s saved record and output—even if it has already finished");
+    await expect(confirmation).toContainText("Uatu may lose the final result");
+    await expect(confirmation).toContainText("output won’t be available after reload");
+    await expect(confirmation).toContainText("OpenCode may show “Failed” instead of “Cancelled”");
+    await expect(confirmation).toContainText("Your project files are not deleted.");
     if (phase === "exit") {
       await expect(page.locator("#chat-drilldown-task")).toContainText("Ended · result unavailable");
-      await expect(page.locator("#chat-drilldown-task")).toContainText("may prevent final result capture");
+      await expect(page.locator("#chat-drilldown-task")).toContainText("Uatu may lose the final result");
       await expect(page.locator("#chat-drilldown-task [data-task-elapsed]")).toHaveCount(0);
     }
     await page.keyboard.press("Escape");

@@ -118,9 +118,12 @@ describe("task inspection panel", () => {
     view.show({ conversationId: "parent", taskId: task.taskId, view: "output" }, task);
     expect(hosts().strip.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(false);
     expect(hosts().strip.textContent).toContain("Ended · result unavailable");
-    expect(hosts().strip.textContent).toContain("removes its provider record and output");
-    expect(hosts().strip.textContent).toContain("may prevent final result capture");
-    expect(hosts().strip.textContent).toContain("even if execution has already ended");
+    expect(hosts().strip.textContent).toContain("deletes this job’s saved record and output");
+    expect(hosts().strip.textContent).toContain("even if it has already finished");
+    expect(hosts().strip.textContent).toContain("Uatu may lose the final result");
+    expect(hosts().strip.textContent).toContain("output won’t be available after reload");
+    expect(hosts().strip.textContent).toContain("OpenCode may show “Failed” instead of “Cancelled”");
+    expect(hosts().strip.textContent).toContain("Your project files are not deleted.");
     expect(hosts().strip.querySelector("[data-task-elapsed]")).toBeNull();
     expect(live().filter(entry => entry.kind === "interval")).toHaveLength(0);
     view.sync({ ...task, control: { available: false, reason: "Exact job proof unavailable" } });

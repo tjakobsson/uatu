@@ -47,10 +47,10 @@
 
 ## 6. Integrated acceptance and independent review
 
-- [x] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
-- [x] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
-- [x] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
-- [x] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
+- [ ] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
+- [ ] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
+- [ ] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
+- [ ] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
 
 ## Verification evidence (2026-10-30)
 
@@ -380,3 +380,74 @@ checkpoint the CI corrections are not yet pushed. All **34** acceptance tasks
 are renewed complete; final affected documentation review, identity rebuild,
 preview verification and publication are the remaining authorized delivery
 steps. Archive remains after upstream PR merge, and the original Hub is untouched.
+
+### Remaining permission-test CI failure (2026-11-02, in progress)
+
+The approved correction was committed and pushed normally as **7f4394a**.
+The exact approved PR body, unchanged title/ready status and matching HTTPS
+preview identity were verified; build and compiled smoke pass. Four fresh
+affected-documentation reviews are also clean. No model prompt, original-Hub
+change, rebase, force push or archive occurred.
+
+Remote CI run **41435701319** confirms the three original failures are fixed:
+functional leg 2 passes, along with units, contracts, performance and CodeQL.
+Functional leg 1 instead reports **653 passed, one failed**: the unreadable-file
+test in `view-and-layout.e2e.ts` times out at its setup synchronization predicate
+before selecting the denied document. All three configured attempts fail;
+`validate` fails only because of this E2E dependency. This is a distinct remaining
+failure, not evidence that the three layout corrections failed.
+
+The unchanged permission test passes **3/3** focused local repetitions at one
+worker and zero retries. That does not establish baseline flakiness or a fix.
+The test and document-update modules are byte-identical to upstream, but their
+exclusive historical cause is unproven. A bounded test/harness-only diagnosis
+is underway before any further correction; permission/authentication safety,
+the final 403/no-auto-retry assertions and all original deadlines remain binding.
+Tasks 6.1–6.4 are reopened for that remaining correction and affected review,
+reusing adequate unchanged implementation/runtime evidence. Private evidence is
+in the CI-fix scratch root's `permission/` directory; completed remote workflow
+observation is `lead/remote-ci-completion.json`.
+
+The bounded permission diagnosis establishes no justified correction. The
+original test passes six further focused repetitions (**9/9** original local
+invocations including the lead's three), and its complete file passes **13/13**.
+Twenty-two instrumented target attempts also pass; two stress failures occur
+earlier in shared boot, not at the permission wait. All temporary source probes
+are removed. Source inspection rules out quiet GETs always minting a new
+`generatedAt`; Linux timestamp precision and browser delivery remain unconfirmed.
+Before changing the predicate, inspect failing Linux values for indexed/stored
+mtime differences and browser/API generation relation. Neither local passes nor
+an unsupported synchronization rewrite resolves the remaining CI failure.
+The worker's evidence, cleanup and precise missing-data list are retained in
+`permission/worker/handoff.md`; no production, assertion, deadline or retry-policy
+change is proposed without that evidence.
+
+### Plain-language shell Stop warning (2026-11-02)
+
+The user requested clearer wording for the shell Stop warning and confirmed the
+proposed text. The shared warning now explains saved job/output deletion,
+possible final-result loss even after execution ends, output unavailability
+after reload, and OpenCode's possible Failed rather than Cancelled outcome in
+plain language. It also distinguishes that removal from deleting project files.
+This changes copy only, not confirmation, cancellation, native mutation or
+ownership/control behavior. Existing unit/browser checks are updated to preserve
+every warning consequence, with additional explicit assertions for reload and
+project-file wording; all original mutation, focus and timing assertions remain.
+
+The updated guidance assertion fails against the old warning, then all **32**
+task-inspection units and the entire affected **62-case** Chromium/WebKit browser
+file pass, two workers, zero retries. Typecheck and whitespace checks pass.
+Primary private logs are under
+`~/.cache/opencode/scratch/worker-activity-warning-copy-20261102/`.
+Four fresh affected Sol reviews—two Standards and two Spec—are clean across
+all four changed paths/five hunks. The user approved normal commit/push and an
+owned-preview restart after finishing their test jobs, with the existing PR body
+and safety behavior unchanged. At this checkpoint publication/preview refresh
+remain delivery steps; this copy change does not resolve the separate
+permission-test CI blocker.
+
+During manual preview testing, the user reports that both timed workers finish,
+the remaining worker's UI row stays Working until completion, and the controlled
+shell prints its expected output and exits with code 7. The agent's separate
+"unverified" commentary was not the UI state. The worker reported no native
+question tool, so that attempt does not establish live question-card coverage.
