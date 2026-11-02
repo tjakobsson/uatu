@@ -47,10 +47,10 @@
 
 ## 6. Integrated acceptance and independent review
 
-- [ ] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
-- [ ] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
-- [ ] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
-- [ ] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
+- [x] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
+- [x] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
+- [x] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
+- [x] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
 
 ## Verification evidence (2026-10-30)
 
@@ -212,3 +212,81 @@ Checkpoint **a611e91** receives clean Standards A, Standards B and Spec B full-t
 The prelaunch correction reproduces **18** failures: six wrong interrupts after retained birth/start proof and twelve stale-Working cases involving verified-parent/cache-only claims. Existing bounded activity/control observations now retain the negative association before admission; replay and alias-only history cannot restore authority. A tiny generation-qualified `HistoryReuse.peek` reads only retained entries without allocation, LRU refresh, pending-read access or changed accounting. Cached ownership remains non-authorizing for birth/execution/Stop; unrelated reads and requested-child input alone remain ignored. **71** focused cases, **2,408** full V2/shared-normalization cases, **593** adapter cases and all **seven** history-reuse cases pass, with typecheck/whitespace checks. The six source/test files are frozen for round-23 fresh reviews before another full runtime pipeline.
 
 Checkpoint **5c5da23** has clean Standards A inspection. Standards B is explicitly incomplete and superseded, not acceptance evidence; its unused convenience-export observation is nonactionable. Spec B identifies native inventory bypassing shared ownership observation; Spec A identifies parent-workspace invalidation missing directly verified prelaunch children without births/tasks. Four actual public probes reproduce those gaps and pass after repair. Get/list/create SessionInfo inputs now share synchronous observation before filtering/rendering; rename's void update uses its already-classified follow-up get, while status maps/messages/receipts/partial events are not SessionInfo inputs. Parent invalidation fences the same direct verified cohort without recursion. **123** focused cases, **2,465** full V2/shared-normalization cases, **593** adapter cases and **seven** history-reuse cases pass, plus typecheck/whitespace checks. Provider/background source/test pairs are frozen for fresh round-24 review; no round-22/23 full runtime pipeline was started or claimed.
+
+### Final round-24 acceptance and publication approval (2026-11-02)
+
+Implementation HEAD **12e882c** completes the subsequent corrections. Shell Stop
+compares retained live native birth identity with fresh inventory. Native
+session records are observed before ownership filtering across get/list/create,
+prelaunch, cached-parent and concurrent reads. Positive identity/ownership
+contradictions fence affected controls and activity; parent-only mismatch does
+not revoke independently healthy nested cohorts. The generation-qualified
+history-cache peek neither allocates nor refreshes LRU/accounting state.
+Working remains independent of Stop authority; no control budgets, revocation,
+gap, capacity or in-flight protections were relaxed.
+
+- Full unit CI: **8,329 passed, 16 skipped, zero failures**, 320 files. Typecheck,
+  API validation, dependency audit, 594-package license check, strict change
+  validation, all **56** capability specs, build and compiled smoke pass. All
+  **14** delta requirement bodies match their synchronized main specs.
+- Four fresh independent full-target native Sol reviews—two Standards and two
+  Spec—are complete and clean across **107 paths / 405 hunks**. Initially
+  incomplete reviews were completed before counting them. Reviewers inspected
+  source/Git read-only; execution checks are separate. Sol identity was exposed,
+  but requested effort changes were not independently verifiable, and read-only
+  execution is not an OS-isolation guarantee.
+- Actual authenticated mounted-browser acceptance passes on **OpenCode 2.2.5 /
+  client 2.2.5**, using the existing Sol/Medium route. Agent and shell show
+  Working with normal Stop enabled; one explicitly confirmed controlled shell
+  Stop returns **200**. Identity guidance recovers automatically. A dismissal
+  **409**, authoritative refresh and explicit retry **200** lead to durable
+  dismissal after reload, with no page errors. The interrupted native attempt
+  was renewed after a server restart; earlier completed checks were preserved.
+- The final unchanged Chromium/WebKit matrix passes **104/104**, two workers,
+  zero retries and unchanged deadlines. Two earlier batches each passed
+  **103/104**, failing on different prerequisites: an unattributed bootstrap
+  SyntaxError and a WebKit login-value mismatch returning 401. Each failed case
+  passed three unchanged focused rechecks. Neither historical cause is proven,
+  and neither failure is called baseline flakiness. All **2,643** tracked hashes
+  stayed unchanged through accepted checks.
+- Primary private evidence is under
+  `~/.cache/opencode/scratch/worker-activity-all-three-20261102/`: the lead's
+  `round24-verification.log`, `round24-final-acceptance.json`,
+  `round24-resumed-native/live-all-three-result.json`, `round24-browser-final.log`
+  and adjacent browser artifacts; `round24-reviews/` retains completed coverage,
+  and `connection-diagnosis/` retains sanitized failure/recheck comparisons.
+  Raw authenticated traces are not public attachments.
+- Upstream **dcc486a** is integrated by merge **84ec22b**; the user reconfirmed
+  merge/preserve-history, not rebase or force push. The frozen dependency
+  restore used disabled install scripts and left the lockfile unchanged. Checks
+  use existing Bun **1.4.2**, while main declares **1.4.4**. Latest stable was
+  reconfirmed as **v0.8.0**; the approved unreleased-feature Release Please
+  override remains applicable. The existing OpenAPI warning and low KaTeX
+  advisory remain; no moderate-or-higher advisory is reported.
+- Upstream discussion has no inline threads or formal reviews. Claude's focused
+  store/API review found no blockers and ran no checks; Codex failed and is not
+  counted as a completed review. OpenAPI already documents 413 and 507. The
+  file-sync/rename implementation does not sync the parent directory, so docs
+  now explicitly exclude power-loss durability. Whole-store scanning is bounded;
+  indexing remains a measurement-led optimization, not a demonstrated defect.
+  User-approved follow-ups track the bootstrap investigation
+  [#579](https://github.com/tjakobsson/uatu/issues/579), WebKit login investigation
+  [#580](https://github.com/tjakobsson/uatu/issues/580), and sanitized store-load /
+  child-response diagnostics [#581](https://github.com/tjakobsson/uatu/issues/581).
+- The user approved the exact updated PR body, normal push and documentation-only
+  final checkpoint, preserving #572's title and ready status. Approval and body
+  digest are retained privately in `lead/pr572-publication-approval.json`.
+  Publication scans found no secrets or private paths in added target content;
+  the existing scoped Git-identity exception remains unchanged. Publishing uses
+  restored GitHub MCP; the declined CLI call is not retried.
+
+All **34** implementation/acceptance tasks are complete. At this checkpoint the
+new commits and approved PR body are not yet published; normal push, PR update
+and final preview-identity verification remain authorized delivery steps. The
+documentation-only delta receives fresh affected review and validation; accepted
+unchanged unit/native/browser evidence is retained. The owned preview may be
+rebuilt/restarted for its new Git identity, but the original Hub is untouched.
+No full browser/performance suite, physical-device, live native question-tool or
+OS-process-restart coverage is claimed. Native mutation APIs still lack an
+atomic occurrence precondition after final validation. Archive only after the
+upstream PR merges; no archive or upstream merge is performed here.

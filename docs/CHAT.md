@@ -529,7 +529,10 @@ including an execution's first dismissal. Pending reads and mutations share an
 8,192-request admission limit. Abandoning a request releases its action authority
 immediately, but its capacity slot remains occupied until the queued wait drains.
 Save/read failures are reported rather than silently claimed as synchronized
-success. An unsuccessful explicit dismissal keeps its own action feedback after
+success. Saves sync the private temporary file before an atomic rename, but do
+not sync the parent directory. A power loss immediately after saving can roll
+back presentation state; this is not a power-loss durability guarantee.
+An unsuccessful explicit dismissal keeps its own action feedback after
 an unrelated successful personal-state read; a new applicable explicit action
 can supersede it. Recovered identity/storage-health guidance remains separately
 owned and can clear automatically without preserving a stale warning copy.
