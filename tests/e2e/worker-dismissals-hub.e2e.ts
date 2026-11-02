@@ -156,12 +156,13 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
       await expect(row(a1, worker.id)).toBeVisible();
       await expect.poll(() => personalReads.get(a1)!).toBeGreaterThan(readsBeforeFreshDismissal);
       await a1.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
-      await expect(a1.locator(".chat-worker-dismissal-notice")).toBeHidden();
+      await expect(a1.locator(".chat-worker-dismissal-notice")).toContainText("retry dismissal");
       const explicitRetry = a1.waitForResponse(response => new URL(response.url()).pathname.endsWith("/api/personal-worker-dismissals") && response.request().method() === "POST", { timeout: 10_000 });
       await row(a1, worker.id).getByRole("button", { name: "Dismiss worker from summary:", exact: false }).click();
       freshSaved = await explicitRetry;
     }
     expect(freshSaved.status(), JSON.stringify(await freshSaved.json())).toBe(200);
+    await expect(a1.locator(".chat-worker-dismissal-notice")).toBeHidden();
     const freshMutation = freshSaved.request().postDataJSON();
     expect(freshMutation).toEqual({ version: 1, conversationId, executionId: freshDismissedId, expectedRevision: currentFresh.revision, operation: "dismiss" });
     await expect(row(a2, worker.id)).toHaveCount(0); await expect(row(a2, fresh.id)).toBeVisible();
@@ -273,11 +274,13 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: synthetic
     let saved = await freshSave;
     if (saved.status() === 409) {
       await expect.poll(() => readAfterConflict).toBeGreaterThan(0);
+      await expect(notice).toContainText("retry dismissal");
       freshSave = dismissResponse();
       await row(page, worker.id).getByRole("button", { name: "Dismiss worker from summary:", exact: false }).click();
       saved = await freshSave;
     }
     expect(saved.status()).toBe(200); await expect(row(page, worker.id)).toHaveCount(0);
+    await expect(notice).toBeHidden();
     const durable = await context.request.get(personalUrl); expect(durable.status()).toBe(200);
     expect((await durable.json()).entries.find((entry: { executionId: string }) => entry.executionId === worker.activity!.executionId).dismissed).toBe(true);
     // A different native reference is not continuity, even with identical

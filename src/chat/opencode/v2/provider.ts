@@ -640,6 +640,16 @@ export class OpenCodeV2Provider implements ChatProvider {
         confirmed = shell?.data.metadata.sessionID === sessionId;
         const native = asRecord(shell?.data), time = asRecord(native.time);
         const command = shellCommandFingerprint(native.command);
+        // Inventory can expose reuse before its live birth arrives. A known
+        // foreign owner or different immutable command revokes A; missing or
+        // failed reads only withhold current confirmation, never invent reuse.
+        const contradicted = occurrence && shell && (typeof shell.data.metadata.sessionID === "string" && !confirmed
+          || command !== undefined && occurrence.launches.some(launch => launch.commandFingerprint !== undefined && launch.commandFingerprint !== command));
+        if (contradicted) {
+          this.controls.invalidateOccurrence(occurrence);
+          this.eventMemory?.workers.invalidateActivity(occurrence.worker);
+          confirmed = false;
+        }
         const matched = confirmed && command !== undefined && occurrence?.launches.every(launch => launch.commandFingerprint === command);
         shellExecuting = matched === true && native.status === "running";
         inventoryShellEnd = matched && ["exited", "timeout", "killed"].includes(String(native.status)) ? numberField(time.completed) : undefined;

@@ -31,6 +31,12 @@ Dismissal reads/writes SHALL derive the account from Hub authentication, validat
 - **THEN** the client reports that it could not save the dismissal and leaves or restores the row
 - **AND** it does not claim cross-device success or treat the failure as a worker failure
 
+#### Scenario: An unsuccessful dismissal is followed by a healthy personal-state read
+- **WHEN** an explicit dismissal POST fails or conflicts and a later authoritative personal-state GET succeeds
+- **THEN** the failed-action feedback remains tied to that dismissal rather than implying the action completed
+- **AND** unrelated reads, automatic retirement and other successful dismissals do not erase it
+- **AND** a new applicable explicit action can supersede the feedback without retaining a stale copy of recovered identity or storage-health guidance
+
 ### Requirement: Personal dismissal invalidations do not disclose other accounts
 Connected clients SHALL receive dismissal changes only within their authenticated account and authorized workspace scope, then reconcile authoritative personal state. Personal marks SHALL NOT enter shared workspace activity or conversation payloads. Missed invalidations SHALL recover on reconnect or conversation selection without changing navigation, disclosure choices or focus.
 

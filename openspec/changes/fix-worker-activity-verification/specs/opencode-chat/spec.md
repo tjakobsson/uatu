@@ -140,6 +140,18 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **THEN** compatible stored readback supplying missing launcher fields preserves normal Stop availability
 - **AND** history alone does not create missing authority, overwrite contradictory facts, clear revocation or retarget a reused occurrence
 
+#### Scenario: Metadata repaint preserves only the surviving owned inspection action
+- **WHEN** task-inspection metadata repaints while its result or Stop action has focus and the same occurrence/action target survives
+- **THEN** the equivalent enabled visible action retains focus without deferred retries or a new fallback selection
+- **AND** changed occurrence, execution, launch reference, child conversation or output targets do not inherit that focus
+- **AND** composer, other-worker and modal focus are not taken over, while unchanged legacy targets retain their existing behavior
+
+#### Scenario: Current shell inventory contradicts the retained command before replacement birth arrives
+- **WHEN** fresh authoritative inventory returns the retained shell ID and parent but a different known command before the replacement's live birth event is observed
+- **THEN** Stop for the old occurrence is revoked and any in-flight validation refuses the mutation without removing the replacement job or output
+- **AND** a retained end for the old execution does not override that contradiction or authorize removal of the replacement
+- **AND** missing or failed inventory is not treated as positive command contradiction, while unrelated healthy workers remain controllable
+
 #### Scenario: Control proof has a bounded share of the live evidence budget
 - **WHEN** the provider retains control evidence alongside live display/correlation records
 - **THEN** control evidence uses at most 1 MiB and 2,048 entries within the existing aggregate 4 MiB and 8,192 live-entry budget

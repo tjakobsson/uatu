@@ -1113,8 +1113,7 @@ export function initChat(api = new ChatApiClient()): void {
         if (!workerDismissible(checkingPresentation.worker(worker))) continue;
         const ids = workerExecutionIds(worker);
         if (!ids.length) continue;
-        await personalDismissals.dismiss(ids[0], ids);
-        if (personalDismissals.error) break;
+        if (!await personalDismissals.dismiss(ids[0], ids)) break;
       }
       return;
     }

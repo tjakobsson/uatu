@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { WorkerDismissalClient, visibleWorkers } from "./worker-dismissal-client";
+import { WorkerDismissalClient, visibleWorkers, workerExecutionIds } from "./worker-dismissal-client";
 import { compactWorkers, type CompactWorker } from "./compact-work";
 import type { BackgroundTaskItem } from "./types";
 import type { LiveTopicConsumer } from "../shell/live-channel";
@@ -94,6 +94,115 @@ test("save is durable-only; conflicts refresh without resending a mutation", asy
   expect(calls.filter(call => call.method !== "POST")).toHaveLength(2);
   expect(JSON.parse(calls[1]!.body as string)).toEqual({ version: 1, conversationId: "opencode:parent", executionId: "exec:one", expectedRevision: 3, operation: "dismiss" });
   client.dispose();
+});
+
+for (const status of [409, 503]) test(`failed explicit dismissal (${status}) survives healthy personal reads and unrelated saves`, async () => {
+  let consumer: LiveTopicConsumer = {};
+  let fail = true;
+  const posts: string[] = [];
+  let reads = 0;
+  const client = new WorkerDismissalClient({ changed: () => {}, channel: {
+    subscribe: (_subscription, handlers) => { consumer = handlers; return { close: () => {}, resubscribe: () => {} }; },
+  }, fetcher: async (_url, init) => {
+    if (init?.method === "POST") {
+      const mutation = JSON.parse(init.body as string); posts.push(mutation.executionId);
+      if (fail && mutation.executionId === "exec:one") return new Response(null, { status });
+      return Response.json(body(undefined, mutation.executionId === "exec:one", 3));
+    }
+    reads++; return Response.json(body(undefined, false, 3));
+  } });
+  try {
+    client.select("opencode:parent"); await flush();
+    expect(await client.dismiss("exec:one")).toBe(false); await flush();
+    expect(reads).toBe(status === 409 ? 2 : 1);
+    expect(client.error).toContain(status === 409 ? "retry" : "Could not save");
+    expect(client.error).not.toContain("Refreshing");
+    const failure = client.error;
+    consumer.data!({ category: "worker-dismissals" }, "", 1); await flush();
+    expect(client.error).toBe(failure);
+    expect(await client.dismiss("exec:unrelated")).toBe(true);
+    expect(client.error).toBe(failure);
+    // Automatic retirement is coordinator health, not a retry of this action.
+    client.refresh(); await flush();
+    expect(client.error).toBe(failure);
+    expect(posts).toEqual(["exec:one", "exec:unrelated"]);
+    fail = false;
+    expect(await client.dismiss("exec:alias", ["exec:one"])).toBe(true);
+    expect(client.error).toBe("");
+    expect(posts).toEqual(["exec:one", "exec:unrelated", "exec:alias"]);
+  } finally { client.dispose(); }
+});
+
+test("automatic retirement and source-specific retries preserve other failed explicit actions until selection reset", async () => {
+  const entries = new Map(["exec:one", "exec:two", "exec:retired"].map(executionId => [executionId, { executionId, revision: 1, dismissed: executionId === "exec:retired" }]));
+  let fail = true;
+  const operations: string[] = [];
+  const client = new WorkerDismissalClient({ changed: () => {}, fetcher: async (_url, init) => {
+    if (init?.method === "POST") {
+      const mutation = JSON.parse(init.body as string); operations.push(mutation.operation);
+      if (fail && mutation.operation === "dismiss") return new Response(null, { status: 503 });
+      const entry = entries.get(mutation.executionId)!; entry.dismissed = mutation.operation === "dismiss"; entry.revision++;
+    }
+    return Response.json({ version: 1, conversationId: "opencode:parent", entries: [...entries.values()] });
+  } });
+  try {
+    client.select("opencode:parent"); await flush();
+    expect(await client.dismiss("exec:one")).toBe(false);
+    expect(await client.dismiss("exec:two")).toBe(false);
+    client.observe([worker("working", "exec:retired")]); await flush();
+    expect(operations).toEqual(["dismiss", "dismiss", "retire"]);
+    expect(client.error).toContain("Could not save");
+    fail = false;
+    expect(await client.dismiss("exec:one")).toBe(true);
+    expect(client.error).toContain("Could not save");
+    expect(await client.dismiss("exec:two")).toBe(true);
+    expect(client.error).toBe("");
+    fail = true; await client.dismiss("exec:one");
+    client.select(null); expect(client.error).toBe("");
+    client.select("opencode:parent"); await flush(); expect(client.error).toBe("");
+    await client.dismiss("exec:one");
+    client.select("opencode:other"); expect(client.error).toBe("");
+  } finally { client.dispose(); }
+});
+
+for (const status of [409, 503]) test(`older successful dismissal cannot erase newer ${status} feedback, but a fresh proven-alias retry can`, async () => {
+  const replies: Array<(response: Response) => void> = [];
+  const client = new WorkerDismissalClient({ changed: () => {}, fetcher: async (_url, init) => init?.method === "POST"
+    ? new Promise<Response>(resolve => replies.push(resolve)) : Response.json(body(undefined, false, 3)) });
+  try {
+    client.select("opencode:parent"); await flush();
+    const older = client.dismiss("exec:one");
+    const newer = client.dismiss("exec:one");
+    replies[1]!(new Response(null, { status })); expect(await newer).toBe(false); await flush();
+    const failure = client.error; expect(failure).toContain(status === 409 ? "Worker status changed" : "Could not save");
+    replies[0]!(Response.json(body(undefined, true, 3))); expect(await older).toBe(true);
+    expect(client.error).toBe(failure);
+    // Reused row/child/UI references do not prove an execution alias.
+    const reused = { ...worker("unavailable", "exec:other"), conversationId: "same-child", references: ["exec:one"] };
+    client.observe([reused]);
+    const unrelated = client.dismiss(workerExecutionIds(reused)[0], workerExecutionIds(reused));
+    replies[2]!(Response.json(body(undefined, true, 3))); expect(await unrelated).toBe(true);
+    expect(client.error).toBe(failure);
+    const proven = { ...reused, activity: { ...reused.activity!, executionId: "exec:new-primary", executionAliases: ["exec:new-primary", "exec:one"] } };
+    client.observe([proven]);
+    const ids = workerExecutionIds(proven), retry = client.dismiss(ids[0], ids);
+    replies[3]!(Response.json({ version: 1, conversationId: "opencode:parent", entries: ids.map(executionId => ({ executionId, revision: 4, dismissed: true })) }));
+    expect(await retry).toBe(true); expect(client.error).toBe("");
+  } finally { client.dispose(); }
+});
+
+test("a superseded in-flight failure cannot replace a newer successful proven-alias action", async () => {
+  const replies: Array<(response: Response) => void> = [];
+  const client = new WorkerDismissalClient({ changed: () => {}, fetcher: async (_url, init) => init?.method === "POST"
+    ? new Promise<Response>(resolve => replies.push(resolve)) : Response.json(body(undefined, false, 3)) });
+  try {
+    client.select("opencode:parent"); await flush();
+    const older = client.dismiss("exec:one");
+    const newer = client.dismiss("exec:new-primary", ["exec:one"]);
+    replies[1]!(Response.json(body(undefined, true, 3))); expect(await newer).toBe(true);
+    replies[0]!(new Response(null, { status: 503 })); expect(await older).toBe(false);
+    expect(client.error).toBe("");
+  } finally { client.dispose(); }
 });
 
 test("read failure restores rows, success commits, and recovery retires once without blocking activity", async () => {

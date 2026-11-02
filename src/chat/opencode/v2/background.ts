@@ -269,6 +269,15 @@ export class BackgroundControls {
     if (aliases) for (const other of this.records.values()) if (!other.unavailable && other.parent === record.parent
       && other.evidence?.launches.some(launch => aliases.includes(launch.call))) this.retire(other, witness);
   }
+  /** Positive native inventory contradictions share the same bounded sticky
+   * revocation as live contradictions, including first-seen and alias rows. */
+  invalidateOccurrence(candidate: WorkerOccurrenceEvidence): void {
+    const record = this.records.get(candidate.taskId);
+    if (record) this.retire(record);
+    else this.put({ parent: candidate.parent, taskId: candidate.taskId, unavailable: true, aliases: candidate.launches.map(launch => launch.call) });
+    for (const other of this.records.values()) if (!other.unavailable && other.parent === candidate.parent
+      && other.evidence?.launches.some(launch => candidate.launches.some(alias => alias.call === launch.call))) this.retire(other);
+  }
   historical(kind: ControlWitness["kind"], proof?: NativeProof): boolean {
     return !!proof && [...this.records.values()].some(record => record.witnesses?.some(witness => witness.kind === kind && sameProof(witness.proof, proof)));
   }

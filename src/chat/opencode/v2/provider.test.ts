@@ -1445,6 +1445,87 @@ for (const birthScope of ["owned", "foreign", "foreign-only"] as const) for (con
   } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
 });
 
+for (const knownEnd of [false, true]) for (const change of ["command-stop", "command-readback", "foreign-owner", "missing-command", "failed-read"] as const) test(`fresh shell inventory fences retained command without a replacement birth (${change}/old end=${knownEnd})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const adjacent = structuredClone(fixture.shell);
+  adjacent.id = "msg_adjacent";
+  adjacent.content[0].id = "call_adjacent";
+  adjacent.content[0].state.input.command = "healthy job";
+  adjacent.content[0].state.metadata.shellID = "sh_adjacent";
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const original: ShellInfo = { id: "sh_fixture", status: "running", command: "printf fixture", cwd: WORKSPACE,
+    shell: "/bin/sh", file: "/fixture/old.out", metadata: { sessionID: "ses_parent" }, time: { started: 75 } };
+  let shell: Record<string, unknown> = original, failed = false;
+  const frame = (id: string, type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id, type, data, created, location: { directory: WORKSPACE } })}\n\n`));
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("connected", "server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell, adjacent], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    "GET /api/session/active": () => ({}),
+    "GET /api/shell/sh_fixture": () => failed ? Response.json({ _tag: "ShellNotFoundError" }, { status: 404 }) : scoped(shell),
+    "DELETE /api/shell/sh_fixture": () => undefined,
+    "GET /api/shell/sh_adjacent": () => scoped({ ...original, id: "sh_adjacent", command: "healthy job" }),
+    "DELETE /api/shell/sh_adjacent": () => undefined,
+  });
+  const provider = server.provider(), stream = observedNativeStream(provider), taskId = "v2:ses_parent:call_shell";
+  try {
+    await stream.seen(event => event.eventType === "server.connected");
+    frame("old-input", "session.tool.input.started", { sessionID: "ses_parent", assistantMessageID: fixture.shell.id, id: "call_shell", name: "shell" }, 70);
+    frame("old-call", "session.tool.called", { sessionID: "ses_parent", assistantMessageID: fixture.shell.id, id: "call_shell", input: { command: original.command }, executed: false }, 71);
+    frame("old-birth", "shell.created", { info: original }, 75);
+    frame("old-launch", "session.message.content.updated", { sessionID: "ses_parent", messageID: fixture.shell.id, content: fixture.shell.content }, 80);
+    frame("healthy-birth", "shell.created", { info: { ...original, id: "sh_adjacent", command: "healthy job" } }, 75);
+    frame("healthy-launch", "session.message.content.updated", { sessionID: "ses_parent", messageID: adjacent.id, content: adjacent.content }, 80);
+    await stream.seen(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "background_task" && update.item.taskId === taskId));
+    await stream.seen(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "background_task" && update.item.taskId === "v2:ses_parent:call_adjacent"));
+    const [initial] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(initial?.control?.available).toBe(true);
+    expect(initial?.activity?.kind).toBe("working");
+    expect(initial?.activity?.launchRef).toBeDefined();
+    if (knownEnd) {
+      frame("old-exit", "shell.exited", { id: original.id, status: "exited", exit: 0 }, 90);
+      await stream.seen(event => event.eventType === "shell.exited");
+    }
+    const contradiction = change.startsWith("command") || change === "foreign-owner";
+    shell = { ...original, ...(change.startsWith("command") ? { command: "replacement job B", time: { started: 95 } }
+      : change === "foreign-owner" ? { metadata: { sessionID: "ses_foreign" } }
+      : change === "missing-command" ? { command: undefined } : {}) };
+    failed = change === "failed-read";
+    // Stop itself must consume the contradiction; no replacement birth or
+    // preparatory readback is required to invalidate A's retained permission.
+    if (change === "command-stop") {
+      const stops = await Promise.allSettled([provider.stopTask("ses_parent", taskId), provider.stopTask("ses_parent", taskId)]);
+      expect(stops.map(result => result.status)).toEqual(["rejected", "rejected"]);
+      expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+    }
+    const [old] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    if (contradiction) {
+      expect(old?.activity?.kind).toBe(knownEnd ? "ended" : "unavailable");
+      expect(old?.activity?.endedAt).toBe(knownEnd ? 90 : undefined);
+      expect(old?.activity?.launchRef).toBeUndefined();
+      expect(old?.control?.available).toBe(false);
+      await expect(provider.stopTask("ses_parent", taskId)).rejects.toThrow();
+      expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+    }
+    // Inconclusive reads are not positive contradictions. Conversely a later
+    // stale A inventory must not resurrect permission after B was observed.
+    failed = false; shell = original;
+    const [recovered] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(recovered?.control?.available).toBe(!contradiction);
+    if (contradiction) {
+      expect(recovered?.activity?.launchRef).toBeUndefined();
+      await expect(provider.stopTask("ses_parent", taskId)).rejects.toThrow();
+    } else await provider.stopTask("ses_parent", taskId);
+    expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(contradiction ? 0 : 1);
+    expect(await provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).toContainEqual(expect.objectContaining({
+      taskId: "v2:ses_parent:call_adjacent", activity: expect.objectContaining({ kind: "working" }), control: { available: true },
+    }));
+    await provider.stopTask("ses_parent", "v2:ses_parent:call_adjacent");
+    expect(server.requests("DELETE", "/api/shell/sh_adjacent")).toHaveLength(1);
+  } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
+});
+
 for (const knownEnd of [false, true]) test(`replacement shell inventory cannot lend its end to an old occurrence (known old end=${knownEnd})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   let wire!: ReadableStreamDefaultController<Uint8Array>;
@@ -4293,9 +4374,14 @@ describe("OpenCode 2.x provider: sessions", () => {
     await expect(provider.taskOutput("ses_parent", "v2:ses_parent:call_shell", { tailBytes: 10 })).rejects.toThrow(/unavailable/);
     expect(server.calls.some(call => call.method === "DELETE" || call.path.endsWith("/output"))).toBe(false);
     owner = "ses_parent";
-    await provider.stopTask("ses_parent", "v2:ses_parent:call_shell");
+    await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_shell")).rejects.toThrow(/no longer confirmed/);
+    expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+    // A coherent independently owned lifetime can still remove an unsettled
+    // job; its 204 acknowledges removal, not a terminal completion report.
+    const independentlyOwned = server.provider();
+    await independentlyOwned.stopTask("ses_parent", "v2:ses_parent:call_shell");
     expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(1);
-    expect(await provider.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "running" })]);
+    expect(await independentlyOwned.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "running" })]);
   });
   test("background reconciliation reads pending results even when the parent is idle; active absence is uncertainty", async () => {
     const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));

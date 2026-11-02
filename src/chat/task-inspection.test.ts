@@ -207,6 +207,17 @@ describe("task inspection panel", () => {
     expect(strip.childNodes.length).toBe(0);
   });
 
+  test("a reused task id repaints the exact occurrence's result even when its metadata matches", () => {
+    const view = panel();
+    const task = item({ id: "task:first", taskId: "reused", status: "completed" });
+    view.show({ conversationId: "parent", taskId: task.taskId, view: "transcript" }, task);
+    const first = hosts().strip.querySelector("[data-task-result]")!;
+    view.sync({ ...task, id: "task:second" });
+    expect(first.isConnected).toBe(false);
+    expect(hosts().strip.querySelector("[data-task-result]")?.getAttribute("data-task-result")).toBe("task:second");
+    view.close();
+  });
+
   test("settled inspection states the outcome and links to its canonical result without repeating the report", () => {
     const task = item({ id: "task:canonical", taskId: "canonical", childConversationId: "child", status: "failed", summary: "Long canonical report that must not be duplicated" });
     const view = panel();

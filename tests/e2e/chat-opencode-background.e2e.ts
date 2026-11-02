@@ -1,9 +1,92 @@
 import type { APIRequestContext, Page } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import type { BackgroundTaskItem } from "../../src/chat/types";
 import { openChatPanel, openChatWorkers } from "./chat-helpers";
 import { test as base, expect } from "./fixtures";
 import { withEngineBrowsers } from "./page-diagnostics";
 import { captureScreenshot } from "./evidence";
 const test = withEngineBrowsers(base);
+
+let inspectionBundle: string | undefined;
+for (const engine of ["webkit", "chromium"] as const) test(`inspection metadata repaint retains only its owned native focus: ${engine}`, async ({ launchBrowser }) => {
+  // Exercise the real panel with native DOM focus, not LinkeDOM's focus stub.
+  // No application server, provider, or authentication is needed at this seam.
+  inspectionBundle ??= execFileSync("bun", ["build", fileURLToPath(new URL("../../src/chat/task-inspection.ts", import.meta.url)), "--target=browser"], { encoding: "utf8" });
+  const browser = await launchBrowser(engine);
+  const page = await browser.newPage();
+  try {
+    const observations = await page.evaluate(async source => {
+      const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+      const { TaskInspectionPanel } = await import(url) as typeof import("../../src/chat/task-inspection");
+      URL.revokeObjectURL(url);
+      const observations = [];
+      for (const scenario of ["result", "legacy result", "stop", "foreign occurrence", "foreign execution", "foreign launch", "foreign child", "foreign output", "foreign conversation", "composer", "other worker", "modal", "removed action", "disabled action"] as const) {
+        document.body.innerHTML = '<div id="strip"></div><div id="output"></div><pre id="text"></pre><p id="note"></p><textarea id="composer"></textarea><button id="other-worker" data-task-result="task:other">Other result</button><dialog><button id="cancel">Cancel</button></dialog>';
+        const strip = document.querySelector<HTMLElement>("#strip")!;
+        const panel = new TaskInspectionPanel({
+          hosts: { strip, output: document.querySelector("#output")!, outputText: document.querySelector("#text")!, outputNote: document.querySelector("#note")! },
+          fetchOutput: async () => null,
+        });
+        const running = ["stop", "removed action", "disabled action"].includes(scenario);
+        const task: BackgroundTaskItem = { id: "task:one", type: "background_task", taskId: "one", taskType: "agent", status: running ? "running" : "completed", description: "Inspection", createdAt: 1, activity: { kind: running ? "working" : "ended", executionId: "execution-one" }, control: { available: true } };
+        if (scenario === "foreign launch") task.activity = { kind: "ended", launchRef: "launch-one" };
+        if (["legacy result", "foreign child", "foreign output"].includes(scenario)) {
+          delete task.activity;
+          task.childConversationId = "child-one";
+          task.outputFile = "output-one";
+        }
+        const link = { conversationId: "parent", taskId: task.taskId, itemId: task.id, view: "transcript" as const };
+        panel.show(link, task);
+        const a = strip.querySelector<HTMLButtonElement>(running ? "[data-stop-task]" : "[data-task-result]")!;
+        a.focus();
+        const initiallyFocused = document.activeElement === a;
+        const composer = document.querySelector<HTMLTextAreaElement>("#composer")!;
+        composer.value = "Preserved draft";
+        if (scenario === "composer") composer.focus();
+        if (scenario === "other worker") document.querySelector<HTMLButtonElement>("#other-worker")!.focus();
+        const dialog = document.querySelector("dialog")!;
+        if (scenario === "modal") dialog.showModal();
+        const externalOwner = document.activeElement;
+        const next: BackgroundTaskItem = { ...task, summary: "Later metadata" };
+        if (scenario === "foreign occurrence") next.id = "task:another-occurrence";
+        if (scenario === "foreign execution") next.activity = { ...task.activity!, executionId: "execution-two" };
+        if (scenario === "foreign launch") next.activity = { ...task.activity!, launchRef: "launch-two" };
+        // Target-only changes must themselves invalidate the strip signature.
+        if (scenario === "foreign child") { next.childConversationId = "child-two"; next.summary = task.summary; }
+        if (scenario === "foreign output") { next.outputFile = "output-two"; next.summary = task.summary; }
+        if (scenario === "removed action") next.status = "completed";
+        if (scenario === "foreign conversation") panel.show({ ...link, conversationId: "other-parent" }, next);
+        else panel.sync(next, scenario === "disabled action");
+        const b = strip.querySelector<HTMLButtonElement>(running && scenario !== "removed action" ? "[data-stop-task]" : "[data-task-result]")!;
+        observations.push({
+          scenario, initiallyFocused, oldDisconnected: !a.isConnected, replaced: a !== b,
+          resultFocused: document.activeElement === b,
+          externalFocusPreserved: document.activeElement === externalOwner,
+          activeTag: document.activeElement?.tagName,
+          target: b.getAttribute(running && scenario !== "removed action" ? "data-stop-task" : "data-task-result"),
+          draft: composer.value,
+        });
+        if (dialog.open) dialog.close();
+        panel.close();
+      }
+      return observations;
+    }, inspectionBundle);
+    for (const observed of observations) {
+      expect(observed.initiallyFocused, observed.scenario).toBe(true);
+      expect(observed.oldDisconnected, observed.scenario).toBe(true);
+      expect(observed.replaced, observed.scenario).toBe(true);
+      expect(observed.draft, observed.scenario).toBe("Preserved draft");
+      if (["result", "legacy result", "stop"].includes(observed.scenario)) expect(observed.resultFocused, observed.scenario).toBe(true);
+      else if (["composer", "other worker", "modal"].includes(observed.scenario)) expect(observed.externalFocusPreserved, observed.scenario).toBe(true);
+      else {
+        expect(observed.resultFocused, observed.scenario).toBe(false);
+        expect(observed.activeTag, observed.scenario).toBe("BODY");
+      }
+      if (observed.scenario === "foreign occurrence") expect(observed.target).toBe("task:another-occurrence");
+    }
+  } finally { await page.close(); await browser.close(); }
+});
 
 async function control(request: APIRequestContext, body: Record<string, unknown>) {
   const response = await request.post("/__e2e/chat", { data: { action: "opencode", ...body } });

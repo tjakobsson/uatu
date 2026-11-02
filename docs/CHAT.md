@@ -529,7 +529,11 @@ including an execution's first dismissal. Pending reads and mutations share an
 8,192-request admission limit. Abandoning a request releases its action authority
 immediately, but its capacity slot remains occupied until the queued wait drains.
 Save/read failures are reported rather than silently claimed as synchronized
-success. Chat remains available if retirement of an old mark cannot be saved;
+success. An unsuccessful explicit dismissal keeps its own action feedback after
+an unrelated successful personal-state read; a new applicable explicit action
+can supersede it. Recovered identity/storage-health guidance remains separately
+owned and can clear automatically without preserving a stale warning copy.
+Chat remains available if retirement of an old mark cannot be saved;
 an old dismissal can then reapply to an unavailable row after restart, but never
 hide currently verified activity or pending requests. Non-Hub source/test
 presentation remains device-local; its old marks are not migrated into Hub state.

@@ -482,6 +482,31 @@ function controlOracle(controls: BackgroundControls) {
   return state;
 }
 
+for (const firstSeen of [false, true]) test(`positive inventory contradiction revokes aliases and overlapping reads within the control budget (first seen=${firstSeen})`, () => {
+  const controls = new BackgroundControls(), original = controlFixture("original", "parent", "shell"), alias = controlFixture("alias", "parent", "shell"), healthy = controlFixture("healthy");
+  const launches = [...original.evidence.launches, ...alias.evidence.launches];
+  const canonical = { ...original.evidence, launches }, foldedAlias = { ...alias.evidence, launches };
+  const read = controls.beginRead("parent", true, false, true);
+  expect(controls.project(healthy.item, healthy.evidence, read).control?.available).toBe(true);
+  if (!firstSeen) {
+    expect(controls.project(original.item, canonical, read).control?.available).toBe(true);
+    expect(controls.project(alias.item, foldedAlias, read).control?.available).toBe(true);
+  }
+  controls.invalidateOccurrence(foldedAlias);
+  expect(controls.project(original.item, canonical, read).control?.available).toBe(false);
+  expect(controls.project(alias.item, foldedAlias, read).control?.available).toBe(false);
+  expect(controls.proof(original.item.taskId)).toBeUndefined();
+  expect(controls.proof(alias.item.taskId)).toBeUndefined();
+  expect(controls.project(healthy.item, healthy.evidence, read).control?.available).toBe(true);
+  controls.endRead(read, true);
+  controls.observationGap();
+  const recovery = controls.beginRead("parent", true, true, true);
+  expect(controls.project(original.item, canonical, recovery).control?.available).toBe(false);
+  expect(controls.project(alias.item, foldedAlias, recovery).control?.available).toBe(false);
+  controls.endRead(recovery, true);
+  controlOracle(controls);
+});
+
 test("initial parent creation and execution do not revoke a positively identified first worker", () => {
   const fixture = controlFixture("initial", "parent", "child", "agent");
   const controls = new BackgroundControls();

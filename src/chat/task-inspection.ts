@@ -201,16 +201,17 @@ export class TaskInspectionPanel {
    */
   sync(task: BackgroundTaskItem | undefined, stopping = false): void {
     if (!this.current) return;
+    const previousTask = this.task;
     const wasRunning = this.task?.status === "running";
     this.task = task;
     const running = task?.status === "running";
     const clockRunning = task !== undefined && workerExecutionClockRuns(task);
     const signature = task
-      ? [task.taskId, task.status, task.stateUncertain ? "uncertain" : "", JSON.stringify(task.activity), JSON.stringify(task.control), task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
+      ? [task.id, task.taskId, task.childConversationId ?? "", task.outputFile ?? "", task.status, task.stateUncertain ? "uncertain" : "", JSON.stringify(task.activity), JSON.stringify(task.control), task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
       : "";
     if (signature !== this.painted) {
       this.painted = signature;
-      this.paintStrip(task, stopping);
+      this.paintStrip(task, stopping, previousTask);
     }
     if (clockRunning && this.elapsedTimer === null) {
       this.elapsedTimer = this.timers.setInterval(() => this.tickElapsed(), 1_000);
@@ -250,8 +251,21 @@ export class TaskInspectionPanel {
     this.hosts.outputNote.hidden = true;
   }
 
-  private paintStrip(task: BackgroundTaskItem | undefined, stopping: boolean): void {
+  private paintStrip(task: BackgroundTaskItem | undefined, stopping: boolean, previousTask: BackgroundTaskItem | undefined): void {
     const strip = this.hosts.strip;
+    const document = strip.ownerDocument;
+    // Metadata can repaint a settled strip after modal focus restoration.
+    // Retain only the focused action's exact equivalent on this execution;
+    // a composer, modal, or another inspection never grants focus ownership.
+    const focused = document.activeElement;
+    const sameExecution = task && previousTask && task.id === previousTask.id && task.taskId === previousTask.taskId
+      && task.activity?.executionId === previousTask.activity?.executionId
+      && task.activity?.launchRef === previousTask.activity?.launchRef
+      && task.childConversationId === previousTask.childConversationId && task.outputFile === previousTask.outputFile;
+    const action = sameExecution && focused && strip.contains(focused)
+      ? focused.hasAttribute("data-task-result") ? "data-task-result" : focused.hasAttribute("data-stop-task") ? "data-stop-task" : null
+      : null;
+    const target = action ? focused?.getAttribute(action) : null;
     if (!task) {
       strip.hidden = true;
       strip.replaceChildren();
@@ -345,6 +359,10 @@ export class TaskInspectionPanel {
       strip.append(reason);
     }
     strip.hidden = false;
+    if (action && target && document.activeElement === document.body && strip.getClientRects().length > 0) {
+      const equivalent = strip.querySelector<HTMLButtonElement>(`[${action}]`);
+      if (equivalent?.getAttribute(action) === target && !equivalent.disabled) equivalent.focus({ preventScroll: true });
+    }
   }
 
   private tickElapsed(): void {
