@@ -634,6 +634,11 @@ creating a baseline from history or the current lookup; inconclusive reads do
 not invent permanent contradictions. This private control proof does not become
 a universal requirement for independently verified Working status.
 
+Positive agent child-identity or parent-ownership contradictions also revoke
+retained occurrence controls and aliases, including concurrent Stop validations.
+A delayed older owned response cannot restore them; an incomplete or missing
+ownership response only withholds that action rather than inventing revocation.
+
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover
 personal dismissal tracking automatically after qualified identity and durable

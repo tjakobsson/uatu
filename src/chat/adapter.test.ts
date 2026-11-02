@@ -369,6 +369,8 @@ for (const kind of ["agent", "shell"] as const) for (const local of [false, true
   try {
     const parent = (await provider.createSession("Independent live work")).id;
     const branch = await adapter.prompt(parent, "branch", "Hide this transcript, not live work", undefined, undefined, undefined, undefined, "steer");
+    // Observe the live birth: history/current lookup cannot manufacture Stop authority.
+    await adapter.history(parent);
     const worker = kind === "agent" ? fake.launchWorker(parent, true) : fake.launchShell(parent, true);
     const taskId = `task:${worker.taskId}`;
     await adapter.history(parent);

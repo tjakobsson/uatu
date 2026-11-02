@@ -3588,6 +3588,11 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **THEN** the old target is refused without redirecting to a newer execution
 - **AND** stream replacement invalidates in-flight authorization but does not erase retained revocation; disposal ends the in-memory provider ownership lifetime
 
+#### Scenario: Concurrent agent Stops observe contradictory ownership
+- **WHEN** one fresh validation positively observes foreign ownership of the retained agent while another Stop still awaits its final ownership response
+- **THEN** the contradiction revokes the retained occurrence and aliases so the second Stop cannot dispatch an interrupt from an older owned response
+- **AND** missing or incomplete ownership responses withhold that action without manufacturing a permanent foreign-owner contradiction
+
 #### Scenario: Proven replay differs from ambiguous old-looking evidence
 - **WHEN** a previously consumed invocation is identified by matching native identity, stamp, semantic fingerprint and its established occurrence link
 - **THEN** that proven replay does not invalidate an otherwise verified target

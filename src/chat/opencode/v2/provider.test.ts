@@ -3650,6 +3650,103 @@ describe("OpenCode 2.x provider: sessions", () => {
     await expect(lost.provider().backgroundBlockingWork("ses_parent")).rejects.toMatchObject({ name: "OperationOutcomeUnknownError" });
     expect(lost.requests("POST", "/api/session/ses_parent/background")).toHaveLength(1);
   });
+  for (const alias of [false, true]) for (const phase of ["final", "snapshot"] as const) for (const observation of ["foreign-parent", "wrong-child", "missing-parent", "empty-parent", "missing-child", "missing", "owned"] as const) test(`positive agent ownership contradiction fences retained Stop (${phase}/${observation}/alias=${alias})`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const healthy = structuredClone(fixture.launch);
+    healthy.sessionID = "healthy_parent"; healthy.content[0].state.metadata.sessionID = "healthy_child";
+    let history = alias ? [fixture.launch, fixture.converted] : [fixture.launch];
+    let wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined, sequence = 0;
+    let armed = false, lookups = 0, entered!: () => void, releaseFirst!: () => void, releaseSecond!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+    const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `owner-fence-${++sequence}`, type, data, created: 60, location: { directory: WORKSPACE } })}\n\n`));
+    const changed = () => observation === "missing" ? notFound("ses_child") : session(observation === "wrong-child" ? "different_child" : "ses_child", {
+      parentID: observation === "foreign-parent" ? "ses_foreign" : observation === "missing-parent" ? undefined : observation === "empty-parent" ? "" : "ses_parent",
+      ...(observation === "missing-child" ? { id: undefined } : {}),
+    });
+    const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}); } }), { headers: { "content-type": "text/event-stream" } }),
+      "GET /api/session/ses_child": async () => {
+        if (!armed) return session("ses_child", { parentID: "ses_parent" });
+        const index = ++lookups;
+        if (phase === "final") {
+          if (index === 2) entered();
+          await (index === 1 ? firstGate : secondGate);
+          return index === 1 ? changed() : session("ses_child", { parentID: "ses_parent" });
+        }
+        if (index === 1) { entered(); await firstGate; return session("ses_child", { parentID: "ses_parent" }); }
+        return changed();
+      },
+      "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+      "GET /api/session/healthy_parent/message": () => ({ data: [healthy], cursor: {} }),
+      "GET /api/session/:id/message": () => ({ data: [], cursor: {} }),
+      "GET /api/session/:id/inbox": () => ({ data: [] }),
+      "GET /api/session/active": () => ({ ses_child: { type: "running" }, healthy_child: { type: "running" } }),
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("healthy_child") ? { parentID: "healthy_parent" } : {}),
+      "POST /api/session/:id/interrupt": () => ({ interrupted: true }),
+    });
+    const provider = server.provider(), controller = new AbortController();
+    const pump = (async () => { for await (const event of provider.events(controller.signal)) if (event.eventType !== "server.connected") { acknowledge?.(); acknowledge = undefined; } })();
+    const send = (type: string, data: unknown) => new Promise<void>(resolve => { acknowledge = resolve; frame(type, data); });
+    // Proven launch aliases initially fold to one published task identity.
+    const taskId = "v2:ses_parent:call_worker";
+    const contradiction = observation === "foreign-parent" || observation === "wrong-child";
+    let first: Promise<unknown> | undefined, second: Promise<unknown> | undefined;
+    try {
+      await provider.waitForEventStream(controller.signal);
+      await send("session.message.content.updated", { sessionID: "ses_parent", messageID: fixture.launch.id, content: fixture.launch.content });
+      if (alias) await send("session.message.content.updated", { sessionID: "ses_parent", messageID: fixture.converted.id, content: fixture.converted.content });
+      expect(await provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).toContainEqual(expect.objectContaining({ taskId, stateUncertain: false, control: { available: true } }));
+      armed = true;
+      first = provider.stopTask("ses_parent", taskId).catch(error => error);
+      if (phase === "final") second = provider.stopTask("ses_parent", taskId).catch(error => error);
+      await started;
+      expect(lookups).toBe(phase === "final" ? 2 : 1);
+      if (phase === "final") {
+        releaseFirst();
+        const result = await first;
+        if (observation === "owned") expect(result).toBeUndefined();
+        else expect(result).toMatchObject({ name: "BackgroundTaskUnavailableError" });
+        releaseSecond();
+        const stale = await second;
+        if (contradiction) expect(stale).toMatchObject({ name: "BackgroundTaskUnavailableError" });
+        else expect(stale).toBeUndefined();
+      } else {
+        // Retire immutable relationship reuse without revoking this worker.
+        // A separate fresh snapshot now learns the contradiction while Stop's
+        // older final ownership response remains held.
+        await send("session.moved", { sessionID: "unrelated" });
+        await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+        expect(lookups).toBe(2);
+        releaseFirst();
+        const stale = await first;
+        if (contradiction) expect(stale).toMatchObject({ name: "BackgroundTaskUnavailableError" });
+        else expect(stale).toBeUndefined();
+      }
+      expect(server.requests("POST", "/api/session/ses_child/interrupt")).toHaveLength(contradiction ? 0 : phase === "final" && observation === "owned" ? 2 : 1);
+      armed = false;
+      const recovered = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      expect(recovered.find(task => task.taskId === taskId)?.control?.available).toBe(!contradiction);
+      if (contradiction) {
+        expect(recovered.find(task => task.taskId === taskId)?.activity?.launchRef).toBeUndefined();
+        await expect(provider.stopTask("ses_parent", taskId)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+        if (alias) {
+          // Restating only the other proven launcher changes the canonical
+          // wire identity, not the occurrence's sticky revocation.
+          history = [fixture.converted];
+          const aliasId = "v2:ses_parent:call_converted";
+          expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).find(task => task.taskId === aliasId)?.control?.available).toBe(false);
+          await expect(provider.stopTask("ses_parent", aliasId)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+        }
+      } else await provider.stopTask("ses_parent", taskId);
+      // A contradiction is occurrence-local, not a provider-wide closure.
+      await send("session.message.content.updated", { sessionID: "healthy_parent", messageID: healthy.id, content: healthy.content });
+      await provider.stopTask("healthy_parent", "v2:healthy_parent:call_worker");
+      expect(server.requests("POST", "/api/session/healthy_child/interrupt")).toHaveLength(1);
+      expect(stopEvidence(provider)).toHaveLength(0);
+    } finally { releaseFirst(); releaseSecond(); await Promise.allSettled([first, second]); controller.abort(); await pump; await provider.dispose(); }
+  });
   test("worker stop verifies its occurrence and interrupts only its child without resuming", async () => {
     const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
     let completed = false;
