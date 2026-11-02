@@ -798,6 +798,16 @@ function workerHistoryServer(messages: unknown[], idle: unknown[], pending: unkn
   });
 }
 
+// Complete native Info for synthetic healthy shell fixtures. Birth evidence is
+// still emitted explicitly; current inventory alone never supplies its baseline.
+const nativeShellInfo = (id = "sh_fixture", parent = "ses_parent", command = "printf fixture", started = 71): ShellInfo => ({
+  id, command, cwd: WORKSPACE, shell: "/bin/sh", file: `/fixture/${id}.out`, status: "running", metadata: { sessionID: parent }, time: { started },
+});
+const emitNativeShellBirths = (wire: ReadableStreamDefaultController<Uint8Array>, ids: string[] = ["sh_fixture"], parent = "ses_parent") => {
+  for (const id of ids) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `birth:${id}`, created: 71, type: "shell.created",
+    location: { directory: WORKSPACE }, data: { info: nativeShellInfo(id, parent) } })}\n\n`));
+};
+
 function workerRecoveryServer() {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   const state = { failure: "", childParent: "ses_parent", shellParent: "ses_parent", messages: [fixture.launch, fixture.shell] as unknown[], revert: undefined as string | undefined };
@@ -810,14 +820,14 @@ function workerRecoveryServer() {
     return result;
   };
   const server = fakeOpenCode({
-    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}); frame("shell.created", { info: nativeShellInfo() }, 71); } }), { headers: { "content-type": "text/event-stream" } }),
     "GET /api/session/ses_parent": () => session("ses_parent", state.revert ? { revert: { messageID: state.revert } } : {}),
     "GET /api/session/ses_child": () => session("ses_child", { parentID: state.childParent }),
     "GET /api/session/ses_parent/message": () => ({ data: state.messages, cursor: {} }),
     "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
     "GET /api/session/ses_child/message": ({ path }) => answer(path, { data: [], cursor: {} }),
     "GET /api/session/active": ({ path }) => answer(path, { ses_child: { status: "running" } }),
-    "GET /api/shell/sh_fixture": ({ path }) => answer(path, scoped({ id: "sh_fixture", command: "printf fixture", status: "running", time: { started: 71 }, metadata: { sessionID: state.shellParent } })),
+    "GET /api/shell/sh_fixture": ({ path }) => answer(path, scoped(nativeShellInfo("sh_fixture", state.shellParent))),
     "DELETE /api/shell/sh_fixture": () => undefined,
     "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
   });
@@ -1325,6 +1335,10 @@ for (const unavailableControl of [false, true]) test(`exact shell inventory end 
       for (const event of [{ type: "server.connected", data: {} }, { id: "parent-birth", created: 2, type: "session.created", location: { directory: WORKSPACE }, data: {
         sessionID: "ses_parent", projectID: "global", slug: "fixture-parent", version: "2.1.2", location: { directory: WORKSPACE } } }])
         controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+      if (!unavailableControl) for (const event of [
+        { id: "shell-birth", created: 71, type: "shell.created", data: { info: { ...nativeShellInfo(), file: "/fixture/output" } } },
+        { id: "shell-launch", created: 80, type: "session.message.content.updated", data: { sessionID: "ses_parent", messageID: fixture.shell.id, content: fixture.shell.content } },
+      ]) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
     } }), { headers: { "content-type": "text/event-stream" } }),
     "GET /api/session/ses_parent": () => session("ses_parent"),
     "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
@@ -1337,12 +1351,12 @@ for (const unavailableControl of [false, true]) test(`exact shell inventory end 
   const provider = server.provider();
   let stream: ReturnType<typeof observedNativeStream> | undefined;
   try {
+    stream = observedNativeStream(provider);
     if (unavailableControl) {
       // A covered startup with no retained live launcher does not authorize
       // Stop, although complete inventory can independently verify activity.
-      stream = observedNativeStream(provider);
       await stream.seen(event => event.eventType === "session.created");
-    }
+    } else await stream.seen(event => event.eventType === "session.message.content.updated");
     expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("working");
     exited = true;
     const [ended] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
@@ -1445,7 +1459,7 @@ for (const birthScope of ["owned", "foreign", "foreign-only"] as const) for (con
   } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
 });
 
-for (const knownEnd of [false, true]) for (const change of ["command-stop", "command-readback", "foreign-owner", "missing-command", "failed-read"] as const) test(`fresh shell inventory fences retained command without a replacement birth (${change}/old end=${knownEnd})`, async () => {
+for (const knownEnd of [false, true]) for (const change of ["command-stop", "command-readback", "foreign-owner", "started", "file", "started-file", "inflight-started", "cwd", "shell", "pid", "native-id", "missing-command", "missing-file", "missing-started", "malformed-started", "malformed-pid", "missing-status", "missing-cwd", "missing-shell", "missing-id", "missing-owner", "failed-read"] as const) test(`fresh shell inventory fences retained command without a replacement birth (${change}/old end=${knownEnd})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   const adjacent = structuredClone(fixture.shell);
   adjacent.id = "msg_adjacent";
@@ -1454,8 +1468,9 @@ for (const knownEnd of [false, true]) for (const change of ["command-stop", "com
   adjacent.content[0].state.metadata.shellID = "sh_adjacent";
   let wire!: ReadableStreamDefaultController<Uint8Array>;
   const original: ShellInfo = { id: "sh_fixture", status: "running", command: "printf fixture", cwd: WORKSPACE,
-    shell: "/bin/sh", file: "/fixture/old.out", metadata: { sessionID: "ses_parent" }, time: { started: 75 } };
+    shell: "/bin/sh", file: "/fixture/old.out", pid: 123, metadata: { sessionID: "ses_parent" }, time: { started: 75 } };
   let shell: Record<string, unknown> = original, failed = false;
+  let heldRead: (() => Promise<void>) | undefined, releaseRead: (() => void) | undefined, pendingStop: Promise<void> | undefined;
   const frame = (id: string, type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id, type, data, created, location: { directory: WORKSPACE } })}\n\n`));
   const server = fakeOpenCode({
     "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("connected", "server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
@@ -1463,7 +1478,7 @@ for (const knownEnd of [false, true]) for (const change of ["command-stop", "com
     "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell, adjacent], cursor: {} }),
     "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
     "GET /api/session/active": () => ({}),
-    "GET /api/shell/sh_fixture": () => failed ? Response.json({ _tag: "ShellNotFoundError" }, { status: 404 }) : scoped(shell),
+    "GET /api/shell/sh_fixture": async () => { const held = heldRead; heldRead = undefined; await held?.(); return failed ? Response.json({ _tag: "ShellNotFoundError" }, { status: 404 }) : scoped(shell); },
     "DELETE /api/shell/sh_fixture": () => undefined,
     "GET /api/shell/sh_adjacent": () => scoped({ ...original, id: "sh_adjacent", command: "healthy job" }),
     "DELETE /api/shell/sh_adjacent": () => undefined,
@@ -1487,19 +1502,41 @@ for (const knownEnd of [false, true]) for (const change of ["command-stop", "com
       frame("old-exit", "shell.exited", { id: original.id, status: "exited", exit: 0 }, 90);
       await stream.seen(event => event.eventType === "shell.exited");
     }
-    const contradiction = change.startsWith("command") || change === "foreign-owner";
+    if (change === "inflight-started") {
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { releaseRead = resolve; });
+      heldRead = async () => { entered(); await gate; };
+      pendingStop = provider.stopTask("ses_parent", taskId); void pendingStop.catch(() => undefined);
+      await started;
+    }
+    const identityChange = ["started", "file", "started-file", "inflight-started", "cwd", "shell", "pid", "native-id"].includes(change);
+    const contradiction = change.startsWith("command") || change === "foreign-owner" || identityChange;
     shell = { ...original, ...(change.startsWith("command") ? { command: "replacement job B", time: { started: 95 } }
+      : ["started", "file", "started-file", "inflight-started"].includes(change) ? { ...(change !== "file" ? { time: { started: 95 } } : {}), ...(["file", "started-file"].includes(change) ? { file: "/fixture/replacement.out" } : {}) }
+      : change === "cwd" ? { cwd: "/replacement/cwd" } : change === "shell" ? { shell: "/bin/replacement" } : change === "pid" ? { pid: 456 }
+      : change === "native-id" ? { id: "sh_replacement" }
       : change === "foreign-owner" ? { metadata: { sessionID: "ses_foreign" } }
-      : change === "missing-command" ? { command: undefined } : {}) };
+      : change === "missing-command" ? { command: undefined } : change === "missing-file" ? { file: undefined }
+      : change === "missing-started" ? { time: {} } : change === "malformed-started" ? { time: { started: "75" } }
+      : change === "malformed-pid" ? { pid: "123" } : change === "missing-status" ? { status: undefined }
+      : change === "missing-cwd" ? { cwd: undefined } : change === "missing-shell" ? { shell: undefined }
+      : change === "missing-id" ? { id: undefined } : change === "missing-owner" ? { metadata: undefined } : {}) };
     failed = change === "failed-read";
+    releaseRead?.();
     // Stop itself must consume the contradiction; no replacement birth or
     // preparatory readback is required to invalidate A's retained permission.
-    if (change === "command-stop") {
-      const stops = await Promise.allSettled([provider.stopTask("ses_parent", taskId), provider.stopTask("ses_parent", taskId)]);
+    if (change === "command-stop" || identityChange) {
+      const stops = await Promise.allSettled([pendingStop ?? provider.stopTask("ses_parent", taskId), provider.stopTask("ses_parent", taskId)]);
       expect(stops.map(result => result.status)).toEqual(["rejected", "rejected"]);
       expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
     }
     const [old] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    if (!contradiction) {
+      expect(old?.control?.available).toBe(false);
+      await expect(provider.stopTask("ses_parent", taskId)).rejects.toThrow();
+      expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+      if (!knownEnd && !["failed-read", "missing-owner", "missing-command", "missing-status"].includes(change)) expect(old?.activity?.kind).toBe("working");
+    }
     if (contradiction) {
       expect(old?.activity?.kind).toBe(knownEnd ? "ended" : "unavailable");
       expect(old?.activity?.endedAt).toBe(knownEnd ? 90 : undefined);
@@ -1523,6 +1560,59 @@ for (const knownEnd of [false, true]) for (const change of ["command-stop", "com
     }));
     await provider.stopTask("ses_parent", "v2:ses_parent:call_adjacent");
     expect(server.requests("DELETE", "/api/shell/sh_adjacent")).toHaveLength(1);
+  } finally { releaseRead?.(); await pendingStop?.catch(() => undefined); stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
+});
+
+for (const birth of ["full", "missing", "partial", "enriched", "optional"] as const) test(`private shell birth identity preserves independent activity and compatible live enrichment (${birth})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const original = nativeShellInfo("sh_fixture", "ses_parent", "printf fixture", 75);
+  let current: Record<string, unknown> = original, wire!: ReadableStreamDefaultController<Uint8Array>;
+  const frame = (id: string, type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id, type, data, created, location: { directory: WORKSPACE } })}\n\n`));
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("connected", "server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/shell/sh_fixture": () => scoped(current), "DELETE /api/shell/sh_fixture": () => undefined,
+  });
+  const provider = server.provider(), stream = observedNativeStream(provider), taskId = "v2:ses_parent:call_shell";
+  try {
+    await stream.seen(event => event.eventType === "server.connected");
+    frame("input", "session.tool.input.started", { sessionID: "ses_parent", assistantMessageID: fixture.shell.id, id: "call_shell", name: "shell" }, 70);
+    frame("call", "session.tool.called", { sessionID: "ses_parent", assistantMessageID: fixture.shell.id, id: "call_shell", input: { command: original.command }, executed: false }, 71);
+    if (birth !== "missing") frame("birth", "shell.created", { info: { ...original, ...(["partial", "enriched"].includes(birth) ? { file: undefined } : {}) } }, 75);
+    frame("launch", "session.message.content.updated", { sessionID: "ses_parent", messageID: fixture.shell.id, content: fixture.shell.content }, 80);
+    await stream.seen(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "background_task" && update.item.taskId === taskId));
+    const [initial] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(initial?.activity?.kind).toBe("working");
+    expect(initial?.control?.available).toBe(birth === "full" || birth === "optional");
+    const reference = initial?.activity?.launchRef;
+    if (birth !== "missing") expect(reference).toBeDefined();
+    if (["missing", "partial", "enriched"].includes(birth)) {
+      await expect(provider.stopTask("ses_parent", taskId)).rejects.toThrow();
+      expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+    }
+    if (birth === "enriched" || birth === "optional") {
+      current = { ...original, pid: 123 };
+      frame("birth", "shell.created", { info: current }, 75);
+      frame("barrier", "session.text.delta", { sessionID: "ses_parent", assistantMessageID: "barrier", id: "text", delta: "enriched" }, 90);
+      await stream.seen(event => event.updates.some(update => update.kind === "text" && update.text === "enriched"));
+    }
+    // Repeated complete GET/history cannot fill an unobserved birth baseline.
+    await provider.listMessages("ses_parent", { limit: 100 });
+    const [recovered] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    const available = birth !== "missing" && birth !== "partial";
+    expect(recovered?.activity?.kind).toBe("working");
+    expect(recovered?.activity?.launchRef).toBe(reference);
+    expect(recovered?.control?.available).toBe(available);
+    if (available) await provider.stopTask("ses_parent", taskId);
+    else await expect(provider.stopTask("ses_parent", taskId)).rejects.toThrow();
+    expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(available ? 1 : 0);
+    if (birth === "optional") {
+      // Optional omission is compatible, not a known conflicting PID.
+      current = original;
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.control?.available).toBe(true);
+    }
   } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
 });
 
@@ -1575,7 +1665,7 @@ for (const change of ["replay", "new-envelope", "command", "started", "foreign-p
     let wire!: ReadableStreamDefaultController<Uint8Array>, armed = false, entered!: () => void, release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
     const frame = (raw: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(raw)}\n\n`));
-    const shell = { id: "sh_fixture", status: "running", command: fixture.shell.content[0].state.input.command, metadata: { sessionID: "ses_parent" }, time: { started: 65 } };
+    const shell = nativeShellInfo("sh_fixture", "ses_parent", fixture.shell.content[0].state.input.command, 65);
     const birth = { id: "shell-birth", created: 66, type: "shell.created", location: { directory: WORKSPACE }, data: { info: shell } };
     const server = fakeOpenCode({
       "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame({ type: "server.connected", data: {} }); } }), { headers: { "content-type": "text/event-stream" } }),
@@ -1583,7 +1673,7 @@ for (const change of ["replay", "new-envelope", "command", "started", "foreign-p
       "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
       "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
       "GET /api/session/active": () => ({}),
-      "GET /api/shell/sh_fixture": async () => { const owned = scoped({ id: "sh_fixture", metadata: { sessionID: "ses_parent" } }); if (armed) { armed = false; entered(); await gate; } return owned; },
+      "GET /api/shell/sh_fixture": async () => { const owned = scoped(shell); if (armed) { armed = false; entered(); await gate; } return owned; },
       "DELETE /api/shell/sh_fixture": () => undefined,
     });
     const provider = server.provider();
@@ -1641,7 +1731,7 @@ for (const change of ["compatible", "old-command", "missing-birth-command", "mis
   test(`first-seen public shell Stop binds its command despite fresh same-ID ownership: ${change}`, async () => {
     let wire!: ReadableStreamDefaultController<Uint8Array>;
     const frame = (raw: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(raw)}\n\n`));
-    const info = { id: "SH", status: "running", command: "NEW", metadata: { sessionID: "P" }, time: { started: 30 } };
+    const info = nativeShellInfo("SH", "P", "NEW", 30);
     const birth = { id: "new-birth", created: 31, type: "shell.created", location: { directory: WORKSPACE }, data: { info: {
       ...info, command: change === "missing-birth-command" ? undefined : "NEW" } } };
     const message = { id: "owning-message", type: "assistant", time: { created: change === "old-command" ? 10 : 29 }, content: [{ type: "tool", id: "call", name: "shell",
@@ -1683,10 +1773,13 @@ for (const change of ["compatible", "old-command", "missing-birth-command", "mis
 for (const kind of ["agent", "shell"] as const) test(`reverted live ${kind} remains independently inspectable and stoppable until settlement`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory }) as OpenCodeV2Provider;
+  let stream: ReturnType<typeof observedNativeStream> | undefined;
   try {
     const parent = (await provider.createSession("Live work survives transcript revert")).id;
+    if (kind === "shell") { stream = observedNativeStream(provider); await stream.seen(event => event.eventType === "server.connected"); }
     const branch = await provider.prompt(parent, { id: "live-branch", text: "Revert the launch transcript", delivery: "queue" });
     const worker = kind === "agent" ? fake.launchWorker(parent, true) : fake.launchShell(parent, true);
+    if (stream) await stream.seen(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "background_task" && update.item.taskId === worker.taskId));
     expect(await provider.reconcileBackgroundTasks(parent, { fresh: true })).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "running", stateUncertain: false }));
     await provider.interrupt(parent, { resume: false });
     fake.externalRevert(parent, branch.messageId);
@@ -1703,7 +1796,7 @@ for (const kind of ["agent", "shell"] as const) test(`reverted live ${kind} rema
     fake.externalRevert(parent, null);
     expect(await provider.reconcileBackgroundTasks(parent, { fresh: true })).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: kind === "agent" ? "completed" : "failed" }));
     expect(fake.state().unhandled).toEqual([]);
-  } finally { await provider.dispose(); await fake.stop(); }
+  } finally { stream?.lifetime.abort(); await stream?.pump; await provider.dispose(); await fake.stop(); }
 });
 
 for (const phase of [2, 3, 4]) test(`public visibility abort retires cancellation-ignoring parent read ${phase} and its control guard`, async () => {
@@ -1839,14 +1932,19 @@ for (const kind of ["running", "shell", "reused-child"] as const) test(`public r
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory }) as OpenCodeV2Provider;
   const privateRead = () => (provider as unknown as { backgroundSnapshot(id: string, options: { fresh: boolean }): Promise<{ tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, unknown>; controls: ReadonlyMap<string, unknown> }> }).backgroundSnapshot(parent, { fresh: true });
   let parent: string;
+  let stream: ReturnType<typeof observedNativeStream> | undefined;
   try {
     parent = (await provider.createSession("Retained public worker prefix")).id;
+    if (kind === "shell") { stream = observedNativeStream(provider); await stream.seen(event => event.eventType === "server.connected"); }
     await provider.prompt(parent, { id: "retained", text: "Keep this turn", delivery: "queue" });
     const kept = fake.launchWorker(parent, true);
     fake.settleWorker(kept.childId, "completed", "Retained completion");
     fake.step(parent); fake.finish(parent);
     const branch = await provider.prompt(parent, { id: "hidden", text: "Revert only this suffix", delivery: "queue" });
-    if (kind === "shell") fake.launchShell(parent, true);
+    if (kind === "shell") {
+      const shell = fake.launchShell(parent, true);
+      await stream!.seen(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "background_task" && update.item.taskId === shell.taskId));
+    }
     else fake.launchWorker(parent, true, kind === "reused-child" ? kept.childId : undefined);
     const full = await privateRead();
     expect(full.tasks.some(item => item.status === "running")).toBe(true);
@@ -1869,7 +1967,7 @@ for (const kind of ["running", "shell", "reused-child"] as const) test(`public r
     fake.externalRevert(parent, null);
     expect(withoutObservationClock(await provider.reconcileBackgroundTasks(parent, { fresh: true }))).toEqual(withoutObservationClock(full.tasks));
     expect(fake.state().unhandled).toEqual([]);
-  } finally { await provider.dispose(); await fake.stop(); }
+  } finally { stream?.lifetime.abort(); await stream?.pump; await provider.dispose(); await fake.stop(); }
 });
 
 test("public revert visibility uses the visible prefix of a folded alias without erasing its private suffix", async () => {
@@ -2168,16 +2266,18 @@ describe("native bootstrap admission through the real adapter", () => {
       let controllable = false;
       for (let attempt = 0; attempt < 100; attempt++) {
         const rows = await provider.reconcileBackgroundTasks(parent, { fresh: true });
-        controllable = [active.taskId, shell.taskId].every(id => rows.find(row => row.taskId === id)?.control?.available === true);
+        controllable = [active.taskId, ...(order === "live" ? [shell.taskId] : [])].every(id => rows.find(row => row.taskId === id)?.control?.available === true);
+        if (order === "cold-history") expect(rows.find(row => row.taskId === shell.taskId)?.control?.available).toBe(false);
         if (controllable) break;
         await Bun.sleep(1);
       }
       expect(controllable).toBe(true);
       await provider.stopTask(parent, active.taskId);
-      await provider.stopTask(parent, shell.taskId);
+      if (order === "live") await provider.stopTask(parent, shell.taskId);
+      else await expect(provider.stopTask(parent, shell.taskId)).rejects.toThrow(/no longer confirmed/);
       expect(fake.state().sessions[parent]?.running).toBe(true);
       expect(fake.state().calls.filter(call => call.startsWith(`POST /api/session/${active.childId}/interrupt?`))).toHaveLength(1);
-      expect(fake.state().calls.filter(call => call.startsWith(`DELETE /api/shell/${shell.shellId}?`))).toHaveLength(1);
+      expect(fake.state().calls.filter(call => call.startsWith(`DELETE /api/shell/${shell.shellId}?`))).toHaveLength(order === "live" ? 1 : 0);
       expect(fake.state().unhandled).toEqual([]);
     } finally {
       await adapter.dispose();
@@ -2680,6 +2780,7 @@ describe("OpenCode 2.x provider: sessions", () => {
     const server = fakeOpenCode({
       "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
         controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+        emitNativeShellBirths(controller, ["sh_fixture", "sh_healthy"]);
       } }), { headers: { "content-type": "text/event-stream" } }),
       "GET /api/session/active": () => ({ ses_child: { status: "running" } }),
       "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
@@ -2688,7 +2789,7 @@ describe("OpenCode 2.x provider: sessions", () => {
       "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
       "GET /api/shell/:id": ({ path }) => path.endsWith("sh_fixture") && failure ? new Response(null, { status: 500 })
         : path.endsWith("sh_fixture") && gone ? new Response(null, { status: 404 })
-          : scoped({ id: path.split("/").at(-1), command: "printf fixture", status: "running", time: { started: 71 }, metadata: { sessionID: "ses_parent" } }),
+          : scoped(nativeShellInfo(path.split("/").at(-1)!)),
     });
     const provider = server.provider(), stream = observedNativeStream(provider);
     const controls = (provider as unknown as { controls: { current(taskId: string): boolean } }).controls;
@@ -2725,6 +2826,7 @@ describe("OpenCode 2.x provider: sessions", () => {
     const server = fakeOpenCode({
       "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
         wire = controller; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+        emitNativeShellBirths(controller, ["sh_fixture", "sh_healthy"]);
       } }), { headers: { "content-type": "text/event-stream" } }),
       "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!),
       "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell, healthy], cursor: {} }),
@@ -2733,8 +2835,7 @@ describe("OpenCode 2.x provider: sessions", () => {
       "GET /api/session/active": () => ({}),
       "GET /api/shell/:id": ({ path }) => path.endsWith("sh_fixture") && failure ? new Response(null, { status: 500 })
         : path.endsWith("sh_fixture") && target === "removed" ? new Response(null, { status: 404 })
-          : scoped({ id: path.split("/").at(-1), command: "printf fixture", status: "running", time: { started: 71 },
-            metadata: { sessionID: path.endsWith("sh_fixture") && target === "foreign" ? "other_parent" : "ses_parent" } }),
+          : scoped(nativeShellInfo(path.split("/").at(-1)!, path.endsWith("sh_fixture") && target === "foreign" ? "other_parent" : "ses_parent")),
     });
     const provider = server.provider(), stream = observedNativeStream(provider), blockers: ReturnType<typeof provider.listMessages>[] = [];
     const controls = (provider as unknown as { controls: { current(taskId: string): boolean; activeReads: number } }).controls;
@@ -2781,6 +2882,7 @@ describe("OpenCode 2.x provider: sessions", () => {
     const server = fakeOpenCode({
       "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
         wire = controller; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+        emitNativeShellBirths(controller, ["sh_fixture", "sh_healthy"]);
       } }), { headers: { "content-type": "text/event-stream" } }),
       "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!),
       "GET /api/session/ses_parent/message": async () => {
@@ -2792,8 +2894,7 @@ describe("OpenCode 2.x provider: sessions", () => {
       "GET /api/session/active": () => ({}),
       "GET /api/shell/:id": ({ path }) => path.endsWith("sh_fixture") && failure ? new Response(null, { status: 500 })
         : path.endsWith("sh_fixture") && target === "removed" ? new Response(null, { status: 404 })
-          : scoped({ id: path.split("/").at(-1), command: "printf fixture", status: "running", time: { started: 71 },
-            metadata: { sessionID: path.endsWith("sh_fixture") && target === "foreign" ? "other_parent" : "ses_parent" } }),
+          : scoped(nativeShellInfo(path.split("/").at(-1)!, path.endsWith("sh_fixture") && target === "foreign" ? "other_parent" : "ses_parent")),
     });
     const provider = server.provider(), stream = observedNativeStream(provider), blockers: ReturnType<typeof provider.listMessages>[] = [];
     const controls = (provider as unknown as { controls: { current(taskId: string): boolean; activeReads: number } }).controls;
@@ -2851,7 +2952,9 @@ describe("OpenCode 2.x provider: sessions", () => {
     });
     const provider = server.provider(), controls = (provider as unknown as { controls: { current(taskId: string): boolean } }).controls;
     let stream: ReturnType<typeof observedNativeStream> | undefined, older: ReturnType<typeof provider.listMessages> | undefined;
-    const healthyCalls = ["healthy_agent", "call_shell"];
+    // The standalone shell has no observed native birth. Its activity can be
+    // current, but fresh inventory cannot manufacture its Stop identity.
+    const healthyCalls = ["healthy_agent"];
     try {
       // Retain both healthy kinds without closing initial live inventory.
       await provider.listMessages("ses_parent", { limit: 100 });
@@ -2909,13 +3012,13 @@ describe("OpenCode 2.x provider: sessions", () => {
       const fresh = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
       if (negative === "foreign-directory") expect(fresh.some(task => task.toolUseId === "call_worker")).toBe(false);
       else expect(fresh.find(task => task.toolUseId === "call_worker")).toMatchObject({ status: "running", stateUncertain: true });
-      expect(fresh.find(task => task.toolUseId === "call_shell")).toMatchObject({ status: "running", stateUncertain: false });
+      expect(fresh.find(task => task.toolUseId === "call_shell")).toMatchObject({ status: "running", stateUncertain: true });
       // Without a subscription, a session may move out of this directory and
       // back before the older caller verifies it. Parentage and IDs stay fixed;
       // recovered ownership/history alone cannot replace pending active proof.
       phase = "owned"; release(); const page = await older;
       expect(page.completeItems).toContainEqual(expect.objectContaining({ toolUseId: "call_worker", status: "running", stateUncertain: true }));
-      expect(page.completeItems).toContainEqual(expect.objectContaining({ toolUseId: "call_shell", status: "running", stateUncertain: false }));
+      expect(page.completeItems).toContainEqual(expect.objectContaining({ toolUseId: "call_shell", status: "running" }));
       expect(controls.current("v2:ses_parent:call_worker")).toBe(false);
       expect(await provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).toContainEqual(expect.objectContaining({ toolUseId: "call_worker", status: "running", stateUncertain: false }));
       expect(controls.current("v2:ses_parent:call_worker")).toBe(true);
@@ -3116,6 +3219,7 @@ describe("OpenCode 2.x provider: sessions", () => {
       const original = structuredClone(fixture.launch), converted = structuredClone(fixture.converted);
       const setKind = (part: { name: string; state: { metadata: Record<string, unknown> } }, workerKind: "agent" | "shell") => { part.name = workerKind === "agent" ? "subagent" : "shell"; part.state.metadata = { [workerKind === "agent" ? "sessionID" : "shellID"]: "ses_child", status: "running" }; };
       if (kind === "shell") { setKind(original.content[0], kind); setKind(converted.content[0], kind); }
+      if (kind === "shell") for (const message of [original, converted]) message.content[0].state.input.command = "printf fixture";
       let history = alias ? [original, converted] : [original];
       const selected = alias ? converted : original;
       let wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined, armed = false, used = false, entered!: () => void, release!: () => void, lookups = 0;
@@ -3132,7 +3236,7 @@ describe("OpenCode 2.x provider: sessions", () => {
         "GET /api/session/active": async () => { await waitAt("active"); return { ses_child: { type: "running" } }; },
         "GET /api/session/ses_child/message": async () => { await waitAt("child-history"); return { data: [], cursor: {} }; },
         "GET /api/session/ses_child": async () => { if (armed) { lookups++; if (phase === "ownership") await waitAt("ownership"); else if (lookups === (warm ? 1 : 2)) await waitAt("final-ownership"); } return session("ses_child", { parentID: "ses_parent" }); },
-        "GET /api/shell/ses_child": async () => { await waitAt("shell-ownership"); return scoped({ id: "ses_child", metadata: { sessionID: "ses_parent" } }); },
+        "GET /api/shell/ses_child": async () => { await waitAt("shell-ownership"); return scoped(nativeShellInfo("ses_child")); },
         "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
         "DELETE /api/shell/ses_child": () => undefined,
       });
@@ -3147,6 +3251,7 @@ describe("OpenCode 2.x provider: sessions", () => {
       let stop: Promise<unknown> | undefined;
       try {
         await provider.waitForEventStream(controller.signal);
+        if (kind === "shell") await sendRaw({ id: "shell-birth", created: 71, type: "shell.created", location: { directory: WORKSPACE }, data: { info: nativeShellInfo("ses_child") } });
         await send("session.tool.input.started", { sessionID: "ses_parent", id: selected.content[0].id, name: kind === "agent" ? "subagent" : "shell", assistantMessageID: selected.id });
         if (warm) {
           await send("session.message.content.updated", { sessionID: "ses_parent", messageID: original.id, content: original.content });
@@ -3232,7 +3337,7 @@ describe("OpenCode 2.x provider: sessions", () => {
       "GET /api/session/:id/inbox": () => ({ data: [] }),
       "GET /api/session/active": () => ({ ses_child: { type: "running" } }),
       "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, { parentID: "ses_parent" }),
-      "GET /api/shell/sh_fixture": () => scoped({ id: "sh_fixture", metadata: { sessionID: "other" } }),
+      "GET /api/shell/sh_fixture": () => scoped(nativeShellInfo("sh_fixture", "other")),
       "DELETE /api/shell/sh_fixture": () => undefined,
       "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
     });
@@ -3245,6 +3350,7 @@ describe("OpenCode 2.x provider: sessions", () => {
     try {
       await provider.waitForEventStream(controller.signal);
       await send("ses_parent", fixture.launch.content);
+      emitNativeShellBirths(wire, ["sh_fixture"], "other");
       await send("other", fixture.shell.content);
       expect(rows.get("v2:ses_parent:call_worker")?.stateUncertain).toBe(false);
       expect(rows.get("v2:other:call_shell")?.stateUncertain).toBe(false);
@@ -4340,15 +4446,22 @@ describe("OpenCode 2.x provider: sessions", () => {
     const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
     let removed = false;
     const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+        emitNativeShellBirths(controller);
+      } }), { headers: { "content-type": "text/event-stream" } }),
       "GET /api/session/active": () => ({}),
       "GET /api/session/:id": () => session("ses_parent"),
       "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
       "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
-      "GET /api/shell/sh_fixture": () => removed ? Response.json({ _tag: "ShellNotFoundError" }, { status: 404 }) : scoped({ id: "sh_fixture", status: "exited", metadata: { sessionID: "ses_parent" } }),
+      "GET /api/shell/sh_fixture": () => removed ? Response.json({ _tag: "ShellNotFoundError" }, { status: 404 }) : scoped({ ...nativeShellInfo(), status: "exited" }),
       "GET /api/shell/sh_fixture/output": ({ query }) => scoped({ output: query.get("cursor") === String(Number.MAX_SAFE_INTEGER) ? "" : "tail", size: 1000, cursor: 1000, truncated: false }),
       "DELETE /api/shell/sh_fixture": () => { removed = true; return undefined; },
     });
     const provider = server.provider();
+    const stream = observedNativeStream(provider);
+    try {
+    await stream.seen(event => event.eventType === "shell.created");
     expect(await provider.taskOutput("ses_parent", "v2:ses_parent:call_shell", { tailBytes: 4 })).toEqual({ text: "tail", truncated: true, settled: false });
     await expect(provider.taskOutput("ses_parent", "/private/secret", { tailBytes: 4 })).rejects.toThrow(/unavailable/);
     await provider.stopTask("ses_parent", "v2:ses_parent:call_shell");
@@ -4356,16 +4469,21 @@ describe("OpenCode 2.x provider: sessions", () => {
     expect(await provider.taskOutput("ses_parent", "v2:ses_parent:call_shell", { tailBytes: 4 })).toBeNull();
     expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(1);
     expect(server.calls.filter(call => call.path.startsWith("/api/shell/")).every(call => call.query.get("location[directory]") === WORKSPACE)).toBe(true);
+    } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
   });
   test("foreign shell ownership refuses output and removal; already-missing removal 204 alone settles nothing", async () => {
     const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
     let owner = "other-parent";
     const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+        emitNativeShellBirths(controller);
+      } }), { headers: { "content-type": "text/event-stream" } }),
       "GET /api/session/active": () => ({}),
       "GET /api/session/ses_parent": () => session("ses_parent"),
       "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
       "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
-      "GET /api/shell/sh_fixture": () => scoped({ id: "sh_fixture", metadata: { sessionID: owner } }),
+      "GET /api/shell/sh_fixture": () => scoped(nativeShellInfo("sh_fixture", owner)),
       // A removal can race another client's removal after our ownership read.
       "DELETE /api/shell/sh_fixture": () => undefined,
     });
@@ -4379,9 +4497,13 @@ describe("OpenCode 2.x provider: sessions", () => {
     // A coherent independently owned lifetime can still remove an unsettled
     // job; its 204 acknowledges removal, not a terminal completion report.
     const independentlyOwned = server.provider();
+    const stream = observedNativeStream(independentlyOwned);
+    try {
+    await stream.seen(event => event.eventType === "shell.created");
     await independentlyOwned.stopTask("ses_parent", "v2:ses_parent:call_shell");
     expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(1);
     expect(await independentlyOwned.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "running" })]);
+    } finally { stream.lifetime.abort(); await stream.pump; await independentlyOwned.dispose(); await provider.dispose(); }
   });
   test("background reconciliation reads pending results even when the parent is idle; active absence is uncertainty", async () => {
     const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));

@@ -3566,6 +3566,12 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **AND** a retained end for the old execution does not override that contradiction or authorize removal of the replacement
 - **AND** missing or failed inventory is not treated as positive command contradiction, while unrelated healthy workers remain controllable
 
+#### Scenario: Same-command replacement contradicts retained native shell-birth identity
+- **WHEN** a fresh native read returns the same shell ID, parent and command but positively contradicts retained immutable native birth fields such as its native start or output identity before a replacement birth event arrives
+- **THEN** old Stop authority and in-flight validation are refused without removing the replacement job or output, including when the old execution has already ended
+- **AND** native birth fields are compared within their own native domain rather than equated with launcher or envelope clocks
+- **AND** a current or historical lookup alone cannot manufacture missing retained birth proof, while missing/incomplete reads do not invent permanent contradictions
+
 #### Scenario: Control proof has a bounded share of the live evidence budget
 - **WHEN** the provider retains control evidence alongside live display/correlation records
 - **THEN** control evidence uses at most 1 MiB and 2,048 entries within the existing aggregate 4 MiB and 8,192 live-entry budget

@@ -63,6 +63,25 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 export function shellCommandFingerprint(command: unknown): string | undefined {
   return typeof command === "string" ? digest(JSON.stringify(["shell-command", command])) : undefined;
 }
+/** V2 Shell.create fixes these values before publishing Created. Lifecycle
+ * updates change status/exit/completed only. Paths stay private hashed facts. */
+export type ShellBirthIdentity = Readonly<{ started?: number; file?: string; cwd?: string; shell?: string; pid?: number }>;
+export function shellBirthIdentity(value: unknown): ShellBirthIdentity {
+  const info = record(value), started = number(record(info.time).started);
+  const field = (name: string) => typeof info[name] === "string" && info[name] !== "" ? digest(JSON.stringify([name, info[name]])) : undefined;
+  return Object.freeze({ started: started !== undefined && started >= 0 ? started : undefined,
+    file: field("file"), cwd: field("cwd"), shell: field("shell"),
+    pid: Number.isSafeInteger(info.pid) && Number(info.pid) > 0 ? Number(info.pid) : undefined });
+}
+function shellIdentityContradicts(birth: ShellBirthIdentity, current: ShellBirthIdentity): boolean {
+  return (["started", "file", "cwd", "shell", "pid"] as const).some(key => birth[key] !== undefined && current[key] !== undefined && birth[key] !== current[key]);
+}
+function completeShellIdentity(value: ShellBirthIdentity): boolean {
+  return value.started !== undefined && value.file !== undefined && value.cwd !== undefined && value.shell !== undefined;
+}
+function enrichShellIdentity(previous?: ShellBirthIdentity, next?: ShellBirthIdentity): ShellBirthIdentity | undefined {
+  return previous || next ? Object.freeze({ ...previous, ...Object.fromEntries(Object.entries(next ?? {}).filter(([, value]) => value !== undefined)) }) : undefined;
+}
 export function nativeProof(event: RecordValue, semantic: unknown): NativeProof | undefined {
   const id = optionalString(event.id);
   if (!identity(id) || event.created !== undefined && (number(event.created) === undefined || Number(event.created) < 0)) return;
@@ -149,7 +168,7 @@ export function retainLauncherEvidence(previous: LauncherEvidence | undefined, n
     ...(previous.conflicted || next.conflicted || conflict ? { conflicted: true } : {}), proof: undefined, historical: undefined });
 }
 
-export type ControlWitness = Readonly<{ kind: "called" | "started" | "ended" | "notification" | "created"; proof: NativeProof }>;
+export type ControlWitness = Readonly<{ kind: "called" | "started" | "ended" | "notification" | "created"; proof: NativeProof; shellIdentity?: ShellBirthIdentity }>;
 export type ControlRead = { id: number; parent: string; start: number; failed: boolean; inventory: boolean; initialInventory?: boolean; incomplete?: true };
 type ControlRecord = { parent: string; taskId: string; unavailable?: true; pending?: true; pendingCalls?: readonly string[]; aliases?: readonly string[]; kind?: "agent" | "shell"; item?: BackgroundTaskItem; evidence?: WorkerOccurrenceEvidence; witnesses?: readonly ControlWitness[]; changed?: number };
 type ControlObservation = { parent?: string; child?: string; launch?: LauncherEvidence; calledAt?: number; witness?: ControlWitness;
@@ -278,6 +297,20 @@ export class BackgroundControls {
     for (const other of this.records.values()) if (!other.unavailable && other.parent === candidate.parent
       && other.evidence?.launches.some(launch => candidate.launches.some(alias => alias.call === launch.call))) this.retire(other);
   }
+  /** Only a retained live birth supplies the baseline, never current GET or
+   * history. Missing fields softly withhold control; known differences revoke. */
+  shellInventory(candidate: WorkerOccurrenceEvidence, current: ShellBirthIdentity): "matched" | "unknown" | "contradicted" {
+    const births = [
+      ...[...this.records.values()].flatMap(record => record.parent === candidate.parent
+        && (record.taskId === candidate.taskId || candidate.launches.some(launch => record.aliases?.includes(launch.call)
+          || record.evidence?.launches.some(alias => alias.call === launch.call))) ? record.witnesses ?? [] : []),
+      ...[...this.observations.values()].flatMap(observation => observation.child === candidate.worker
+        && observation.lifecycle?.kind === "shell.created" && observation.lifecycle.own && observation.lifecycle.parent === candidate.parent
+        && observation.witness ? [observation.witness] : []),
+    ].flatMap(witness => witness.kind === "created" && witness.shellIdentity ? [witness.shellIdentity] : []);
+    if (births.some(birth => shellIdentityContradicts(birth, current))) return "contradicted";
+    return completeShellIdentity(current) && births.some(completeShellIdentity) ? "matched" : "unknown";
+  }
   historical(kind: ControlWitness["kind"], proof?: NativeProof): boolean {
     return !!proof && [...this.records.values()].some(record => record.witnesses?.some(witness => witness.kind === kind && sameProof(witness.proof, proof)));
   }
@@ -335,6 +368,8 @@ export class BackgroundControls {
     if (prior?.launch && observation.launch && this.initialDetachment(prior, observation.launch)) launch = Object.freeze({ ...launch!, background: true });
     if (prior?.backgroundObserved && observation.launch?.background === false && launch) launch = Object.freeze({ ...launch, conflicted: true });
     const next = { ...prior, ...observation, launch, calledAt: observation.calledAt ?? prior?.calledAt, seen: prior?.seen ?? this.sequence,
+      commandFingerprint: observation.commandFingerprint ?? prior?.commandFingerprint,
+      ...(observation.witness?.shellIdentity ? { witness: { ...observation.witness, shellIdentity: enrichShellIdentity(prior?.witness?.shellIdentity, observation.witness.shellIdentity) } } : {}),
       ...(prior?.backgroundObserved || observation.launch?.background === true ? { backgroundObserved: true as const } : {}) };
     if (this.fits(this.observations, key, next)) { this.write(this.observations, key, next); return []; }
     const updates: Array<{ parent: string; item: BackgroundTaskItem }> = [];
@@ -376,7 +411,14 @@ export class BackgroundControls {
       // new scope is foreign. Only this occurrence's consumed canonical proof
       // (identity, stamp and semantic fingerprint) establishes an exact replay.
       else if (record.kind === "shell" && event.shellBirth?.id === basis.worker && (!own || event.shellBirth.parent !== record.parent
-        || !record.witnesses?.some(witness => witness.kind === "created" && sameProof(witness.proof, event.shellBirth?.proof)))) this.retire(record);
+        || !record.witnesses?.some(witness => witness.kind === "created" && sameProof(witness.proof, event.shellBirth?.proof))
+        || event.shellBirth.commandFingerprint !== undefined && basis.launches.some(launch => launch.commandFingerprint !== undefined && launch.commandFingerprint !== event.shellBirth!.commandFingerprint)
+        || record.witnesses?.some(witness => witness.shellIdentity && event.shellBirth?.identity && shellIdentityContradicts(witness.shellIdentity, event.shellBirth.identity)))) this.retire(record);
+      else if (record.kind === "shell" && event.shellBirth?.id === basis.worker && event.shellBirth.identity) {
+        const birth = event.shellBirth;
+        this.put({ ...record, witnesses: record.witnesses?.map(witness => witness.kind === "created" && sameProof(witness.proof, birth.proof)
+          ? { ...witness, shellIdentity: enrichShellIdentity(witness.shellIdentity, birth.identity) } : witness) });
+      }
       else if (own && event.userShell?.id === basis.worker && event.userShell.parent === record.parent && record.kind === "shell") this.retire(record);
       else if (own && event.execution && !event.execution.historical && event.session === basis.worker && record.kind === "agent") this.retire(record, event.execution.proof ? { kind: event.execution.phase, proof: event.execution.proof } : undefined);
       else if (own && event.session === record.parent) {
@@ -401,7 +443,8 @@ export class BackgroundControls {
       const prior = [...this.observations].filter(([, observation]) => observation.child === birth.id && observation.lifecycle?.kind === "shell.created");
       const contradicted = prior.some(([, observation]) => observation.birthContradicted
         || (this.gapSequence === null || observation.seen! > this.gapSequence)
-          && (!sameProof(observation.witness?.proof, birth.proof) || observation.lifecycle?.own !== own
+          && (!sameProof(observation.witness?.proof, birth.proof) || observation.witness?.shellIdentity && birth.identity && shellIdentityContradicts(observation.witness.shellIdentity, birth.identity) || observation.lifecycle?.own !== own
+            || observation.commandFingerprint !== undefined && birth.commandFingerprint !== undefined && observation.commandFingerprint !== birth.commandFingerprint
             || observation.lifecycle?.directory !== event.directory));
       // Before a launcher exists, distinct native births cannot both be
       // consumed as witnesses for its occurrence. Keep this negative fact in
@@ -411,7 +454,7 @@ export class BackgroundControls {
       updates.push(...this.note(JSON.stringify(["shell-birth", birth.id, birth.proof]), {
         child: birth.id, lifecycle: { kind: "shell.created", parent: birth.parent, directory: event.directory, own },
         commandFingerprint: birth.commandFingerprint, ...(contradicted ? { birthContradicted: true as const } : {}),
-        ...(birth.proof ? { witness: { kind: "created", proof: birth.proof } } : {}),
+        ...(birth.proof ? { witness: { kind: "created", proof: birth.proof, shellIdentity: birth.identity } } : {}),
       }));
     }
     if (!own) return updates;
@@ -660,7 +703,7 @@ export class BackgroundWorkers {
     executionHistory?: ReadonlyMap<string, readonly number[]>;
   } = {}) {}
   private readonly parents = new Map<string, string>();
-  private readonly births = new Map<string, { parent?: string; proof?: NativeProof; shellCommand?: string; shellEnd?: NativeProof; contradicted?: true }>();
+  private readonly births = new Map<string, { parent?: string; proof?: NativeProof; shellCommand?: string; shellIdentity?: ShellBirthIdentity; shellEnd?: NativeProof; contradicted?: true }>();
   private readonly tasks = new Map<string, WorkerTask>();
   private readonly notices = new Map<string, { proof?: NativeProof; occurrence?: string; discarded?: { parent: string; worker: string; at?: number } }>();
   private readonly invocations = new Map<string, { fact: LauncherEvidence; occurrence?: string }>();
@@ -969,6 +1012,12 @@ export class BackgroundWorkers {
     return occurrence.kind === "shell" && !occurrence.uncertain && !birth?.contradicted && !birth?.shellEnd && !occurrence.executionEnd && !!birth?.shellCommand
       && birth.parent === occurrence.parent && occurrence.launches.every(launch => launch.commandFingerprint === birth.shellCommand);
   }
+  /** Activity keeps its own retained negative facts even if control evidence
+   * is unavailable. This comparison supplies no Stop authorization. */
+  shellIdentityContradicted(worker: string, current: ShellBirthIdentity): boolean {
+    const birth = this.births.get(worker);
+    return !!birth?.shellIdentity && shellIdentityContradicts(birth.shellIdentity, current);
+  }
 
   shellEnded(worker: string, proof?: NativeProof): void {
     if (this.recoveryOnly || !identity(worker) || !proof) return;
@@ -1147,17 +1196,22 @@ export class BackgroundWorkers {
     this.bound();
   }
 
-  observeBirth(child: string, parent: string, proof?: NativeProof, shellCommand?: string): void {
+  observeBirth(child: string, parent: string, proof?: NativeProof, shellCommand?: string, shellIdentity?: ShellBirthIdentity): void {
     if (this.recoveryOnly || !identity(child) || !identity(parent) || !proof) return;
     const previous = this.births.get(child);
-    if (sameProof(previous?.proof, proof)) return;
+    if (sameProof(previous?.proof, proof) && !(previous?.shellIdentity && shellIdentity && shellIdentityContradicts(previous.shellIdentity, shellIdentity))
+      && !(previous?.shellCommand !== undefined && shellCommand !== undefined && previous.shellCommand !== shellCommand)) {
+      if (previous) this.set(this.births, child, { ...previous, shellCommand: previous.shellCommand ?? shellCommand, shellIdentity: enrichShellIdentity(previous.shellIdentity, shellIdentity) });
+      this.bound();
+      return;
+    }
     // Reuse can precede the first projected launcher. Keep the contradiction
     // with the original birth, inside the same payload/entry budget, so a
     // delayed launch cannot borrow replacement activity or cold-read clocks.
     if (previous) this.set(this.births, child, { ...previous, contradicted: true });
     for (const task of this.tasks.values()) if (task.worker === child) this.uncertain(task);
     if (!this.births.has(child) && !this.terminalProofs.has(child) && ![...this.tasks.values()].some(task => task.worker === child)) {
-      this.set(this.births, child, { parent, proof, shellCommand });
+      this.set(this.births, child, { parent, proof, shellCommand, shellIdentity });
     }
     this.bound();
   }

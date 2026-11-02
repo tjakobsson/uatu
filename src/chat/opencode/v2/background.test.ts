@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { BackgroundControls, BackgroundWorkers, launcherChanged, nativeProof, prepareTool, retainLauncherEvidence, shellCommandFingerprint, workerExecutionIds, type WorkerOccurrenceEvidence } from "./background";
+import { BackgroundControls, BackgroundWorkers, launcherChanged, nativeProof, prepareTool, retainLauncherEvidence, shellBirthIdentity, shellCommandFingerprint, workerExecutionIds, type WorkerOccurrenceEvidence } from "./background";
 import fc from "fast-check";
 import { compactWorkers } from "../../compact-work";
 import type { BackgroundTaskItem, ConversationItem } from "../../types";
@@ -481,6 +481,35 @@ function controlOracle(controls: BackgroundControls) {
   expect(entries).toBeLessThanOrEqual(2_048);
   return state;
 }
+
+test("native birth identity uses accounted witnesses, not the first current inventory, and preserves aliases and budget fences", () => {
+  const controls = new BackgroundControls(), original = controlFixture("original", "parent", "shell"), alias = controlFixture("alias", "parent", "shell"), healthy = controlFixture("healthy");
+  const canonical = { ...original.evidence, launches: [...original.evidence.launches, ...alias.evidence.launches] };
+  const foldedAlias = { ...canonical, taskId: alias.evidence.taskId };
+  const info = { time: { started: 12 }, file: "/private/output", cwd: "/private/cwd", shell: "/private/shell" };
+  const identity = shellBirthIdentity(info), proof = nativeProof({ id: "birth", created: 13 }, { shell: "shell" })!;
+  const workers = new BackgroundWorkers();
+  workers.observeBirth("shell", "parent", proof, shellCommandFingerprint("fixture"), identity);
+  expect(workers.shellIdentityContradicted("shell", identity)).toBe(false);
+  expect(workers.shellIdentityContradicted("shell", shellBirthIdentity({ ...info, file: "/replacement/output" }))).toBe(true);
+  checkBytes(workers);
+  expect(controls.shellInventory(canonical, identity)).toBe("unknown");
+  controls.observe({ shutdown: false, launchers: [], shellBirth: { id: "shell", parent: "parent", proof, commandFingerprint: shellCommandFingerprint("fixture"), identity } }, true);
+  expect(controls.project(original.item, canonical).control?.available).toBe(true);
+  expect(controls.project(alias.item, foldedAlias).control?.available).toBe(true);
+  expect(controls.project(healthy.item, healthy.evidence).control?.available).toBe(true);
+  const retained = controls.proof(original.item.taskId);
+  expect(controls.shellInventory(canonical, identity)).toBe("matched");
+  expect(controls.shellInventory(canonical, shellBirthIdentity({ ...info, file: undefined }))).toBe("unknown");
+  expect(controls.proof(original.item.taskId)).toEqual(retained);
+  expect(controls.shellInventory(canonical, shellBirthIdentity({ ...info, file: "/replacement/output" }))).toBe("contradicted");
+  controls.invalidateOccurrence(canonical);
+  expect(controls.project(alias.item, foldedAlias).control?.available).toBe(false);
+  expect(controls.project(healthy.item, healthy.evidence).control?.available).toBe(true);
+  const state = controlOracle(controls);
+  expect(JSON.stringify([...state.records])).not.toContain("/private/");
+  expect(JSON.stringify([...state.observations])).not.toContain("/private/");
+});
 
 for (const firstSeen of [false, true]) test(`positive inventory contradiction revokes aliases and overlapping reads within the control budget (first seen=${firstSeen})`, () => {
   const controls = new BackgroundControls(), original = controlFixture("original", "parent", "shell"), alias = controlFixture("alias", "parent", "shell"), healthy = controlFixture("healthy");

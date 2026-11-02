@@ -18,6 +18,21 @@ test("native shell exit evidence uses the typed identity and terminal process st
   expect(normalize.prepare({ ...event, data: { shellID: "shell", status: "exited" } }).evidence.shellExit).toBeUndefined();
 });
 
+test("private native shell identity hashes fixed Info fields and keeps its envelope proof stable through compatible enrichment", () => {
+  const normalize = createOpenCodeV2Normalizer("/ws");
+  const info = { id: "shell", command: "fixture", cwd: "/private/cwd", shell: "/private/interpreter", file: "/private/output", metadata: { sessionID: "parent" }, time: { started: 19 } };
+  const envelope = { id: "birth", created: 20, type: "shell.created", location: { directory: "/ws" }, data: { info } };
+  const full = normalize.prepare(envelope).evidence.shellBirth!;
+  expect(full.identity).toMatchObject({ started: 19, file: expect.stringMatching(/^[a-f0-9]{64}$/), cwd: expect.stringMatching(/^[a-f0-9]{64}$/), shell: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  expect(JSON.stringify(full)).not.toContain("/private/");
+  const enriched = normalize.prepare({ ...envelope, data: { info: { ...info, pid: 123, status: "exited", exit: 0, time: { ...info.time, completed: 30 } } } }).evidence.shellBirth!;
+  expect(enriched.proof).toEqual(full.proof);
+  expect(enriched.identity).toMatchObject({ ...full.identity, pid: 123 });
+  const partial = normalize.prepare({ ...envelope, data: { info: { ...info, file: undefined, time: { started: "19" }, pid: "123" } } }).evidence.shellBirth!;
+  expect(partial.identity?.started).toBeUndefined(); expect(partial.identity?.file).toBeUndefined(); expect(partial.identity?.pid).toBeUndefined();
+  expect(partial.proof).toEqual(full.proof);
+});
+
 test("only assistant execution metadata reports effort, live and stored, not parent/user selection", () => {
   const normalize = createOpenCodeV2Normalizer(process.cwd());
   const event = normalize({ id: "event", type: "session.step.started", created: 5, data: { sessionID: "child", assistantMessageID: "a", started: 4, model: { providerID: "fixture", id: "model", variant: "medium" } } });

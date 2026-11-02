@@ -22,7 +22,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { pendingPermissionFields, number as numberField } from "../normalization";
-import { BackgroundControls, BackgroundWorkers, launcherChanged, retainLauncherEvidence, sameLauncherIdentity, shellCommandFingerprint, workerExecutionIds, type ControlRead, type LauncherEvidence, type WorkerOccurrenceEvidence } from "./background";
+import { BackgroundControls, BackgroundWorkers, launcherChanged, retainLauncherEvidence, sameLauncherIdentity, shellBirthIdentity, shellCommandFingerprint, workerExecutionIds, type ControlRead, type LauncherEvidence, type WorkerOccurrenceEvidence } from "./background";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, pendingInboxEntry, prepareStoredMessage, storedAccounting, storedPromptId, supportedFormFields, type V2Evidence } from "./normalization";
 import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 import { TASK_OUTPUT_TAIL_MAX_BYTES } from "../../types";
@@ -632,18 +632,28 @@ export class OpenCodeV2Provider implements ChatProvider {
       const occurrence = folded.occurrences.get(item.taskId);
       let confirmed = !!item.childConversationId && active?.[item.childConversationId] !== undefined;
       let shellExecuting = false;
+      let shellControlConfirmed = true;
       let inventoryShellEnd: number | undefined;
       if (item.taskType === "shell" && item.outputFile?.startsWith("shell:")) {
         const shell = await this.client.shell.get({ id: item.outputFile.slice(6), ...this.scope }, { signal }).catch(() => undefined);
         // Exit is not job settlement: capture may still be pending. The
         // unique owned shell remains controllable until its job result arrives.
-        confirmed = shell?.data.metadata.sessionID === sessionId;
         const native = asRecord(shell?.data), time = asRecord(native.time);
+        const owner = asRecord(native.metadata).sessionID;
+        confirmed = owner === sessionId;
         const command = shellCommandFingerprint(native.command);
+        const identity = shellBirthIdentity(native);
+        const inventoryIdentity = occurrence ? this.controls.shellInventory(occurrence, identity) : "unknown";
+        shellControlConfirmed = inventoryIdentity === "matched" && command !== undefined && native.id === occurrence?.worker
+          && typeof native.status === "string" && ["running", "exited", "timeout", "killed"].includes(native.status)
+          && (native.pid === undefined || Number.isSafeInteger(native.pid) && Number(native.pid) > 0);
         // Inventory can expose reuse before its live birth arrives. A known
         // foreign owner or different immutable command revokes A; missing or
         // failed reads only withhold current confirmation, never invent reuse.
-        const contradicted = occurrence && shell && (typeof shell.data.metadata.sessionID === "string" && !confirmed
+        const contradicted = occurrence && shell && (typeof owner === "string" && owner.length > 0 && !confirmed
+          || typeof native.id === "string" && native.id.length > 0 && native.id !== occurrence.worker
+          || inventoryIdentity === "contradicted"
+          || this.eventMemory?.workers.shellIdentityContradicted(occurrence.worker, identity)
           || command !== undefined && occurrence.launches.some(launch => launch.commandFingerprint !== undefined && launch.commandFingerprint !== command));
         if (contradicted) {
           this.controls.invalidateOccurrence(occurrence);
@@ -697,7 +707,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         this.coldActivityObservations.set(coldIdentity, observedAt);
         while (this.coldActivityObservations.size > 128) this.coldActivityObservations.delete(this.coldActivityObservations.keys().next().value!);
       }
-      tasks.push({ ...item, activity, stateUncertain: item.stateUncertain === true || !confirmed });
+      tasks.push({ ...item, activity, stateUncertain: item.stateUncertain === true || !confirmed || !shellControlConfirmed });
     }
     signal.throwIfAborted();
     const projected = tasks.map(original => {
@@ -1174,7 +1184,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             } else if (id) memory.workers.invalidateActivity(id);
           }
           if (evidence.shellBirth?.parent && (!evidence.directory || path.resolve(evidence.directory) === this.workspace)) {
-            memory.workers.observeBirth(evidence.shellBirth.id, evidence.shellBirth.parent, evidence.shellBirth.proof, evidence.shellBirth.commandFingerprint);
+            memory.workers.observeBirth(evidence.shellBirth.id, evidence.shellBirth.parent, evidence.shellBirth.proof, evidence.shellBirth.commandFingerprint, evidence.shellBirth.identity);
           } else if (evidence.shellBirth) memory.workers.invalidateActivity(evidence.shellBirth.id);
           if (evidence.shellExit && (!evidence.directory || path.resolve(evidence.directory) === this.workspace)) memory.workers.shellEnded(evidence.shellExit.id, evidence.shellExit.proof);
           // Membership changes invalidate even when the new location is

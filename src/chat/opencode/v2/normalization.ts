@@ -31,7 +31,7 @@ import {
 import type { ConversationItem, MessageAttachment, MessageDelivery, StructuredQuestion, TokenUsage } from "../../types";
 import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
 import type { InboxDelta, PendingInboxEntry } from "../../provider";
-import { BackgroundWorkers, nativeProof, prepareNotification, prepareTool, shellCommandFingerprint, type BackgroundControls, type LauncherEvidence, type NativeProof, type PreparedTool, type PreparedNotification } from "./background";
+import { BackgroundWorkers, nativeProof, prepareNotification, prepareTool, shellBirthIdentity, shellCommandFingerprint, type ShellBirthIdentity, type BackgroundControls, type LauncherEvidence, type NativeProof, type PreparedTool, type PreparedNotification } from "./background";
 
 export type { NormalizedProviderEvent };
 
@@ -80,7 +80,7 @@ export type V2Evidence = Readonly<{
   shutdown: boolean;
   execution?: Readonly<{ phase: "started" | "ended"; proof?: NativeProof; historical: boolean }>;
   notification?: Readonly<{ child: string; id: string; proof?: NativeProof; historical: boolean }>;
-  shellBirth?: Readonly<{ id: string; parent?: string; proof?: NativeProof; commandFingerprint?: string }>;
+  shellBirth?: Readonly<{ id: string; parent?: string; proof?: NativeProof; commandFingerprint?: string; identity?: ShellBirthIdentity }>;
   shellExit?: Readonly<{ id: string; proof?: NativeProof }>;
   requestTool?: Readonly<{ child: string; source: { message: string; tool: string }; proof?: NativeProof }>;
   requestSource?: Readonly<{ child: string; kind: "permission" | "question"; source: { message: string; tool: string } }>;
@@ -133,7 +133,11 @@ function prepareV2Event(value: unknown, memory?: OpenCodeV2Memory, controls?: Ba
   // shell.created is an ephemeral native birth. session.shell.* instead
   // describes the durable user-command transcript and is not birth evidence.
   const shellBirth = eventType === "shell.created" && shellId && event.durable === undefined
-    ? Object.freeze({ id: shellId, parent: optionalString(record(shell.metadata).sessionID), proof: nativeProof(event, { type: eventType, info: shell }), commandFingerprint: shellCommandFingerprint(shell.command) }) : undefined;
+    ? Object.freeze({ id: shellId, parent: optionalString(record(shell.metadata).sessionID),
+      // The envelope identifies the birth; separately retained immutable
+      // facts detect contradictions without renaming compatible enrichment.
+      proof: nativeProof(event, { type: eventType, id: shellId, parent: record(shell.metadata).sessionID }),
+      commandFingerprint: shellCommandFingerprint(shell.command), identity: shellBirthIdentity(shell) }) : undefined;
   const userShellId = optionalString(record(data.shell).id);
   const toolMessage = optionalString(data.assistantMessageID), toolId = optionalString(data.id);
   const requestTool = session && toolMessage && toolId && (eventType === "session.tool.input.started" || eventType === "session.tool.called")

@@ -623,8 +623,16 @@ gaps remain conservative. Session/output inspection does not require Stop
 authorization.
 This is not a promise of execution survival
 across service restarts. Reused child sessions can have ambiguous results, and
-the native interruption API cannot atomically lock a particular execution
-generation against an external continuation.
+native interruption/removal APIs have no atomic occurrence precondition against
+an external continuation or replacement after validation.
+
+Fresh shell validation compares retained live native birth identity, including
+its native start and hashed output/context fields, not just parent and command.
+Positive contradictions revoke the old target even before a replacement birth
+frame arrives. Missing birth or current identity withholds Stop rather than
+creating a baseline from history or the current lookup; inconclusive reads do
+not invent permanent contradictions. This private control proof does not become
+a universal requirement for independently verified Working status.
 
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover
