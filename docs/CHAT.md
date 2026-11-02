@@ -641,6 +641,11 @@ ownership response only withholds that action rather than inventing revocation.
 Occurrence-aware reverted visibility, stream verification and output reads use
 the same contradiction rules; they cannot leave an older Stop proof usable
 after observing a replacement.
+Positive foreign-workspace ownership remains private contradiction evidence,
+not a missing-record result for validation purposes; ordinary readers still
+receive no foreign record. Recovery rechecks activity/reference provenance after
+visibility awaits so an older Working snapshot cannot survive a later known
+contradiction. Missing private control proof alone does not withdraw Working.
 
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover

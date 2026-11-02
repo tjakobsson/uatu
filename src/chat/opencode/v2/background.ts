@@ -299,9 +299,21 @@ export class BackgroundControls {
   }
   /** Control records can outlive aggregate worker projection after saturation.
    * A positive ownership contradiction still retires their associated agents. */
-  invalidateAgentOwnership(parent: string, worker: string): void {
-    for (const record of this.records.values()) if (record.parent === parent
-      && record.evidence?.kind === "agent" && record.evidence.worker === worker) this.retire(record);
+  invalidateAgentOwnership(parent: string | undefined, worker: string, actualParent?: string): boolean {
+    let associated = false;
+    for (const record of this.records.values()) if ((parent === undefined || record.parent === parent)
+      && record.evidence?.kind === "agent" && record.evidence.worker === worker
+      && (actualParent === undefined || record.parent !== actualParent)) {
+      associated = true;
+      this.retire(record);
+    }
+    return associated;
+  }
+  /** A positive foreign parent workspace retires only its retained cohort. */
+  invalidateParentOwnership(parent: string): boolean {
+    let associated = false;
+    for (const record of this.records.values()) if (record.parent === parent) { associated = true; this.retire(record); }
+    return associated;
   }
   /** Only a retained live birth supplies the baseline, never current GET or
    * history. Missing fields softly withhold control; known differences revoke. */
@@ -874,6 +886,12 @@ export class BackgroundWorkers {
       })) return;
     }
     return live;
+  }
+
+  /** Native negative provenance, independent of missing control/projection
+   * retention. A discarded aggregate alone supplies no contradiction. */
+  activityContradicted(candidate: WorkerOccurrenceEvidence): boolean {
+    return this.births.get(candidate.worker)?.contradicted === true || this.matchingTask(candidate)?.evidence.uncertain === true;
   }
 
   childTasks(child: string): Array<{ parent: string; item: BackgroundTaskItem }> {

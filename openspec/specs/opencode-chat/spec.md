@@ -3593,6 +3593,7 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **THEN** the contradiction revokes the retained occurrence and aliases so the second Stop cannot dispatch an interrupt from an older owned response
 - **AND** missing or incomplete ownership responses withhold that action without manufacturing a permanent foreign-owner contradiction
 - **AND** occurrence-aware reverted visibility, stream ownership and output reads apply the same positive-contradiction revocation, so their observations cannot leave another Stop authorized by an older response
+- **AND** a positively foreign child or retained parent workspace remains a private ownership contradiction rather than being reduced to missing data; ordinary readers still receive no foreign record, and absent workspace facts remain inconclusive
 
 #### Scenario: Proven replay differs from ambiguous old-looking evidence
 - **WHEN** a previously consumed invocation is identified by matching native identity, stamp, semantic fingerprint and its established occurrence link
@@ -3630,6 +3631,11 @@ Worker presentation SHALL distinguish verified task activity from active-session
 - **THEN** a partial live reference alone does not downgrade that task from Working to Unresolved
 - **AND** activity and session/output inspection do not require complete Stop authorization
 - **AND** real reuse, contradictory evidence and observation gaps remain protected without enabling Stop
+
+#### Scenario: Later recovery observations invalidate an earlier Working snapshot
+- **WHEN** reverted-worker visibility or a concurrent authoritative read observes a positive occurrence contradiction after the initial recovery snapshot, including while final visibility validation is pending
+- **THEN** the returned old occurrence no longer carries Working or its obsolete launch reference and cannot keep a growing execution clock
+- **AND** mere absence of private Stop-grade proof does not downgrade otherwise independently verified activity
 
 #### Scenario: Sparse success enriches a fresh owned agent observation
 - **WHEN** a fresh owned child execution is positively associated with its launcher and a live tool-success record omits timing anchors later supplied compatibly by stored history

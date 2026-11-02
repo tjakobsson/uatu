@@ -8,6 +8,22 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+test("activity contradiction projection requires native negative facts, not missing aggregate or control evidence", () => {
+  const history = new BackgroundWorkers();
+  history.launchPrepared("parent", prepareTool(launch("call", "shell"), 12, "snapshot", "message"), 12);
+  const occurrence = history.occurrence("v2:parent:call")!;
+  const absent = new BackgroundWorkers(), saturated = new BackgroundWorkers({ entries: 1 });
+  expect(absent.activityContradicted(occurrence)).toBe(false);
+  saturated.invalidateActivity("unrelated-a"); saturated.invalidateActivity("unrelated-b");
+  expect(saturated.controlEvidenceAvailable).toBe(false);
+  expect(saturated.activityContradicted(occurrence)).toBe(false);
+  absent.invalidateActivity("unrelated");
+  expect(absent.activityContradicted(occurrence)).toBe(false);
+  absent.invalidateActivity("shell");
+  expect(absent.activityContradicted(occurrence)).toBe(true);
+  checkBytes(absent); checkBytes(saturated);
+});
+
 for (const guard of ["none", "message", "created", "ran", "completed", "command", "input", "foreign", "gap"] as const) test(`sparse shell activity readback enriches missing anchors but preserves ${guard}`, () => {
   const live = new BackgroundWorkers(), history = new BackgroundWorkers();
   const part = launch("call", "shell");
@@ -557,6 +573,38 @@ test("agent ownership contradiction retires bounded retained records and aliases
   const recovered = controls.beginRead("parent", true, true, true);
   expect(controls.project(alias.item, alias.evidence, recovered).control?.available).toBe(false);
   controls.endRead(recovered, true);
+  controlOracle(controls);
+});
+
+test("ordinary foreign session observations search only existing agent associations without allocating unknown identities", () => {
+  const controls = new BackgroundControls();
+  const fixtures = [controlFixture("first", "parent", "child", "agent"), controlFixture("second", "other-parent", "child", "agent"),
+    controlFixture("shell", "parent", "child", "shell"), controlFixture("healthy", "parent", "healthy-child", "agent")];
+  for (const fixture of fixtures) expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(true);
+  const before = controls.usage;
+  expect(controls.invalidateAgentOwnership(undefined, "unrelated")).toBe(false);
+  expect(controls.invalidateParentOwnership("unrelated")).toBe(false);
+  expect(controls.usage).toEqual(before);
+  expect(controls.invalidateAgentOwnership(undefined, "child", "parent")).toBe(true);
+  expect(controls.proof(fixtures[0]!.item.taskId)).toBeDefined();
+  expect(controls.proof(fixtures[1]!.item.taskId)).toBeUndefined();
+  expect(controls.invalidateAgentOwnership(undefined, "child")).toBe(true);
+  for (const [index, fixture] of fixtures.entries()) expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(index >= 2);
+  controlOracle(controls);
+});
+
+test("foreign parent workspace retires only its bounded retained cohort including aliases and shells", () => {
+  const controls = new BackgroundControls();
+  const original = controlFixture("original", "parent", "child", "agent"), alias = controlFixture("alias", "parent", "child", "agent");
+  const shell = controlFixture("shell", "parent"), healthy = controlFixture("healthy", "other-parent", "child", "agent");
+  const launches = [...original.evidence.launches, ...alias.evidence.launches];
+  expect(controls.project(original.item, { ...original.evidence, launches }).control?.available).toBe(true);
+  expect(controls.project(alias.item, { ...alias.evidence, launches }).control?.available).toBe(true);
+  expect(controls.project(shell.item, shell.evidence).control?.available).toBe(true);
+  expect(controls.project(healthy.item, healthy.evidence).control?.available).toBe(true);
+  controls.invalidateParentOwnership("parent");
+  for (const fixture of [original, alias, shell]) expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(false);
+  expect(controls.project(healthy.item, healthy.evidence).control?.available).toBe(true);
   controlOracle(controls);
 });
 
