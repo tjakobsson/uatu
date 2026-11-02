@@ -2,7 +2,7 @@
 
 This checklist records implementation progress and remaining review corrections. Planning artifacts were added retrospectively; checked items refer to observed implementation and test results, not an earlier planning phase.
 
-The original checks and review completed before PR preparation. Tasks 4.1 and 4.3 are reopened for the user-approved integration of upstream `389221a`; earlier checked test counts remain historical evidence, not results for the integrated state.
+The original checks and review completed before PR preparation. Tasks 4.1 and 4.3 were reopened for the user-approved integration of upstream `389221a`; earlier checked test counts remain historical evidence. The integrated full unit run passed 8,354 tests with 16 skipped and zero failures; typecheck, build, smoke, and strict OpenSpec validation also passed. Authenticated iPhone/live-SSE and the full E2E suite remain unexecuted.
 
 ## 1. Preserve the verified recovery baseline
 
@@ -25,8 +25,8 @@ The original checks and review completed before PR preparation. Tasks 4.1 and 4.
 
 ## 4. Complete integrated verification and review
 
-- [ ] 4.1 Run `bun run typecheck`, affected provider/adapter/worker tests, `bun run test:ci`, `bun run build`, and a compiled binary version check after the corrections; verify results and report any runtime or unexecuted-check limits.
+- [x] 4.1 Run `bun run typecheck`, affected provider/adapter/worker tests, `bun run test:ci`, `bun run build`, and a compiled binary version check after the corrections; verify results and report any runtime or unexecuted-check limits.
 - [x] 4.2 Validate the OpenSpec change with the existing project-local CLI and `--strict`, reconcile this task list, and verify the main capability spec contains the approved delta without losing existing scenarios.
-- [ ] 4.3 Repeat fresh parallel Sol Standards and Spec reviews of the complete updated change until both axes have no actionable findings; verify fixes receive a new independent round and report unresolved live-browser validation limits.
+- [x] 4.3 Repeat fresh parallel Sol Standards and Spec reviews of the complete updated change until both axes have no actionable findings; verify fixes receive a new independent round and report unresolved live-browser validation limits.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.
