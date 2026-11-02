@@ -106,6 +106,7 @@ export type LiveAttachment = {
 };
 
 export type LiveBrokerOptions = {
+  observeConversation?(workspaceId: string, conversationId: string, data: unknown): void;
   lingerMs?: number;
   replayBufferBytes?: number;
   retryMinMs?: number;
@@ -258,10 +259,12 @@ const INVENTORY_OPEN_GRACE_MS = 250;
 
 type UpstreamState = "idle" | "opening" | "live" | "failed" | "unsupported" | "closed";
 
+// Personal state never enters shared workspace/topic maps, replay or metrics.
+type BrokerTopic = Exclude<LiveTopic, "personal">;
 type Subscriber = {
   sink: LiveSink;
   workspaceId: string;
-  topic: LiveTopic;
+  topic: BrokerTopic;
   key: string | undefined;
   // The last cursor this subscriber applied: presented on attach, advanced
   // on every `data` written to it.
@@ -319,19 +322,19 @@ class Upstream {
   constructor(
     readonly id: string,
     readonly workspaceId: string,
-    readonly topic: LiveTopic,
+    readonly topic: BrokerTopic,
     readonly key: string | undefined,
   ) {}
 }
 
-function upstreamId(workspaceId: string, topic: LiveTopic, key: string | undefined): string {
+function upstreamId(workspaceId: string, topic: BrokerTopic, key: string | undefined): string {
   return `${workspaceId}\n${topic}\n${key ?? ""}`;
 }
 
 // The upstream metrics describe subscriptions to a CHILD. `worktrees` has
 // none, so it is deliberately absent from the counters rather than reported
 // as an upstream that never opens.
-function childUpstreamTopic(topic: LiveTopic): UpstreamTopic | null {
+function childUpstreamTopic(topic: BrokerTopic): UpstreamTopic | null {
   return topic === "worktrees" ? null : topic;
 }
 
@@ -372,12 +375,15 @@ export class LiveBroker implements PresenceSource {
   // feed: a user's feed is discarded when their last page closes, and
   // "switched away and came back later" is exactly the case the fact is
   // for. `observed` is the last value the workspace's activity upstream
-  // delivered; `finishedAt` is stamped when that value goes from working to
+  // delivered, with completion eligibility retained through unresolved-only
+  // intervals; `finishedAt` is stamped when observed work becomes genuinely
   // quiet; `viewedAt` is stamped per user by acknowledgeViewed. Stamps come
   // from one broker counter, so a finish after the last view outranks it
   // without clocks; a restart resumes the counter above the highest stamp
   // read back, which is what keeps that comparison meaningful across one.
-  private readonly observed = new Map<string, WorkspaceActivity>();
+  // Internal child evidence and a transient completion epoch share the
+  // existing workspace observation lifetime; neither is a public wire field.
+  private readonly observed = new Map<string, WorkspaceActivity & { unresolved?: boolean; completionPending?: boolean }>();
   private readonly finishedAt = new Map<string, number>();
   private readonly viewedAt = new Map<string, Map<string, number>>();
   private stamp = 0;
@@ -415,7 +421,7 @@ export class LiveBroker implements PresenceSource {
   private readonly presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly presenceListeners = new Set<(user: string) => void>();
 
-  constructor(private readonly source: LiveUpstreamSource, options: LiveBrokerOptions = {}) {
+  constructor(private readonly source: LiveUpstreamSource, private readonly options: LiveBrokerOptions = {}) {
     this.lingerMs = options.lingerMs ?? LIVE_LINGER_MS;
     this.replayBufferBytes = options.replayBufferBytes ?? LIVE_REPLAY_BUFFER_BYTES;
     this.retryMinMs = options.retryMinMs ?? RETRY_MIN_MS;
@@ -485,11 +491,16 @@ export class LiveBroker implements PresenceSource {
   // Attaches a client sink to one workspace topic. The subscription's
   // cursor is where the sink resumes from (absent: the current position).
   subscribe(sink: LiveSink, workspaceId: string, subscription: LiveSubscription): LiveAttachment {
+    if (subscription.topic === "personal") throw new Error("personal topics belong to the authenticated endpoint");
     if (this.disposed) throw new Error("live broker is disposed");
     return this.attachSink(sink, workspaceId, subscription.topic, subscription.key, subscription.cursor);
   }
 
-  private attachSink(sink: LiveSink, workspaceId: string, topic: LiveTopic, key: string | undefined, cursor: string | undefined): LiveAttachment {
+  observeWorkerConversations(observer: LiveBrokerOptions["observeConversation"]): void {
+    this.options.observeConversation = observer;
+  }
+
+  private attachSink(sink: LiveSink, workspaceId: string, topic: BrokerTopic, key: string | undefined, cursor: string | undefined): LiveAttachment {
     const subscriber: Subscriber = {
       sink,
       workspaceId,
@@ -675,7 +686,7 @@ export class LiveBroker implements PresenceSource {
   // ---------------------------------------------------------------------
   // Subscriptions
 
-  private attachSubscriber(subscriber: Subscriber, topic: LiveTopic, key: string | undefined): void {
+  private attachSubscriber(subscriber: Subscriber, topic: BrokerTopic, key: string | undefined): void {
     const id = upstreamId(subscriber.workspaceId, topic, key);
     let upstream = this.upstreams.get(id);
     if (!upstream) {
@@ -961,7 +972,9 @@ export class LiveBroker implements PresenceSource {
               return;
             }
             if (frame.event !== "chat" || frame.id === undefined) continue;
-            this.emitData(subscriber, parseJson(frame.data), frame.id);
+            const data = parseJson(frame.data);
+            this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
+            this.emitData(subscriber, data, frame.id);
             if (this.mergeCatchUp(upstream, subscriber, frame.id)) {
               release();
               await reader.cancel().catch(() => undefined);
@@ -1096,7 +1109,7 @@ export class LiveBroker implements PresenceSource {
         upstream.state = "unsupported";
         upstream.retryDelayMs = 0;
         upstream.failing = false;
-        this.recordActivity(upstream, RUNNING_UNKNOWN);
+        this.recordActivity(upstream, { ...RUNNING_UNKNOWN, unresolved: false });
         for (const subscriber of [...upstream.subscribers]) {
           if (!subscriber.live) this.attachLive(upstream, subscriber);
         }
@@ -1205,6 +1218,7 @@ export class LiveBroker implements PresenceSource {
           return false;
         }
         if (frame.event !== "chat" || frame.id === undefined) return false;
+        this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
         upstream.head = frame.id;
         this.bufferPush(upstream, frame.id, data, frame.data.length);
         this.fanOut(upstream, data, frame.id);
@@ -1213,7 +1227,7 @@ export class LiveBroker implements PresenceSource {
       case "activity": {
         if (frame.event !== CHILD_ACTIVITY_EVENT) return false;
         const record = (typeof parseJson(frame.data) === "object" ? parseJson(frame.data) : {}) as Record<string, unknown>;
-        this.recordActivity(upstream, sanitizeWorkspaceActivity({ running: true, ...record }));
+        this.recordActivity(upstream, { ...sanitizeWorkspaceActivity({ running: true, ...record }), unresolved: record.unresolved === true });
         return false;
       }
       case "worktrees":
@@ -1222,11 +1236,15 @@ export class LiveBroker implements PresenceSource {
     }
   }
 
-  private recordActivity(upstream: Upstream, activity: WorkspaceActivity): void {
+  private observeConversation(workspaceId: string, conversationId: string, data: unknown): void {
+    try { this.options.observeConversation?.(workspaceId, conversationId, data); } catch { /* Personal persistence never interrupts chat. */ }
+  }
+
+  private recordActivity(upstream: Upstream, activity: WorkspaceActivity & { unresolved: boolean }): void {
     const cursor = this.nextHubCursor(upstream);
     upstream.latest = { cursor, data: activity };
     this.fanOut(upstream, activity, cursor);
-    this.notifyWorktrees(observer => observer.activity(upstream.workspaceId, activity));
+    this.notifyWorktrees(observer => observer.activity(upstream.workspaceId, sanitizeWorkspaceActivity(activity)));
   }
 
   private nextHubCursor(upstream: Upstream): string {
@@ -1409,7 +1427,8 @@ export class LiveBroker implements PresenceSource {
         if (released) return;
         switch (envelope.event.kind) {
           case "data":
-            this.observeActivity(workspaceId, sanitizeWorkspaceActivity(envelope.event.data));
+            this.observeActivity(workspaceId, { ...sanitizeWorkspaceActivity(envelope.event.data),
+              unresolved: (envelope.event.data as { unresolved?: unknown } | null)?.unresolved === true });
             return;
           case "unavailable":
             // The child is unreachable although the session table still
@@ -1451,6 +1470,8 @@ export class LiveBroker implements PresenceSource {
     const watch = this.activityWatches.get(workspaceId);
     if (!watch) return;
     this.activityWatches.delete(workspaceId);
+    const observed = this.observed.get(workspaceId);
+    if (observed) delete observed.completionPending;
     watch.detach();
   }
 
@@ -1482,18 +1503,19 @@ export class LiveBroker implements PresenceSource {
   // the fact is about the workspace, not about who happened to be looking.
   // The facts are the same for every user, so every feed is re-derived; the
   // per-user part is only `viewedAt`.
-  private observeActivity(workspaceId: string, activity: WorkspaceActivity): void {
+  private observeActivity(workspaceId: string, activity: WorkspaceActivity & { unresolved: boolean }): void {
     const previous = this.observed.get(workspaceId);
-    this.observed.set(workspaceId, activity);
+    // Awaiting cancels eligibility as before. Only positive Working arms
+    // it; unresolved alone can retain an observed epoch, never invent one.
+    const completionPending = !activity.awaiting && (activity.working || activity.unresolved && previous?.completionPending === true);
+    this.observed.set(workspaceId, { ...activity, completionPending });
     if (activity.working || activity.awaiting) {
       // Work resumed, or an interaction awaits: whatever finished before
       // is superseded by what the user will look at now.
       if (this.finishedAt.delete(workspaceId)) this.persistMarks();
-    } else if (previous?.working && !previous.awaiting) {
-      // Working → quiet. Not from unknown (a page opening onto an idle
-      // workspace invents nothing), not from awaiting (the answer was given
-      // from somewhere the user was looking — a pending question keeps the
-      // turn in flight, so "working and awaiting" is the awaiting case).
+    } else if (!activity.unresolved && previous?.completionPending) {
+      // Observed Working → genuinely quiet, possibly through an unresolved
+      // interval. First-seen unknown and cleared attention invent no finish.
       this.finishedAt.set(workspaceId, this.nextStamp());
       this.persistMarks();
     }
@@ -1507,8 +1529,8 @@ export class LiveBroker implements PresenceSource {
     }
   }
 
-  private composeActivity(user: string, workspaceId: string, facts: WorkspaceActivity): WorkspaceActivity {
-    const quiet = facts.running && !facts.working && !facts.awaiting;
+  private composeActivity(user: string, workspaceId: string, facts: WorkspaceActivity & { unresolved?: boolean }): WorkspaceActivity {
+    const quiet = facts.running && !facts.working && !facts.awaiting && !facts.unresolved;
     const finishedAt = this.finishedAt.get(workspaceId);
     const viewedAt = this.viewedAt.get(user)?.get(workspaceId) ?? -Infinity;
     return {

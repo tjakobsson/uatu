@@ -15,6 +15,14 @@ export class HistoryReuse<T> {
   get size(): number { return this.retained.size; }
   get retainedBytes(): number { return this.bytes; }
 
+  /** Read a qualified retained value without loading or refreshing its LRU
+   * position. Like read(), this returns the stored value, not a deep copy. */
+  peek(key: string, version: string | undefined): T | undefined {
+    if (this.disposed || version === undefined) return;
+    const cached = this.retained.get(key);
+    return cached?.version === version ? cached.value : undefined;
+  }
+
   async read(key: string, version: string | undefined, loader: () => Promise<T>): Promise<T> {
     if (this.disposed) throw new Error("History reuse is disposed");
     const cached = this.retained.get(key);

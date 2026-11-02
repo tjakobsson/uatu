@@ -7,7 +7,8 @@ import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { onUiModeChange } from "../shell/ui-mode";
 import { registerBackInterceptor } from "../shell/history";
-import { onManualRecovery, registerRecoveryWork, requestManualRecovery } from "../shell/live";
+import { liveChannel, onManualRecovery, registerLiveTeardown, registerRecoveryWork, requestManualRecovery } from "../shell/live";
+import { isHubPage } from "../shared/app-url";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
@@ -24,11 +25,14 @@ import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from ".
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, questionStepLabel, statusLabel, subagentEntries, workingLabel } from "./timeline-renderer";
 import { backgroundTasksByTool, runningBackgroundTasks } from "./background-tasks";
 import { pausedStatusLabel, pausedWakeups, pendingWakeups, scheduledStatusLabel, wakeupFireTime } from "./scheduled-wakeups";
-import { CompactDisclosure, compactWorkers, workerSummary } from "./compact-work";
+import { CompactDisclosure, compactWorkers, workerSummary, type CompactWorker } from "./compact-work";
+import { WorkerDismissalClient, visibleWorkers, workerDismissible, workerExecutionIds } from "./worker-dismissal-client";
+import { CheckingPresentation } from "./worker-dismissal-client-checking";
+import { revealWorkerRequest } from "./worker-dismissal-client-request";
 import { CompactWorkersView } from "./compact-workers-view";
 import { expandedWorkBudget } from "./work-budget";
 import { renderChatMarkdown } from "./markdown";
-import { SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
+import { SHELL_WORKER_STOP_WARNING, SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
@@ -387,7 +391,7 @@ export function initChat(api = new ChatApiClient()): void {
   const syncTaskInspection = () => {
     if (!taskPanel || !child?.task) return;
     const owner = projection?.conversationId === child.task.conversationId ? projection : null;
-    taskPanel.sync(owner ? taskById(owner.items, child.task.taskId, child.task.itemId) : undefined, stoppingTasks.has(child.task.taskId));
+    taskPanel.sync(checkingPresentation.task(owner ? taskById(owner.items, child.task.taskId, child.task.itemId) : undefined), stoppingTasks.has(child.task.taskId));
   };
   let childGeneration = 0;
   // A run that streams nothing — the review a typed command launches — or
@@ -1071,6 +1075,18 @@ export function initChat(api = new ChatApiClient()): void {
   const compactWorkersList = document.querySelector<HTMLDetailsElement>("#chat-compact-workers");
   const compactWorkersLabel = document.querySelector<HTMLElement>("#chat-compact-workers-label");
   const compactWorkersItems = document.querySelector<HTMLElement>("#chat-compact-workers-items");
+  const hubDismissals = isHubPage();
+  const checkingPresentation = new CheckingPresentation(() => { syncCompactWork(); syncTaskInspection(); });
+  const dismissalNotice = document.createElement("p");
+  dismissalNotice.className = "chat-worker-dismissal-notice";
+  dismissalNotice.setAttribute("role", "status");
+  dismissalNotice.hidden = true;
+  // Personal-state guidance has its own owner, but shares the composer's
+  // measured, bounded and keyboard-scrollable feedback band. An extra dock
+  // sibling would consume unallocated space between Workers and Pending.
+  document.querySelector("#chat-composer-notices")?.append(dismissalNotice);
+  const personalDismissals = hubDismissals ? new WorkerDismissalClient({ channel: liveChannel(), changed: () => syncCompactWork() }) : null;
+  registerLiveTeardown(() => { personalDismissals?.dispose(); checkingPresentation.dispose(); });
   const compactWorkerState = new CompactDisclosure();
   const compactPendingState = new CompactDisclosure();
   const pendingScrollPositions = new Map<string, number>();
@@ -1083,22 +1099,65 @@ export function initChat(api = new ChatApiClient()): void {
     syncQueueOverflow();
     syncDesktopWorkLayout();
   });
-  const compactView = compactWorkersItems ? new CompactWorkersView(compactWorkersItems, () => {
+  let dismissalBatchFeedback: { conversationId: string; skipped: number } | null = null;
+  const dismissWorkers = async (workers: readonly CompactWorker[]) => {
     if (!projection) return;
+    const conversationId = projection.conversationId;
+    if (personalDismissals) {
+      const eligible = workers.filter(worker => workerDismissible(checkingPresentation.worker(worker)));
+      dismissalBatchFeedback = { conversationId, skipped: eligible.filter(worker => !workerExecutionIds(worker).length).length };
+      syncCompactWork();
+      // Serialize this explicit batch, retaining independent per-entry revisions.
+      for (const worker of eligible) {
+        if (projection?.conversationId !== conversationId) break;
+        if (!workerDismissible(checkingPresentation.worker(worker))) continue;
+        const ids = workerExecutionIds(worker);
+        if (!ids.length) continue;
+        if (!await personalDismissals.dismiss(ids[0], ids)) break;
+      }
+      return;
+    }
     const dismissed = new Set(presentation.dismissedSubagents[projection.conversationId] ?? []);
-    for (const worker of compactWorkers(projection.items)) {
-      if (worker.state !== "working" && worker.state !== "unknown") { dismissed.add(worker.id); for (const reference of worker.references) dismissed.add(reference); }
+    for (const worker of workers) {
+      if (workerDismissible(checkingPresentation.worker(worker))) dismissed.add(worker.activity?.executionId ?? worker.id);
     }
     presentation.dismissedSubagents[projection.conversationId] = [...dismissed];
     save(); syncCompactWork();
+  };
+  const compactView = compactWorkersItems ? new CompactWorkersView(compactWorkersItems, () => {
+    void dismissWorkers(compactWorkers(projection?.items ?? []).filter(worker => worker.state !== "working" && worker.state !== "unknown"));
   }) : null;
   const syncCompactWork = () => {
     if (!compactWorkersList || !compactWorkersItems || !compactWorkersLabel) return;
-    const allWorkers = compactWorkers(projection?.items ?? [])
+    const allWorkers = checkingPresentation.paint(projection?.conversationId ?? null, compactWorkers(projection?.items ?? []))
       .filter(worker => worker.kind === "agent" && declares("subagents") || Boolean(worker.taskId) && declares("background-tasks"))
       .map(worker => declares("context") ? worker : { ...worker, tokens: undefined });
+    personalDismissals?.select(projection?.conversationId ?? null);
+    personalDismissals?.observe(allWorkers);
     const dismissed = new Set(projection ? presentation.dismissedSubagents[projection.conversationId] ?? [] : []);
-    const workers = allWorkers.filter(worker => worker.state === "working" || worker.state === "unknown" || !dismissed.has(worker.id) && !worker.references.some(id => dismissed.has(id)));
+    if (!personalDismissals && projection) {
+      const oldSize = dismissed.size;
+      for (const worker of allWorkers) if (worker.activity?.kind === "working" || worker.activity?.kind === "needs-answer") {
+        for (const id of workerExecutionIds(worker)) dismissed.delete(id);
+        dismissed.delete(worker.id);
+        for (const reference of worker.references) dismissed.delete(reference);
+      }
+      if (dismissed.size !== oldSize) { presentation.dismissedSubagents[projection.conversationId] = [...dismissed]; save(); }
+    }
+    // Legacy browser aliases are never authority in a Hub account. Local mode
+    // keeps its old terminal marks, but new marks prefer exact execution ids.
+    const workers = personalDismissals ? visibleWorkers(allWorkers, personalDismissals.dismissed) : allWorkers.filter(worker =>
+      !workerDismissible(worker) || !(worker.activity?.executionId ? workerExecutionIds(worker).some(id => dismissed.has(id)) : dismissed.has(worker.id) || worker.references.some(id => dismissed.has(id))));
+    if (dismissalBatchFeedback?.conversationId !== projection?.conversationId) dismissalBatchFeedback = null;
+    const skipped = dismissalBatchFeedback?.skipped ?? 0;
+    const dismissalText = personalDismissals ? [...new Set([
+      personalDismissals.error,
+      skipped ? `Skipped ${skipped} worker${skipped === 1 ? "" : "s"} with an unverified execution identity; ${skipped === 1 ? "it remains" : "they remain"} visible.` : "",
+    ].filter(Boolean))].join(" ") : (workers.length ? "Worker dismissals apply only on this device." : "");
+    // Replacing unchanged composer text during disclosure allocation can make
+    // WebKit move the timeline before the next geometry read. Keep its node.
+    if (dismissalNotice.textContent !== dismissalText) dismissalNotice.textContent = dismissalText;
+    dismissalNotice.hidden = !dismissalNotice.textContent;
     const summary = workerSummary(workers);
     compactWorkersLabel.textContent = summary;
     compactWorkersList.querySelector("summary")?.setAttribute("aria-label", `Workers: ${summary}`);
@@ -1125,12 +1184,22 @@ export function initChat(api = new ChatApiClient()): void {
     if (owned) compactWorkersList.querySelector<HTMLElement>(":scope > summary")?.focus({ preventScroll: true });
   });
   compactWorkersItems?.addEventListener("click", event => {
+    const dismiss = (event.target as Element).closest<HTMLElement>("[data-dismiss-worker]");
+    if (dismiss) {
+      const worker = compactWorkers(projection?.items ?? []).find(worker => worker.id === dismiss.dataset.dismissWorker);
+      if (worker) void dismissWorkers([worker]);
+      return;
+    }
     const stop = (event.target as Element).closest<HTMLButtonElement>("[data-stop-task]");
     if (stop) { if (!stop.disabled) void requestStopTask(stop.dataset.stopTask!, stop, stop.dataset.stopItem); return; }
     const id = (event.target as Element).closest<HTMLElement>("[data-worker-item]")?.dataset.workerItem;
     if (!id) return;
     const worker = compactWorkers(projection?.items ?? []).find(worker => worker.id === id);
     if (!worker) return;
+    if (worker.activity?.kind === "needs-answer" && worker.activity.request) {
+      revealWorkerRequest(worker.activity, projection?.items ?? [], id => jumpToPrompt(id, false));
+      return; // Never create a second reply flow or guess a child association.
+    }
     const task = worker.taskId ? taskById(projection?.items ?? [], worker.taskId, worker.id) : undefined;
     const target = task ? taskInspection(task) : undefined;
     if (task && target && (target.view === "transcript" || taskById(projection?.items ?? [], task.taskId)?.id === task.id)) { inspectTask(task.taskId, task.id); return; }
@@ -1227,7 +1296,7 @@ export function initChat(api = new ChatApiClient()): void {
     const task = taskById(source.items, taskId);
     if (!task || itemId !== undefined && task.id !== itemId || task.status !== "running" || task.stateUncertain) return;
     if (declares("background-blocking-work") && task.taskType === "shell") {
-      if (!await confirmChatAction("Stop shell worker?", "This removes its provider record and output. OpenCode may report failed rather than cancelled; missing output cannot be recovered after reload.", "Stop shell worker", invoker)) return;
+      if (!await confirmChatAction("Stop shell worker?", SHELL_WORKER_STOP_WARNING, "Stop shell worker", invoker)) return;
       const current = taskById(projection?.items ?? [], taskId);
       if (projection?.conversationId !== source.conversationId || current?.id !== task.id || current.status !== "running" || current.stateUncertain || stoppingTasks.has(taskId)) return;
     }
@@ -3491,9 +3560,8 @@ export function initChat(api = new ChatApiClient()): void {
     const pendingHeading = queueDockElement.hidden ? null : queueDockElement.querySelector(".chat-queue-header");
     const workerHeight = workerHeading?.getBoundingClientRect().height ?? 0;
     const pendingHeight = pendingHeading?.getBoundingClientRect().height ?? 0;
-    const workerItems = compactWorkersList?.querySelector<HTMLElement>("#chat-compact-workers-items");
     const queueContent = queueDockElement.querySelector<HTMLElement>(".chat-queue-content");
-    const workerBody = compactWorkersList?.open && workerHeight ? workerItems?.scrollHeight ?? 0 : 0;
+    const workerBody = compactWorkersList?.open && workerHeight ? compactView?.contentHeight() ?? 0 : 0;
     const queueBody = pendingHeight ? queueContent?.scrollHeight ?? 0 : 0;
     const workerFloor = workerHeight ? workerHeight + 2 + Math.min(48, workerBody) : 0;
     const queueActionHeight = Math.max(32, ...[...queueContent?.querySelectorAll<HTMLElement>(".chat-queued-action") ?? []].map(button => button.getBoundingClientRect().height));
@@ -3554,7 +3622,7 @@ export function initChat(api = new ChatApiClient()): void {
     set("--chat-work-full-floor", fullFloor);
     syncExpandedWorkBudget(scroller, fullFloor);
     const hardAvailable = parseFloat(scroller.style.getPropertyValue("--chat-work-hard-available"));
-    const cramped = (document.documentElement.dataset.uiMode === "touch" || document.documentElement.hasAttribute("data-chat-work-expanded"))
+    const cramped = (document.documentElement.dataset.uiMode === "touch" || scroller.hasAttribute("data-work-content-expanded") || document.documentElement.hasAttribute("data-chat-work-expanded"))
       && Number.isFinite(hardAvailable) && fullFloor > hardAvailable;
     scroller.toggleAttribute("data-work-cramped", cramped);
     const active = scroller.dataset.workActive;
@@ -4300,7 +4368,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (taskPanel) {
       if (link) {
         const owner = projection?.conversationId === link.conversationId ? projection : null;
-        taskPanel.show(link, owner ? taskById(owner.items, link.taskId, link.itemId) : undefined, stoppingTasks.has(link.taskId));
+        taskPanel.show(link, checkingPresentation.task(owner ? taskById(owner.items, link.taskId, link.itemId) : undefined), stoppingTasks.has(link.taskId));
       } else taskPanel.close();
     }
     // A task's output view has no transcript: the timeline stays out of the
@@ -4880,21 +4948,30 @@ export function initChat(api = new ChatApiClient()): void {
     const css = getComputedStyle(surface);
     const fixed = measureSurfaceChromeHeight(surface, dock, (parseFloat(css.paddingTop) || 0) + (parseFloat(css.paddingBottom) || 0));
     const compactDesktop = document.documentElement.dataset.uiMode === "desktop" && window.matchMedia("(pointer: fine) and (hover: hover)").matches;
-    const { reading, capacity: inlineCapacity } = expandedWorkBudget(surface.clientHeight - fixed, minimumWork, compactDesktop ? "desktop" : "comfortable");
+    const available = Math.max(0, surface.clientHeight - fixed);
+    const actionReading = document.documentElement.dataset.uiMode === "desktop" && !overlay ? transcriptActionReading() : 0;
+    const { reading, capacity: inlineCapacity } = expandedWorkBudget(available, minimumWork, compactDesktop ? "desktop" : "comfortable", actionReading);
     const capacity = overlay && form
       ? Math.max(0, form.getBoundingClientRect().top - surface.getBoundingClientRect().top)
       : inlineCapacity;
     for (const [element, property, value] of [
       [dock, "--chat-work-expanded-capacity", capacity],
-      [dock, "--chat-work-hard-available", overlay ? capacity : Math.max(0, surface.clientHeight - fixed)],
+      [dock, "--chat-work-hard-available", overlay ? capacity : Math.max(0, available - actionReading)],
       [surface, "--chat-expanded-reading", reading],
     ] as const) {
       const pixels = `${value}px`;
       if (element.style.getPropertyValue(property) !== pixels) element.style.setProperty(property, pixels);
     }
   }
+  function transcriptActionReading(): number {
+    if (!timeline) return 0;
+    const action = timeline.querySelector<HTMLElement>(".chat-message-revert");
+    const css = getComputedStyle(timeline);
+    return action ? action.getBoundingClientRect().height
+      + (parseFloat(css.scrollPaddingTop) || 0) + (parseFloat(css.scrollPaddingBottom) || 0) : 0;
+  }
   function syncDesktopWorkLayout() {
-    if (!surface || !form || !input || typeof getComputedStyle !== "function") return;
+    if (!surface || !form || !input || !timeline || typeof getComputedStyle !== "function") return;
     const root = document.documentElement;
     const dock = surface.querySelector<HTMLElement>("#chat-work-dock");
     const toggle = surface.querySelector<HTMLButtonElement>("#chat-work-toggle");
@@ -4912,10 +4989,17 @@ export function initChat(api = new ChatApiClient()): void {
     const hasWork = [...dock.children].some(child => child !== close && !(child as HTMLElement).hidden && getComputedStyle(child).display !== "none");
     root.toggleAttribute("data-chat-has-work", hasWork);
     const fixed = measureSurfaceChromeHeight(surface, dock, 0, transcript);
-    const floor = dock.hasAttribute("data-work-content-expanded")
+    const allocatedReading = dock.hasAttribute("data-work-content-expanded")
       ? parseFloat(surface.style.getPropertyValue("--chat-expanded-reading")) || 0
       : parseFloat(getComputedStyle(transcript).minHeight) || 0;
-    const minimum = Math.max(52, parseFloat(dock.style.getPropertyValue("--chat-work-full-floor")) || 0);
+    // The expanded allocator may yield almost all reading space to work. A
+    // nonzero remainder is not necessarily usable: native scrolling cannot
+    // expose even one transcript action beneath its sticky header/insets.
+    // Compact the inactive pane first; if that still cannot fit, use the
+    // existing desktop work sheet, not overlapping cards.
+    const actionReading = transcriptActionReading();
+    const floor = Math.max(allocatedReading, actionReading);
+    const minimum = Math.max(52, parseFloat(dock.style.getPropertyValue(dock.hasAttribute("data-work-cramped") ? "--chat-work-floor" : "--chat-work-full-floor")) || 0);
     const constrained = hasWork && surface.clientHeight - fixed - floor < minimum;
     root.toggleAttribute("data-chat-work-constrained", constrained);
     if (!constrained) {

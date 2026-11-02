@@ -2,6 +2,42 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 12 / Workspace 33 - Unreleased (partial launch continuity)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `WorkerActivity` payloads may carry optional `launchRef`, an opaque provider-proven reference connecting partial live observations to the same launch's qualified execution identity. It supports automatic private dismissal recovery without matching by row, child session, display clocks or UI folding.
+- The reference is presentation-continuity data only. It is not a saved-dismissal identity or alias and grants no Stop permission. Genuine reuse or contradictory native evidence must not inherit it; it may be absent or change when the provider observation lifetime ends.
+- Dismissal recovery still requires authoritative retirement confirmation for the qualified execution identities. A reference alone cannot clear unresolved identity, persistence or visibility fences.
+
+### Migration
+
+Strict workspace-payload consumers must regenerate against revision 33 because revision 32's closed activity object rejects the optional field. Preserve it through conversation snapshots and live updates without adding it to dismissal keys or Stop requests. Keep unknown or unmatched occurrences visible and retain failure guidance when retirement is unconfirmed. Hub revision remains 12 and bundled-web revision remains 3; workspace revision participates in matching-assets checks.
+
+## Hub 12 / Workspace 32 - Unreleased (worker activity and private dismissal)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- Closed background-task payloads can carry independent `activity` and `control` observations. Verified task activity, active-session-only evidence and occurrence-specific end without a result are distinct. Working does not authorize Stop; current ownership and retained exact-occurrence proof still govern every native mutation. Unresolved never implies successful completion.
+- The existing single live stream accepts an opt-in, no-cursor `personal` topic carrying only `{category:"worker-dismissals"}`. Its account/workspace-scoped invalidations bypass shared child-topic fanout. Fetch personal state on attachment/reconnect and invalidation; never put personal marks in shared activity or conversation events.
+- Authenticated workspace-prefixed personal worker-dismissal GET/POST operations persist exact-execution marks privately per account. Conditional per-entry revisions merge concurrent device dismissals without changing provider history, work, terminal outcomes or canonical requests. The API rejects principal selectors, invalid scope, stale evidence and full/unavailable storage.
+- Verified activity and pending requests remain visible despite old dismissals. Successful retirement is durable. If retirement persistence fails or is unconfirmed, chat stays available with personal-storage failure guidance; an old mark can reapply to an unavailable row after restart during that failure, never to currently verified activity or pending requests.
+- Internal child activity carries a content-free `unresolved` fact alongside `working` and `awaiting`. Unverified background work no longer counts as verified Working; the Hub retains an observed-work epoch through uncertainty instead of manufacturing a Finished badge. Genuine quiet after resolution can finish that epoch without an intervening return to Working. Existing Awaiting behavior remains unchanged: attention cancels prior completion eligibility; clearing a request alone does not create a finish. First-seen unresolved/quiet state does not invent prior work. Public workspace-summary fields and revisions are unchanged; this child route is internal and unversioned.
+
+### Migration
+
+Strict clients must regenerate the expanded Hub live-topic vocabulary and workspace background-task schemas. Interpret activity independently of Stop availability, preserve last-seen/end provenance and treat missing evidence conservatively. Do not create another EventSource, infer task ownership from a reused child session, reply to requests twice or replay native mutations. Personal dismissal revisions are not Stop authorization tokens. Existing device-local dismissal IDs are not migrated into Hub account state. Bundled-web revision remains 3; the workspace API revision participates in asset matching.
+
+For strongly identified OpenCode V2 executions, only provider-proven execution identities and aliases match dismissal marks. Older unqualified call/task marks remain stored unchanged but are not honored for these executions: previously dismissed V2 rows can reappear and may be dismissed again using their current qualified identity. Do not bridge these identities through a shared call, task or child identifier; contradictory native launch facts can denote another execution.
+
+Notification-only V2 rows can carry a separate qualified provisional identity naming the admitted native notification, not a launch execution. It remains stable through replay/restart without clocks, status or display text. It supplies no activity or Stop authority. The consumed native data does not prove exact notification-to-launch association, so a later launch row may reappear instead of inheriting the provisional dismissal through a child/time match or UI fold. Contradictory source/worker evidence does not inherit that mark.
+
+When a V2 activity envelope withholds identity because native evidence is incomplete, keep the row visible with dismissal guidance. Missing qualified identity is not permission to substitute a bare call, task or result key.
+
 ## Hub 11 / Workspace 31 - Unreleased (explicit local discard)
 
 Compatibility: breaking (workspace)

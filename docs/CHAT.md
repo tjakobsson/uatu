@@ -444,7 +444,25 @@ reading budget applies to collapsed cards whenever whole actions and headers
 physically fit; expanded cards use the small conversation strip above. A smaller
 band prioritizes the pane being used without overlapping the composer.
 Worker counts distinguish
-confirmed working, finished (including failed/stopped), and unknown occurrences.
+**Working**, **Unresolved**, and **Finished** (including confirmed failed/stopped)
+occurrences. A request positively linked to the current execution reads
+**Needs your answer** and counts under Working. It reveals the existing main-session
+permission/question card, with the same request ID, notification and answer flow;
+it does not create a second request. A request that cannot be attributed to a
+particular task remains available in the main session without being assigned to
+an old task merely because they share a child session.
+
+**Checking status…** counts under Unresolved and lasts at most ten seconds per
+recovery cycle; repaints, unrelated updates and retries do not extend it.
+**Session active · task unverified** means the child session is
+active but its current execution cannot be assigned to that task. Unobservable
+work reads **Status unavailable · last seen …**, using the last positive task
+observation, or explicitly unknown time when none exists. A positively identified
+execution end without a correlated outcome reads **Ended · result unavailable**;
+it remains Unresolved, not successful, failed or cancelled. Unobservable,
+ambiguous and ended work has no running animation or growing execution timer.
+Recovery is automatic; there is no worker **Check again** control.
+
 Counts and rows use the same deduplicated executions: actual background shell
 tasks count, ordinary foreground commands do not. Zero-count categories are
 omitted. Dismissed counts are not shown; when no visible workers remain the whole
@@ -471,8 +489,57 @@ agent/model/usage/effort/cost is not invented. Touch **Stop** remains a separate
 44px target with an 8px gap; unknown execution state disables it. Settled rows
 retain the approved compact inspection density and narrow-width fallback.
 **Dismiss finished**
-stays on the right of the same compact header, not in a footer, and hides only this device's per-conversation
-view using the existing persisted dismissal state, never provider history.
+stays on the right of the same compact header, not in a footer. Unavailable and
+ended-without-result rows also offer an individual **Dismiss**. In a Hub these
+are personal account state, synchronized across that account's devices and
+scoped to the stable workspace, conversation and exact execution. Proven launch
+aliases preserve identity across history/replay; a reused child session alone
+does not. New executions never inherit an old dismissal. Dismissal changes only
+summary visibility, never provider history, work, requests or a task's outcome.
+Finished rows without an activity envelope retain immutable native task,
+launcher or result anchors. OpenCode V2 rows match only provider-proven qualified
+identities and aliases. A complete launch identity names its execution. A
+notification-only row instead has a separate provisional identity naming that
+native notification, stable across replay and restart without depending on
+clocks, status or display text. Dismissing it does not establish a launch
+association or grant activity/Stop trust. The current native data supplies no
+proven notification-to-launch link: if an exact launch later replaces that row,
+it may reappear rather than inherit the provisional dismissal through a guessed
+child/time match. Contradictory notification source or worker evidence also
+does not inherit the old mark.
+Older unqualified call/task marks stay stored unchanged but no longer hide
+qualified V2 rows: some previously dismissed rows can reappear and may be
+dismissed again with their current qualified identity. Reusing a launcher
+identifier with contradictory native facts does not carry a dismissal to a new
+execution. If native identity is incomplete, the row stays visible with
+dismissal guidance; bare call/task/result keys are not substitutes. **Dismiss
+finished** still processes supported rows and reports skipped entries.
+Verified activity and positively linked pending requests automatically resurface.
+Workspace Working also uses verified background activity rather than a retained
+running job status. Unresolved work does not create a Finished badge when
+verification is lost. A content-free internal activity fact keeps an observed
+work epoch pending through uncertainty; genuine settlement can finish it later
+without a new Working interval. Existing attention behavior is unchanged:
+Awaiting cancels prior finish eligibility, and clearing a request alone does not
+create a finish. First-seen uncertainty or quiet does not invent prior work.
+Conditional dismissal intent is recorded before waiting for the workspace
+lifecycle lock; authoritative reads and durable saves still run inside that
+lock. Activity arriving during the wait therefore invalidates an older action,
+including an execution's first dismissal. Pending reads and mutations share an
+8,192-request admission limit. Abandoning a request releases its action authority
+immediately, but its capacity slot remains occupied until the queued wait drains.
+Save/read failures are reported rather than silently claimed as synchronized
+success. Saves sync the private temporary file before an atomic rename, but do
+not sync the parent directory. A power loss immediately after saving can roll
+back presentation state; this is not a power-loss durability guarantee.
+An unsuccessful explicit dismissal keeps its own action feedback after
+an unrelated successful personal-state read; a new applicable explicit action
+can supersede it. Recovered identity/storage-health guidance remains separately
+owned and can clear automatically without preserving a stale warning copy.
+Chat remains available if retirement of an old mark cannot be saved;
+an old dismissal can then reapply to an unavailable row after restart, but never
+hide currently verified activity or pending requests. Non-Hub source/test
+presentation remains device-local; its old marks are not migrated into Hub state.
 There is no Restore finished control. Results and their inspection remain in
 the timeline; summaries count only visible rows.
 Σ usage is cumulative, not context occupancy.
@@ -485,7 +552,7 @@ unavailable and unknown guidance remains tied to its source operation; unrelated
 Remove, delivery changes or later successful steers cannot clear it. A Settings
 read failure means that page cannot confirm the saved preference, not that the
 server has disabled a saved ON policy in another tab or device. In desktop UI
-mode, Workers opens when visible working or unknown work first appears; Pending
+mode, Workers opens when visible Working or Unresolved work first appears; Pending
 opens when entries first appear, including paused entries. A deliberate collapse
 holds throughout that nonempty active-work or pending batch, including further
 arrivals. Once that batch is empty, the next batch opens again. Settlement alone
@@ -499,7 +566,11 @@ Desktop cards share only a measured capacity, never an outer scroller. When both
 are collapsed the cap is 40% of the measured chat panel (and 25rem), with the
 lesser of 12rem or 35% reserved for conversation. Expanded fine-pointer/hover
 desktop cards prefer a 35% reading reserve, bounded to 200–280px; physical action
-minimums can reduce it. Touch and comfortable-density layouts use the smaller
+minimums can reduce it. Expanded desktop work first reserves a whole transcript
+action plus its scroll insets. If both work panes cannot keep their full
+allocations, the inactive pane compacts before the dock falls back to Show work;
+both headers remain reachable when an inline action still fits.
+Touch and comfortable-density layouts use the smaller
 reserve described above. Expanded cards do not require Show work when normal
 in-flow actions fit. A new replacement warning is revealed once within Pending after the restored
 draft has laid out; later updates respect deliberate independent pane scrolling.
@@ -528,6 +599,12 @@ neither recovery nor a worker's later completion restores the reverted turn.
 
 Stopping a shell removes its provider record and output. If removal prevents
 final capture, OpenCode can report **failed**, even after the process exited.
+An exited process whose native job is still unsettled remains **Ended · result
+unavailable**, with no running animation or growing execution timer. Its removal
+action remains available only with retained exact-occurrence authorization and
+fresh ownership/job validation. Task details and confirmation explain that it
+can delete the job/output and prevent final capture. Process exit alone never
+authorizes removal; settled jobs and unverified targets do not offer the action.
 An already confirmed completed report stays completed. Output already received
 can remain in the open view, but missing provider output cannot be recovered
 after reload; there is no persistent output archive.
@@ -539,16 +616,77 @@ inspection action rather than the parent composer.
 Reconnect reads history, pending results and current execution evidence.
 Complete history is reused only within a connected event generation, invalidated
 by session events, and reread after disconnection; execution/inbox evidence stays fresh.
-Missing evidence means **Status unavailable**, not finished or cancelled; an
-unverified worker cannot be stopped. This is not a promise of execution survival
+Missing evidence means **Status unavailable**, not finished or cancelled.
+Activity and Stop authorization are independent: an owned task with positively
+verified current activity can show **Working** while Stop is unavailable. Task
+details explain the unavailable control in ordinary text, including on mobile;
+a Working label is never permission to interrupt an unverified native target.
+Ownership here means that the native job or child session belongs to this
+conversation. A fresh native read identifying the current shell launch as
+running can establish Working without a complete Stop record. Merely retaining
+a partial live reference is not conflicting execution evidence and must not
+cancel that read; actual reuse, command/owner contradictions and observation
+gaps remain conservative. Session/output inspection does not require Stop
+authorization.
+This is not a promise of execution survival
 across service restarts. Reused child sessions can have ambiguous results, and
-the native interruption API cannot atomically lock a particular execution
-generation against an external continuation.
+native interruption/removal APIs have no atomic occurrence precondition against
+an external continuation or replacement after validation.
+
+Fresh shell validation compares retained live native birth identity, including
+its native start and hashed output/context fields, not just parent and command.
+Positive contradictions revoke the old target even before a replacement birth
+frame arrives. Missing birth or current identity withholds Stop rather than
+creating a baseline from history or the current lookup; inconclusive reads do
+not invent permanent contradictions. This private control proof does not become
+a universal requirement for independently verified Working status.
+
+Positive agent child-identity or parent-ownership contradictions also revoke
+retained occurrence controls and aliases, including concurrent Stop validations.
+A delayed older owned response cannot restore them; an incomplete or missing
+ownership response only withholds that action rather than inventing revocation.
+Occurrence-aware reverted visibility, stream verification and output reads use
+the same contradiction rules; they cannot leave an older Stop proof usable
+after observing a replacement.
+Positive foreign-workspace ownership remains private contradiction evidence,
+not a missing-record result for validation purposes; ordinary readers still
+receive no foreign record. Recovery rechecks activity/reference provenance after
+visibility awaits so an older Working snapshot cannot survive a later known
+contradiction. Missing private control proof alone does not withdraw Working.
+Control fields are independently rechecked before recovery returns: revocation
+during visibility validation disables the old Stop offer even for ended,
+unsettled jobs. A parent-only relationship mismatch withdraws only the affected
+child associations, preserving independently owned nested workers; true identity
+or workspace contradictions retain their subtree safeguards.
+Stream and recovery share exact-occurrence activity derivation, so compatible
+native ends, starts and canonical request changes observed during visibility
+validation are not overwritten by an earlier snapshot. Recovery reuses retained
+positive activity rather than reviving Working from old start evidence alone;
+end clocks come only from native proof.
+Known associations include retained prelaunch births and verified parentage,
+not only admitted rows. A positive contradiction before launcher success fences
+delayed admission and replay; unrelated ordinary reads create no such state.
+Session detail, inventory and creation records share this observation before
+workspace filtering. Positive parent contradictions also fence directly verified
+children whose birth/task rows have not yet arrived, without recursive traversal
+into independently owned nested conversations.
+
+Partial live updates may carry a provider-proven `launchRef` before their complete
+execution identity is available. This reference lets the same launch recover
+personal dismissal tracking automatically after qualified identity and durable
+retirement are confirmed. It is not a dismissal key or alias, and grants no Stop
+permission. Unmatched references, real identity ambiguity and storage failures
+keep their visibility fences and guidance; row/child IDs, clocks or stream
+generation alone never clear them. Reference continuity is guaranteed only
+within the retained native stream generation; restart or a gap does not prove
+that a new observation belongs to an earlier partial launch. The optional field requires workspace API
+revision 33; the Hub revision remains 12.
 
 Stop also depends on bounded safety records identifying the particular worker
 run. Cleaning up display records does not disable targets whose verification
 evidence remains retained. If that evidence is missing, revoked or cannot fit,
-the target stays uncertain with Stop unavailable—even if a status read succeeds.
+the target's control stays unverified with Stop unavailable—even if a status read
+succeeds. Separately established task activity can still show Working.
 History alone does not recreate lost control proof. Unretained targets can remain
 unavailable for the provider runtime's lifetime; reconnect does not erase known
 revocations. These internal limits do not prevent workers running or messages
@@ -563,6 +701,16 @@ be matched to the launcher, that target stays uncertain with Stop unavailable.
 User-command shell transcript notes are kept separate from
 background-worker report retention; ordinary shell use does not spend that
 worker-control budget.
+
+A first child may be born while its launcher is executing, and its first native
+execution may start after that launcher returns. These orderings alone do not
+revoke the task: association requires positive parent/workspace, compatible
+accepted invocation and first-execution evidence. Competing invocations,
+intervening execution boundaries and contradictory identity remain vetoes; a
+fresh active-session lookup does not clear old revocations. Native event-envelope
+clocks are distinct from stored session timestamps and tool-part clocks. Tests
+exercise these timing shapes through the public provider seam, not a claim that
+an exclusive cause was captured for every historical screenshot.
 
 If a response is lost, Chat reports **Outcome unknown** and refreshes without
 replaying the mutation. Same-request retries are deduplicated only while the

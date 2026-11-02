@@ -5,7 +5,7 @@ import { realpath } from "node:fs/promises";
 import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage } from "./claude/normalization";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
-import type { ChatAgent, ChatActionContext } from "./types";
+import type { BackgroundTaskItem, ChatAgent, ChatActionContext } from "./types";
 import type {
   InboxDelta,
   NormalizedProviderEvent,
@@ -28,6 +28,274 @@ import type { AgentNotificationEvent } from "./notifications";
 import { notificationPipeline } from "../../tests/notification-pipeline";
 import { startOpenCodeV2Fake } from "../../tests/e2e/opencode-v2-fake";
 import { addAcceptedDraft, applyChatEvent, projectionFromSnapshot } from "./projection";
+import { LiveBroker } from "../hub/live-broker";
+import type { LiveEnvelope } from "../shared/live-protocol";
+
+describe("independent background workspace activity", () => {
+  for (const legacy of [false, true]) test(`stream loss withdraws evicted verified activity while preserving legacy work (${legacy})`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), fixtureSession("other")];
+    const worker: BackgroundTaskItem = { id: "task:evicted", type: "background_task", taskId: "evicted", description: "Worker", createdAt: 1,
+      status: "running", activity: { kind: "working", executionId: "execution:evicted" } };
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "parent" ? [worker,
+      ...(legacy ? [{ ...worker, id: "task:legacy", taskId: "legacy", stateUncertain: true, activity: undefined }] : [])] : [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+    try {
+      await adapter.history("parent");
+      await adapter.history("other");
+      expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+      const pump = adapter.startEventPump();
+      provider.eventQueue.close();
+      await pump;
+      expect(adapter.activity()).toEqual({ working: legacy, awaiting: false, unresolved: true });
+    } finally { await adapter.dispose(); }
+  });
+  for (const kind of ["checking", "unavailable", "session-active", "ended"] as const) {
+    test(`settled parent withdraws Working for ${kind} without inventing completion, then recovers`, async () => {
+      const provider = new FakeProvider();
+      provider.sessions = [fixtureSession("parent")];
+      let worker: BackgroundTaskItem = { id: "task:workspace-activity", type: "background_task", taskId: "workspace-activity",
+        description: "Worker", createdAt: 1, status: "running", stateUncertain: true,
+        activity: { kind: "working", executionId: "execution:workspace-activity", observedAt: 2 },
+        control: { available: false, reason: "No retained Stop proof" } };
+      Object.assign(provider, { reconcileBackgroundTasks: async () => [worker] });
+      const notifications: AgentNotificationEvent[] = [];
+      let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const encoder = new TextEncoder();
+      const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "workspace-activity", coalesceWindowMs: 0,
+        onNotification: event => notifications.push(event),
+        // The actual child route serializes exactly these three internal facts.
+        onActivityChange: () => controller?.enqueue(encoder.encode(`event: activity\ndata: ${JSON.stringify(adapter.activity())}\n\n`)),
+      });
+      const envelopes: LiveEnvelope[] = [];
+      const broker = new LiveBroker({ isRunning: () => true, workspaceIds: () => ["workspace-activity"],
+        async open({ path }) {
+          expect(path).toBe("/api/activity");
+          return new Response(new ReadableStream<Uint8Array>({ start(value) {
+            controller = value;
+            value.enqueue(encoder.encode(`: open\n\nevent: activity\ndata: ${JSON.stringify(adapter.activity())}\n\n`));
+          } }), { headers: { "content-type": "text/event-stream" } });
+        },
+      });
+      const attachment = broker.subscribeActivity({ write: envelope => envelopes.push(envelope) }, "fixture-user");
+      const pump = adapter.startEventPump();
+      try {
+        provider.eventQueue.push({ type: "server.connected", data: {} });
+        await adapter.history("parent");
+        provider.eventQueue.push({ normalized: { conversationId: "parent", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "running" }] } });
+        provider.eventQueue.push({ normalized: { conversationId: "parent", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "completed" }] } });
+        await waitUntil(() => provider.eventQueue.waiting);
+        await waitUntil(() => envelopes.some(envelope => envelope.event.kind === "data" && (envelope.event.data as { working?: boolean }).working === true));
+        const baselineNotifications = notifications.length;
+        const notificationCount = () => notifications.slice(baselineNotifications).filter(event => event.type === "notification" && event.notification.kind === "turn-completed").length;
+        const samples: Array<{ phase: string; working: boolean; awaiting: boolean; unresolved: boolean; status: string; inventedTerminal: boolean; successfulNotifications: number }> = [];
+        for (const phase of [kind, "working"] as const) {
+          worker = { ...worker, activity: { ...worker.activity!, kind: phase, ...(phase === "ended" ? { endedAt: 3 } : {}) } };
+          const snapshot = await adapter.history("parent");
+          await flushRecoveryIo();
+          samples.push({ phase, ...adapter.activity(), status: snapshot.conversation.status,
+            inventedTerminal: snapshot.items.some(item => item.type === "background_task" && item.status !== "running"), successfulNotifications: notificationCount() });
+        }
+        expect(envelopes.some(envelope => envelope.event.kind === "data" && (envelope.event.data as { finished?: boolean }).finished === true)).toBe(false);
+        expect(samples).toEqual([
+          { phase: kind, working: false, awaiting: false, unresolved: true, status: "background", inventedTerminal: false, successfulNotifications: 0 },
+          { phase: "working", working: true, awaiting: false, unresolved: false, status: "background", inventedTerminal: false, successfulNotifications: 0 },
+        ]);
+        expect(provider.prompts).toEqual([]);
+        expect(provider.interrupts).toEqual([]);
+      } finally {
+        attachment.detach(); broker.dispose(); await adapter.dispose(); await pump;
+      }
+    });
+  }
+
+  test("parent work and canonical attention remain independent of unresolved workers and uncertainty-only ticks", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), fixtureSession("active")];
+    let worker: BackgroundTaskItem = { id: "task:activity", type: "background_task", taskId: "activity", description: "Worker", createdAt: 1,
+      status: "running", activity: { kind: "unavailable" } };
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "parent" ? [worker] : [] });
+    let changes = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0, onActivityChange: () => changes++ });
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await adapter.history("parent");
+      provider.eventQueue.push({ normalized: { conversationId: "active", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "running" }] } });
+      await waitUntil(() => adapter.activity().working);
+      expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: true });
+      const before = changes;
+      worker = { ...worker, stateUncertain: true, control: { available: false, reason: "No retained Stop proof" }, activity: { kind: "working" } };
+      await adapter.history("parent");
+      expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+      expect(changes).toBeGreaterThan(before);
+      provider.eventQueue.push({ normalized: { conversationId: "active", eventType: "session.status", outcome: "handled", updates: [{ kind: "status", status: "completed" }] } });
+      await waitUntil(() => provider.eventQueue.waiting);
+      provider.listQuestions = async () => [{ conversationId: "parent", requestId: "canonical", questions: [{ prompt: "Proceed?", header: "", options: [], multiple: false, allowFreeForm: true }] }];
+      worker = { ...worker, activity: { kind: "needs-answer", request: { kind: "question", id: "canonical" } } };
+      const snapshot = await adapter.history("parent");
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ type: "question", requestId: "canonical", status: "pending" }));
+      expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
+      worker = { ...worker, activity: { kind: "unavailable" } };
+      await adapter.history("parent");
+      expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: true });
+      for (const status of ["completed", "failed", "stopped"] as const) {
+        worker = { ...worker, status, stateUncertain: false, activity: undefined };
+        await adapter.history("parent");
+        expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: false });
+      }
+    } finally { await adapter.dispose(); await pump; }
+  });
+
+  test("existing child boolean transport interprets verification withdrawal exactly like genuine completion", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const encoder = new TextEncoder();
+    const envelopes: LiveEnvelope[] = [];
+    const broker = new LiveBroker({ isRunning: () => true, workspaceIds: () => ["workspace-activity"],
+      async open() {
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; value.enqueue(encoder.encode(": open\n\n")); } }),
+          { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const attachment = broker.subscribeActivity({ write: envelope => envelopes.push(envelope) }, "fixture-user");
+    const last = () => envelopes.at(-1)?.event;
+    const latest = () => { const event = last(); return event?.kind === "data" ? event.data as { working: boolean; finished: boolean } : undefined; };
+    try {
+      await waitUntil(() => controller !== undefined);
+      controller.enqueue(encoder.encode('event: activity\ndata: {"working":true,"awaiting":false}\n\n'));
+      await waitUntil(() => latest()?.working === true);
+      controller.enqueue(encoder.encode('event: activity\ndata: {"working":false,"awaiting":false}\n\n'));
+      await waitUntil(() => latest()?.working === false && latest()?.finished === true);
+      expect(latest()).toMatchObject({ working: false, finished: true });
+      controller.enqueue(encoder.encode('event: activity\ndata: {"working":true,"awaiting":false}\n\n'));
+      await waitUntil(() => latest()?.working === true);
+      expect(latest()).toMatchObject({ working: true, finished: false });
+    } finally { attachment.detach(); broker.dispose(); }
+  });
+});
+
+describe("production recovery Checking presentation", () => {
+  const unavailable: BackgroundTaskItem = { id: "task:checking", type: "background_task", taskId: "checking", toolUseId: "checking-call",
+    description: "Worker", createdAt: 1, status: "running", stateUncertain: true,
+    activity: { kind: "unavailable", executionId: "execution:checking", executionAliases: ["launch:checking"], generation: 7, observedAt: 1234 },
+    control: { available: false, reason: "No current proof" } };
+
+  test("a hanging real read publishes Checking, expires despite unrelated updates, and accepts a late current result", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const working: BackgroundTaskItem = { ...unavailable, stateUncertain: false, activity: { ...unavailable.activity!, kind: "working", observedAt: 2345 } };
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; await gate; return [working]; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(reads).toBe(1);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { ...unavailable.activity!, kind: "checking" }, control: unavailable.control });
+      const activityBefore = adapter.activity();
+      jest.advanceTimersByTime(9000);
+      provider.eventQueue.push({ normalized: { conversationId: "session", eventType: "session.message.content.updated", updates: [], outcome: "handled" } });
+      projection.upsert({ id: "message:unrelated", type: "assistant_message", markdown: "Unrelated update", createdAt: 2 });
+      await flushRecoveryIo();
+      jest.advanceTimersByTime(1000); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity, control: unavailable.control });
+      expect(adapter.activity()).toEqual(activityBefore); expect(reads).toBe(1);
+      release(); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: working.activity, stateUncertain: false });
+      expect(reads).toBe(1); // Presentation expiry did not invalidate its read fence.
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+      expect(provider.permissionReplies).toEqual([]); expect(provider.questionReplies).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  for (const result of ["failed", "inconclusive"] as const) test(`${result} read ends Checking without resetting on retry reads`, async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      if (++reads === 1) await gate;
+      if (result === "failed") throw new Error("Unavailable");
+      return [];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
+      release(); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      jest.advanceTimersByTime(1000); await flushRecoveryIo(); expect(reads).toBe(2);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      jest.advanceTimersByTime(2000); await flushRecoveryIo(); expect(reads).toBe(3);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  test("scheduled reads do not downgrade Working, canonical Needs your answer, or Ended", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, reads = 0; const gate = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; await gate; return []; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session");
+    const workers = (["working", "needs-answer", "ended"] as const).map(kind => ({ ...unavailable, id: `task:${kind}`,
+      activity: { ...unavailable.activity!, kind, ...(kind === "needs-answer" ? { request: { id: "canonical", kind: "permission" as const } } : {}) } }));
+    workers.forEach(item => projection.upsert(item));
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo(); expect(reads).toBe(1);
+      jest.advanceTimersByTime(10000); await flushRecoveryIo();
+      for (const item of workers) expect(projection.get(item.id)).toEqual(item);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  test("reconnect cancels the old presentation and result without increasing read concurrency", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let reads = 0; const releases: Array<() => void> = [];
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      const read = ++reads; await new Promise<void>(resolve => releases.push(resolve));
+      return [{ ...unavailable, activity: { ...unavailable.activity!, kind: "working", observedAt: read } }];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      jest.advanceTimersByTime(9000);
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(reads).toBe(1); expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      releases.shift()!(); await flushRecoveryIo(); expect(reads).toBe(2);
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking", observedAt: 1234 } });
+      jest.advanceTimersByTime(1000); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
+      releases.shift()!(); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "working", observedAt: 2 } });
+    } finally { const disposing = adapter.dispose(); releases.splice(0).forEach(release => release()); await disposing; await pump; jest.useRealTimers(); }
+  });
+
+  for (const cancellation of ["ended", "disposed"] as const) test(`${cancellation} cancels a hanging Checking window and rejects its obsolete result`, async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { await gate; return [{ ...unavailable, activity: { ...unavailable.activity!, kind: "working" } }]; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
+      const ended: BackgroundTaskItem = { ...unavailable, activity: { ...unavailable.activity!, kind: "ended", endedAt: 3456 } };
+      const disposing = cancellation === "disposed" ? adapter.dispose() : undefined;
+      if (cancellation === "ended") projection.upsert(ended);
+      jest.advanceTimersByTime(20000); await flushRecoveryIo();
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: cancellation === "ended" ? ended.activity : unavailable.activity });
+      release(); await flushRecoveryIo(); await disposing;
+      expect(projection.get(unavailable.id)).toMatchObject({ activity: cancellation === "ended" ? ended.activity : unavailable.activity });
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+});
 
 test("covered V2 snapshot preserves a rename published during its history read", async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
@@ -101,6 +369,8 @@ for (const kind of ["agent", "shell"] as const) for (const local of [false, true
   try {
     const parent = (await provider.createSession("Independent live work")).id;
     const branch = await adapter.prompt(parent, "branch", "Hide this transcript, not live work", undefined, undefined, undefined, undefined, "steer");
+    // Observe the live birth: history/current lookup cannot manufacture Stop authority.
+    await adapter.history(parent);
     const worker = kind === "agent" ? fake.launchWorker(parent, true) : fake.launchShell(parent, true);
     const taskId = `task:${worker.taskId}`;
     await adapter.history(parent);
@@ -4794,6 +5064,29 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(adapter.activity().working).toBe(false);
     await adapter.dispose();
   });
+  test("verified uncontrollable activity survives recovery but a stream gap withdraws its live clock and authority", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const worker: BackgroundTaskItem = { id: "task:worker", type: "background_task", taskId: "worker", description: "Worker", childConversationId: "child", createdAt: 1, status: "running", stateUncertain: true,
+      activity: { kind: "working", executionId: "fixture-execution", observedAt: 50 }, control: { available: false, reason: "Retained Stop proof unavailable" } };
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "parent" ? [worker] : [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await waitUntil(() => adapter.projectionForTests("parent").find(item => item.type === "background_task" && item.activity?.kind === "working") !== undefined);
+      expect(adapter.activity().working).toBe(true);
+      expect(adapter.projectionForTests("parent").find(item => item.id === worker.id)).toMatchObject({ stateUncertain: true, activity: { kind: "working" }, control: { available: false } });
+      provider.eventQueue.close();
+      await waitUntil(() => adapter.projectionForTests("parent").find(item => item.type === "background_task" && item.activity?.kind === "unavailable") !== undefined);
+      expect(adapter.projectionForTests("parent").find(item => item.id === worker.id)).toMatchObject({ activity: { kind: "unavailable", executionId: "fixture-execution", observedAt: 50 }, control: { available: false } });
+      // Inconclusive disappearance does not manufacture a workspace-finished transition.
+      expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: true });
+      expect(provider.prompts).toEqual([]);
+      expect(provider.interrupts).toEqual([]);
+    } finally { await adapter.dispose(); await pump; }
+  });
+
   test("connected-before-read recovery discovers unselected parents with at most four reads and no text-delta rereads", async () => {
     const provider = new FakeProvider();
     provider.sessions = Array.from({ length: 6 }, (_, i) => fixtureSession(`parent-${i}`));
@@ -4855,7 +5148,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.eventQueue.push({ type: "server.connected", data: {} });
     await waitUntil(() => adapter.activity().working);
     expect(reads).toBeGreaterThan(0);
-    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     expect(adapter.projectionForTests("parent").find(item => item.id === `${kind}:pending`)).toMatchObject({ type: kind, status: "pending", conversationId: "child" });
     expect(provider.prompts).toEqual([]);
     expect(provider.interrupts).toEqual([]);
@@ -4903,7 +5196,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     fail = true;
     provider.eventQueue.push({ normalized: { conversationId: "child", eventType: "session.execution.succeeded", outcome: "handled", updates: [] } } as unknown as ProviderEvent);
     await waitUntil(() => reads >= 2);
-    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     fail = false; pending = false;
     await waitUntil(() => reads >= 3 && !adapter.activity().awaiting);
     expect(adapter.activity().working).toBe(true);
@@ -8277,6 +8570,39 @@ describe("pending permission recovery", () => {
     expect(provider.questionReplies).toEqual([{ sessionId: "child", requestId: "que_child", answers: [["A"]] }]);
   });
 
+  for (const kind of ["permission", "question"] as const) test(`a positively linked worker ${kind} keeps one canonical parent card and one native answer`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listPermissions = async () => kind === "permission"
+      ? [{ conversationId: "child", requestId: "canonical", action: "read", resources: ["safe-fixture"] }] : [];
+    provider.listQuestions = async () => kind === "question"
+      ? [{ conversationId: "child", requestId: "canonical", questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }] : [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    try {
+      await adapter.history("parent");
+      // Provider occurrence proof is verified separately through the native V2
+      // seam. This adapter test consumes its DTO without inventing a second ask.
+      adapter.projectionForTests("parent").upsert({ id: "task:worker", type: "background_task", taskId: "worker", createdAt: 1,
+        description: "Worker", childConversationId: "child", status: "running", stateUncertain: true,
+        activity: { kind: "needs-answer", executionId: "execution:worker", request: { id: "canonical", kind } }, control: { available: false } });
+      const cards = adapter.projectionForTests("parent").items().filter(item => item.type === kind);
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ id: `${kind}:canonical`, requestId: "canonical", conversationId: "child", status: "pending" });
+      expect(adapter.projectionForTests("parent").find(item => item.id === "task:worker")).toMatchObject({ activity: { request: { id: "canonical", kind } } });
+      if (kind === "permission") {
+        await adapter.respondPermission("child", "canonical", "client-1", "approved-once");
+        expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "canonical", reply: "once" }]);
+        expect(provider.questionReplies).toEqual([]);
+      } else {
+        await adapter.respondQuestion("child", "canonical", "client-1", { kind: "answered", answers: [["A"]] });
+        expect(provider.questionReplies).toEqual([{ sessionId: "child", requestId: "canonical", answers: [["A"]] }]);
+        expect(provider.permissionReplies).toEqual([]);
+      }
+      expect(provider.prompts).toEqual([]);
+      expect(provider.interrupts).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
   test("a provider without the list simply never recovers, and does not throw", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
@@ -8798,30 +9124,30 @@ describe("workspace activity summary", () => {
 
   test("a turn in flight in any conversation is working, and only a change of the summary is reported", () => {
     const { adapter, changes } = activityAdapter();
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
     // A second live turn, and the first ending while the second runs, leave
     // the summary where it was.
     adapter.projectionForTests("b").apply({ kind: "status", status: "compacting" });
     adapter.projectionForTests("a").apply({ kind: "status", status: "completed" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
     adapter.projectionForTests("b").apply({ kind: "status", status: "idle" });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes()).toBe(2);
   });
 
   test("a turn that ends into live background work keeps the workspace working without a change", () => {
     const { adapter, changes } = activityAdapter();
     adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
     // The turn ended but the agent still holds a backgrounded task: the
     // summary reads the same, so nothing is reported.
     adapter.projectionForTests("a").apply({ kind: "status", status: "background" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(changes()).toBe(1);
   });
 
@@ -8831,7 +9157,7 @@ describe("workspace activity summary", () => {
     adapter.projectionForTests("a").apply({ kind: "status", status: "background" });
     expect(changes()).toBe(1);
     adapter.projectionForTests("a").apply({ kind: "status", status: "idle" });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes()).toBe(2);
   });
 
@@ -8842,13 +9168,13 @@ describe("workspace activity summary", () => {
     const pump = adapter.startEventPump();
     adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
     adapter.projectionForTests("a").apply({ kind: "status", status: "background" });
-    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     const before = changes();
     provider.sessions = [];
     provider.eventQueue.push({ type: "session.deleted", data: { info: local } });
     await waitUntil(() => changes() > before);
     await Bun.sleep(20);
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes() - before).toBe(1);
     await adapter.dispose();
     await pump;
@@ -8857,14 +9183,14 @@ describe("workspace activity summary", () => {
   test("a pending permission or question awaits the user until it settles or is withdrawn", () => {
     const { adapter, changes } = activityAdapter();
     adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1") });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: true, unresolved: false });
     expect(changes()).toBe(1);
     adapter.projectionForTests("b").apply({ kind: "upsert", item: question("q1") });
     adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1", "resolved") });
     expect(adapter.activity().awaiting).toBe(true);
     expect(changes()).toBe(1);
     adapter.projectionForTests("b").apply({ kind: "remove", itemId: "question:q1" });
-    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(changes()).toBe(2);
     // A resync rewrite rebuilds the timeline from history, which carries no
     // requests: what it drops no longer counts.
@@ -8902,7 +9228,7 @@ describe("workspace activity summary", () => {
         const pump = adapter.startEventPump();
         adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
         adapter.projectionForTests("a").apply({ kind: "upsert", item: request });
-        expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+        expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
         const before = changes();
 
         if (leave === "deleted") {
@@ -8915,7 +9241,7 @@ describe("workspace activity summary", () => {
         }
         await waitUntil(() => changes() > before);
         await Bun.sleep(20);
-        expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+        expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
         expect(changes() - before).toBe(1);
 
         if (leave === "moved out of the workspace") {
@@ -8925,7 +9251,7 @@ describe("workspace activity summary", () => {
           provider.eventQueue.push({ type: "session.updated", data: { info: local } });
           provider.eventQueue.push({ type: "session.status", data: { sessionID: "a", status: { type: "busy" } } });
           await waitUntil(() => adapter.activity().working);
-          expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+          expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
           expect(changes() - before).toBe(2);
         }
 
@@ -8946,7 +9272,7 @@ describe("workspace activity summary", () => {
       const before = changes();
       provider.sessions = [fixtureSession("a", `${process.cwd()}-moved`)];
       await lookup(adapter);
-      expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+      expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
       expect(changes() - before).toBe(1);
     }
   });
@@ -8965,7 +9291,7 @@ describe("workspace activity summary", () => {
     await expectInventorySignal(inventory);
     await adapter.listConversations();
     await adapter.getConversation("a");
-    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     expect(changes()).toBe(before);
     inventory.cancel();
     await adapter.dispose();

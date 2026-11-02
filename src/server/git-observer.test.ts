@@ -291,7 +291,6 @@ test("a root that becomes a repository is observed from its first commit", async
   await observer.start();
   expect(observer.directories()).toEqual([directory]);
   await git(directory, ["init", "--initial-branch=main"]);
-  await until(() => names.includes(".git"), "the new .git directory");
   const gitDir = path.join(directory, ".git");
   // On Linux the half-made .git is watched first; wait for the full set.
   await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the new repository's Git-metadata watches");
@@ -303,19 +302,25 @@ test("a root that becomes a repository is observed from its first commit", async
   await until(() => names.includes("main") || names.includes("HEAD") || names.includes("index"), "the first commit");
 }, 20_000);
 
-test("a .git directory that appears before git init finishes is still resolved", async () => {
-  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "uatu-git-observer-halfmade-")));
-  cleanup.push(() => rm(directory, { recursive: true, force: true }));
-  const { observer, names } = observe([dir(directory)]);
-  await observer.start();
-  // Linux reports .git as soon as it exists, before HEAD is written.
-  const gitDir = path.join(directory, ".git");
-  await mkdir(gitDir);
-  await until(() => names.includes(".git"), "the empty .git directory");
-  await until(() => observer.directories().includes(gitDir), "the half-made .git to be watched");
-  await git(directory, ["init", "--initial-branch=main"]);
-  await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the full Git-metadata watch set");
-}, 20_000);
+for (const unnamed of [false, true]) {
+  test(`a .git directory that appears before git init finishes is still resolved${unnamed ? " with unnamed native events" : ""}`, async () => {
+    const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "uatu-git-observer-halfmade-")));
+    cleanup.push(() => rm(directory, { recursive: true, force: true }));
+    const withoutNames = ((root: string, options: unknown, listener: (event: string, filename: string | null) => void) =>
+      nodeWatch(root, options as never, event => listener(event, null))) as typeof nodeWatch;
+    const { observer, names, failures } = observe([dir(directory)], unnamed ? withoutNames : undefined);
+    await observer.start();
+    // Linux reports .git as soon as it exists, before HEAD is written.
+    const gitDir = path.join(directory, ".git");
+    await mkdir(gitDir);
+    // Native events may omit filenames; wait for the resulting watch state.
+    await until(() => observer.directories().includes(gitDir), "the half-made .git to be watched");
+    await git(directory, ["init", "--initial-branch=main"]);
+    await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the full Git-metadata watch set");
+    if (unnamed) expect(names).toContain(null);
+    expect(failures).toEqual([]);
+  }, 20_000);
+}
 
 test("excluded working-tree paths count only when Git can see them", async () => {
   const { work } = await checkout();

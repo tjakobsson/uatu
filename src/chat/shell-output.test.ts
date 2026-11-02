@@ -69,7 +69,7 @@ describe("shell scroll owner", () => {
     owner.dispose();
   });
 
-  for (const input of ["wheel", "touch", "keyboard"]) {
+  for (const input of ["wheel", "touch", "keyboard", "scrollbar"]) {
     test(`nested shell ${input} input pauses only its registered owner`, () => {
       const parent = view(), viewport = view(); parent.append(viewport);
       const parentAnchor = new TimelineAnchorController();
@@ -85,6 +85,11 @@ describe("shell scroll owner", () => {
       };
       if (input === "wheel") fire("wheel", { deltaY: -4 });
       else if (input === "keyboard") fire("keydown", { key: "ArrowUp" });
+      else if (input === "scrollbar") {
+        Object.defineProperty(viewport, "getBoundingClientRect", { value: () => ({ left: 0, right: 516 }) });
+        Object.assign(viewport, { clientLeft: 0 });
+        fire("pointerdown", { pointerType: "mouse", clientX: 508 });
+      }
       else { fire("touchstart", { touches: [{ clientY: 100 }] }); fire("touchmove", { touches: [{ clientY: 104 }] }); }
       expect(owner.following).toBe(false); expect(parentAnchor.isPinned()).toBe(true);
       expect(frames.size).toBe(1); // Only the outer correction remains pending.
@@ -98,14 +103,31 @@ describe("shell scroll owner", () => {
 
   test("one listener set and one writer handle replacement and delayed clamp echoes", () => {
     const viewport = view();
+    const types = ["scroll", "wheel", "touchstart", "touchmove", "keydown", "pointerdown"];
     const counts = new Map<string, number>();
+    const active = new Map<string, Set<EventListener>>();
     const add = viewport.addEventListener.bind(viewport);
+    const remove = viewport.removeEventListener.bind(viewport);
     viewport.addEventListener = ((type: string, listener: EventListener, options?: AddEventListenerOptions) => {
+      const listeners = active.get(type) ?? new Set<EventListener>();
+      listeners.add(listener); active.set(type, listeners);
       counts.set(type, (counts.get(type) ?? 0) + 1); add(type, listener, options);
     }) as typeof viewport.addEventListener;
+    viewport.removeEventListener = ((type: string, listener: EventListener, options?: EventListenerOptions) => {
+      expect(active.get(type)?.delete(listener)).toBe(true);
+      remove(type, listener, options);
+    }) as typeof viewport.removeEventListener;
+    const expectListeners = (registrations: number, remaining: number) => {
+      // The shared coordinator owns exactly one complete set, including its
+      // native scrollbar guard; the shell adapter adds no input listeners.
+      expect([...counts.keys()].sort()).toEqual([...types].sort());
+      for (const type of types) {
+        expect(counts.get(type)).toBe(registrations);
+        expect(active.get(type)?.size).toBe(remaining);
+      }
+    };
     const owner = new ShellScrollOwner(viewport);
-    for (const type of ["scroll", "wheel", "touchstart", "touchmove", "keydown"]) expect(counts.get(type)).toBe(1);
-    expect(counts.has("pointerdown")).toBe(false);
+    expectListeners(1, 1);
     owner.latest(); frame(); owner.readerInput("up"); viewport.scrollTop = 217; owner.observe();
     owner.replaced(1); owner.updated(); frame(); owner.observe(); owner.observe();
     expect(owner.readingTop).toBe(237); expect(owner.following).toBe(false);
@@ -113,7 +135,18 @@ describe("shell scroll owner", () => {
     expect(owner.readingTop).toBe(237); expect(owner.following).toBe(false);
     Object.assign(viewport, { scrollHeight: 2000 }); owner.request(); frame();
     expect(viewport.scrollTop).toBe(237);
+    expectListeners(1, 1);
     owner.dispose();
+    expectListeners(1, 0);
+    for (const generation of [2, 3]) {
+      const replacement = new ShellScrollOwner(viewport);
+      replacement.latest(); replacement.request(); replacement.updated(); frame();
+      replacement.observe(); replacement.observe(); replacement.replaced(0);
+      expectListeners(generation, 1);
+      replacement.dispose();
+      expectListeners(generation, 0);
+      expect(frames.size).toBe(0);
+    }
   });
 
   test("horizontal native clamps and echoes preserve the offset, but deliberate return to zero does not", () => {

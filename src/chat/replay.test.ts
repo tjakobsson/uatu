@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay, encodeReplayCursor } from "./replay";
+import { parseChatEvent } from "./validation";
 
 async function next<T>(iterator: AsyncIterator<T>): Promise<T> {
   const result = await iterator.next();
@@ -10,6 +11,21 @@ async function next<T>(iterator: AsyncIterator<T>): Promise<T> {
 }
 
 describe("conversation replay", () => {
+  test("replay preserves independent worker activity and control evidence", async () => {
+    const replay = new ConversationReplay("generation", "parent", 10_000);
+    const projection = new ConversationProjection(replay);
+    const cursor = replay.latestCursor();
+    const item = { id: "task", type: "background_task" as const, taskId: "task", description: "Worker", status: "running" as const, createdAt: 1,
+      stateUncertain: true, activity: { kind: "working" as const, executionId: "execution", observedAt: 2, generation: 1 }, control: { available: false, reason: "Control proof unavailable" } };
+    projection.apply({ kind: "upsert", item });
+    const handoff = replay.handoff(() => projection.items(), cursor);
+    try {
+      const event = parseChatEvent(JSON.parse(JSON.stringify(await next(handoff.subscription[Symbol.asyncIterator]()))));
+      expect(event).toMatchObject({ type: "item.upsert", item });
+      expect(handoff.snapshot).toEqual([item]);
+    } finally { handoff.subscription.cancel(); }
+  });
+
   test("hands off atomically from ordered replay to live events", async () => {
     const replay = new ConversationReplay("generation", "session", 10_000);
     replay.publish({ type: "conversation.status", status: "sending" });

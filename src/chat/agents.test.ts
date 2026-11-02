@@ -84,7 +84,7 @@ class StubAgentService implements WorkspaceChatService {
   async usage() { return this.record("usage", [], null); }
   async readUsage(requestId: string, mode: UsageReadMode) { return this.record("readUsage", [requestId, mode], { report: null, reason: "no-live-session" as const }); }
   async dispose() { this.calls.push({ method: "dispose", args: [] }); }
-  activityState: ChatActivity = { working: false, awaiting: false };
+  activityState: ChatActivity = { working: false, awaiting: false, unresolved: false };
   activityChanges = new ConversationInventoryBroadcaster();
   async activity() { return this.activityState; }
   async subscribeActivity(options: { signal?: AbortSignal } = {}) { return this.activityChanges.subscribe(options.signal); }
@@ -475,18 +475,29 @@ describe("workspace activity merges across agents", () => {
 
   test("working in one agent and awaiting in another merge into one summary", async () => {
     const { service, a, b } = activityRouter();
-    expect(await service.activity()).toEqual({ working: false, awaiting: false });
-    a.activityState = { working: true, awaiting: false };
-    b.activityState = { working: false, awaiting: true };
-    expect(await service.activity()).toEqual({ working: true, awaiting: true });
+    expect(await service.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    a.activityState = { working: true, awaiting: false, unresolved: false };
+    b.activityState = { working: false, awaiting: true, unresolved: false };
+    expect(await service.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
+  });
+
+  test("unresolved evidence is ORed independently from other agents' working and awaiting facts", async () => {
+    const { service, a, b } = activityRouter();
+    a.activityState = { working: false, awaiting: false, unresolved: true };
+    b.activityState = { working: true, awaiting: true, unresolved: false };
+    expect(await service.activity()).toEqual({ working: true, awaiting: true, unresolved: true });
+    b.activityState = { working: false, awaiting: false, unresolved: false };
+    expect(await service.activity()).toEqual({ working: false, awaiting: false, unresolved: true });
+    a.activityState.unresolved = false;
+    expect(await service.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
   });
 
   test("an agent that cannot answer counts as idle and does not silence the others", async () => {
     const { service, a, b } = activityRouter();
     b.activity = async () => { throw new Error("agent down"); };
     b.subscribeActivity = async () => { throw new Error("agent down"); };
-    a.activityState = { working: false, awaiting: true };
-    expect(await service.activity()).toEqual({ working: false, awaiting: true });
+    a.activityState = { working: false, awaiting: true, unresolved: false };
+    expect(await service.activity()).toEqual({ working: false, awaiting: true, unresolved: false });
 
     const changes = await service.subscribeActivity();
     expect((await changes.next()).done).toBe(false);
@@ -495,10 +506,10 @@ describe("workspace activity merges across agents", () => {
     // tick can only be the forwarded change.
     await Bun.sleep(5);
     expect(await within(changes.next())).toEqual({ value: undefined, done: false });
-    a.activityState = { working: true, awaiting: true };
+    a.activityState = { working: true, awaiting: true, unresolved: false };
     a.activityChanges.invalidate();
     expect(await within(changes.next())).toEqual({ value: undefined, done: false });
-    expect(await service.activity()).toEqual({ working: true, awaiting: true });
+    expect(await service.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     changes.cancel();
   });
 
