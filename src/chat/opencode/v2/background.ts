@@ -299,7 +299,7 @@ export class BackgroundControls {
   }
   /** Control records can outlive aggregate worker projection after saturation.
    * A positive ownership contradiction still retires their associated agents. */
-  invalidateAgentOwnership(parent: string | undefined, worker: string, actualParent?: string): boolean {
+  invalidateAgentOwnership(parent: string | undefined, worker: string, actualParent?: string, retainedClaim = false): boolean {
     let associated = false;
     for (const record of this.records.values()) if ((parent === undefined || record.parent === parent)
       && record.evidence?.kind === "agent" && record.evidence.worker === worker
@@ -307,12 +307,33 @@ export class BackgroundControls {
       associated = true;
       this.retire(record);
     }
+    for (const [key, observation] of this.observations) {
+      const birth = observation.lifecycle, launch = observation.launch;
+      const owner = birth?.kind === "session.created" && birth.own ? birth.parent : observation.parent;
+      const linked = birth?.kind === "session.created" && birth.own && observation.child === worker
+        || launch?.workerType === "agent" && (launch.child === worker || launch.reportedChild === worker
+          || retainedClaim && !launch.requestedSelectedOnly && launch.requestedChild === worker);
+      if (!linked || owner === undefined || parent !== undefined && owner !== parent || owner === actualParent) continue;
+      associated = true;
+      this.note(key, { ...observation, parent: owner, birthContradicted: true });
+    }
+    // Qualified verification can precede a birth or worker row. This negative
+    // uses the same accounted observations and supplies no admission witness.
+    if (parent !== undefined && parent !== actualParent && (retainedClaim || associated)) {
+      this.note(JSON.stringify(["ownership", parent, worker]), { parent, child: worker, birthContradicted: true });
+      associated = true;
+    }
     return associated;
   }
   /** A positive foreign parent workspace retires only its retained cohort. */
   invalidateParentOwnership(parent: string): boolean {
     let associated = false;
     for (const record of this.records.values()) if (record.parent === parent) { associated = true; this.retire(record); }
+    for (const [key, observation] of this.observations) if (observation.parent === parent
+      || observation.lifecycle?.own && observation.lifecycle.parent === parent) {
+      associated = true;
+      this.note(key, { ...observation, parent, birthContradicted: true });
+    }
     return associated;
   }
   /** Only a retained live birth supplies the baseline, never current GET or
@@ -639,6 +660,10 @@ export class BackgroundControls {
       const initialChild = candidate && [...this.observations.values()].some(observation => observation.child === candidate.worker
         && observation.lifecycle?.kind === "session.created" && observation.lifecycle.own && observation.lifecycle.parent === candidate.parent);
       if (candidate && !revoked) for (const observation of this.observations.values()) {
+        if (observation.birthContradicted && (observation.child === candidate.worker
+          && (observation.parent === undefined || observation.parent === candidate.parent)
+          && (candidate.kind === "agent" && observation.lifecycle?.kind !== "shell.created" || candidate.kind === "shell" && observation.lifecycle?.kind === "shell.created")
+          || observation.parent === candidate.parent && observation.launch && candidate.launches.some(launch => launch.call === observation.launch!.call))) { revoked = true; continue; }
         if (observation.witness && observation.witness.kind !== "created" && (this.historical(observation.witness.kind, observation.witness.proof)
           || witnesses.some(witness => witness.kind === observation.witness!.kind && sameProof(witness.proof, observation.witness!.proof)))) continue;
         if (observation.child === candidate.worker || observation.child === candidate.parent) {
@@ -896,6 +921,17 @@ export class BackgroundWorkers {
 
   childTasks(child: string): Array<{ parent: string; item: BackgroundTaskItem }> {
     return [...this.tasks.values()].filter(task => task.worker === child).map(task => ({ parent: task.parent, item: task.item }));
+  }
+
+  /** Read only retained scoped ownership, never infer it from requested input. */
+  ownershipParent(child: string): string | undefined { return this.parents.get(child) ?? this.births.get(child)?.parent; }
+
+  hasOwnershipAssociation(sessionId: string, actualParent?: string): boolean {
+    const parent = this.parents.get(sessionId), birth = this.births.get(sessionId);
+    if (parent !== undefined && parent !== actualParent || birth?.parent !== undefined && birth.parent !== actualParent) return true;
+    return [...this.tasks.values()].some(task => task.worker === sessionId && task.evidence.kind === "agent" && task.parent !== actualParent
+      || actualParent === undefined && task.parent === sessionId)
+      || actualParent === undefined && ([...this.parents.values()].includes(sessionId) || [...this.births.values()].some(birth => birth.parent === sessionId));
   }
 
   rememberActivity(taskId: string, activity: NonNullable<BackgroundTaskItem["activity"]>, candidate?: WorkerOccurrenceEvidence): void {

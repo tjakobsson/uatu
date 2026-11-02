@@ -4189,6 +4189,101 @@ describe("OpenCode 2.x provider: sessions", () => {
     await expect(lost.provider().backgroundBlockingWork("ses_parent")).rejects.toMatchObject({ name: "OperationOutcomeUnknownError" });
     expect(lost.requests("POST", "/api/session/ses_parent/background")).toHaveLength(1);
   });
+  for (const stage of ["birth", "verified-parent", "cache-only"] as const) for (const reader of ["session", "configuration"] as const)
+  for (const change of ["workspace", "parent", "wrong-id", "missing", "unrelated", "healthy"] as const)
+  test(`ordinary prelaunch observation fences only retained ownership facts (${stage}/${reader}/${change})`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const launch = structuredClone(fixture.launch); launch.content[0].time = { created: 20, ran: 20, completed: 30 };
+    const foreground = structuredClone(launch); foreground.content[0].state.input.background = false; foreground.content[0].state.metadata.status = "completed"; foreground.content[0].state.content = [{ type: "text", text: "Foreground work" }];
+    let history: unknown[] = stage === "cache-only" ? [foreground] : [], changed = false;
+    let wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined, sequence = 0;
+    const sequences = new Map<string, number>();
+    const raw = (type: string, data: unknown, created: number, proof = true) => {
+      const aggregateID = (data as { sessionID?: string }).sessionID, seq = aggregateID ? (sequences.get(aggregateID) ?? 0) + 1 : undefined;
+      if (aggregateID && type.startsWith("session.")) sequences.set(aggregateID, seq!);
+      return { ...(proof ? { id: `prelaunch-owner-${++sequence}` } : {}), type, data, created, location: { directory: WORKSPACE },
+        ...(aggregateID && type.startsWith("session.") ? { durable: { aggregateID, seq, version: type === "session.tool.success" ? 2 : 1 } } : {}) };
+    };
+    const frame = (event: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame(raw("server.connected", {}, 1)); } }), { headers: { "content-type": "text/event-stream" } }),
+      "GET /api/session/active": () => ({ ses_child: { type: "running" }, ses_healthy: { type: "running" } }),
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "GET /api/session/:id": ({ path }) => {
+        const id = path.split("/").at(-1)!, selected = id === (change === "unrelated" ? "unrelated" : "ses_child");
+        return session(changed && selected && change === "wrong-id" ? "wrong_child" : id, { parentID: changed && selected && change === "parent" ? "foreign_parent" : "ses_parent",
+          time: id === "ses_healthy" ? { created: 42, updated: 43 } : { created: 22, updated: 23 }, ...(changed && selected && (change === "workspace" || change === "unrelated") ? { location: { directory: "/foreign" } } : changed && selected && change === "missing" ? { location: {} } : {}) });
+      },
+      "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+      "GET /api/session/ses_healthy/message": () => ({ data: [], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
+      "POST /api/session/ses_healthy/interrupt": () => ({ interrupted: true }),
+    });
+    const provider = server.provider(), lifetime = new AbortController();
+    const pump = (async () => { for await (const event of provider.events(lifetime.signal)) if (event.eventType !== "server.connected") { acknowledge?.(); acknowledge = undefined; } })();
+    const sendRaw = (event: unknown) => new Promise<void>(resolve => { acknowledge = resolve; frame(event); });
+    const send = (type: string, data: unknown, at: number, proof = true) => sendRaw(raw(type, data, at, proof));
+    const state = provider as unknown as { controls: { basis(id: string): unknown }; childParents: { size: number }; eventMemory: { workers: { births: Map<string, unknown>; parents: Map<string, string>; childTasks(id: string): unknown[] } } };
+    const contradiction = ["workspace", "parent", "wrong-id"].includes(change), taskId = "v2:ses_parent:call_worker";
+    try {
+      await provider.waitForEventStream(lifetime.signal);
+      const common = { sessionID: "ses_parent", assistantMessageID: launch.id, id: "call_worker" };
+      let calledFrame: ReturnType<typeof raw> | undefined, birthFrame: ReturnType<typeof raw> | undefined;
+      if (stage === "cache-only") {
+        await provider.listMessages("ses_parent", { limit: 100 });
+        expect(state.childParents.size).toBe(1); expect(state.eventMemory.workers.births.size).toBe(0); expect(state.eventMemory.workers.parents.size).toBe(0);
+      } else {
+        await send("session.tool.input.started", { ...common, name: "subagent" }, 20);
+        calledFrame = raw("session.tool.called", { ...common, input: launch.content[0].state.input, executed: true }, 20); await sendRaw(calledFrame);
+        birthFrame = raw("session.created", { sessionID: "ses_child", parentID: "ses_parent", projectID: "global", slug: "child", version: "2.1.2", location: { directory: WORKSPACE } }, 22, stage === "birth"); await sendRaw(birthFrame);
+        if (stage === "birth") await send("session.execution.started", { sessionID: "ses_child" }, 23);
+        expect(state.eventMemory.workers.parents.get("ses_child")).toBe("ses_parent");
+        expect(state.eventMemory.workers.births.size).toBe(stage === "birth" ? 1 : 0);
+      }
+      expect(state.controls.basis(taskId)).toBeUndefined(); expect(state.eventMemory.workers.childTasks("ses_child")).toEqual([]);
+      const births = state.eventMemory.workers.births.size;
+      changed = true;
+      const id = change === "unrelated" ? "unrelated" : "ses_child";
+      const record = reader === "session" ? await provider.getSession(id) : await provider.getConversationConfiguration(id);
+      if (reader === "session" && ["workspace", "missing", "unrelated"].includes(change)) expect(record).toBeNull();
+      if (change === "unrelated") expect(state.eventMemory.workers.births.size).toBe(births);
+      if (stage !== "cache-only") changed = false;
+      if (contradiction && stage === "birth") { await sendRaw(calledFrame!); await sendRaw(birthFrame!); }
+      history = [launch];
+      if (stage !== "cache-only") {
+        await send("session.tool.success", { ...common, executed: true, input: launch.content[0].state.input, metadata: launch.content[0].state.metadata, content: launch.content[0].state.content }, 30);
+        await send("session.message.content.updated", { sessionID: "ses_parent", messageID: launch.id, content: launch.content }, 30);
+      }
+      const [row] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+      const result = await provider.stopTask("ses_parent", taskId).catch(error => error);
+      expect(server.requests("POST", "/api/session/ses_child/interrupt")).toHaveLength(!contradiction && stage === "birth" ? 1 : 0);
+      if (contradiction) {
+        expect(row?.activity?.kind).not.toBe("working"); expect(row?.activity?.launchRef).toBeUndefined();
+        expect(row?.control?.available).not.toBe(true); expect(result).toMatchObject({ name: "BackgroundTaskUnavailableError" });
+        changed = false;
+        history = [fixture.converted];
+        const [alias] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+        expect(alias?.activity?.kind).not.toBe("working"); expect(alias?.activity?.launchRef).toBeUndefined(); expect(alias?.control?.available).not.toBe(true);
+        await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_converted")).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+        const healthy = structuredClone(launch); healthy.id = "msg_healthy"; healthy.time.created = 40;
+        healthy.content[0].id = "call_healthy"; healthy.content[0].time = { created: 40, ran: 40, completed: 50 }; healthy.content[0].state.metadata.sessionID = "ses_healthy";
+        const next = { sessionID: "ses_parent", assistantMessageID: healthy.id, id: "call_healthy" };
+        await send("session.tool.input.started", { ...next, name: "subagent" }, 40);
+        await send("session.tool.called", { ...next, input: healthy.content[0].state.input, executed: true }, 40);
+        await send("session.created", { sessionID: "ses_healthy", parentID: "ses_parent", projectID: "global", slug: "healthy", version: "2.1.2", location: { directory: WORKSPACE } }, 42);
+        await send("session.execution.started", { sessionID: "ses_healthy" }, 43);
+        history = [fixture.converted, healthy]; await send("session.message.content.updated", { sessionID: "ses_parent", messageID: healthy.id, content: healthy.content }, 50);
+        const healthyRows = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+        expect(healthyRows.find(task => task.taskId === "v2:ses_parent:call_healthy")?.control?.available).toBe(true);
+        await provider.stopTask("ses_parent", "v2:ses_parent:call_healthy");
+        expect(server.requests("POST", "/api/session/ses_healthy/interrupt")).toHaveLength(1);
+        expect(server.requests("POST", "/api/session/ses_child/interrupt")).toHaveLength(0);
+      } else expect(row?.activity?.kind).toBe("working");
+    } finally { lifetime.abort(); await pump; await provider.dispose(); }
+  });
+
   for (const saturated of [false, true]) for (const alias of [false, true]) for (const reader of ["session", "configuration"] as const)
   for (const target of ["child", "parent", "unrelated"] as const) for (const scope of (!saturated && !alias
     ? ["foreign", "missing", "wrong-id", "foreign-parent", "missing-id", "missing-parent"] as const : ["foreign", "missing"] as const))

@@ -656,6 +656,9 @@ native ends, starts and canonical request changes observed during visibility
 validation are not overwritten by an earlier snapshot. Recovery reuses retained
 positive activity rather than reviving Working from old start evidence alone;
 end clocks come only from native proof.
+Known associations include retained prelaunch births and verified parentage,
+not only admitted rows. A positive contradiction before launcher success fences
+delayed admission and replay; unrelated ordinary reads create no such state.
 
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover

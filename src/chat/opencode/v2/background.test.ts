@@ -516,6 +516,41 @@ function controlOracle(controls: BackgroundControls) {
   return state;
 }
 
+for (const invalidation of ["none", "child", "parent", "verified-claim"] as const)
+test(`prelaunch control observations retain scoped ownership contradictions without aggregate workers (${invalidation})`, () => {
+  const controls = new BackgroundControls(), original = controlFixture("original", "parent", "child", "agent"), alias = controlFixture("alias", "parent", "child", "agent");
+  const start = nativeProof({ id: "initial-start", created: 13, durable: { aggregateID: "child", seq: 2, version: 1 } }, { child: "child" })!;
+  const birth = nativeProof({ id: "initial-birth", created: 12, durable: { aggregateID: "child", seq: 1, version: 1 } }, { child: "child", parent: "parent" })!;
+  const born = { shutdown: false, session: "child", launchers: [], lifecycle: { kind: "session.created" as const, id: "child", parent: "parent", directory: "/ws", proof: birth } };
+  const started = { shutdown: false, session: "child", launchers: [], execution: { phase: "started" as const, historical: false, proof: start } };
+  if (invalidation !== "verified-claim") { controls.observe(born, true); controls.observe(started, true); }
+  const launches = [...original.evidence.launches, ...alias.evidence.launches], canonical = { ...original.evidence, launches, executionStart: start };
+  const witness = [{ kind: "started" as const, proof: start }];
+  expect(controls.basis(original.item.taskId)).toBeUndefined();
+  if (invalidation === "child") expect(controls.invalidateAgentOwnership(undefined, "child", "foreign-parent")).toBe(true);
+  else if (invalidation === "parent") expect(controls.invalidateParentOwnership("parent")).toBe(true);
+  else if (invalidation === "verified-claim") expect(controls.invalidateAgentOwnership("parent", "child", "foreign-parent", true)).toBe(true);
+  // Neither a replay of the native owned proof nor an alias-only history fold
+  // can erase a pre-admission contradiction; no aggregate worker map is used.
+  controls.observe(born, true); controls.observe(started, true);
+  expect(controls.project(original.item, canonical, undefined, witness).control?.available).toBe(invalidation === "none");
+  expect(controls.project(alias.item, { ...alias.evidence, launches, executionStart: start }, undefined, witness).control?.available).toBe(invalidation === "none");
+  const healthy = controlFixture("healthy", "healthy-parent", "healthy-child", "agent");
+  expect(controls.project(healthy.item, healthy.evidence).control?.available).toBe(true);
+  controlOracle(controls);
+});
+
+test("a requested child alone is not a retained ownership association", () => {
+  const controls = new BackgroundControls();
+  const fact = prepareTool({ id: "call", name: "subagent", state: { input: { sessionID: "child" } } }, 10, "called", "message", { id: "called", created: 10 }).fact;
+  controls.observe({ shutdown: false, session: "parent", launchers: [fact] }, true);
+  const before = controls.usage;
+  expect(controls.invalidateAgentOwnership(undefined, "child", "other-parent")).toBe(false);
+  expect(controls.invalidateAgentOwnership("parent", "child", "other-parent")).toBe(false);
+  expect(controls.usage).toEqual(before);
+  controlOracle(controls);
+});
+
 test("native birth identity uses accounted witnesses, not the first current inventory, and preserves aliases and budget fences", () => {
   const controls = new BackgroundControls(), original = controlFixture("original", "parent", "shell"), alias = controlFixture("alias", "parent", "shell"), healthy = controlFixture("healthy");
   const canonical = { ...original.evidence, launches: [...original.evidence.launches, ...alias.evidence.launches] };

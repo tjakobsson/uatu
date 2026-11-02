@@ -2077,14 +2077,23 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Its own parentID does not invalidate a nested conversation's workers.
     const parent = actualParent === undefined && this.controls.invalidateParentOwnership(sessionId);
     let associated = child || parent;
+    const workers = this.eventMemory?.workers;
+    const cachedParent = this.childParents.peek(sessionId, this.streamConnected ? String(this.streamGeneration) : undefined)?.[1];
+    const retainedParent = workers?.ownershipParent(sessionId);
+    for (const expected of [cachedParent, retainedParent]) if (expected !== undefined && expected !== actualParent) {
+      this.controls.invalidateAgentOwnership(expected, sessionId, actualParent, true);
+      associated = true;
+    }
+    if (cachedParent !== undefined && cachedParent !== actualParent) this.childParents.invalidate(sessionId);
+    for (const check of this.ownershipChecks) if (check.child === sessionId && check.parent !== actualParent) {
+      this.childParents.invalidate(sessionId);
+    }
     for (const validation of this.stopValidations) if (actualParent === undefined && validation.parent === sessionId
       || validation.child === sessionId && validation.occurrence?.kind !== "shell" && (actualParent === undefined || validation.parent !== actualParent)) {
       this.revokeStop(validation);
       associated = true;
     }
-    const workers = this.eventMemory?.workers;
-    if (!associated && workers) associated = workers.childTasks(sessionId).some(({ item, parent }) => item.taskType === "agent" && (actualParent === undefined || parent !== actualParent))
-      || actualParent === undefined && [...workers.evidenceSnapshot().values()].some(occurrence => occurrence.parent === sessionId);
+    associated ||= workers?.hasOwnershipAssociation(sessionId, actualParent) === true;
     if (associated) {
       if (actualParent === undefined) workers?.invalidateActivity(sessionId);
       else workers?.invalidateChildActivity(sessionId, actualParent);
