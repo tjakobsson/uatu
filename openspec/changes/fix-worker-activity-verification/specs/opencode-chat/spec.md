@@ -125,6 +125,7 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 #### Scenario: Unverifiable control is shown consistently
 - **WHEN** control evidence is missing, revoked or overflowed
 - **THEN** live updates, history and reconciliation consistently withhold Stop and explain the unavailable control in task details
+- **AND** recovery return paths recheck current control proof after visibility awaits, including historically ended but unsettled shell jobs; an older enabled-control snapshot cannot outlive known revocation
 - **AND** separately verified current task activity can show Working without restoring missing Stop proof
 - **AND** workers continue running and message delivery remains available
 
@@ -205,6 +206,11 @@ Uatu SHALL associate a uniquely owned new child and its first native execution w
 - **WHEN** another invocation, execution boundary, foreign parent or workspace makes the association ambiguous or contradictory
 - **THEN** Uatu does not assign current activity or terminal results to the old task based only on a shared child ID
 - **AND** a stop of that old target never redirects to the newer execution
+
+#### Scenario: Parent-only contradiction preserves a healthy nested worker cohort
+- **WHEN** an ordinary or occurrence-aware lookup changes C's parent from A to B within the same workspace while C independently owns a verified worker D
+- **THEN** A's old C association loses its activity/reference and Stop authority without invalidating D's unchanged Working, launch continuity or retained controls
+- **AND** actual identity/workspace contradictions retain their appropriate subtree protection, while missing relationship facts remain inconclusive
 
 ### Requirement: Worker activity confidence is independent of control authorization
 Worker presentation SHALL distinguish verified task activity from active-session-only evidence and unavailable task status. Current evidence of a task's activity SHALL allow Working independently of Stop authorization. Historical running metadata or an active reused session alone SHALL NOT prove task activity. Unavailable Stop reasons SHALL be readable in task details with keyboard and touch, not only a hover tooltip.

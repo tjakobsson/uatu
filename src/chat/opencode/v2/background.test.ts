@@ -24,6 +24,24 @@ test("activity contradiction projection requires native negative facts, not miss
   checkBytes(absent); checkBytes(saturated);
 });
 
+for (const actualParent of ["outer", "replacement"]) test(`parent-only activity invalidation preserves nested native births (${actualParent})`, () => {
+  const workers = new BackgroundWorkers();
+  workers.verifyChild("child", "outer");
+  workers.observeBirth("child", "outer", nativeProof({ id: "child-birth", created: 22 }, { child: "child" }));
+  const outer = { id: "outer-call", name: "subagent", time: { created: 20, completed: 30 }, state: { status: "completed",
+    input: { prompt: "fixture", background: true }, metadata: { sessionID: "child", status: "running" } } };
+  workers.launchPrepared("outer", prepareTool(outer, 30, "success", "outer-message", { id: "outer-success", created: 30 }), 30);
+  workers.observeBirth("nested", "child", nativeProof({ id: "nested-birth", created: 42 }, { shell: "nested" }), shellCommandFingerprint("fixture"));
+  workers.launchPrepared("child", prepareTool({ ...launch("nested-call", "nested"), time: { created: 40, completed: 50 } }, 50, "success", "nested-message", { id: "nested-success", created: 50 }), 50);
+  const old = workers.occurrence("v2:outer:outer-call")!, nested = workers.occurrence("v2:child:nested-call")!;
+  expect(workers.shellActivity(nested)).toBe(true);
+  workers.invalidateChildActivity("child", actualParent);
+  expect(workers.activityContradicted(old)).toBe(actualParent !== "outer");
+  expect(workers.activityContradicted(nested)).toBe(false);
+  expect(workers.shellActivity(nested)).toBe(true);
+  checkBytes(workers);
+});
+
 for (const guard of ["none", "message", "created", "ran", "completed", "command", "input", "foreign", "gap"] as const) test(`sparse shell activity readback enriches missing anchors but preserves ${guard}`, () => {
   const live = new BackgroundWorkers(), history = new BackgroundWorkers();
   const part = launch("call", "shell");

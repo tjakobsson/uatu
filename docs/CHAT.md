@@ -646,6 +646,11 @@ not a missing-record result for validation purposes; ordinary readers still
 receive no foreign record. Recovery rechecks activity/reference provenance after
 visibility awaits so an older Working snapshot cannot survive a later known
 contradiction. Missing private control proof alone does not withdraw Working.
+Control fields are independently rechecked before recovery returns: revocation
+during visibility validation disables the old Stop offer even for ended,
+unsettled jobs. A parent-only relationship mismatch withdraws only the affected
+child associations, preserving independently owned nested workers; true identity
+or workspace contradictions retain their subtree safeguards.
 
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover

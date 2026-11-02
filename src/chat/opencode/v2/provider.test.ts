@@ -8,7 +8,7 @@ import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../../
 import { createOpenCodeV2Provider, formAnswerFromChoices, type OpenCodeV2Provider } from "./provider";
 import { ChatAdapter, SteerAlreadyDeliveredError, SteerWithdrawalUnconfirmedError } from "../../adapter";
 import { compactWorkers, workerSummary } from "../../compact-work";
-import { workerState, workerExecutionClockRuns } from "../../worker-state";
+import { workerState, workerExecutionClockRuns, workerCanStop } from "../../worker-state";
 import { workerDismissalIdentities } from "../../worker-dismissal-identity";
 import { visibleWorkers } from "../../worker-dismissal-client";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
@@ -1976,20 +1976,26 @@ test(`authoritative ${readSite} ${kind} read fences an older Stop (${change}/old
   } finally { releaseObserved(); releaseStop(); await Promise.allSettled([read, stop]); lifetime.abort(); await pump; await provider.dispose(); }
 });
 
-for (const reverted of [false, true]) for (const knownEnd of [false, true]) for (const change of ["command", "started", "file", "missing-started", "healthy"] as const)
-test(`reverted activity rechecks native provenance after its final boundary await (${reverted ? "reverted-final" : "unreverted-boundary"}/${change}/old-end=${knownEnd})`, async () => {
+for (const view of ["unreverted-boundary", "reverted-final", "visible-prefix-final"] as const) for (const knownEnd of [false, true])
+for (const change of ["command", "started", "file", "foreign-workspace", "missing-started", "healthy"] as const)
+test(`reverted activity rechecks native provenance after its final boundary await (${view}/${change}/old-end=${knownEnd})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   const original: ShellInfo = { id: "sh_fixture", command: "printf fixture", status: "running", cwd: "/owned/other-cwd",
     shell: "/bin/sh", file: "/fixture/old.out", pid: 123, metadata: { sessionID: "ses_parent" }, time: { started: 75 } };
-  let current: unknown = original, marker = false, reads = 0, armed = false;
+  const reverted = view !== "unreverted-boundary", boundaryId = view === "visible-prefix-final" ? "msg_boundary" : fixture.shell.id;
+  let current: unknown = original, marker = false, reads = 0, armed = false, foreign = false;
   let wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined, sequence = 0, entered!: () => void, release!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
   const frame = (type: string, data: unknown, created = 80) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `activity-fence-${++sequence}`, type, data, created, location: { directory: WORKSPACE } })}\n\n`));
   const server = fakeOpenCode({
     "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
-    "GET /api/session/ses_parent": async () => { if (armed && ++reads === (reverted ? 4 : 2)) { entered(); await gate; } return session("ses_parent", marker ? { revert: { messageID: fixture.shell.id } } : {}); },
+    "GET /api/session/ses_parent": async () => {
+      const captured = session("ses_parent", { ...(marker ? { revert: { messageID: boundaryId } } : {}), ...(foreign ? { location: { directory: "/foreign" } } : {}) });
+      if (armed && ++reads === (reverted ? 4 : 2)) { entered(); await gate; }
+      return captured;
+    },
     "GET /api/session/active": () => ({}),
-    "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
+    "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell, ...(view === "visible-prefix-final" ? [{ id: "msg_boundary", type: "user", text: "Hidden suffix", time: { created: 100 } }] : [])], cursor: {} }),
     "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
     "GET /api/shell/sh_fixture": () => scoped(current),
     "DELETE /api/shell/sh_fixture": () => undefined,
@@ -1998,7 +2004,7 @@ test(`reverted activity rechecks native provenance after its final boundary awai
   const pump = (async () => { for await (const event of provider.events(lifetime.signal)) if (event.eventType !== "server.connected") { acknowledge?.(); acknowledge = undefined; } })();
   const send = (type: string, data: unknown, at?: number) => new Promise<void>(resolve => { acknowledge = resolve; frame(type, data, at); });
   let pending: ReturnType<typeof provider.reconcileBackgroundTasks> | undefined;
-  const taskId = "v2:ses_parent:call_shell", contradiction = ["command", "started", "file"].includes(change);
+  const taskId = "v2:ses_parent:call_shell", contradiction = ["command", "started", "file", "foreign-workspace"].includes(change);
   try {
     await provider.waitForEventStream(lifetime.signal);
     await send("session.tool.input.started", { sessionID: "ses_parent", assistantMessageID: fixture.shell.id, id: "call_shell", name: "shell" }, 70);
@@ -2009,8 +2015,12 @@ test(`reverted activity rechecks native provenance after its final boundary awai
     marker = reverted; armed = true; pending = provider.reconcileBackgroundTasks("ses_parent", { fresh: true }); await started;
     current = { ...original, ...(change === "command" ? { command: "replacement B" } : change === "started" ? { time: { started: 95 } }
       : change === "file" ? { file: "/replacement.out" } : change === "missing-started" ? { time: {} } : {}) };
-    const stop = await provider.stopTask("ses_parent", taskId).catch(error => error);
-    if (contradiction || change === "missing-started") expect(stop).toMatchObject({ name: "BackgroundTaskUnavailableError" });
+    if (change === "foreign-workspace") {
+      foreign = true; expect(await provider.getSession("ses_parent")).toBeNull(); foreign = false;
+    } else {
+      const stop = await provider.stopTask("ses_parent", taskId).catch(error => error);
+      if (contradiction || change === "missing-started") expect(stop).toMatchObject({ name: "BackgroundTaskUnavailableError" });
+    }
     current = original; release(); const [row] = await pending;
     expect(row?.activity?.kind).toBe(knownEnd ? "ended" : contradiction ? "unavailable" : "working");
     expect(workerExecutionClockRuns(row!)).toBe(!knownEnd && !contradiction);
@@ -2018,7 +2028,147 @@ test(`reverted activity rechecks native provenance after its final boundary awai
     if (contradiction) expect(row?.activity?.launchRef).toBeUndefined();
     else if (!knownEnd) expect(row?.activity?.launchRef).toBeDefined();
     if (knownEnd) expect(row?.activity?.endedAt).toBe(90);
+    expect(row?.control?.available).toBe(!contradiction);
+    expect(row?.stateUncertain).toBe(contradiction);
+    expect(workerCanStop(row!)).toBe(!contradiction);
+    if (contradiction) {
+      expect(row?.control?.reason).toBeString();
+      await expect(provider.stopTask("ses_parent", taskId)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+      expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+    }
   } finally { release(); await pending?.catch(() => undefined); lifetime.abort(); await pump; await provider.dispose(); }
+});
+
+test("post-boundary control projection cannot borrow a newer valid alias basis", async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  let history = [fixture.launch], armed = false, parentReads = 0, wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined;
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 60, location: { directory: WORKSPACE } })}\n\n`));
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/active": () => ({ ses_child: { type: "running" } }),
+    "GET /api/session/ses_parent": async () => { if (armed && ++parentReads === 2) { entered(); await gate; } return session("ses_parent"); },
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_parent" }),
+    "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+  });
+  const provider = server.provider(), lifetime = new AbortController();
+  const pump = (async () => { for await (const event of provider.events(lifetime.signal)) if (event.eventType !== "server.connected") { acknowledge?.(); acknowledge = undefined; } })();
+  const send = (message: typeof fixture.launch) => new Promise<void>(resolve => { acknowledge = resolve; frame("session.message.content.updated", { sessionID: "ses_parent", messageID: message.id, content: message.content }); });
+  let pending: ReturnType<typeof provider.reconcileBackgroundTasks> | undefined;
+  try {
+    await provider.waitForEventStream(lifetime.signal);
+    await send(fixture.launch);
+    expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.control?.available).toBe(true);
+    armed = true; pending = provider.reconcileBackgroundTasks("ses_parent", { fresh: true }); await started;
+    armed = false; history = [fixture.launch, fixture.converted]; await send(fixture.converted);
+    const [latest] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(latest?.toolUseIds).toEqual(["call_worker", "call_converted"]); expect(latest?.control?.available).toBe(true);
+    release(); const [old] = await pending;
+    expect(old?.toolUseIds).toBeUndefined(); expect(old?.control?.available).toBe(false);
+    expect(old?.stateUncertain).toBe(true); expect(workerCanStop(old!)).toBe(false);
+    expect(old?.control?.reason).toBeString();
+  } finally { release(); await pending?.catch(() => undefined); lifetime.abort(); await pump; await provider.dispose(); }
+});
+
+for (const view of ["none", "hidden", "prefix"] as const) test(`current control reprojection cannot create cold shell authority or erase independent Working (${view})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const server = fakeOpenCode({
+    "GET /api/session/active": () => ({}),
+    "GET /api/session/ses_parent": () => session("ses_parent", view === "none" ? {} : { revert: { messageID: view === "hidden" ? fixture.shell.id : "msg_boundary" } }),
+    "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell, ...(view === "prefix" ? [{ id: "msg_boundary", type: "user", text: "Hidden suffix", time: { created: 100 } }] : [])], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    "GET /api/shell/sh_fixture": () => scoped({ ...nativeShellInfo(), cwd: "/owned/other-cwd" }),
+    "DELETE /api/shell/sh_fixture": () => undefined,
+  });
+  const provider = server.provider();
+  try {
+    const [row] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(row?.activity?.kind).toBe("working"); expect(workerExecutionClockRuns(row!)).toBe(true);
+    expect(row?.control?.available).toBe(false); expect(row?.stateUncertain).toBe(true); expect(workerCanStop(row!)).toBe(false);
+    await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_shell")).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+    expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+  } finally { await provider.dispose(); }
+});
+
+for (const site of ["ordinary", "configuration", "history", "stream", "reverted", "final"] as const)
+for (const change of ["parent", "workspace", "wrong-id", "missing-parent", "healthy"] as const)
+test(`parent-only ownership contradiction preserves independently proven nested workers (${site}/${change})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const outer = structuredClone(fixture.launch), nested = structuredClone(fixture.launch);
+  outer.content[0].time = { created: 20, ran: 20, completed: 30 };
+  nested.id = "msg_nested"; nested.sessionID = "ses_child"; nested.time.created = 40;
+  nested.content[0].id = "call_nested"; nested.content[0].time = { created: 40, ran: 40, completed: 50 };
+  nested.content[0].state.metadata.sessionID = "ses_nested";
+  let changed = false, reverted = false, wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined, sequence = 0;
+  const frame = (type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `nested-owner-${++sequence}`, type, data, created, location: { directory: WORKSPACE } })}\n\n`));
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/active": () => ({ ses_child: { type: "running" }, ses_nested: { type: "running" } }),
+    "GET /api/session/ses_parent/message": () => ({ data: [outer], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [nested], cursor: {} }),
+    "GET /api/session/ses_nested/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }),
+    "GET /api/session/:id": ({ path }) => {
+      const id = path.split("/").at(-1)!;
+      return session(id, id === "ses_child" ? {
+        parentID: changed && change === "parent" ? "ses_new_parent" : changed && change === "missing-parent" ? undefined : "ses_parent", time: { created: 22, updated: 23 },
+        ...(changed && change === "workspace" ? { location: { directory: "/foreign" } } : changed && change === "wrong-id" ? { id: "wrong_child" } : {}),
+      } : id === "ses_nested" ? { parentID: "ses_child", time: { created: 42, updated: 43 } }
+        : id === "ses_parent" && reverted ? { revert: { messageID: outer.id } } : {});
+    },
+    "POST /api/session/:id/interrupt": () => ({ interrupted: true }),
+  });
+  const provider = server.provider(), lifetime = new AbortController();
+  const pump = (async () => { for await (const event of provider.events(lifetime.signal)) if (event.eventType !== "server.connected") { acknowledge?.(); acknowledge = undefined; } })();
+  const send = (type: string, data: unknown, at: number) => new Promise<void>(resolve => { acknowledge = resolve; frame(type, data, at); });
+  const launch = async (parent: string, child: string, message: typeof outer, created: number) => {
+    const common = { sessionID: parent, assistantMessageID: message.id, id: message.content[0].id };
+    await send("session.tool.input.started", { ...common, name: "subagent" }, created);
+    await send("session.tool.called", { ...common, input: message.content[0].state.input, executed: true }, created);
+    await send("session.created", { sessionID: child, parentID: parent, projectID: "global", slug: child, version: "2.1.2", location: { directory: WORKSPACE } }, created + 2);
+    await send("session.execution.started", { sessionID: child }, created + 3);
+    await send("session.message.content.updated", { sessionID: parent, messageID: message.id, content: message.content }, created + 10);
+  };
+  const contradiction = ["parent", "workspace", "wrong-id"].includes(change), subtree = change === "workspace" || change === "wrong-id";
+  try {
+    await provider.waitForEventStream(lifetime.signal);
+    await launch("ses_parent", "ses_child", outer, 20);
+    await launch("ses_child", "ses_nested", nested, 40);
+    const [oldOuter] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    const [before] = await provider.reconcileBackgroundTasks("ses_child", { fresh: true });
+    expect(oldOuter?.activity?.kind).toBe("working"); expect(workerCanStop(oldOuter!)).toBe(true);
+    expect(before?.activity?.kind).toBe("working"); expect(before?.activity?.launchRef).toBeDefined(); expect(workerCanStop(before!)).toBe(true);
+    if (site === "history" || site === "stream") await send("session.moved", { sessionID: "unrelated" }, 60);
+    changed = true;
+    if (site === "ordinary") await provider.getSession("ses_child");
+    else if (site === "configuration") await provider.getConversationConfiguration("ses_child");
+    else if (site === "history") await provider.listMessages("ses_parent", { limit: 100 });
+    else if (site === "stream") await send("session.message.content.updated", { sessionID: "ses_parent", messageID: outer.id, content: outer.content }, 60);
+    else if (site === "reverted") { reverted = true; await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }).catch(() => undefined); }
+    else await provider.stopTask("ses_parent", "v2:ses_parent:call_worker").catch(() => undefined);
+    if (change !== "parent") changed = false;
+    const [after] = await provider.reconcileBackgroundTasks("ses_child", { fresh: true });
+    if (subtree) {
+      expect(after?.activity?.kind).not.toBe("working"); expect(after?.activity?.launchRef).toBeUndefined();
+      expect(workerCanStop(after!)).toBe(false);
+      await expect(provider.stopTask("ses_child", "v2:ses_child:call_nested")).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+    } else {
+      expect(after?.activity?.kind).toBe("working"); expect(after?.activity?.launchRef).toBe(before?.activity?.launchRef);
+      expect(after?.control?.available).toBe(true); expect(workerCanStop(after!)).toBe(true);
+      await provider.stopTask("ses_child", "v2:ses_child:call_nested");
+    }
+    if (contradiction) {
+      await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_worker")).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+      const history = await provider.listMessages("ses_parent", { limit: 100 });
+      expect(history.completeItems?.filter(item => item.type === "background_task").every(item => item.activity?.launchRef === undefined)).toBe(true);
+    }
+    const expected = subtree ? [] : ["/api/session/ses_nested/interrupt"];
+    if (site === "final" && change === "healthy") expected.unshift("/api/session/ses_child/interrupt");
+    expect(server.calls.filter(call => call.method === "POST").map(call => call.path)).toEqual(expected);
+  } finally { lifetime.abort(); await pump; await provider.dispose(); }
 });
 
 for (const alias of [false, true]) for (const change of ["foreign", "wrong-id", "foreign-workspace", "missing-workspace", "missing-parent", "missing-id", "healthy", "unrelated-foreign", "unrelated-wrong-id", "unrelated-foreign-workspace"] as const)

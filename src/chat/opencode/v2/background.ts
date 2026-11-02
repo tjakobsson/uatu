@@ -1015,6 +1015,18 @@ export class BackgroundWorkers {
     if (pending.request) this.linkRequest(task.worker, pending.request.id, pending.request.kind, pending.request.source);
   }
 
+  /** A changed parent contradicts this session as a child, not its independently
+   * owned nested workers or another retained matching-parent association. */
+  invalidateChildActivity(worker: string, actualParent: string): void {
+    const birth = this.births.get(worker);
+    if (!this.recoveryOnly && identity(worker) && !birth) this.set(this.births, worker, { contradicted: true });
+    else if (birth && birth.parent !== actualParent && !birth.contradicted) this.set(this.births, worker, { ...birth, contradicted: true });
+    const boundary = this.terminalProofs.get(worker);
+    if (boundary?.prelaunch && birth?.parent !== actualParent) this.set(this.terminalProofs, worker, { ...boundary, prelaunch: undefined });
+    for (const task of this.tasks.values()) if (task.worker === worker && task.parent !== actualParent && task.evidence.kind === "agent") this.uncertain(task);
+    this.bound();
+  }
+
   invalidateActivity(worker?: string): void {
     // Ownership/lifecycle contradictions can precede task admission too. A
     // later history read must not use the surviving old birth as live proof.
