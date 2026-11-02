@@ -418,6 +418,18 @@ export class OpenCodeV2Provider implements ChatProvider {
         }
       }
     }
+    if (boundaryIndex >= 0) {
+      // Ownership recovery can turn an earlier synthetic notice into a worker.
+      // Hide both presentations of a discarded native result, using the actual
+      // fallback normalizer without granting child ownership or control authority.
+      const retained = syntheticNoticeIdentities(visible), excluded = new Set(excludedItemIds);
+      for (const id of syntheticNoticeIdentities(complete.slice(boundaryIndex))) {
+        if (!retained.has(id) && !normalized.has(id) && !excluded.has(id)) {
+          excluded.add(id);
+          excludedItemIds.push(id);
+        }
+      }
+    }
     signal.throwIfAborted();
     return { complete, info, boundaryId, visible, normalized, allNormalized, excludedItemIds, version, end };
   }
@@ -2391,6 +2403,11 @@ function backgroundIdentityCandidates(parent: string, messages: StoredMessage[])
     if (id && notice?.valid && notice.status && notice.source === "subagent" && notice.worker) identities.set(`task:${nativeNotificationTaskId(parent, id)}`, notice.worker);
   }
   return identities;
+}
+
+function syntheticNoticeIdentities(messages: StoredMessage[]): Set<string> {
+  return new Set(messages.flatMap(message => message.type === "synthetic"
+    ? normalizeStoredMessage(message).filter(item => item.type === "notice").map(item => item.id) : []));
 }
 
 function messageIdentity(value: unknown): string {

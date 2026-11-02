@@ -80,6 +80,55 @@ const scoped = <T>(data: T) => ({ location: { directory: WORKSPACE }, data });
 const skillInfo = (id: string, overrides: { name?: string; description?: string } = {}) => ({ id, name: overrides.name ?? id, ...(overrides.description ? { description: overrides.description } : {}), path: `/ws/.opencode/skills/${id}/SKILL.md`, content: `# ${id}` });
 const notFound = (sessionID: string) => Response.json({ _tag: "SessionNotFoundError", sessionID, message: `Session not found: ${sessionID}` }, { status: 404 });
 
+for (const recovers of [false, true]) test(`same adapter removes reverted fallback result notices when ownership ${recovers ? "recovers" : "stays unavailable"}`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  let reverted = false;
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [session("ses_parent")], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", reverted ? { revert: { messageID: "msg_result" } } : {}),
+    "GET /api/session/ses_child": () => reverted && recovers ? session("ses_child", { parentID: "ses_parent" }) : new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => ({ data: [fixture.stored], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }),
+    "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]),
+    "GET /api/form": () => scoped([]),
+  });
+  const adapter = new ChatAdapter({ provider: server.provider(), workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const lifetime = new AbortController();
+  try {
+    const first = await adapter.history("ses_parent");
+    expect(first.items).toEqual([expect.objectContaining({ id: "notice:msg_result", type: "notice", message: expect.stringContaining("Fixture checked.") })]);
+    reverted = true;
+    const history = await adapter.history("ses_parent");
+    const subscription = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+    expect(history.items).toEqual([]);
+    expect(subscription.snapshot.items).toEqual([]);
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { lifetime.abort(); await adapter.dispose(); }
+});
+
+test("fallback notice exclusions preserve visible native results after ownership recovers", async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const hidden = { ...fixture.stored, id: "msg_hidden_result" };
+  const server = fakeOpenCode({
+    "GET /api/session/ses_parent": () => session("ses_parent", { revert: { messageID: hidden.id } }),
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_parent" }),
+    "GET /api/session/ses_parent/message": () => ({ data: [fixture.stored, hidden], cursor: {} }),
+  });
+  const provider = server.provider();
+  try {
+    const page = await provider.listMessages("ses_parent", { limit: 100 });
+    expect(page.items).toContainEqual(expect.objectContaining({ type: "background_task", resultId: "msg_result", status: "completed" }));
+    expect(page.revertVisibility?.excludedItemIds).toContain("notice:msg_hidden_result");
+    expect(page.revertVisibility?.excludedItemIds).not.toContain("notice:msg_result");
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { await provider.dispose(); }
+});
+
 test("required child history survives a shared optional enrichment deadline", async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   let captured!: () => void, release!: () => void, transportSignal: AbortSignal | undefined;

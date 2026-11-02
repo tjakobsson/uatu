@@ -8,6 +8,10 @@ PR review subsequently reproduced two additional P2 bugs. Section 5 tracks their
 
 The section 5 corrections passed 8,373 unit tests with 16 skipped and zero failures on the isolated SDK 0.3.316 dependency state. Typecheck, build, compiled version/smoke, the 593-package license check, dependency audit, and all 58 strict OpenSpec items passed. The audit retains the existing low KaTeX advisory, with no moderate-or-higher advisories. Fresh parallel Sol Standards and Spec re-reviews found no actionable issues after the nested stale-completeness correction; the Spec reviewer independently passed 17 focused tests. Bun 1.4.2 was used rather than CI's pinned 1.4.4; full E2E and authenticated iPhone/live-SSE recovery remain unverified.
 
+The user subsequently approved a third reproduced P2: a fallback result notice retained during unavailable ownership survives a later native revert after ownership recovers because its exclusion identity changes. Section 6 tracks this correction, and tasks 4.1/4.3 are reopened for its final verification and fresh review. The section 5 results remain historical evidence rather than acceptance for section 6.
+
+Section 6 verification passed 8,376 unit tests with 16 skipped and zero failures, plus 3,109 affected tests and all three new fallback-visibility regressions. Typecheck, build/version/smoke, the 593-package license check, dependency audit, and all 58 strict OpenSpec items passed. Fresh parallel Sol Standards and Spec reviews of the full corrected PR found no actionable issues. Runtime, advisory, E2E, and authenticated mobile/SSE limits above remain unchanged.
+
 ## 1. Preserve the verified recovery baseline
 
 - [x] 1.1 Separate optional provider child enrichment from required parent reads, with regression coverage for lookup saturation, hung ownership/execution history, required parent failures, and later retry; verified by the completed provider/adapter run of 2,115 passing tests.
@@ -39,5 +43,11 @@ The section 5 corrections passed 8,373 unit tests with 16 skipped and zero failu
 - [x] 5.2 Carry internal visible-child-enrichment incompleteness into accounting reconstruction without changing the public wire contract; verify transient grandchild ownership failure retains known own cost, prevents a false completeness stamp, and a same-adapter refresh restores nested cost immediately after recovery, while hidden-suffix-only enrichment failures do not poison visible completeness. Include previously complete nested trees whose expired reconstruction becomes incomplete, so old descendant completeness cannot renew an ancestor's completeness.
 - [x] 5.3 Validate the review's originless-row and nested-deadline hypotheses before changing visibility rules; verified by the insertion/update invariant, seven focused provider visibility tests and three accounting-owner tests. Retain positive-origin safeguards and defer optional optimization suggestions.
 - [x] 5.4 Align the design, capability delta/main spec, and chat guidance with shared-read cancellation and descendant-completeness behavior; verify the main recovery requirement exactly matches the approved delta and retains all existing scenarios.
+
+## 6. Remove reverted fallback result identities
+
+- [x] 6.1 Add a same-adapter public history/subscription regression and witness failure before correction: a delivered result initially retained as a fallback notice must disappear from both history and the next subscription snapshot after a native revert, whether child ownership remains unavailable or recovers.
+- [x] 6.2 Include possible fallback notice identities in authoritative hidden-suffix removals without broad absence-based adapter deletion; verify visible-prefix origin vetoes, canonical/alias exclusions, independently live work, and ownership/Stop safeguards remain intact.
+- [x] 6.3 Align the design, capability delta/main spec, and chat guidance with enrichment-independent fallback identity removal; verify main and delta recovery requirements match exactly without losing scenarios.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.

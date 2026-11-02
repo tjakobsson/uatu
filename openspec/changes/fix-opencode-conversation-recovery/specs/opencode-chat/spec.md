@@ -51,6 +51,12 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **AND** a previously projected settled worker whose native origin is hidden does not merge back into the transcript merely because its child metadata is unavailable
 - **AND** independently verified live detached work retains its existing visibility and control protections
 
+#### Scenario: A reverted result was previously a fallback notice
+- **WHEN** unavailable child ownership caused a delivered result to be retained as a fallback notice, and a later native revert hides that result
+- **THEN** authoritative removals include the fallback identity whether ownership remains unavailable or recovers and changes the result's normalized identity
+- **AND** neither the history response nor the next subscription snapshot exposes the hidden fallback result
+- **AND** visible-prefix origins and independently verified live work retain their existing safeguards
+
 #### Scenario: Authoritative history is slower than a worker check
 - **WHEN** the parent's authoritative history succeeds within its bounded history-read window but takes longer than the short worker-recovery budget
 - **THEN** the conversation loads without treating that short worker budget as a deadline for the entire transcript

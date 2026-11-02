@@ -623,6 +623,9 @@ Later successful reads can restore those details without restarting the agent.
 The whole V2 history read has a bounded 25-second window, separate from the
 shorter worker checks. Reverted settled results stay hidden even when child
 details are unavailable; missing details alone do not hide a visible worker.
+This also removes a hidden result's earlier fallback notice if ownership later
+recovers and the result's presentation identity changes, so the next subscription
+snapshot cannot restore that reverted notice.
 Child cost/model reconstruction also has a bounded optional-read window.
 Unavailable accounting keeps its known values without inventing zero or
 completeness, and a later read can retry rather than blocking parent history.
