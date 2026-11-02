@@ -12,6 +12,7 @@ Fresh, uniquely owned OpenCode workers can be rejected when their child is creat
 - Keep unavailable and ended-without-result rows non-animated with non-growing execution timers. Recovery is automatic and bounded; introduce no manual Check again control.
 - Permit presentation-only dismissal of unresolved unavailable/ended entries as well as finished history. Synchronize dismissal privately across devices for the same Hub account, stable workspace, conversation and execution. Verified activity resurfaces; new executions never inherit old dismissal. No Restore interface.
 - Preserve main-session permission/question cards, identities, notifications and answering flow; linked worker rows show the existing blocking request without creating another request.
+- Carry optional provider-proven `WorkerActivity.launchRef` continuity through partial-to-qualified observations. Recover dismissal guidance only after the matching launch's qualified identities receive post-resolution authoritative retirement confirmation; the reference is neither a dismissal alias nor Stop permission. Workspace revision 33 expands the closed payload contract; Hub revision remains 12.
 
 ## Capabilities
 

@@ -1099,13 +1099,13 @@ export function initChat(api = new ChatApiClient()): void {
     syncQueueOverflow();
     syncDesktopWorkLayout();
   });
-  let dismissalBatchFeedback: { conversationId: string; skipped: number; priorError: string } | null = null;
+  let dismissalBatchFeedback: { conversationId: string; skipped: number } | null = null;
   const dismissWorkers = async (workers: readonly CompactWorker[]) => {
     if (!projection) return;
     const conversationId = projection.conversationId;
     if (personalDismissals) {
       const eligible = workers.filter(worker => workerDismissible(checkingPresentation.worker(worker)));
-      dismissalBatchFeedback = { conversationId, skipped: eligible.filter(worker => !workerExecutionIds(worker).length).length, priorError: personalDismissals.error };
+      dismissalBatchFeedback = { conversationId, skipped: eligible.filter(worker => !workerExecutionIds(worker).length).length };
       syncCompactWork();
       // Serialize this explicit batch, retaining independent per-entry revisions.
       for (const worker of eligible) {
@@ -1152,7 +1152,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (dismissalBatchFeedback?.conversationId !== projection?.conversationId) dismissalBatchFeedback = null;
     const skipped = dismissalBatchFeedback?.skipped ?? 0;
     dismissalNotice.textContent = personalDismissals ? [...new Set([
-      personalDismissals.error, dismissalBatchFeedback?.priorError,
+      personalDismissals.error,
       skipped ? `Skipped ${skipped} worker${skipped === 1 ? "" : "s"} with an unverified execution identity; ${skipped === 1 ? "it remains" : "they remain"} visible.` : "",
     ].filter(Boolean))].join(" ") : (workers.length ? "Worker dismissals apply only on this device." : "");
     dismissalNotice.hidden = !dismissalNotice.textContent;

@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 12.32.0-experimental
+  version: 12.33.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 12 and workspace revision 32
+  summary: Hub revision 12 and workspace revision 33
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -22,7 +22,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 12
-    workspaceApiRevision: 32
+    workspaceApiRevision: 33
 servers:
   - url: https://{hubHost}
     variables:
@@ -2496,6 +2496,7 @@ components:
       description: "Current task observation independent of Stop authorization. Historical running metadata or an active reused session alone is not task activity; ended is not a successful result."
       properties:
         kind: { enum: [working, needs-answer, checking, session-active, unavailable, ended] }
+        launchRef: { type: string, minLength: 1, maxLength: 512, pattern: '^[!-~]+$', description: "Opaque printable-ASCII provider-proven reference linking partial and qualified updates for the same observed native launch, at most 512 bytes without spaces or control characters. Presentation recovery only; not a dismissal identity, persisted alias or Stop authorization. May be absent or change when the provider observation lifetime ends; never derive it from a row, child session, clock or UI fold." }
         observedAt: { type: number, minimum: 0, description: "Last positive server observation of this task in Unix epoch milliseconds, not launch time or unrelated session progress." }
         endedAt: { type: number, minimum: 0, description: "Positively correlated execution end in Unix epoch milliseconds; does not establish a result outcome." }
         executionId: { type: string, minLength: 1, maxLength: 512, description: "Stable occurrence identity when established, never child-session identity alone." }

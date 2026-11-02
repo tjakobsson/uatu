@@ -1157,6 +1157,166 @@ for (const kind of ["agent", "shell"] as const) test(`history alone cannot autho
   }
 });
 
+for (const kind of ["agent", "shell"] as const) for (const veto of ["none", "initial-snapshot", "initial-pending", "initial-sparse", "initial-input", "initial-clock", "initial-completed", "initial-unwitnessed", "history-first", "history-first-input", "foreign-parent", "input", "new-run", "gap", "settled", "revoked", "inflight-input"] as const) test(`fresh native-shaped ${kind} sparse launch keeps activity and owned Stop (${veto})`, async () => {
+  // Native 2.2.2 persisted shape/relative chronology; delivery envelopes and
+  // identities are synthetic, not a recording of the native event stream.
+  const input = kind === "agent" ? { agent: "worker", prompt: "Check fixture", background: true } : { command: "sleep 30", background: true };
+  const metadata = { status: "running", truncated: false, ...(kind === "agent" ? { sessionID: "ses_child" } : { shellID: "sh_child" }) };
+  const tool = { id: "fresh-call", type: "tool", name: kind === "agent" ? "subagent" : "shell", executed: false,
+    time: { created: 103, ran: 113, completed: 151 }, state: { status: "completed", input, metadata, content: [] } };
+  const launch = { id: "fresh-message", type: "assistant", time: { created: 97 }, content: [tool] };
+  let history: unknown[] = [], wire!: ReadableStreamDefaultController<Uint8Array>, sequence = 0, foreignParent = false;
+  let ownershipRead: (() => Promise<void>) | undefined;
+  const frame = (type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `fresh-event-${++sequence}`, type, data, created,
+    location: { directory: WORKSPACE }, ...(type.startsWith("session.") ? { durable: { aggregateID: (data as { sessionID: string }).sessionID, seq: sequence, version: 1 } } : {}) })}\n\n`));
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/active": () => kind === "agent" ? { ses_child: { type: "running" } } : {},
+    "GET /api/session/:id": async ({ path }) => {
+      if (path.endsWith("ses_child")) await ownershipRead?.();
+      return session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: foreignParent ? "ses_foreign" : "ses_parent", time: { created: 147, updated: 153 } } : { time: { created: 2, updated: 3 } });
+    },
+    "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+    "GET /api/shell/sh_child": async () => { await ownershipRead?.(); return scoped({ id: "sh_child", command: "sleep 30", cwd: WORKSPACE, shell: "/bin/sh", file: "/fixture/output", status: "running", metadata: { sessionID: foreignParent ? "ses_foreign" : "ses_parent" }, time: { started: 147 } } satisfies ShellInfo); },
+    "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
+    "DELETE /api/shell/sh_child": () => undefined,
+  });
+  const provider = server.provider(), stream = observedNativeStream(provider);
+  const send = async (type: string, data: unknown, created: number) => {
+    const start = stream.events.length;
+    frame(type, data, created);
+    await stream.seen(event => stream.events.indexOf(event) >= start && event.eventType === type);
+  };
+  const common = { sessionID: "ses_parent", assistantMessageID: launch.id, id: tool.id };
+  try {
+    await stream.seen(event => event.eventType === "server.connected");
+    await send("session.created", { sessionID: "ses_parent", projectID: "global", slug: "fixture", version: "2.2.2", location: { directory: WORKSPACE } }, 2);
+    await send("session.tool.input.started", { ...common, name: tool.name }, 103);
+    if (veto.startsWith("initial-")) {
+      // Synthetic delivery of a native pending/running part, before its child
+      // exists. These envelopes are not inferred from persisted part clocks.
+      const initial = { ...tool, time: { created: veto === "initial-clock" ? 102 : 103,
+        ...(veto === "initial-completed" ? { completed: 110 } : {}) }, state: {
+        status: veto === "initial-completed" ? "completed" : veto === "initial-pending" ? "pending" : "running",
+        ...(veto === "initial-sparse" ? {} : { input: veto === "initial-input" ? { ...input, background: false } : input }),
+      } };
+      await send("session.message.content.updated", { sessionID: "ses_parent", messageID: launch.id, content: [initial] }, 110);
+      if (veto === "initial-pending") await send("session.message.content.updated", { sessionID: "ses_parent", messageID: launch.id,
+        content: [{ ...initial, state: { ...initial.state, status: "running" } }] }, 111);
+    }
+    if (veto !== "initial-unwitnessed") await send("session.tool.called", { ...common, input, executed: false }, 113);
+    if (kind === "agent") await send("session.created", { sessionID: "ses_child", parentID: "ses_parent", projectID: "global", slug: "fixture-child", version: "2.2.2", location: { directory: WORKSPACE } }, 147);
+    else await send("shell.created", { info: { id: "sh_child", command: "sleep 30", cwd: WORKSPACE, shell: "/bin/sh", file: "/fixture/output", status: "running", time: { started: 147 }, metadata: { sessionID: "ses_parent" } } }, 147);
+    if (veto === "history-first") { history = [launch]; await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }); }
+    if (veto === "history-first-input") {
+      history = [{ ...launch, content: [{ ...tool, state: { ...tool.state, input: { ...input, background: false } } }] }];
+      await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    }
+    await send("session.tool.success", { ...common, executed: false, content: [], metadata }, 151);
+    const partial = stream.events.flatMap(event => event.updates.flatMap(update => update.kind === "upsert" && update.item.type === "background_task" ? [update.item] : [])).at(-1);
+    const partialRef = partial?.activity?.launchRef;
+    if (veto === "none") {
+      expect(partial?.activity?.executionId).toBeUndefined();
+      expect(partialRef).toMatch(/^v1:launch:/);
+    }
+    if (kind === "agent") await send("session.execution.started", { sessionID: "ses_child" }, 153);
+    history = [launch];
+    const [row] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(row?.activity?.kind).toBe("working");
+    expect(row?.control?.available).toBe(!["history-first-input", "initial-input", "initial-clock", "initial-completed", "initial-unwitnessed"].includes(veto));
+    if (veto === "none") {
+      expect(row?.activity?.launchRef).toBe(partialRef);
+      const items = (await provider.listMessages("ses_parent", { limit: 100 })).items;
+      const task = items.find(item => item.type === "background_task");
+      expect(task?.type === "background_task" && task.activity?.launchRef).toBe(partialRef);
+    }
+    const changed = () => send("session.message.content.updated", { sessionID: "ses_parent", messageID: launch.id,
+      content: [{ ...tool, state: { ...tool.state, input: kind === "agent" ? { ...input, prompt: "Different invocation" } : { ...input, command: "different command" } } }] }, 160);
+    if (veto === "foreign-parent") foreignParent = true;
+    if (veto === "input") await changed();
+    if (veto === "new-run") {
+      if (kind === "agent") await send("session.execution.started", { sessionID: "ses_child" }, 160);
+      else await send("shell.created", { info: { id: "sh_child", command: "sleep 30", cwd: WORKSPACE, shell: "/bin/sh", file: "/fixture/reused", status: "running", time: { started: 160 }, metadata: { sessionID: "ses_parent" } } }, 160);
+    }
+    if (veto === "settled") {
+      const payload = { type: "synthetic", text: "Fixture finished", metadata: { source: kind === "agent" ? "subagent" : "shell", state: "completed", ...(kind === "agent" ? { childID: "ses_child" } : { shellID: "sh_child", exit: 0 }) } };
+      await send("session.inbox.enqueued", { sessionID: "ses_parent", inboxID: "fresh-result", item: { type: "synthetic", payload } }, 160);
+      history.push({ ...payload, id: "fresh-result", time: { created: 160 } });
+    }
+    if (veto === "revoked") await send("session.moved", { sessionID: "ses_parent", location: { directory: "/foreign" } }, 160);
+    if (veto === "gap") { wire.close(); await stream.pump; }
+    if (veto === "inflight-input") ownershipRead = async () => { ownershipRead = undefined; await changed(); };
+    const stoppable = ["none", "initial-snapshot", "initial-pending", "initial-sparse", "history-first"].includes(veto);
+    if (stoppable) await provider.stopTask("ses_parent", row!.taskId);
+    else await expect(provider.stopTask("ses_parent", row!.taskId)).rejects.toThrow();
+    if (["foreign-parent", "input", "new-run", "gap", "revoked", "inflight-input"].includes(veto)) {
+      const recovered = (await provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).find(item => item.taskId === row!.taskId);
+      expect(recovered?.activity?.launchRef).toBeUndefined();
+    }
+    expect(server.calls.filter(call => call.method !== "GET").map(call => `${call.method} ${call.path}`)).toEqual(stoppable ? [kind === "agent" ? "POST /api/session/ses_child/interrupt" : "DELETE /api/shell/sh_child"] : []);
+  } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
+});
+
+for (const live of ["cold", "content", "tool-success"] as const) for (const executed of [false, true]) test(`native 2.2.2 background shell launcher remains working with current inventory (executed=${executed}/live=${live})`, async () => {
+  // Stored native 2.2.2 launcher, with sanitized IDs/output and relative clocks.
+  // Live envelopes are synthetic: original delivery clocks were not retained.
+  // Inventory contains the ownership/command/running facts verified live.
+  const command = "sleep 30; printf 'Timer task finished\\n'";
+  const launch = { id: "message-timer", type: "assistant", time: {
+    created: 1_790_000_000_000, streamed: 1_790_000_002_310, completed: 1_790_000_002_338,
+  }, content: [{
+    id: "call-timer", type: "tool", name: "shell", executed,
+    time: { created: 1_790_000_002_071, ran: 1_790_000_002_264, completed: 1_790_000_002_305 },
+    state: { status: "completed", input: { command, background: true },
+      metadata: { status: "running", truncated: false, shellID: "sh_timer" },
+      content: [{ type: "text", text: "Moved to background. Output file: /fixture/timer.out" }] },
+  }] };
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      const common = { sessionID: "ses_parent", assistantMessageID: launch.id, id: "call-timer" };
+      const events = live === "tool-success" ? [
+        { type: "session.tool.input.started", data: { ...common, name: "shell" } },
+        { type: "session.tool.called", data: { ...common, input: { command, background: true }, executed } },
+        { type: "session.tool.success", data: { ...common, executed, metadata: launch.content[0]!.state.metadata, content: launch.content[0]!.state.content } },
+      ].map((event, index) => ({ ...event, id: `event-timer-${index}`, created: 1_790_000_002_306 + index,
+        location: { directory: WORKSPACE }, durable: { aggregateID: "ses_parent", seq: index + 1, version: 1 } })) : [{
+        id: "event-timer-launch", type: "session.message.content.updated", created: 1_790_000_002_309,
+        location: { directory: WORKSPACE }, durable: { aggregateID: "ses_parent", seq: 1, version: 1 },
+        data: { sessionID: "ses_parent", messageID: launch.id, content: launch.content },
+      }];
+      for (const event of [{ type: "server.connected", data: {} }, ...events]) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_parent/message": () => ({ data: [launch], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    "GET /api/session/active": () => ({}),
+    "GET /api/shell/sh_timer": () => scoped({ id: "sh_timer", command, cwd: WORKSPACE,
+      shell: "/bin/sh", file: "/fixture/timer.out", status: "running", metadata: { sessionID: "ses_parent" },
+      time: { started: 1_790_000_002_265 } } satisfies ShellInfo),
+  });
+  const provider = server.provider();
+  let stream: ReturnType<typeof observedNativeStream> | undefined;
+  try {
+    if (live !== "cold") {
+      stream = observedNativeStream(provider);
+      await stream.seen(event => event.eventType === (live === "content" ? "session.message.content.updated" : "session.tool.success"));
+    }
+    const rows = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "running", activity: { kind: "working" } });
+    if (live === "tool-success") {
+      expect(rows[0]?.control?.available).toBe(false);
+      await expect(provider.stopTask("ses_parent", rows[0]!.taskId)).rejects.toThrow();
+      // Subsequent readback must not downgrade independently verified activity.
+      expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("working");
+    }
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { stream?.lifetime.abort(); await stream?.pump; await provider.dispose(); }
+});
+
 for (const unavailableControl of [false, true]) test(`exact shell inventory end remains unresolved independently of control (unavailable=${unavailableControl})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   let exited = false;

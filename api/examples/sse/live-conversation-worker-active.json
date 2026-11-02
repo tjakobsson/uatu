@@ -25,6 +25,7 @@
           "stateUncertain": true,
           "activity": {
             "kind": "working",
+            "launchRef": "launch-ref:fixture",
             "observedAt": 1724100010000,
             "generation": 1,
             "executionId": "v1:fixture-execution",

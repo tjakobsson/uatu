@@ -214,6 +214,90 @@ for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real auth
   } finally { await browser.close(); }
 });
 
+for (const engine of ["chromium", "webkit"] as const) test(`${engine}: synthetic launch-reference recovery through authenticated Hub and mounted client`, async ({ hub }, info) => {
+  test.setTimeout(120_000);
+  const browser = await ({ chromium, webkit })[engine].launch();
+  try {
+    const workspace = hub.workspaces[0]!;
+    // Synthetic trusted child DTO delivery; this test exercises the real Hub,
+    // atomic private store, broker and mounted browser client, not native proof.
+    const worker: BackgroundTaskItem = { type: "background_task", id: "worker:partial-recovery", taskId: "partial-recovery", taskType: "agent", description: "Synthetic continuity execution",
+      childConversationId: "opencode:synthetic-child", status: "running", createdAt: 1,
+      activity: { kind: "unavailable", executionId: "v1:synthetic-qualified", launchRef: "synthetic:accepted-occurrence", generation: 1 },
+      control: { available: false, reason: "Synthetic fixture has no native control proof" } };
+    const snapshot = await childChatControl(workspace, { action: "seed", title: "Synthetic launch-reference recovery", items: [worker] }) as ConversationSnapshot;
+    const conversationId = snapshot.conversation.id;
+    const personalUrl = `${workspace.sessionUrl}api/personal-worker-dismissals?conversationId=${encodeURIComponent(conversationId)}`;
+    const context = await browser.newContext(engine === "webkit" ? { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } : { viewport: { width: 1440, height: 900 } });
+    const login = await context.newPage(); await signIn(login, hub); await login.close();
+    const page = await context.newPage();
+    const matchesPersonal = (url: string) => {
+      const parsed = new URL(url), expected = new URL(personalUrl);
+      return parsed.pathname === expected.pathname && parsed.searchParams.get("conversationId") === conversationId;
+    };
+    // requestfinished, not response headers: the mounted client's initial read
+    // must be fully delivered, scoped to this workspace AND seeded conversation.
+    const personalRead = () => page.waitForEvent("requestfinished", { predicate: async request => matchesPersonal(request.url()) && request.method() === "GET" && (await request.response())?.status() === 200, timeout: 10_000 });
+    const initialRead = personalRead();
+    await page.goto(workspace.sessionUrl);
+    await chat(page, conversationId); await initialRead; await openChatWorkers(page);
+    const notice = page.locator(".chat-worker-dismissal-notice");
+    const dismissResponse = () => page.waitForResponse(response => new URL(response.url()).pathname === new URL(personalUrl).pathname && response.request().method() === "POST", { timeout: 10_000 });
+    const firstSave = dismissResponse();
+    await row(page, worker.id).getByRole("button", { name: "Dismiss worker from summary:", exact: false }).click();
+    expect((await firstSave).status()).toBe(200); await expect(row(page, worker.id)).toHaveCount(0);
+    await page.locator("#chat-input").fill("Draft survives identity recovery");
+    const initialUrl = page.url();
+    const partial: BackgroundTaskItem = { ...worker, activity: { kind: "working", launchRef: worker.activity!.launchRef, generation: 1 } };
+    await childChatControl(workspace, { action: "item", conversationId, item: partial });
+    await openChatWorkers(page); await expect(row(page, worker.id)).toHaveAttribute("data-state", "working");
+    await expect(notice).toContainText("complete execution identity");
+    const acknowledged = personalRead();
+    const qualified: BackgroundTaskItem = { ...worker, activity: { ...worker.activity!, kind: "working" } };
+    await childChatControl(workspace, { action: "item", conversationId, item: qualified });
+    const confirmedRequest = await acknowledged;
+    const confirmed = await (await confirmedRequest.response())!.json() as { entries: Array<{ executionId: string; dismissed: boolean }> };
+    expect(confirmed.entries.find(entry => entry.executionId === worker.activity!.executionId)?.dismissed).toBe(false);
+    await expect(notice).toBeHidden(); await expect(row(page, worker.id)).toHaveAttribute("data-state", "working");
+    expect(page.url()).toBe(initialUrl); await expect(page.locator("#chat-input")).toHaveValue("Draft survives identity recovery");
+    await childChatControl(workspace, { action: "item", conversationId, item: worker });
+    await expect(row(page, worker.id)).toHaveAttribute("data-state", "unknown");
+    // Unavailability advances the authoritative signature. A normal 409 gets
+    // one explicit user retry only after the client's coalesced read finishes.
+    let readAfterConflict = 0;
+    page.on("requestfinished", async request => {
+      if (matchesPersonal(request.url()) && request.method() === "GET" && (await request.response())?.status() === 200) readAfterConflict++;
+    });
+    let freshSave = dismissResponse();
+    await row(page, worker.id).getByRole("button", { name: "Dismiss worker from summary:", exact: false }).click();
+    let saved = await freshSave;
+    if (saved.status() === 409) {
+      await expect.poll(() => readAfterConflict).toBeGreaterThan(0);
+      freshSave = dismissResponse();
+      await row(page, worker.id).getByRole("button", { name: "Dismiss worker from summary:", exact: false }).click();
+      saved = await freshSave;
+    }
+    expect(saved.status()).toBe(200); await expect(row(page, worker.id)).toHaveCount(0);
+    const durable = await context.request.get(personalUrl); expect(durable.status()).toBe(200);
+    expect((await durable.json()).entries.find((entry: { executionId: string }) => entry.executionId === worker.activity!.executionId).dismissed).toBe(true);
+    // A different native reference is not continuity, even with identical
+    // row/task/child anchors and a successful authoritative private-state GET.
+    const negative: BackgroundTaskItem = { ...partial, id: "worker:unresolved-reference", taskId: "unresolved-reference", description: "Synthetic mismatched continuity",
+      activity: { ...partial.activity!, launchRef: "synthetic:old-reference" } };
+    await childChatControl(workspace, { action: "item", conversationId, item: negative });
+    await openChatWorkers(page); await expect(notice).toContainText("complete execution identity");
+    const wrong: BackgroundTaskItem = { ...negative, activity: { kind: "working", generation: 1, launchRef: "synthetic:different-reference", executionId: "v1:synthetic-unrelated" } };
+    await childChatControl(workspace, { action: "item", conversationId, item: wrong });
+    const negativeRead = personalRead();
+    const authoritative = await context.request.get(personalUrl); expect(authoritative.status()).toBe(200); await negativeRead;
+    await expect(notice).toContainText("complete execution identity"); await expect(row(page, negative.id)).toHaveAttribute("data-state", "working");
+    await childChatControl(workspace, { action: "item", conversationId, item: { ...wrong, activity: { ...wrong.activity!, kind: "unavailable" } } });
+    await expect(row(page, negative.id)).toHaveAttribute("data-state", "unknown"); await expect(notice).toContainText("complete execution identity");
+    await saveEvidence(info, `${engine}-synthetic-launch-reference-recovery.json`, JSON.stringify({ engine, provider: "synthetic child DTO fixture", authenticatedHubAndMountedClient: true,
+      qualifiedRetirement: confirmed, warningClearedWithoutReload: true, laterExplicitDismissalDurable: true, wrongReferenceRemainsVisibleWithGuidance: true }, null, 2));
+  } finally { await browser.close(); }
+});
+
 for (const engine of ["chromium", "webkit"] as const) test(`${engine}: native child permission and question resurface dismissed work and answer once through the canonical parent card`, async ({ hub }, info) => {
   test.setTimeout(120_000);
   const browser = await ({ chromium, webkit })[engine].launch();

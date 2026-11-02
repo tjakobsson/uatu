@@ -62,12 +62,22 @@ test("background activity and control evidence round trip independently", () => 
   const item = { id: "task", type: "background_task", taskId: "task", createdAt: 1, description: "Worker", status: "running", stateUncertain: true } as const;
   expect(parseConversationItem(item)).toEqual(item);
   for (const kind of ["working", "checking", "session-active", "unavailable", "ended"] as const) {
-    const value = { ...item, activity: { kind, observedAt: 3, endedAt: 4, generation: 1, executionId: "execution:fixture", executionAliases: ["execution:fixture", "execution:alias"], reason: "Fixture evidence" }, control: { available: false, reason: "Occurrence proof unavailable" } };
+    const value = { ...item, activity: { kind, launchRef: "launch-ref:fixture", observedAt: 3, endedAt: 4, generation: 1, executionId: "execution:fixture", executionAliases: ["execution:fixture", "execution:alias"], reason: "Fixture evidence" }, control: { available: false, reason: "Occurrence proof unavailable" } };
     expect(parseConversationItem(value)).toEqual(value);
     expect(parseChatEvent({ type: "item.upsert", conversationId: "opencode:parent", generation: "g", sequence: 1, item: value })).toBeDefined();
   }
   const request = { ...item, activity: { kind: "needs-answer", request: { kind: "question", id: "request" } } } as const;
   expect(parseConversationItem(request)).toEqual(request);
+});
+
+test("partial worker launch references are optional bounded continuity data, not execution aliases", () => {
+  const item = { id: "task", type: "background_task", taskId: "task", createdAt: 1, description: "Worker", status: "running",
+    activity: { kind: "working", launchRef: "launch-ref:partial", generation: 1 }, control: { available: false } } as const;
+  expect(parseConversationItem(item)).toEqual(item);
+  expect(parseChatEvent({ type: "item.upsert", conversationId: "opencode:parent", generation: "g", sequence: 1, item })).toBeDefined();
+  for (const launchRef of [null, "", true, "x".repeat(513), "å".repeat(257), "ref invalid", "ref\ninvalid", "ref\u007finvalid"]) {
+    expect(() => parseConversationItem({ ...item, activity: { ...item.activity, launchRef } })).toThrow();
+  }
 });
 
 test("background activity rejects malformed or unbounded evidence", () => {

@@ -135,6 +135,11 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **AND** task details and explicit confirmation explain that removal can delete its job record/output and prevent final result capture
 - **AND** a settled job or missing, revoked, gap-invalidated or overflowed proof withholds the action without retargeting another occurrence
 
+#### Scenario: Normal owned launches retain Stop through compatible readback
+- **WHEN** retained live native birth and invocation evidence authorize the exact owned worker occurrence and current native validation confirms that target
+- **THEN** compatible stored readback supplying missing launcher fields preserves normal Stop availability
+- **AND** history alone does not create missing authority, overwrite contradictory facts, clear revocation or retarget a reused occurrence
+
 #### Scenario: Control proof has a bounded share of the live evidence budget
 - **WHEN** the provider retains control evidence alongside live display/correlation records
 - **THEN** control evidence uses at most 1 MiB and 2,048 entries within the existing aggregate 4 MiB and 8,192 live-entry budget
@@ -183,6 +188,17 @@ Worker presentation SHALL distinguish verified task activity from active-session
 - **WHEN** current native evidence independently verifies the owned task's activity but retained Stop proof is unavailable
 - **THEN** the row shows Working and contributes once to Working
 - **AND** Stop remains disabled with its reason accessible in task details on desktop and mobile
+
+#### Scenario: Partial live references do not override current native shell activity
+- **WHEN** a fresh native read verifies that the current shell launch belongs to the conversation and is running, without conflicting ownership, command or execution evidence
+- **THEN** a partial live reference alone does not downgrade that task from Working to Unresolved
+- **AND** activity and session/output inspection do not require complete Stop authorization
+- **AND** real reuse, contradictory evidence and observation gaps remain protected without enabling Stop
+
+#### Scenario: Sparse success enriches a fresh owned agent observation
+- **WHEN** a fresh owned child execution is positively associated with its launcher and a live tool-success record omits timing anchors later supplied compatibly by stored history
+- **THEN** current native activity remains Working instead of becoming session-active/task-unverified solely because those anchors were initially absent
+- **AND** conflicting immutable anchors or a different child execution remain unverified for that task
 
 #### Scenario: Unresolved workers do not fabricate workspace completion
 - **WHEN** a previously verified background worker becomes unavailable, session-active without task attribution, checking, or ended without a result after its parent settles

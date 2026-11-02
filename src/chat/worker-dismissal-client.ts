@@ -4,6 +4,7 @@ import type { CompactWorker } from "./compact-work";
 import { workerIsActive } from "./worker-state";
 
 type Entry = { executionId: string; revision: number; dismissed: boolean };
+type IdentityFence = { generation: number; ids: Set<string>; resolvedAt?: number };
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 const MAX_IDENTITIES = 8192;
 const path = () => appUrl("/api/personal-worker-dismissals");
@@ -48,6 +49,11 @@ export class WorkerDismissalClient {
   private generation: number | null = null;
   private capacityExceeded = false;
   private identityUnavailable = false;
+  private unscopedIdentity = false;
+  // Native launch continuity only. Never a dismissal identity or alias.
+  private identityFences = new Map<string, IdentityFence>();
+  private identityFenceSize = 0;
+  private activityGeneration = 0;
   private readonly fetcher: Fetcher;
   private readonly changed: () => void;
 
@@ -97,6 +103,7 @@ export class WorkerDismissalClient {
         const entries = await this.parse(response, conversation);
         if (epoch !== this.epoch || read.signal.aborted) return;
         this.acceptDismissals(entries, observation);
+        this.confirmIdentities(entries, observation);
         this.entries = entries; this.error = this.retirementWarning(); this.changed();
       }).catch(() => {
         if (epoch !== this.epoch || read.signal.aborted) return;
@@ -122,18 +129,60 @@ export class WorkerDismissalClient {
   }
 
   observe(workers: readonly CompactWorker[]): void {
+    // A later native generation cannot re-admit a replay from an older one.
+    for (const worker of workers) {
+      const generation = worker.activity?.generation;
+      if (Number.isSafeInteger(generation) && generation! > this.activityGeneration) this.activityGeneration = generation!;
+    }
     const activeNow = new Set<string>();
     const groups = new Map<string, readonly string[]>();
+    let resolveIdentities = false;
     for (const worker of workers) {
       const ids = workerExecutionIds(worker);
       for (const id of ids) if (groups.size < MAX_IDENTITIES || groups.has(id)) groups.set(id, ids);
       const active = worker.activity?.kind === "working" || worker.activity?.kind === "needs-answer";
+      const ref = worker.activity?.launchRef, generation = worker.activity?.generation;
+      const scoped = typeof ref === "string" && ref.length > 0 && new TextEncoder().encode(ref).length <= 512
+        && !/[\u0000-\u001f\u007f]/.test(ref) && Number.isSafeInteger(generation) && generation! >= 0;
       if (active && !ids.length) {
         // No safe scope exists for a retirement write (for example a provider
         // alias overflow). Fail open for this selection rather than letting a
         // later unavailable row resurrect marks we could not safely retire.
         this.identityUnavailable = true;
+        if (!scoped) this.unscopedIdentity = true;
+        else {
+          let pending = this.identityFences.get(ref!);
+          if (!pending) {
+            if (this.identityFenceSize >= MAX_IDENTITIES) this.capacityExceeded = true;
+            else {
+              pending = { generation: generation!, ids: new Set() };
+              this.identityFences.set(ref!, pending); this.identityFenceSize++;
+            }
+          }
+          if (pending) {
+            if (pending.generation !== generation) this.unscopedIdentity = true;
+            // A new incomplete frame invalidates any in-flight confirmation.
+            if (pending.resolvedAt !== undefined) { pending.resolvedAt = undefined; ++this.observationSequence; }
+          }
+        }
         this.error = this.retirementWarning();
+      }
+      // The same proven launch may finish before its first qualified update.
+      // Resolution is not retirement: even terminal/unavailable rows still need
+      // a later authoritative non-dismissed revision for every qualified alias.
+      if (ids.length && scoped) {
+        const pending = this.identityFences.get(ref!);
+        if (pending && pending.generation === generation && generation === this.activityGeneration) {
+          let expanded = false;
+          for (const id of ids) if (!pending.ids.has(id)) {
+            if (this.identityFenceSize >= MAX_IDENTITIES) { this.capacityExceeded = true; break; }
+            pending.ids.add(id); this.identityFenceSize++; expanded = true;
+          }
+          if (pending.resolvedAt === undefined || expanded) {
+            pending.resolvedAt = ++this.observationSequence;
+            resolveIdentities = true;
+          }
+        }
       }
       if (!active && !ids.some(id => this.retired.has(id))) continue;
       for (const id of ids) {
@@ -161,6 +210,19 @@ export class WorkerDismissalClient {
     this.activeIdentities = activeNow;
     this.provenGroups = groups;
     void this.retireNext();
+    // One coalesced authoritative read per qualification/alias expansion, not
+    // a polling loop. Earlier reads and mutation responses cannot discharge it.
+    if (resolveIdentities) this.refresh();
+  }
+
+  private confirmIdentities(entries: ReadonlyMap<string, Entry>, observation: number): void {
+    for (const [ref, pending] of this.identityFences) {
+      if (pending.generation !== this.activityGeneration || pending.resolvedAt === undefined || pending.resolvedAt > observation || !pending.ids.size) continue;
+      if (![...pending.ids].every(id => entries.get(id)?.dismissed === false
+        && entries.get(id)!.revision >= (this.retired.get(id) ?? 0))) continue;
+      this.identityFences.delete(ref); this.identityFenceSize -= 1 + pending.ids.size;
+    }
+    this.identityUnavailable = this.unscopedIdentity || this.identityFences.size > 0 || this.capacityExceeded;
   }
 
   private acceptDismissals(entries: ReadonlyMap<string, Entry>, observation: number): void {
@@ -243,8 +305,8 @@ export class WorkerDismissalClient {
   }
 
   private retirementWarning(): string {
-    if (this.identityUnavailable) return "Could not verify an active worker's complete execution identity or retire its saved dismissals. Saved dismissals are ignored on this page; reopen the conversation after identity is verified.";
     if (this.capacityExceeded) return "Worker dismissal tracking is full. Rows remain visible; chat is still available.";
+    if (this.identityUnavailable) return "Could not verify an active worker's complete execution identity or retire its saved dismissals. Saved dismissals are ignored on this page; reopen the conversation after identity is verified.";
     return [...this.entries.values()].some(entry => entry.dismissed && this.retired.has(entry.executionId))
       ? "Could not confirm saved dismissal retirement. Active work stays visible; an old dismissal may return after reload." : "";
   }
@@ -260,6 +322,7 @@ export class WorkerDismissalClient {
     this.fence(); this.subscription?.close(); this.subscription = null; this.generation = null;
     this.entries.clear(); this.retired.clear(); this.retirementAttempts.clear(); this.error = ""; this.capacityExceeded = false;
     this.identityUnavailable = false;
+    this.unscopedIdentity = false; this.identityFences.clear(); this.identityFenceSize = 0; this.activityGeneration = 0;
     this.activeIdentities.clear(); this.provenGroups.clear(); this.recoveredAt.clear(); this.observationSequence = 0;
   }
   dispose(): void { this.reset(); this.conversation = null; }

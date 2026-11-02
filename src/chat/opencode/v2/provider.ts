@@ -477,9 +477,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       // A complete historical launcher identifies its recorded occurrence even
       // when it supplies no evidence of current activity. Do not force clients
       // back onto a reusable call id just because this is a transcript read.
+      const launchRef = entry.item.stateUncertain ? undefined : this.workerLaunchReference(occurrence);
       const activity: import("../../types").WorkerActivity = entry.item.status !== "running"
         ? this.terminalWorkerActivity(entry.item.taskId, occurrence, entry.item.activity)
-        : { kind: "unavailable", ...(executionAliases.length ? { executionId: executionAliases[0], executionAliases } : {}) };
+        : { kind: "unavailable", ...(executionAliases.length ? { executionId: executionAliases[0], executionAliases } : {}), ...(launchRef ? { launchRef } : {}) };
       normalized.set(id, { ...entry, item: { ...entry.item, activity } });
     }
     if (overlay) for (const [id, entry] of normalized) if (entry.item.type === "background_task") normalized.set(id, { ...entry,
@@ -672,6 +673,9 @@ export class OpenCodeV2Provider implements ChatProvider {
           ? { kind: "working", observedAt, executionId, generation: this.streamGeneration }
           : { kind: confirmed && item.taskType === "agent" ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
       if (executionAliases.length) activity.executionAliases = executionAliases;
+      const launchRef = confirmed && unique && compatibleCurrent && (item.taskType !== "shell" || shellExecuting || shellEndedAt !== undefined)
+        ? this.workerLaunchReference(occurrence) : undefined;
+      if (launchRef) activity.launchRef = launchRef;
       const request = live && this.eventMemory?.workers.linkedRequest(item.taskId, occurrence);
       const pendingRequests = request?.kind === "permission" ? pendingPermissions : pendingForms;
       if (request && pendingRequests?.some(entry => entry.id === request.id && entry.sessionID === occurrence?.worker)
@@ -703,7 +707,15 @@ export class OpenCodeV2Provider implements ChatProvider {
         activity: { ...item.activity, kind: current?.executionEnd ? "ended" : item.taskType === "agent" && active?.[item.childConversationId ?? ""] ? "session-active" : "unavailable",
           request: undefined,
           endedAt: current?.executionEnd?.created } };
-      return this.controls.project(item, folded.occurrences.get(item.taskId), controlRead, folded.workers.controlWitnesses(item.taskId));
+      // A history fold supplies missing immutable launcher clocks, not live
+      // authorization. Only its exact compatible retained occurrence may add
+      // already observed call/start witnesses (including a newborn first start).
+      const basis = occurrence && current && !current.uncertain ? { ...occurrence,
+        executionStart: current.executionStart ?? occurrence.executionStart,
+        executionEnd: current.executionEnd ?? occurrence.executionEnd } : occurrence;
+      const witnesses = [...folded.workers.controlWitnesses(item.taskId),
+        ...(occurrence && current && !current.uncertain ? this.eventMemory?.workers.readbackControlWitnesses(occurrence) ?? [] : [])];
+      return this.controls.project(item, basis, controlRead, witnesses);
     });
     this.eventMemory?.workers.enforceBudget();
     return { tasks: projected, occurrences: folded.occurrences, controls: new Map(projected.flatMap(item => {
@@ -720,9 +732,19 @@ export class OpenCodeV2Provider implements ChatProvider {
     const executionAliases = occurrence ? workerExecutionIds(occurrence)
       : provisionalId && /^v1:notification:[a-f0-9]{64}$/.test(provisionalId) ? [provisionalId] : [];
     const live = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
+    const launchRef = this.workerLaunchReference(occurrence);
     return { kind: "ended", executionId: executionAliases[0], ...(executionAliases.length ? { executionAliases } : {}),
+      ...(launchRef ? { launchRef } : {}),
       observedAt: this.eventMemory?.workers.lastActivity(taskId, occurrence)?.observedAt,
       endedAt: live?.executionEnd?.created ?? occurrence?.executionEnd?.created, generation: this.streamGeneration };
+  }
+
+  /** Guaranteed only while this native stream generation retains the exact
+   * invocation/birth. Not a dismissal identity or a Stop authorization basis. */
+  private workerLaunchReference(occurrence?: WorkerOccurrenceEvidence): string | undefined {
+    if (!occurrence || !this.streamConnected) return;
+    const reference = this.eventMemory?.workers.launchReference(occurrence);
+    return reference ? `v1:launch:${this.streamGeneration}:${reference}` : undefined;
   }
 
   private coldActivityIdentity(occurrence: WorkerOccurrenceEvidence): string | undefined {
@@ -1200,6 +1222,8 @@ export class OpenCodeV2Provider implements ChatProvider {
                 ? { kind: "working", observedAt: Date.now(), executionId, generation: this.streamGeneration }
                 : { kind: evidence.execution?.phase === "started" ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
             if (executionAliases.length) activity.executionAliases = executionAliases;
+            const launchRef = this.workerLaunchReference(occurrence);
+            if (launchRef) activity.launchRef = launchRef;
             const request = live && memory.workers.linkedRequest(item.taskId, occurrence);
             if (request && activity.kind === "working") { activity.kind = "needs-answer"; activity.request = request; }
             if (item.status === "running") memory.workers.rememberActivity(item.taskId, activity, occurrence);
@@ -1698,7 +1722,13 @@ export class OpenCodeV2Provider implements ChatProvider {
         // authorization. Re-read confinement after all execution evidence.
         const child = await this.lookupChild(task.childConversationId, signal);
         assertAuthorizationCurrent();
-        if (child?.parentID !== sessionId) throw new BackgroundTaskUnavailableError("Worker ownership is no longer confirmed");
+        if (child?.parentID !== sessionId) {
+          // A positive foreign owner contradicts the retained occurrence too;
+          // do not later publish its presentation-continuity reference from
+          // the still-cached historical parent relationship.
+          if (child) this.eventMemory?.workers.invalidateActivity(task.childConversationId);
+          throw new BackgroundTaskUnavailableError("Worker ownership is no longer confirmed");
+        }
       }
     } catch (error) {
       assertAuthorizationCurrent();

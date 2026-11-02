@@ -139,6 +139,10 @@ export function retainLauncherEvidence(previous: LauncherEvidence | undefined, n
   if (next.historical) return previous;
   const conflict = (["message", "workerType", "created", "ran", "completed", "inputFingerprint", "commandFingerprint"] as const).some(key => previous[key] !== undefined && next[key] !== undefined && previous[key] !== next[key]);
   return Object.freeze({ ...previous, phase: previous.phase === "snapshot" || next.phase === "snapshot" ? "snapshot" : previous.phase,
+    // Sparse native progress does not classify background execution. Retain
+    // a later success's positive classification, without replacing any prior
+    // explicit foreground fact (which still requires initialDetachment).
+    background: previous.background ?? next.background,
     message: previous.message ?? next.message, workerType: previous.workerType ?? next.workerType, created: previous.created ?? next.created, ran: previous.ran ?? next.ran,
     completed: previous.completed ?? next.completed, reportedCompletion: previous.reportedCompletion ?? next.reportedCompletion,
     inputFingerprint: previous.inputFingerprint ?? next.inputFingerprint, commandFingerprint: previous.commandFingerprint ?? next.commandFingerprint,
@@ -435,6 +439,40 @@ export class BackgroundControls {
       && !launcherChanged({ ...fact, phase: "snapshot", background: undefined }, candidate)
       && witnesses.some(witness => witness.kind === "called" && sameProof(witness.proof, fact.proof));
   }
+  private consumedInitialSnapshot(observation: ControlObservation, candidate: WorkerOccurrenceEvidence, witnesses: readonly ControlWitness[]): boolean {
+    const fact = observation.launch, launch = fact && candidate.launches.find(launch => launch.call === fact.call);
+    if (!fact || !launch || fact.phase !== "snapshot" || fact.background !== false || fact.child || fact.requestedChild
+      || fact.created === undefined || fact.completed !== undefined || fact.conflicted || !launch.message || fact.message !== launch.message
+      || fact.workerType !== candidate.kind || launcherChanged({ ...fact, background: undefined }, candidate)) return false;
+    // A content snapshot describes the launcher's initial pending/running
+    // stage, not a foreground worker result. Classify it only through this
+    // occurrence's consumed native call and a subsequently observed newborn.
+    // Neither compatible history nor clocks alone supply these witnesses.
+    return [...this.observations.values()].some(called => called.parent === candidate.parent && called.launch?.call === fact.call
+      && called.launch.phase === "called" && called.launch.message === fact.message && called.launch.workerType === candidate.kind
+      && called.launch.proof?.created !== undefined && called.launch.proof.created >= fact.created!
+      && !retainLauncherEvidence(fact, called.launch).conflicted
+      && this.consumed(called.launch, candidate, witnesses)
+      && [...this.observations.values()].some(born => born.child === candidate.worker && born.lifecycle?.own
+        && born.lifecycle.parent === candidate.parent && !born.birthContradicted && !!born.witness
+        && born.lifecycle.kind === (candidate.kind === "shell" ? "shell.created" : "session.created")
+        && observation.seen! < born.seen! && called.seen! < born.seen!
+        && born.witness.proof.created !== undefined && called.launch!.proof!.created! <= born.witness.proof.created
+        && (launch.completed ?? launch.reportedCompletion) !== undefined && born.witness.proof.created <= (launch.completed ?? launch.reportedCompletion)!
+        && (candidate.kind !== "shell" || this.matchesShellCommand(candidate, born.commandFingerprint))));
+  }
+  private pendingNewbornCall(fact: LauncherEvidence, candidate: WorkerOccurrenceEvidence): boolean {
+    if (fact.phase !== "called" || fact.proof?.created === undefined
+      || launcherChanged({ ...fact, phase: "snapshot", background: undefined }, candidate)) return false;
+    const launch = candidate.launches.find(launch => launch.call === fact.call);
+    return !!launch && launch.created !== undefined && fact.proof.created >= launch.created
+      && [...this.observations.values()].some(observation => observation.child === candidate.worker && observation.lifecycle?.own
+        && observation.lifecycle.parent === candidate.parent && !observation.birthContradicted
+        && observation.lifecycle.kind === (candidate.kind === "shell" ? "shell.created" : "session.created")
+        && observation.witness?.proof.created !== undefined && fact.proof!.created! <= observation.witness.proof.created
+        && (launch.completed ?? launch.reportedCompletion) !== undefined && observation.witness.proof.created <= (launch.completed ?? launch.reportedCompletion)!
+        && (candidate.kind !== "shell" || this.matchesShellCommand(candidate, observation.commandFingerprint)));
+  }
   project(item: BackgroundTaskItem, candidate: WorkerOccurrenceEvidence | undefined, read?: ControlRead, witnesses: readonly ControlWitness[] = []): BackgroundTaskItem {
     const projected = this.projectEvidence(item, candidate, read, witnesses);
     return { ...projected, control: { available: projected.status === "running" && projected.stateUncertain !== true,
@@ -495,22 +533,28 @@ export class BackgroundControls {
         && observation.lifecycle.kind === (candidate.kind === "shell" ? "shell.created" : "session.created") && !!observation.witness
         && (candidate.kind !== "shell" || this.matchesShellCommand(candidate, observation.commandFingerprint)));
       const launched = candidate.launches.every(launch => [...this.observations.values()].some(observation => observation.seen! > this.gapSequence!
-        && observation.parent === candidate.parent && observation.launch?.background === true && sameLauncherIdentity(observation.launch, launch)));
+        && observation.parent === candidate.parent && observation.launch?.background === true && sameLauncherIdentity(retainLauncherEvidence(observation.launch, launch), launch)));
       unresolved = !born || !launched;
     }
     if (!record && candidate && read?.initialInventory !== undefined) {
       const startup = [...this.observations.values()].some(observation => observation.lifecycle?.kind === "session.created"
         && (observation.child === candidate.parent || observation.child === candidate.worker));
       if (!read.initialInventory || startup) unresolved ||= !candidate.launches.every(launch => [...this.observations.values()].some(observation => observation.parent === candidate.parent
-        && observation.launch?.background === true && sameLauncherIdentity(observation.launch, launch)));
+        && observation.launch?.background === true && sameLauncherIdentity(retainLauncherEvidence(observation.launch, launch), launch)));
     }
     // Facts observed before Stop are just as binding as facts seen during its
     // reads. Compatible restatements cannot clear an unclassified invocation.
     if (candidate) for (const observation of this.observations.values()) {
       const fact = observation.launch;
       if (!fact || observation.parent !== candidate.parent) continue;
-      if (this.consumed(fact, candidate, [...witnesses, ...(record?.witnesses ?? [])])) continue;
+      if (this.consumed(fact, candidate, [...witnesses, ...(record?.witnesses ?? [])])
+        || this.consumedInitialSnapshot(observation, candidate, [...witnesses, ...(record?.witnesses ?? [])])) continue;
       const selected = candidate.launches.some(launch => launch.call === fact.call);
+      // Stored success can overtake the first live success frame. A matching
+      // called phase is still unclassified, not a contradictory foreground
+      // execution. Only later exact native witnesses can resolve it; this
+      // branch never admits a target or repairs an existing revoked record.
+      if (!record && selected && this.pendingNewbornCall(fact, candidate)) { unresolved = true; continue; }
       if (!record && selected && candidate.launches.some(launch => this.initialDetachment(observation, launch))) { unresolved = true; continue; }
       if (selected && launcherChanged(fact, candidate)) {
         if (record) this.retire(record);
@@ -556,8 +600,9 @@ export class BackgroundControls {
         }
         const fact = observation.launch;
         if (fact && observation.parent === candidate.parent) {
-          if (this.consumed(fact, candidate, witnesses)) continue;
+          if (this.consumed(fact, candidate, witnesses) || this.consumedInitialSnapshot(observation, candidate, witnesses)) continue;
           const selected = candidate.launches.some(launch => launch.call === fact.call);
+          if (selected && this.pendingNewbornCall(fact, candidate)) { unresolved = true; continue; }
           if (selected && candidate.launches.some(launch => this.initialDetachment(observation, launch))) { unresolved = true; continue; }
           if (selected && (launcherChanged(fact, candidate) || read && (observation.calledAt ?? -1) > read.start)) revoked = true;
           if (!selected && (!fact.selectedOnly && fact.child === candidate.worker || !fact.requestedSelectedOnly && fact.requestedChild === candidate.worker)) unresolved = true;
@@ -712,10 +757,22 @@ export class BackgroundWorkers {
     if (launches.size !== candidate.launches.length || launches.size !== task.evidence.launches.length
       || !task.evidence.launches.every(retained => {
         const launch = launches.get(retained.call);
-        return launch !== undefined && sameLauncherIdentity(retained, launch);
+        // Native tool-success events omit the part's creation/run clocks;
+        // stored history supplies them later. Missing anchors are not a
+        // contradiction. Preserve every conflicting immutable field; these
+        // clocks alone never create native birth/call/start witnesses.
+        return launch !== undefined && (sameLauncherIdentity(retained, launch)
+          || sameLauncherIdentity(retainLauncherEvidence(retained, launch), launch));
       }) || candidate.executionStart && task.evidence.executionStart && !sameProof(candidate.executionStart, task.evidence.executionStart)
       || candidate.executionEnd && task.evidence.executionEnd && !sameProof(candidate.executionEnd, task.evidence.executionEnd)) return;
-    return task;
+    if (task.evidence.launches.some(retained => (["created", "ran", "completed", "inputFingerprint", "commandFingerprint"] as const)
+      .some(key => retained[key] === undefined && launches.get(retained.call)![key] !== undefined))) {
+      task.evidence = Object.freeze({ ...task.evidence, launches: Object.freeze(task.evidence.launches.map(retained =>
+        retainLauncherEvidence(retained, launches.get(retained.call)!))) });
+      this.set(this.tasks, task.item.taskId, task);
+      this.bindInitialStart(task);
+    }
+    return this.retainedTask(task.item.taskId);
   }
 
   /** Retained calls and prelaunch birth contradictions fence cold activity.
@@ -928,6 +985,35 @@ export class BackgroundWorkers {
     if (evidence.executionEnd) witnesses.push({ kind: "ended", proof: evidence.executionEnd });
     for (const notice of this.notices.values()) if (notice.occurrence === evidence.key && notice.proof) witnesses.push({ kind: "notification", proof: notice.proof });
     return witnesses;
+  }
+
+  /** Readback may enrich a covered newborn, never recreate live proof from
+   * historical running metadata or an unobserved/reused native identity. */
+  readbackControlWitnesses(candidate: WorkerOccurrenceEvidence): ControlWitness[] {
+    const task = this.matchingTask(candidate), birth = task && this.births.get(task.worker);
+    return task && !task.evidence.uncertain && birth?.proof && !birth.contradicted && birth.parent === task.parent
+      ? this.controlWitnesses(task.item.taskId) : [];
+  }
+
+  /** Presentation continuity only, derived from accounted native provenance.
+   * The owning invocation and birth distinguish identical-looking reruns;
+   * missing clocks may enrich their retained occurrence without renaming it.
+   * A history-only fold cannot manufacture either live witness. */
+  launchReference(candidate: WorkerOccurrenceEvidence): string | undefined {
+    if (this.recoveryOnly || candidate.uncertain) return;
+    const task = this.matchingTask(candidate), evidence = task?.evidence;
+    if (!task || !evidence || evidence.uncertain || evidence.kind === undefined
+      || evidence.kind === "agent" && this.parents.get(task.worker) !== task.parent) return;
+    const birth = this.births.get(task.worker), launch = evidence.launches[0];
+    const invocation = launch && this.invocations.get(`${task.parent}:${launch.call}`);
+    if (!birth?.proof || birth.contradicted || birth.parent !== task.parent || !launch
+      || !invocation?.fact.proof || invocation.occurrence !== evidence.key
+      || invocation.fact.message === undefined || invocation.fact.message !== launch.message
+      || invocation.fact.workerType !== evidence.kind || invocation.fact.inputFingerprint === undefined
+      || launch.inputFingerprint !== undefined && invocation.fact.inputFingerprint !== launch.inputFingerprint
+      || launcherChanged({ ...invocation.fact, phase: "snapshot", background: undefined }, evidence)
+      || evidence.kind === "shell" && (!birth.shellCommand || evidence.launches.some(alias => alias.commandFingerprint !== birth.shellCommand))) return;
+    return digest(JSON.stringify([evidence.key, birth.proof, invocation.fact.proof]));
   }
 
   enforceBudget(): void { this.bound(); }

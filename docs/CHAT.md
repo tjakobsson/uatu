@@ -610,10 +610,28 @@ Activity and Stop authorization are independent: an owned task with positively
 verified current activity can show **Working** while Stop is unavailable. Task
 details explain the unavailable control in ordinary text, including on mobile;
 a Working label is never permission to interrupt an unverified native target.
+Ownership here means that the native job or child session belongs to this
+conversation. A fresh native read identifying the current shell launch as
+running can establish Working without a complete Stop record. Merely retaining
+a partial live reference is not conflicting execution evidence and must not
+cancel that read; actual reuse, command/owner contradictions and observation
+gaps remain conservative. Session/output inspection does not require Stop
+authorization.
 This is not a promise of execution survival
 across service restarts. Reused child sessions can have ambiguous results, and
 the native interruption API cannot atomically lock a particular execution
 generation against an external continuation.
+
+Partial live updates may carry a provider-proven `launchRef` before their complete
+execution identity is available. This reference lets the same launch recover
+personal dismissal tracking automatically after qualified identity and durable
+retirement are confirmed. It is not a dismissal key or alias, and grants no Stop
+permission. Unmatched references, real identity ambiguity and storage failures
+keep their visibility fences and guidance; row/child IDs, clocks or stream
+generation alone never clear them. Reference continuity is guaranteed only
+within the retained native stream generation; restart or a gap does not prove
+that a new observation belongs to an earlier partial launch. The optional field requires workspace API
+revision 33; the Hub revision remains 12.
 
 Stop also depends on bounded safety records identifying the particular worker
 run. Cleaning up display records does not disable targets whose verification

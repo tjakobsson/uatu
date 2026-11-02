@@ -22,20 +22,28 @@ for (const engine of ["chromium", "webkit"] as const) for (const failure of ["re
         } else await route.continue();
       });
       const login = await context.newPage(); await signIn(login, hub); await login.close();
-      const personalRead = context.waitForEvent("response", { predicate: response => new URL(response.url()).pathname.endsWith("/api/personal-worker-dismissals") && response.request().method() === "GET" });
+      // First response headers may precede an aborted read. Only a completed
+      // read can synchronize the deliberately failed write.
+      const dismissalUrl = new URL("api/personal-worker-dismissals", workspace.sessionUrl);
+      const personalRead = context.waitForEvent("requestfinished", { predicate: request => {
+        const url = new URL(request.url());
+        return request.method() === "GET" && url.origin === dismissalUrl.origin && url.pathname === dismissalUrl.pathname
+          && url.searchParams.get("conversationId") === snapshot.conversation.id;
+      } });
       const page = await openSessionTab(context, workspace);
       if (touch) await page.locator("#touch-tab-chat").click(); else await openChatPanel(page);
       await expect(page.locator("#chat-conversation-select")).toHaveValue(snapshot.conversation.id);
       await openChatWorkers(page);
       const row = page.locator('[data-worker-id="worker:guidance"]');
       await expect(row).toBeVisible();
+      const response = await (await personalRead).response();
+      expect(response).not.toBeNull();
       if (failure === "save") {
         // The visible row may precede the initial personal-state read. Wait
         // for that client read before authorizing a deliberately failed write.
-        const response = await personalRead;
-        expect(response.status()).toBe(200); await response.finished();
+        expect(response!.status()).toBe(200);
         await row.getByRole("button", { name: "Dismiss worker from summary:", exact: false }).click();
-      } else expect((await personalRead).status()).toBe(503);
+      } else expect(response!.status()).toBe(503);
       const guidance = page.locator("#chat-composer-notices .chat-worker-dismissal-notice");
       const message = failure === "read" ? "Could not read saved worker dismissals." : "Could not save worker dismissal changes.";
       await expect(guidance).toContainText(message);

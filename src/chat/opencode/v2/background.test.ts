@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { BackgroundControls, BackgroundWorkers, launcherChanged, nativeProof, prepareTool, retainLauncherEvidence, shellCommandFingerprint, type WorkerOccurrenceEvidence } from "./background";
+import { BackgroundControls, BackgroundWorkers, launcherChanged, nativeProof, prepareTool, retainLauncherEvidence, shellCommandFingerprint, workerExecutionIds, type WorkerOccurrenceEvidence } from "./background";
 import fc from "fast-check";
 import { compactWorkers } from "../../compact-work";
 import type { BackgroundTaskItem, ConversationItem } from "../../types";
@@ -7,6 +7,118 @@ import { taskInspection } from "../../task-inspection";
 import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
+
+for (const guard of ["none", "message", "created", "ran", "completed", "command", "input", "foreign", "gap"] as const) test(`sparse shell activity readback enriches missing anchors but preserves ${guard}`, () => {
+  const live = new BackgroundWorkers(), history = new BackgroundWorkers();
+  const part = launch("call", "shell");
+  // Native success lacks part clocks. The clock guard cases additionally
+  // retain one previously observed clock to prove it cannot be overwritten.
+  const time = guard === "created" ? { created: 9 } : guard === "ran" ? { ran: 9 } : guard === "completed" ? { completed: 9 } : {};
+  live.launchPrepared("parent", prepareTool({ ...part, time }, 12, "success", "message", { id: "success", created: 12 }), 12);
+  if (guard === "foreign") live.invalidateActivity("shell");
+  if (guard === "gap") { live.invalidateActivity(); live.invalidateOwnership(); }
+  const stored = { ...part, time: { created: 10, ran: 11, completed: 12 }, state: {
+    ...part.state, input: { command: guard === "command" ? "different" : "fixture", ...(guard === "input" ? { background: true } : {}) },
+  } };
+  history.launchPrepared("parent", prepareTool(stored, 12, "snapshot", guard === "message" ? "different" : "message"), 12);
+  const candidate = history.occurrence("v2:parent:call")!;
+  expect(live.hasRetainedReference(candidate)).toBe(true);
+  const evidence = live.activityEvidence(candidate);
+  if (guard === "none") expect(evidence).toBeDefined();
+  else expect(!evidence || evidence.uncertain).toBe(true);
+});
+
+for (const guard of ["none", "message", "created", "ran", "completed", "input", "foreign", "gap", "reuse", "rebirth", "capacity"] as const) test(`sparse newborn agent readback binds only its retained first execution (${guard})`, () => {
+  const live = new BackgroundWorkers(guard === "capacity" ? { entries: 4 } : {}), history = new BackgroundWorkers();
+  live.verifyChild("child", "parent");
+  live.observeBirth("child", "parent", nativeProof({ id: "birth", created: 22 }, { child: "child", parent: "parent" }));
+  const part = { id: "call", name: "subagent", state: { status: "completed", input: { prompt: "fixture", background: true }, metadata: { sessionID: "child", status: "running" } } };
+  const time = guard === "created" ? { created: 19 } : guard === "ran" ? { ran: 19 } : guard === "completed" ? { completed: 29 } : {};
+  live.launchPrepared("parent", prepareTool({ ...part, time }, 30, "success", "message", { id: "success", created: 30 }), 30);
+  live.executionStarted("child", nativeProof({ id: "start", created: 31 }, { child: "child" }));
+  if (guard === "capacity") for (let index = 0; index < 8; index++) live.invocation("parent", prepareTool({ id: `overflow-${index}`, name: "subagent", state: { input: { prompt: "other" } } }, 32, "called", "other-message", { id: `overflow-event-${index}`, created: 32 }).fact);
+  if (guard === "foreign") live.invalidateActivity("child");
+  if (guard === "gap") { live.invalidateActivity(); live.invalidateOwnership(); }
+  if (guard === "reuse") live.executionStarted("child", nativeProof({ id: "reuse", created: 32 }, { child: "child" }));
+  if (guard === "rebirth") live.observeBirth("child", "parent", nativeProof({ id: "rebirth", created: 32 }, { child: "child", parent: "parent" }));
+  history.verifyChild("child", "parent");
+  history.launchPrepared("parent", prepareTool({ ...part, time: { created: 20, ran: 20, completed: 30 }, state: { ...part.state,
+    input: { prompt: guard === "input" ? "different" : "fixture", background: true } } }, 30, "snapshot", guard === "message" ? "different" : "message"), 30);
+  const candidate = history.occurrence("v2:parent:call")!;
+  const evidence = live.activityEvidence(candidate);
+  if (guard === "none") {
+    expect(evidence?.executionStart?.id).toBe("start");
+    expect(live.readbackControlWitnesses(candidate)).toContainEqual(expect.objectContaining({ kind: "started", proof: expect.objectContaining({ id: "start" }) }));
+  } else {
+    expect(!evidence || evidence.uncertain || !evidence.executionStart).toBe(true);
+    expect(live.readbackControlWitnesses(candidate).some(witness => witness.kind === "started")).toBe(false);
+  }
+});
+
+for (const kind of ["agent", "shell"] as const) test(`launch reference uses native provenance, not reusable row anchors (${kind})`, () => {
+  const fixture = (options: { message?: string; call?: string; invocation?: string; birth?: string; noInvocation?: boolean; noBirth?: boolean } = {}) => {
+    const workers = new BackgroundWorkers(), message = options.message ?? "message", call = options.call ?? "call";
+    const input = kind === "agent" ? { prompt: "fixture", background: true } : { command: "fixture", background: true };
+    const part = { id: call, name: kind === "agent" ? "subagent" : "shell", state: { status: "completed", input,
+      metadata: { status: "running", ...(kind === "agent" ? { sessionID: "child" } : { shellID: "child" }) } } };
+    const called = prepareTool(part, 20, "called", message, { id: options.invocation ?? "native-called", created: 20, durable: { aggregateID: "parent", seq: 1, version: 1 } }).fact;
+    const birth = nativeProof({ id: options.birth ?? "native-birth", created: 22 }, { child: "child", parent: "parent" })!;
+    if (kind === "agent") workers.verifyChild("child", "parent");
+    if (!options.noInvocation) workers.invocation("parent", called);
+    if (!options.noBirth) workers.observeBirth("child", "parent", birth, kind === "shell" ? shellCommandFingerprint("fixture") : undefined);
+    workers.launchPrepared("parent", prepareTool(part, 30, "success", message, { id: "native-success", created: 30 }), 30);
+    const partial = workers.occurrence(`v2:parent:${call}`)!;
+    const reference = workers.launchReference(partial);
+    return { workers, message, call, part, called, birth, partial, reference };
+  };
+  const first = fixture();
+  expect(first.reference).toMatch(/^[a-f0-9]{64}$/);
+  expect(workerExecutionIds(first.partial)).toEqual([]);
+  first.workers.invocation("parent", first.called);
+  first.workers.observeBirth("child", "parent", first.birth, kind === "shell" ? shellCommandFingerprint("fixture") : undefined);
+  expect(first.workers.launchReference(first.partial)).toBe(first.reference);
+  first.workers.launchPrepared("parent", prepareTool({ ...first.part, time: { created: 19, ran: 20, completed: 30 } }, 30, "snapshot", first.message), 30);
+  const qualified = first.workers.occurrence(first.partial.taskId)!;
+  expect(workerExecutionIds(qualified)).toHaveLength(1);
+  expect(first.workers.launchReference(qualified)).toBe(first.reference);
+  expect(workerExecutionIds(qualified)).not.toContain(first.reference!);
+  if (kind === "agent") {
+    first.workers.executionStarted("child", nativeProof({ id: "first-execution", created: 31 }, { child: "child" }));
+    const started = first.workers.occurrence(qualified.taskId)!;
+    expect(first.workers.launchReference(started)).toBe(first.reference);
+    expect(first.workers.launchReference({ ...started, executionStart: nativeProof({ id: "other-execution", created: 32 }, { child: "child" }) })).toBeUndefined();
+  }
+  for (const options of [{ message: "different-message" }, { call: "different-call" }, { invocation: "different-native-invocation" }, { birth: "different-native-birth" }])
+    expect(fixture(options).reference).not.toBe(first.reference);
+  expect(fixture({ noInvocation: true }).reference).toBeUndefined();
+  expect(fixture({ noBirth: true }).reference).toBeUndefined();
+});
+
+for (const kind of ["agent", "shell"] as const) for (const veto of ["input", "message", "call", "clock", "execution", "foreign", "gap", "capacity"] as const) test(`launch reference is withheld after ${kind} ${veto}`, () => {
+  const workers = new BackgroundWorkers(veto === "capacity" ? { entries: 8 } : {});
+  const part = { id: "call", name: kind === "agent" ? "subagent" : "shell", state: { status: "completed", input: { command: "fixture", prompt: "fixture" },
+    metadata: { status: "running", ...(kind === "agent" ? { sessionID: "child" } : { shellID: "child" }) } } };
+  workers.verifyChild("child", "parent");
+  workers.invocation("parent", prepareTool(part, 20, "called", "message", { id: "called", created: 20 }).fact);
+  workers.observeBirth("child", "parent", nativeProof({ id: "birth", created: 22 }, { child: "child", parent: "parent" }), kind === "shell" ? shellCommandFingerprint("fixture") : undefined);
+  workers.launchPrepared("parent", prepareTool({ ...part, time: { created: 19, ran: 20, completed: 30 } }, 30, "snapshot", "message"), 30);
+  const candidate = workers.occurrence("v2:parent:call")!;
+  expect(workers.launchReference(candidate)).toBeDefined();
+  let readback = candidate;
+  if (veto === "input" || veto === "message" || veto === "call" || veto === "clock") readback = { ...candidate, launches: candidate.launches.map(launch => ({ ...launch,
+    ...(veto === "input" ? { inputFingerprint: "different" } : veto === "message" ? { message: "different" } : veto === "call" ? { call: "different" } : { ran: 21 }) })) };
+  if (veto === "execution") {
+    if (kind === "agent") {
+      workers.executionStarted("child", nativeProof({ id: "initial-run", created: 31 }, { child: "child" }));
+      workers.executionStarted("child", nativeProof({ id: "later-run", created: 40 }, { child: "child" }));
+    }
+    else workers.observeBirth("child", "parent", nativeProof({ id: "later-birth", created: 40 }, { child: "child" }), shellCommandFingerprint("fixture"));
+  }
+  if (veto === "foreign") workers.invalidateActivity("child");
+  if (veto === "gap") { workers.invalidateActivity(); workers.invalidateOwnership(); }
+  if (veto === "capacity") for (let index = 0; index < 10; index++) workers.verifyChild(`other-${index}`, "parent");
+  expect(workers.launchReference(readback)).toBeUndefined();
+});
 
 test("owned shell exit ends activity without inventing a captured result or revoking control", () => {
   const workers = new BackgroundWorkers();
@@ -309,6 +421,52 @@ function controlFixture(call: string, parent = "parent", worker = call, kind: "a
     taskType: kind, ...(kind === "shell" ? { outputFile: `shell:${worker}` } : { childConversationId: worker }), toolUseId: call, description: "Fixture", status: "running", createdAt: 10 };
   return { item, evidence };
 }
+
+for (const kind of ["agent", "shell"] as const) for (const guard of ["none", "no-success", "foreground-success", "changed-input", "missing-call-witness", "foreign-birth", "gap", "failed-read", ...(kind === "agent" ? ["missing-start-witness"] : [])]) test(`capture-derived sparse progress then success admits exact current ${kind} control (${guard})`, () => {
+  // Derived from sanitized native control metadata, not a raw-envelope replay.
+  // IDs/fingerprints/payloads are synthetic; relative clocks and the delivered
+  // call -> birth -> sparse progress -> success -> first start/read ordering
+  // preserve the capture. Success omits input and part clocks; history supplies
+  // them. Native progress and shell birth have no durable coordinates.
+  const controls = new BackgroundControls(), fixture = controlFixture("launch", "parent", "child", kind);
+  const clocks = kind === "agent" ? { created: 5341, ran: 6876, birth: 6883, progress: 6885, completed: 6888, start: 6890 }
+    : { created: 8347, ran: 8505, birth: 8560, progress: 8560, completed: 8561, start: 8560 };
+  const proof = (id: string, created: number, aggregate = "parent", seq = 0, version = 1) => nativeProof({ id, created,
+    durable: { aggregateID: aggregate, seq, version } }, { fixture: id })!;
+  controls.observe({ shutdown: false, session: "parent", launchers: [], lifecycle: { kind: "session.created", id: "parent", directory: "/ws", proof: proof("parent-birth", 0) } }, true);
+  controls.observe({ shutdown: false, session: "parent", launchers: [], execution: { phase: "started", historical: false, proof: proof("parent-start", 3411, "parent", 4) } }, true);
+  const inventory = controls.beginRead("parent", true, true, true);
+  controls.endRead(inventory, true);
+  const full = { ...fixture.evidence.launches[0]!, created: clocks.created, ran: clocks.ran, completed: clocks.completed };
+  const called = { call: full.call, message: full.message, workerType: kind, selectedOnly: kind === "shell" ? true : undefined,
+    phase: "called" as const, background: false, executed: false, inputFingerprint: full.inputFingerprint,
+    commandFingerprint: full.commandFingerprint, proof: proof("called", clocks.ran, "parent", kind === "agent" ? 12 : 19) };
+  controls.observe({ shutdown: false, session: "parent", launchers: [called] }, true);
+  const birth = kind === "agent" ? proof("birth", clocks.birth, "child") : nativeProof({ id: "birth", created: clocks.birth }, { fixture: "birth" })!;
+  if (kind === "agent") controls.observe({ shutdown: false, session: "child", launchers: [], lifecycle: { kind: "session.created", id: "child", parent: "parent", directory: guard === "foreign-birth" ? "/foreign" : "/ws", proof: birth } }, guard !== "foreign-birth");
+  else controls.observe({ shutdown: false, launchers: [], shellBirth: { id: "child", parent: "parent", proof: birth, commandFingerprint: full.commandFingerprint } }, guard !== "foreign-birth");
+  const progress = { call: full.call, child: "child", reportedChild: kind === "agent" ? "child" : undefined, message: full.message, workerType: kind,
+    selectedOnly: kind === "shell" ? true : undefined, phase: "progress" as const, commandFingerprint: full.commandFingerprint,
+    proof: nativeProof({ id: "progress", created: clocks.progress }, { fixture: "progress" })! };
+  controls.observe({ shutdown: false, session: "parent", launchers: [progress] }, true);
+  const success = { ...progress, phase: "success" as const, background: true, executed: false,
+    reportedCompletion: clocks.completed, proof: proof("success", clocks.completed, "parent", kind === "agent" ? 13 : 21, 2) };
+  if (guard !== "no-success") controls.observe({ shutdown: false, session: "parent", launchers: [{ ...success,
+    background: guard !== "foreground-success", ...(guard === "changed-input" ? { inputFingerprint: "different" } : {}) }] }, true);
+  const provisional = { ...fixture.evidence, launches: [success] };
+  expect(controls.project({ ...fixture.item, stateUncertain: true }, provisional, undefined, [{ kind: "called", proof: called.proof }]).control?.available).toBe(false);
+  if (guard === "none") expect(controls.unavailable(fixture.item.taskId)).toBe(false);
+  const start = proof("child-start", clocks.start, "child", 2);
+  if (kind === "agent") controls.observe({ shutdown: false, session: "child", launchers: [], execution: { phase: "started", historical: false, proof: start } }, true);
+  const candidate = { ...fixture.evidence, launches: [full], ...(kind === "agent" ? { executionStart: start } : {}) };
+  if (guard === "gap") controls.observationGap();
+  const read = controls.beginRead("parent", guard !== "failed-read", true, true);
+  const witnesses = [...(guard !== "missing-call-witness" ? [{ kind: "called" as const, proof: called.proof }] : []),
+    ...(kind === "agent" && guard !== "missing-start-witness" ? [{ kind: "started" as const, proof: start }] : [])];
+  expect(controls.project(fixture.item, candidate, read, witnesses)).toMatchObject({ stateUncertain: guard !== "none", control: { available: guard === "none" } });
+  expect(controls.current(fixture.item.taskId)).toBe(guard === "none");
+  controls.endRead(read, true);
+});
 
 function controlOracle(controls: BackgroundControls) {
   const state = controls as unknown as { closed: boolean; projectionLost: boolean; gapSequence: number | null; scopes: Map<string, "retained" | "partial" | "inventoried" | "gap">;

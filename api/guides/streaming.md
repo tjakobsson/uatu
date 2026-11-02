@@ -10,6 +10,8 @@ Keep the last cursor you applied for each cursor-bearing subscription, and advan
 
 `worktrees` and `personal` have no replay cursor: read their authoritative state on every data invalidation, including attachment and reconnect. `personal` is account-private and has no upstream. Its `unavailable` signal means dismissal persistence failed or remains unconfirmed, not that the workspace stopped. Keep chat and canonical requests available and show private storage guidance. Confirmed storage recovery emits `ready` followed by a fresh data invalidation; initial personal attachment emits data without requiring `ready`.
 
+Workspace revision 33 adds optional `WorkerActivity.launchRef` to conversation payloads. It links a provider-proven partial launch observation to that same launch's later qualified execution identity. Preserve the reference, but never use it as a dismissal key, alias or Stop permission. Automatic dismissal recovery also needs authoritative retirement confirmation; a matching reference alone is insufficient. Continuity is guaranteed only within the retained native stream generation. References may be absent or change after a gap, restart, contradictory evidence, reuse or saturation; never infer continuity across that boundary.
+
 Change subscriptions with `POST /api/hub/live/{streamId}/subscriptions`. To reconnect after a transport error, open a new stream and present every retained cursor in `subs`. The stream ignores SSE event ids and `Last-Event-ID`. Comment frames are keepalives and carry no data.
 
 ## Clone job events

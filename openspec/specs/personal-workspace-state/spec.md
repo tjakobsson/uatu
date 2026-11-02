@@ -173,6 +173,17 @@ Dismissal identity SHALL remain stable through pagination, live/history reconcil
 - **THEN** that evidence remains visible despite a delayed dismissal response or stale client write
 - **AND** after successful durable retirement, later unavailability does not automatically reactivate the obsolete dismissal
 
+#### Scenario: A partial launch gains its qualified identity
+- **WHEN** an active observation lacks a complete dismissal identity but carries a provider-proven launch reference, later updates prove that same launch's qualified execution identities, and authoritative retirement is confirmed after that resolution
+- **THEN** the client can clear the matched identity fence and guidance automatically without reopening the conversation
+- **AND** the launch reference is never persisted as a dismissal key, treated as an execution alias or used as Stop authorization
+
+#### Scenario: Launch continuity or retirement remains unproven
+- **WHEN** the reference is absent, names a different native launch, or cannot be matched to a post-resolution authoritative retirement acknowledgment
+- **THEN** affected work remains visible with identity or storage guidance rather than reviving old dismissal marks
+- **AND** row, call or child identifiers, display clocks, stream generation and UI folding alone do not establish continuity
+- **AND** stale responses, unrelated qualified workers and failed writes do not discharge the unresolved fence
+
 #### Scenario: Retirement storage fails while activity returns
 - **WHEN** the Hub cannot confirm persistence of retirement for an old dismissal
 - **THEN** verified activity, transcript content and canonical pending requests remain available without waiting for that save

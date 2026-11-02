@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 12 / Workspace 33 - Unreleased (partial launch continuity)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `WorkerActivity` payloads may carry optional `launchRef`, an opaque provider-proven reference connecting partial live observations to the same launch's qualified execution identity. It supports automatic private dismissal recovery without matching by row, child session, display clocks or UI folding.
+- The reference is presentation-continuity data only. It is not a saved-dismissal identity or alias and grants no Stop permission. Genuine reuse or contradictory native evidence must not inherit it; it may be absent or change when the provider observation lifetime ends.
+- Dismissal recovery still requires authoritative retirement confirmation for the qualified execution identities. A reference alone cannot clear unresolved identity, persistence or visibility fences.
+
+### Migration
+
+Strict workspace-payload consumers must regenerate against revision 33 because revision 32's closed activity object rejects the optional field. Preserve it through conversation snapshots and live updates without adding it to dismissal keys or Stop requests. Keep unknown or unmatched occurrences visible and retain failure guidance when retirement is unconfirmed. Hub revision remains 12 and bundled-web revision remains 3; workspace revision participates in matching-assets checks.
+
 ## Hub 12 / Workspace 32 - Unreleased (worker activity and private dismissal)
 
 Compatibility: breaking (Hub and workspace)

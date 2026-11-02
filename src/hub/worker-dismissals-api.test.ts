@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { compactWorkers } from "../chat/compact-work";
@@ -12,6 +12,7 @@ import { handleWorkerDismissals, readAuthoritativeWorkerEvidence } from "./worke
 import { WorkerDismissalsStore } from "./worker-dismissals";
 import { observeWorkerProjection } from "./worker-dismissals-observation";
 import { parseConversationItem } from "../chat/validation";
+import { BackgroundWorkers, nativeProof, prepareTool, workerExecutionIds as nativeExecutionIds } from "../chat/opencode/v2/background";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -210,6 +211,67 @@ test("activity without execution proof refuses bare marks, posts and trusted ret
   expect(client.error).toContain("complete execution identity");
   const next = { ...item, id: "task:next", taskId: "next", toolUseId: "new-call", activity: { kind: "unavailable" as const } };
   expect(visibleWorkers(compactWorkers([next]), new Set(["worker-dismissal:tool:call"]))).toHaveLength(1);
+});
+
+test.each([false, true])("native launch continuity recovers only after durable Hub retirement (initial save failure: %s)", async failSave => {
+  const workers = new BackgroundWorkers();
+  const part = { id: "call", name: "subagent", state: { status: "completed", input: { prompt: "fixture", background: true }, metadata: { status: "running", sessionID: "child" } } };
+  workers.verifyChild("child", "parent");
+  workers.invocation("parent", prepareTool(part, 20, "called", "message", { id: "native-called", created: 20, durable: { aggregateID: "parent", seq: 1, version: 1 } }).fact);
+  workers.observeBirth("child", "parent", nativeProof({ id: "native-birth", created: 22 }, { child: "child", parent: "parent" }));
+  const project = (value: unknown, phase: "success" | "snapshot"): BackgroundTaskItem => {
+    const update = workers.launchPrepared("parent", prepareTool(value, 30, phase, "message", phase === "success" ? { id: "native-success", created: 30 } : undefined), 30)
+      .find(update => update.kind === "upsert" && update.item.type === "background_task");
+    if (update?.kind !== "upsert" || update.item.type !== "background_task") throw new Error("missing native task");
+    const occurrence = workers.occurrence(update.item.taskId)!;
+    const ids = nativeExecutionIds(occurrence), ref = workers.launchReference(occurrence);
+    return parseConversationItem({ ...update.item, activity: { kind: "working", generation: 1, launchRef: ref && `v1:launch:1:${ref}`, ...(ids.length ? { executionId: ids[0], executionAliases: ids } : {}) } }) as BackgroundTaskItem;
+  };
+  const partial = project(part, "success");
+  const qualified = project({ ...part, time: { created: 19, ran: 20, completed: 30 } }, "snapshot");
+  expect(partial.activity!.launchRef).toBeDefined();
+  expect(partial.activity!.launchRef).toBe(qualified.activity!.launchRef);
+  const executionId = qualified.activity!.executionId!;
+  const pages: ConversationItem[][] = [[partial]]; childPages(pages);
+  const root = await mkdtemp(path.join(tmpdir(), "uatu-native-identity-recovery-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "marks.json");
+  const store = new WorkerDismissalsStore(file); await store.load();
+  const scope = { user: "alice", workspaceId: "project", conversationId };
+  const bare = "worker-dismissal:tool:call";
+  for (const id of [executionId, bare]) await store.reconcile(scope, async () => [{ executionId: id, signature: "old-unavailable", active: false, dismissible: true }], { executionId: id, expectedRevision: 0, operation: "dismiss" });
+  let changed: () => void = () => {};
+  const fetcher = (url: string, init?: RequestInit) => handleWorkerDismissals(new Request(new URL(url, "http://hub.invalid"), init), {
+    ...scope, store, read: () => readAuthoritativeWorkerEvidence(running, conversationId),
+  });
+  const client = new WorkerDismissalClient({ changed: () => changed(), fetcher });
+  cleanups.push(() => client.dispose());
+  const loaded = new Promise<void>(resolve => { changed = resolve; }); client.select(conversationId); await loaded;
+  client.observe(compactWorkers([partial]));
+  expect(client.error).toContain("complete execution identity");
+  pages[0] = [qualified];
+  if (failSave) {
+    // Real atomic-save failure, not a fabricated successful API acknowledgement.
+    await rm(root, { recursive: true });
+    const failed = new Promise<void>(resolve => { changed = () => { if (client.error.includes("Could not read")) resolve(); }; });
+    client.observe(compactWorkers([qualified])); await failed;
+    expect(client.error).not.toBe(""); expect(client.dismissed.size).toBe(0);
+    expect(visibleWorkers(compactWorkers([qualified]), client.dismissed)).toHaveLength(1);
+    await mkdir(root);
+  }
+  const recovered = new Promise<void>(resolve => { changed = () => { if (!client.error) resolve(); }; });
+  if (failSave) client.refresh(); else client.observe(compactWorkers([qualified]));
+  await recovered;
+  expect(client.error).toBe("");
+  expect(visibleWorkers(compactWorkers([qualified]), client.dismissed)).toHaveLength(1);
+  const restarted = new WorkerDismissalsStore(file); await restarted.load();
+  const saved = await restarted.reconcile(scope, async () => []);
+  expect(saved.entries.find(entry => entry.executionId === executionId)).toMatchObject({ dismissed: false, revision: 1 });
+  expect(saved.entries.find(entry => entry.executionId === bare)).toMatchObject({ dismissed: true });
+  expect(await Bun.file(file).text()).not.toContain(partial.activity!.launchRef!);
+  const unavailable = { ...qualified, activity: { ...qualified.activity!, kind: "unavailable" as const } };
+  client.observe(compactWorkers([unavailable]));
+  expect(visibleWorkers(compactWorkers([unavailable]), client.dismissed)).toHaveLength(1);
 });
 
 test("header batch DOM skips an accepted oversized identity, posts supported work and retains skipped/storage feedback", async () => {

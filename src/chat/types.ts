@@ -761,6 +761,9 @@ export type CompactionItem = TimelineItemBase & {
  */
 export type WorkerActivity = {
   kind: "working" | "needs-answer" | "checking" | "session-active" | "unavailable" | "ended";
+  // Provider-proven continuity from a partial launch to its qualified identity.
+  // Presentation recovery only: never a dismissal alias or Stop capability.
+  launchRef?: string;
   observedAt?: number;
   endedAt?: number;
   executionId?: string;

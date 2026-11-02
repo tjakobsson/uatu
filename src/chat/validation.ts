@@ -542,11 +542,13 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground", "stateUncertain", "resultId", "toolUseIds", "workerSession", "terminalReportedAt", "activity", "control"], type);
       if (record.activity !== undefined) {
         const activity = expectRecord(record.activity, "worker activity");
-        expectKeys(activity, ["kind", "observedAt", "endedAt", "executionId", "executionAliases", "generation", "reason", "request"], "worker activity");
+        expectKeys(activity, ["kind", "launchRef", "observedAt", "endedAt", "executionId", "executionAliases", "generation", "reason", "request"], "worker activity");
         expectOneOf(activity.kind, ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"], "worker activity kind");
         expectOptionalTimestamp(activity.observedAt, "worker observation time");
         expectOptionalTimestamp(activity.endedAt, "worker end time");
         expectOptionalCount(activity.generation, "worker observation generation");
+        expectOptionalIdentity(activity.launchRef, "worker launch reference");
+        if (typeof activity.launchRef === "string" && /[^!-~]/.test(activity.launchRef)) throw new Error("worker launch reference must be printable ASCII without spaces");
         expectOptionalIdentity(activity.executionId, "worker execution id");
         if (activity.executionAliases !== undefined) {
           expectStringArray(activity.executionAliases, "worker execution aliases", true);
