@@ -203,6 +203,10 @@ export type ProviderHistoryPage = {
   // absence from even completeItems cannot establish cancellation. Positive
   // visible delivery evidence and explicit inbox settlements remain valid.
   deliveryHistoryIncomplete?: true;
+  // Internal accounting evidence: visible descendant links may be omitted by
+  // unavailable optional enrichment. Own accounting remains usable, but this
+  // page cannot establish a complete descendant tree. Not a public wire field.
+  visibleDescendantsIncomplete?: true;
   nextCursor?: string;
 };
 

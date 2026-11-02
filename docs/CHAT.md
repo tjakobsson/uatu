@@ -626,6 +626,13 @@ details are unavailable; missing details alone do not hide a visible worker.
 Child cost/model reconstruction also has a bounded optional-read window.
 Unavailable accounting keeps its known values without inventing zero or
 completeness, and a later read can retry rather than blocking parent history.
+Shared transcript reads keep each caller's cancellation window separate: an
+optional enrichment deadline cannot cancel a required reader still waiting on
+the same transport. The transport is cancelled when no reader remains.
+Missing visible descendant links also leave accounting incomplete, even when
+the child's own cost is known. A later parent refresh retries those links rather
+than caching the partial tree as complete; unavailable enrichment confined to a
+reverted hidden suffix does not invalidate the visible accounting tree.
 Missing evidence means **Status unavailable**, not finished or cancelled.
 Activity and Stop authorization are independent: an owned task with positively
 verified current activity can show **Working** while Stop is unavailable. Task

@@ -39,6 +39,12 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **WHEN** the parent's authoritative transcript or required session read fails, or the caller cancels the read
 - **THEN** Uatu reports a failed or cancelled read rather than presenting a successful empty or incomplete parent transcript
 
+#### Scenario: Optional and required readers share a child transcript
+- **WHEN** optional enrichment and a required history reader share a pending child transcript read, and the optional reader's deadline expires first
+- **THEN** the required reader can still receive the healthy transcript within its own read window without a duplicate transport request
+- **AND** each reader's cancellation releases only its own interest; shared transport is retired when no reader remains
+- **AND** cancelled or superseded shared reads cannot populate current history reuse or remove a newer pending read
+
 #### Scenario: Partial child enrichment preserves native revert visibility
 - **WHEN** child enrichment fails for either the visible prefix or the complete transcript while a native revert boundary is staged
 - **THEN** missing child metadata alone does not authorize removal of a worker whose native origin remains visible
@@ -55,3 +61,10 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **THEN** the parent history read succeeds with the accounting already available rather than failing or reporting missing amounts as zero or complete
 - **AND** late results from a cancelled, expired, or superseded accounting read do not overwrite current accounting or mark an incomplete reconstruction complete
 - **AND** a later successful read can restore verified accounting without restarting the agent or replaying a mutation
+
+#### Scenario: Visible descendant enrichment is temporarily incomplete
+- **WHEN** child history returns known own accounting but unavailable optional enrichment leaves its visible descendant topology incomplete on any reconstruction page
+- **THEN** Uatu retains the known own accounting without marking the descendant reconstruction complete
+- **AND** a later parent refresh retries the incomplete reconstruction and can restore verified nested accounting immediately after ownership recovers, without waiting for the completeness cache to expire
+- **AND** if a previously complete nested tree becomes incomplete on refresh, its older completeness stamp does not make the current reconstruction or its ancestors complete
+- **AND** enrichment failures confined to a reverted hidden suffix do not make the visible accounting tree incomplete

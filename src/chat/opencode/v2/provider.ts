@@ -386,6 +386,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       completeItems: [...normalized.values()].map(({ item }) => item),
       revertVisibility: { boundaryId: boundaryId ?? null, state: reversible.state, excludedItemIds },
       ...(boundaryId ? { deliveryHistoryIncomplete: true as const } : {}),
+      ...(normalized.descendantsIncomplete ? { visibleDescendantsIncomplete: true as const } : {}),
       nextCursor: historyPageCursor(start, version),
     };
     } finally { this.controls.endRead(controlRead, completeRead); }
@@ -454,7 +455,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         return child ? [child] : [];
       })));
     const verified = new Set<string>();
-    await this.verifyChildren(children, sessionId, signal, child => verified.add(child), optionalEnrichment, (child, actualParent) => {
+    const unavailableOwnership = await this.verifyChildren(children, sessionId, signal, child => verified.add(child), optionalEnrichment, (child, actualParent) => {
       for (const message of prepared) for (const { fact } of message.tools.values()) {
         if (fact.reportedChild !== child) continue;
         const taskId = `v2:${sessionId}:${fact.call}`;
@@ -528,6 +529,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       item: this.controls.project(entry.item, workers.occurrence(entry.item.taskId), controlRead, workers.controlWitnesses(entry.item.taskId)) });
     this.eventMemory?.workers.enforceBudget();
     return Object.assign(normalized, { occurrences: workers.evidenceSnapshot(), workers, origins,
+      descendantsIncomplete: unavailableOwnership.size > 0,
       unverifiedChildren: new Set([...children].filter(child => !verified.has(child))) });
   }
 
@@ -1179,8 +1181,11 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
   }
 
-  private async verifyChildren(children: Set<string>, parent: string, signal: AbortSignal, verified: (child: string) => void, tolerateUnavailable = false, contradicted?: (child: string, actualParent?: string) => void): Promise<void> {
+  private async verifyChildren(children: Set<string>, parent: string, signal: AbortSignal, verified: (child: string) => void, tolerateUnavailable = false, contradicted?: (child: string, actualParent?: string) => void): Promise<Set<string>> {
     const pending = children.values();
+    // A successful negative ownership check is conclusive, not transient.
+    // Keep failed and unattempted checks separate from unverified identities.
+    const unavailable = new Set(children);
     // One deadline for the whole batch, not one timeout per child. Four
     // readers match background recovery's concurrency budget.
     await Promise.all(Array.from({ length: Math.min(4, children.size) }, async () => {
@@ -1188,14 +1193,19 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (signal.aborted) break;
         try {
           if (await this.verifiedChild(child, parent, signal, contradicted ? actualParent => contradicted(child, actualParent) : undefined)) verified(child);
+          unavailable.delete(child);
         } catch (error) {
           // Stream/transcript enrichment cannot eat unrelated parent content;
           // strict inventory recovery retains failed-read-is-unknown semantics.
           if (!tolerateUnavailable) throw error;
+          // Explicit denial is negative authorization evidence, not a
+          // temporarily missing descendant that accounting should retry.
+          if (isLookupDenied(error)) unavailable.delete(child);
         }
       }
     }));
     if (!tolerateUnavailable) signal.throwIfAborted();
+    return unavailable;
   }
 
   private async coveredRead<T>(signal: AbortSignal, read: () => Promise<T>): Promise<T> {
@@ -1217,8 +1227,11 @@ export class OpenCodeV2Provider implements ChatProvider {
     // session event invalidates its entry (including an in-flight read),
     // and reconnect starts cold because V2 offers no provider event replay.
     signal.throwIfAborted();
-    const messages = await this.historyReuse.read(sessionId, this.streamConnected ? String(this.streamGeneration) : undefined,
-      () => this.coveredRead(signal, () => this.readAllMessages(sessionId, signal)));
+    const messages = await this.historyReuse.readShared(sessionId, this.streamConnected ? String(this.streamGeneration) : undefined,
+      ownerSignal => {
+        const sharedSignal = this.readSignal(ownerSignal);
+        return this.coveredRead(sharedSignal, () => this.readAllMessages(sessionId, sharedSignal));
+      }, signal);
     signal.throwIfAborted();
     return messages;
   }
@@ -2139,7 +2152,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       signal.throwIfAborted();
     } catch (error) {
       if (isLookupMiss(error)) return { info: null, foreignWorkspace: false };
-      throw new Error(`OpenCode session lookup failed: ${stringify(error)}`);
+      throw new Error(`OpenCode session lookup failed: ${stringify(error)}`, { cause: error });
     }
     return this.observeSessionRecord(info, sessionId);
   }
@@ -2341,6 +2354,11 @@ function isLookupMiss(error: unknown): boolean {
   if (tag && /notfound/i.test(tag)) return true;
   const message = error instanceof Error ? error.message : stringValue(record.message);
   return message !== undefined && /\bnot found\b/i.test(message);
+}
+
+function isLookupDenied(error: unknown): boolean {
+  return [...causes(error)].some(record => record._tag === "ForbiddenError"
+    || record.name === "ClientError" && record.reason === "UnexpectedStatus" && asRecord(record.cause).status === 403);
 }
 
 function toSession(info: unknown): ProviderSession {

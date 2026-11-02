@@ -3362,6 +3362,11 @@ export class ChatAdapter {
       const current = { controller, promise: Promise.resolve(), callers: 0 };
       this.nativeAccountingReads.set(key, current);
       const epoch = this.attributionReadEpoch(key);
+      // Completeness belongs to this refresh, not an earlier successful read.
+      // Clear it while this owner is current, before any await: failure,
+      // expiry or incomplete descendants must also leave ancestors retryable.
+      // Retired reads cannot clear a newer owner's successful stamp later.
+      this.completeAttributions.delete(key);
       current.promise = Promise.race([
         this.reconstructAttributionRead(key, childId, epoch, new Set([...ancestry, childId]), signal),
         retired,
@@ -3422,6 +3427,7 @@ export class ChatAdapter {
         signal?.throwIfAborted();
         const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT, ...(signal ? { signal } : {}) });
         signal?.throwIfAborted();
+        if (page.visibleDescendantsIncomplete) descendantsIncomplete = true;
         sessionCostUsd = page.sessionCostUsd;
         for (const reported of page.accounting) {
           if (reported.usage) byMessage.set(reported.messageId, reported.usage);

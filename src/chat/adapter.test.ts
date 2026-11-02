@@ -3004,6 +3004,84 @@ describe("native optional accounting ownership", () => {
   const priced = (cost: number): ProviderHistoryPage => ({ items: [], accounting: [{ messageId: "priced", createdAt: 2, model: "Stored", usage: { input: 10, costUsd: cost } }], sessionCostUsd: cost });
   const row = (snapshot: { items: ConversationItem[] }) => snapshot.items.find(item => item.id === "launch") as ToolItem;
 
+  for (const unavailable of ["incomplete", "failed", "expired"] as const) test(`previously complete nested accounting retries immediately after a ${unavailable} refresh`, async () => {
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }, { ...fixtureSession("leaf"), parentId: "grandchild" }];
+    let phase: "healthy" | "unavailable" | "recovered" = "healthy";
+    const reads = { child: 0, grandchild: 0, leaf: 0 };
+    const held = Promise.withResolvers<void>(), returned = Promise.withResolvers<void>();
+    provider.listMessages = async (id, _options) => {
+      if (id === "parent") return { items: [launcher("launch", "child")], accounting: [] };
+      if (id === "child") { reads.child++; return { ...priced(0.5), items: [launcher("grandchild-launch", "grandchild")] }; }
+      if (id === "leaf") { reads.leaf++; return priced(phase === "healthy" ? 0.125 : 0.75); }
+      reads.grandchild++;
+      if (phase === "unavailable") {
+        if (unavailable === "failed") throw new Error("Temporary grandchild read failure");
+        if (unavailable === "expired") {
+          await held.promise; returned.resolve();
+          return { ...priced(9), items: [] }; // A retired transport deliberately returns late.
+        }
+        return { ...priced(0.25), visibleDescendantsIncomplete: true as const };
+      }
+      return { ...priced(0.25), items: [launcher("leaf-launch", "leaf")] };
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0, accountingReadTimeoutMs: 60 });
+    const clock = spyOn(Date, "now").mockReturnValue(Date.now());
+    try {
+      const first = await adapter.history("parent");
+      expect(row(first).workerSession?.costUsd).toBe(0.5);
+      expect(row(first).descendants).toContainEqual(expect.objectContaining({ conversationId: "leaf", usage: expect.objectContaining({ costUsd: 0.125 }) }));
+      expect(reads).toEqual({ child: 1, grandchild: 1, leaf: 1 });
+      clock.mockReturnValue(Date.now() + 31_000);
+      phase = "unavailable";
+      const partial = await adapter.history("parent");
+      expect(row(partial).workerSession?.costUsd).toBe(0.5);
+      expect(reads).toEqual({ child: 2, grandchild: 2, leaf: 1 });
+      phase = "recovered";
+      const retry = await adapter.history("parent");
+      expect(reads).toEqual({ child: 3, grandchild: 3, leaf: 2 });
+      expect(row(retry).workerSession?.costUsd).toBe(0.5);
+      expect(row(retry).descendants).toContainEqual(expect.objectContaining({ conversationId: "grandchild", usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      expect(row(retry).descendants).toContainEqual(expect.objectContaining({ conversationId: "leaf", usage: expect.objectContaining({ costUsd: 0.75 }) }));
+      if (unavailable === "expired") { held.resolve(); await returned.promise; }
+      const retained = await adapter.history("parent");
+      expect(reads).toEqual({ child: 3, grandchild: 3, leaf: 2 });
+      expect(row(retained).descendants).toContainEqual(expect.objectContaining({ conversationId: "grandchild", usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      expect(row(retained).descendants).toContainEqual(expect.objectContaining({ conversationId: "leaf", usage: expect.objectContaining({ costUsd: 0.75 }) }));
+    } finally { held.resolve(); clock.mockRestore(); await adapter.dispose(); }
+  });
+
+  for (const incompletePage of ["newest", "oldest"] as const) test(`incomplete ${incompletePage} accounting page preserves own cost and retries visible descendants`, async () => {
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("nested"), parentId: "child" }];
+    let incomplete = true, childPages = 0;
+    provider.listMessages = async (id, options: { cursor?: string; limit: number; signal?: AbortSignal }) => {
+      if (id === "parent") return { items: [launcher("launch", "child")], accounting: [] };
+      if (id === "nested") return priced(0.25);
+      childPages++;
+      const oldest = options.cursor !== undefined;
+      return {
+        ...(oldest ? priced(0.5) : { accounting: [] }),
+        items: oldest && !incomplete ? [launcher("nested-launch", "nested")] : [],
+        ...(!oldest ? { nextCursor: "older" } : {}),
+        ...(incomplete && oldest === (incompletePage === "oldest") ? { visibleDescendantsIncomplete: true as const } : {}),
+      };
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    try {
+      const first = await adapter.history("parent");
+      expect(row(first).workerSession?.costUsd).toBe(0.5);
+      expect(row(first).descendants ?? []).toEqual([]);
+      incomplete = false;
+      const retry = await adapter.history("parent");
+      expect(childPages).toBe(4);
+      expect(row(retry).workerSession?.costUsd).toBe(0.5);
+      expect(row(retry).descendants).toContainEqual(expect.objectContaining({ conversationId: "nested", usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      await adapter.history("parent");
+      expect(childPages).toBe(4);
+    } finally { await adapter.dispose(); }
+  });
+
   for (const ending of ["expired", "cancelled", "replaced"] as const) test(`${ending} nested owner fences late pages and permits current retry`, async () => {
     const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("nested"), parentId: "child" }];

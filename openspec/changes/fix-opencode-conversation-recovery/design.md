@@ -6,6 +6,8 @@ See `proposal.md` for motivation and the retrospective planning note. The provid
 
 The implementation began on `dcc486a`. During PR preparation, the user approved integrating upstream `389221a` (#572), preserving its independent activity/control evidence and contradiction handling alongside optional history enrichment. Integrated verification and fresh review must cover that combined state before publication.
 
+Later PR review reproduced two remaining gaps: provider message coalescing let an optional caller's deadline abort a required reader, and omitted descendant links could still satisfy the accounting completeness cache. The user approved correcting both. Upstream `ffd92c36` subsequently changes only the Claude SDK lock state; its exact dependencies were restored in an isolated task-owned directory with scripts disabled, leaving shared dependencies untouched.
+
 Round-one review found that the adapter subsequently reconstructed launcher accounting through child history without a separate deadline or cancellation signal. That path could defeat the provider's graceful degradation. The correction below bounds that work. The review also identified duplicated worker identity recipes between the worker fold and exclusion-only evidence, now shared through pure constructors.
 
 ## Goals / Non-Goals
@@ -38,11 +40,19 @@ Parent history will retain already available accounting when enrichment cannot f
 
 Alternatives rejected: increasing the whole-history timeout again, which only delays failure; and racing only the caller's await while leaving an unbounded, authoritative reconstruction running underneath.
 
+Shared provider message I/O must likewise belong to the shared operation rather than its first waiter. Each optional or required reader keeps its own cancellation window; departure retires the transport only when no current reader needs it. Owner lifetime, cache invalidation, stream generation and disposal remain bounded, and a retired owner cannot overwrite or remove a newer cached/in-flight read. Existing legacy-provider reuse behavior remains unchanged.
+
+A successful normalized page is not necessarily complete descendant topology. The provider will carry an internal visible-enrichment incompleteness marker into accounting reconstruction. Known own accounting remains available, but any incomplete visible descendant coverage prevents the completeness stamp and permits a later parent refresh to retry. Hidden-suffix-only enrichment failures do not make the visible accounting tree incomplete. This marker stays below the public wire contract and remains separate from inbox-delivery visibility evidence.
+
+Completeness must describe the current reconstruction, not merely the presence of an older cache stamp. If a previously complete nested tree becomes incomplete on refresh, its old completeness cannot make an ancestor appear freshly complete or delay the next retry.
+
 ### 3. Share only the native identity construction
 
 Extract small pure constructors used by the worker fold and the exclusion-only collector. Preserve the existing string identities and validation. Candidate collection stays separate from ownership verification, worker-state folding, and Stop authorization.
 
 Alternative rejected: running a permissive worker fold to recover exclusion identities. It would unnecessarily mix presentation evidence with control trust.
+
+The PR review's proposed originless-row fallback is unnecessary: initial normalized insertions record an origin, and `finishHistory()` updates only already-present rows. Preserve that invariant rather than treating an unknown origin as permission to hide visible work.
 
 ### 4. Verify through the existing public seams
 
