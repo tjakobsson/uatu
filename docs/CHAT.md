@@ -638,6 +638,9 @@ Positive agent child-identity or parent-ownership contradictions also revoke
 retained occurrence controls and aliases, including concurrent Stop validations.
 A delayed older owned response cannot restore them; an incomplete or missing
 ownership response only withholds that action rather than inventing revocation.
+Occurrence-aware reverted visibility, stream verification and output reads use
+the same contradiction rules; they cannot leave an older Stop proof usable
+after observing a replacement.
 
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover

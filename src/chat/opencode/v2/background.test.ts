@@ -536,6 +536,30 @@ for (const firstSeen of [false, true]) test(`positive inventory contradiction re
   controlOracle(controls);
 });
 
+test("agent ownership contradiction retires bounded retained records and aliases independently of aggregate workers", () => {
+  const controls = new BackgroundControls();
+  const original = controlFixture("original", "parent", "child", "agent"), alias = controlFixture("alias", "parent", "child", "agent");
+  const launches = [...original.evidence.launches, ...alias.evidence.launches];
+  const canonical = { ...original.evidence, launches }, foldedAlias = { ...alias.evidence, launches };
+  const healthy = [controlFixture("other-child", "parent", "other-child", "agent"),
+    controlFixture("other-parent", "other-parent", "child", "agent"), controlFixture("same-id-shell", "parent", "child", "shell")];
+  const read = controls.beginRead("parent", true, false, true);
+  expect(controls.project(original.item, canonical, read).control?.available).toBe(true);
+  expect(controls.project(alias.item, foldedAlias, read).control?.available).toBe(true);
+  for (const fixture of healthy) expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(true);
+  controls.invalidateAgentOwnership("parent", "child");
+  expect(controls.proof(original.item.taskId)).toBeUndefined();
+  expect(controls.proof(alias.item.taskId)).toBeUndefined();
+  expect(controls.project(original.item, canonical, read).control?.available).toBe(false);
+  expect(controls.project(alias.item, foldedAlias, read).control?.available).toBe(false);
+  for (const fixture of healthy) expect(controls.project(fixture.item, fixture.evidence).control?.available).toBe(true);
+  controls.endRead(read, true);
+  const recovered = controls.beginRead("parent", true, true, true);
+  expect(controls.project(alias.item, alias.evidence, recovered).control?.available).toBe(false);
+  controls.endRead(recovered, true);
+  controlOracle(controls);
+});
+
 test("initial parent creation and execution do not revoke a positively identified first worker", () => {
   const fixture = controlFixture("initial", "parent", "child", "agent");
   const controls = new BackgroundControls();

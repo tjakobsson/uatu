@@ -434,7 +434,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (fact.reportedChild !== child) continue;
         const taskId = `v2:${sessionId}:${fact.call}`;
         const occurrence = this.controls.basis(taskId) ?? this.eventMemory?.workers.occurrence(taskId);
-        if (occurrence) this.controls.invalidateOccurrence(occurrence);
+        if (occurrence?.kind === "agent" && occurrence.parent === sessionId && occurrence.worker === child) this.revokeWorkerOccurrence(occurrence);
       }
       this.eventMemory?.workers.invalidateActivity(child);
     });
@@ -553,12 +553,15 @@ export class OpenCodeV2Provider implements ChatProvider {
         let confirmed = false;
         if (task.taskType === "agent" && task.childConversationId === occurrence.worker) {
           const child = await this.lookupChild(occurrence.worker, signal);
-          if (child?.parentID !== sessionId) throw new Error("Background visibility ownership unavailable");
+          const ownership = this.agentOwnership(occurrence.worker, sessionId, child);
+          if (ownership === "contradicted") this.revokeWorkerOccurrence(occurrence);
+          if (ownership !== "confirmed") throw new Error("Background visibility ownership unavailable");
           active ??= await this.coveredRead(signal, () => this.client.session.active({ signal }));
           confirmed = active[occurrence.worker] !== undefined;
         } else if (task.taskType === "shell" && task.outputFile === `shell:${occurrence.worker}`) {
           const shell = await this.coveredRead(signal, () => this.client.shell.get({ id: occurrence.worker, ...this.scope }, { signal }));
-          confirmed = shell.data.metadata.sessionID === sessionId;
+          const inventory = this.shellInventory(sessionId, occurrence, shell.data);
+          confirmed = inventory.confirmed && inventory.controlConfirmed;
         }
         signal.throwIfAborted();
         // Visibility is not authorization. A gap/revocation can leave a known
@@ -644,33 +647,11 @@ export class OpenCodeV2Provider implements ChatProvider {
       let inventoryShellEnd: number | undefined;
       if (item.taskType === "shell" && item.outputFile?.startsWith("shell:")) {
         const shell = await this.client.shell.get({ id: item.outputFile.slice(6), ...this.scope }, { signal }).catch(() => undefined);
-        // Exit is not job settlement: capture may still be pending. The
-        // unique owned shell remains controllable until its job result arrives.
-        const native = asRecord(shell?.data), time = asRecord(native.time);
-        const owner = asRecord(native.metadata).sessionID;
-        confirmed = owner === sessionId;
-        const command = shellCommandFingerprint(native.command);
-        const identity = shellBirthIdentity(native);
-        const inventoryIdentity = occurrence ? this.controls.shellInventory(occurrence, identity) : "unknown";
-        shellControlConfirmed = inventoryIdentity === "matched" && command !== undefined && native.id === occurrence?.worker
-          && typeof native.status === "string" && ["running", "exited", "timeout", "killed"].includes(native.status)
-          && (native.pid === undefined || Number.isSafeInteger(native.pid) && Number(native.pid) > 0);
-        // Inventory can expose reuse before its live birth arrives. A known
-        // foreign owner or different immutable command revokes A; missing or
-        // failed reads only withhold current confirmation, never invent reuse.
-        const contradicted = occurrence && shell && (typeof owner === "string" && owner.length > 0 && !confirmed
-          || typeof native.id === "string" && native.id.length > 0 && native.id !== occurrence.worker
-          || inventoryIdentity === "contradicted"
-          || this.eventMemory?.workers.shellIdentityContradicted(occurrence.worker, identity)
-          || command !== undefined && occurrence.launches.some(launch => launch.commandFingerprint !== undefined && launch.commandFingerprint !== command));
-        if (contradicted) {
-          this.controls.invalidateOccurrence(occurrence);
-          this.eventMemory?.workers.invalidateActivity(occurrence.worker);
-          confirmed = false;
-        }
-        const matched = confirmed && command !== undefined && occurrence?.launches.every(launch => launch.commandFingerprint === command);
-        shellExecuting = matched === true && native.status === "running";
-        inventoryShellEnd = matched && ["exited", "timeout", "killed"].includes(String(native.status)) ? numberField(time.completed) : undefined;
+        const inventory = this.shellInventory(sessionId, occurrence, shell?.data);
+        confirmed = inventory.confirmed;
+        shellControlConfirmed = inventory.controlConfirmed;
+        shellExecuting = inventory.executing;
+        inventoryShellEnd = inventory.endedAt;
       }
       // Neither a successful but inconclusive lookup nor an absent active
       // child is positive verification for an overlapping transcript caller.
@@ -984,6 +965,56 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
   }
 
+  private revokeWorkerOccurrence(occurrence: WorkerOccurrenceEvidence): void {
+    this.controls.invalidateOccurrence(occurrence);
+    this.eventMemory?.workers.invalidateActivity(occurrence.worker);
+  }
+
+  private agentOwnership(child: string, parent: string, info: SessionRecord | null): "confirmed" | "contradicted" | "unknown" {
+    const id = stringValue(info?.id), owner = stringValue(info?.parentID);
+    if (id && id !== child || owner && owner !== parent) return "contradicted";
+    return id === child && owner === parent ? "confirmed" : "unknown";
+  }
+
+  private revokeChildOccurrences(child: string, parent: string): void {
+    this.controls.invalidateAgentOwnership(parent, child);
+    // A current lookup revokes only already-associated occurrences, never a
+    // different child selected by a new launcher or an invented alias transfer.
+    for (const { item, parent: ownedParent } of this.eventMemory?.workers.childTasks(child) ?? []) {
+      const occurrence = this.eventMemory?.workers.occurrence(item.taskId);
+      if (ownedParent === parent && occurrence?.kind === "agent" && occurrence.worker === child) this.revokeWorkerOccurrence(occurrence);
+    }
+    for (const validation of this.stopValidations) {
+      const occurrence = validation.occurrence;
+      if (occurrence?.kind === "agent" && occurrence.parent === parent && occurrence.worker === child) this.revokeWorkerOccurrence(occurrence);
+    }
+  }
+
+  private shellInventory(parent: string, occurrence: WorkerOccurrenceEvidence | undefined, value: unknown) {
+    const native = asRecord(value), time = asRecord(native.time), owner = asRecord(native.metadata).sessionID;
+    let confirmed = owner === parent;
+    const command = shellCommandFingerprint(native.command), identity = shellBirthIdentity(native);
+    const inventoryIdentity = occurrence ? this.controls.shellInventory(occurrence, identity) : "unknown";
+    const controlConfirmed = inventoryIdentity === "matched" && command !== undefined && native.id === occurrence?.worker
+      && typeof native.status === "string" && ["running", "exited", "timeout", "killed"].includes(native.status)
+      && (native.pid === undefined || Number.isSafeInteger(native.pid) && Number(native.pid) > 0);
+    // Missing/malformed facts withhold confirmation. Positive immutable
+    // contradictions revoke A even before B's live birth has been observed.
+    if (occurrence && (stringValue(owner) && !confirmed
+      || stringValue(native.id) && native.id !== occurrence.worker
+      || inventoryIdentity === "contradicted"
+      || this.eventMemory?.workers.shellIdentityContradicted(occurrence.worker, identity)
+      || command !== undefined && occurrence.launches.some(launch => launch.commandFingerprint !== undefined && launch.commandFingerprint !== command))) {
+      this.revokeWorkerOccurrence(occurrence);
+      confirmed = false;
+    }
+    const matched = confirmed && command !== undefined && occurrence?.launches.every(launch => launch.commandFingerprint === command) === true;
+    // Activity can be independently positive without Stop's retained birth.
+    // Native exit is not job settlement: pending capture remains stoppable.
+    return { confirmed, controlConfirmed, matched, executing: matched && native.status === "running",
+      endedAt: matched && ["exited", "timeout", "killed"].includes(String(native.status)) ? numberField(time.completed) : undefined };
+  }
+
   private lookupChild(sessionId: string, signal: AbortSignal): Promise<SessionRecord | null> {
     signal.throwIfAborted();
     // No pending queue: at capacity the stream preserves unrelated parts and
@@ -1015,10 +1046,12 @@ export class OpenCodeV2Provider implements ChatProvider {
         const promise = this.childParents.read(child, this.streamConnected ? String(this.streamGeneration) : undefined, async () => {
           const info = await this.lookupChild(child, sharedSignal);
           const actualParent = stringValue(info?.parentID);
-          const actualChild = stringValue(info?.id);
           for (const check of this.ownershipChecks) if (check.child === child && !check.changed
-            && (actualChild && actualChild !== child || actualParent && actualParent !== check.parent)) check.contradicted?.();
-          if (actualChild !== child) throw UNVERIFIED_CHILD;
+            && this.agentOwnership(child, check.parent, info) === "contradicted") {
+            this.revokeChildOccurrences(child, check.parent);
+            check.contradicted?.();
+          }
+          if (stringValue(info?.id) !== child) throw UNVERIFIED_CHILD;
           if (!actualParent || ![...this.ownershipChecks].some(check => check.child === child && check.parent === actualParent && !check.changed)) throw UNVERIFIED_CHILD;
           return [child, actualParent] as const;
         });
@@ -1754,15 +1787,9 @@ export class OpenCodeV2Provider implements ChatProvider {
         // authorization. Re-read confinement after all execution evidence.
         const child = await this.lookupChild(task.childConversationId, signal);
         assertAuthorizationCurrent();
-        if (child?.parentID !== sessionId || child.id !== task.childConversationId) {
-          // A positive foreign owner contradicts the retained occurrence too;
-          // do not later publish its presentation-continuity reference from
-          // the still-cached historical parent relationship.
-          if (stringValue(child?.parentID) && child!.parentID !== sessionId
-            || stringValue(child?.id) && child!.id !== task.childConversationId) {
-            this.controls.invalidateOccurrence(controlBasis.basis);
-            this.eventMemory?.workers.invalidateActivity(task.childConversationId);
-          }
+        const ownership = this.agentOwnership(task.childConversationId, sessionId, child);
+        if (ownership !== "confirmed") {
+          if (ownership === "contradicted") this.revokeWorkerOccurrence(controlBasis.basis);
           throw new BackgroundTaskUnavailableError("Worker ownership is no longer confirmed");
         }
       }
@@ -1796,9 +1823,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     const task = (await this.reconcileBackgroundTasks(sessionId)).find(task => task.taskId === taskId);
     if (!task || task.taskType !== "shell" || !task.outputFile?.startsWith("shell:")) throw new BackgroundTaskUnavailableError("Shell output is unavailable");
     const id = task.outputFile.slice(6);
+    const retained = this.controls.basis(taskId) ?? this.eventMemory?.workers.occurrence(taskId);
+    const occurrence = retained?.kind === "shell" && retained.parent === sessionId && retained.worker === id ? retained : undefined;
     try {
       const shell = await this.client.shell.get({ id, ...this.scope });
-      if (shell.data.metadata.sessionID !== sessionId) throw new BackgroundTaskUnavailableError("Shell output is unavailable");
+      const inventory = this.shellInventory(sessionId, occurrence, shell.data);
+      if (!inventory.confirmed || occurrence && !inventory.matched) throw new BackgroundTaskUnavailableError("Shell output is unavailable");
       const limit = Math.min(TASK_OUTPUT_TAIL_MAX_BYTES, Math.max(1, Math.floor(options.tailBytes)));
       const latest = await this.client.shell.output({ id, ...this.scope, cursor: Number.MAX_SAFE_INTEGER });
       const cursor = Math.max(0, latest.data.size - limit);

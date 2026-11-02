@@ -3592,6 +3592,7 @@ Worker Stop SHALL target a retained, verified native occurrence. Display-record 
 - **WHEN** one fresh validation positively observes foreign ownership of the retained agent while another Stop still awaits its final ownership response
 - **THEN** the contradiction revokes the retained occurrence and aliases so the second Stop cannot dispatch an interrupt from an older owned response
 - **AND** missing or incomplete ownership responses withhold that action without manufacturing a permanent foreign-owner contradiction
+- **AND** occurrence-aware reverted visibility, stream ownership and output reads apply the same positive-contradiction revocation, so their observations cannot leave another Stop authorized by an older response
 
 #### Scenario: Proven replay differs from ambiguous old-looking evidence
 - **WHEN** a previously consumed invocation is identified by matching native identity, stamp, semantic fingerprint and its established occurrence link

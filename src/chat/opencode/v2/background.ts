@@ -297,6 +297,12 @@ export class BackgroundControls {
     for (const other of this.records.values()) if (!other.unavailable && other.parent === candidate.parent
       && other.evidence?.launches.some(launch => candidate.launches.some(alias => alias.call === launch.call))) this.retire(other);
   }
+  /** Control records can outlive aggregate worker projection after saturation.
+   * A positive ownership contradiction still retires their associated agents. */
+  invalidateAgentOwnership(parent: string, worker: string): void {
+    for (const record of this.records.values()) if (record.parent === parent
+      && record.evidence?.kind === "agent" && record.evidence.worker === worker) this.retire(record);
+  }
   /** Only a retained live birth supplies the baseline, never current GET or
    * history. Missing fields softly withhold control; known differences revoke. */
   shellInventory(candidate: WorkerOccurrenceEvidence, current: ShellBirthIdentity): "matched" | "unknown" | "contradicted" {
