@@ -2,7 +2,9 @@
 
 ## Context
 
-See `proposal.md` for motivation and the retrospective planning note. The current uncommitted provider patch separates optional child enrichment from required parent history. The adapter uses a 25-second whole-history deadline, below the browser's ordinary 30-second read deadline; optional provider enrichment uses one second, while strict worker recovery retains five seconds.
+See `proposal.md` for motivation and the retrospective planning note. The provider patch separates optional child enrichment from required parent history. The adapter uses a 25-second whole-history deadline, below the browser's ordinary 30-second read deadline; optional provider enrichment uses one second, while strict worker recovery retains five seconds.
+
+The implementation began on `dcc486a`. During PR preparation, the user approved integrating upstream `389221a` (#572), preserving its independent activity/control evidence and contradiction handling alongside optional history enrichment. Integrated verification and fresh review must cover that combined state before publication.
 
 Round-one review found that the adapter subsequently reconstructed launcher accounting through child history without a separate deadline or cancellation signal. That path could defeat the provider's graceful degradation. The correction below bounds that work. The review also identified duplicated worker identity recipes between the worker fold and exclusion-only evidence, now shared through pure constructors.
 

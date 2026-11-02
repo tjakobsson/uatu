@@ -645,7 +645,7 @@ describe("workspace activity", () => {
     });
     const changes = await service.subscribeActivity();
     expect((await changes.next()).done).toBe(false);
-    expect(await service.activity()).toEqual({ working: false, awaiting: false });
+    expect(await service.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     // Watching the summary starts nothing: the hub watches every running
     // workspace, and watching must not spawn an agent.
     expect(providerCalls).toBe(0);
@@ -655,12 +655,12 @@ describe("workspace activity", () => {
     expect((await changes.next()).done).toBe(false);
     built.at(-1)!.projectionForTests("conversation").apply({ kind: "status", status: "running" });
     expect((await changes.next()).done).toBe(false);
-    expect(await service.activity()).toEqual({ working: true, awaiting: false });
+    expect(await service.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
 
     // A retry retires the adapter, and its turn with it.
     await service.retry();
     expect((await changes.next()).done).toBe(false);
-    expect(await service.activity()).toEqual({ working: false, awaiting: false });
+    expect(await service.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
 
     await service.dispose();
     expect((await changes.next()).done).toBe(true);

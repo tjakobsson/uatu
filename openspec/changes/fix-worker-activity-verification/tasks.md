@@ -1,0 +1,453 @@
+# Tasks
+
+## 1. Permanent verification regressions and first-launch association
+
+- [x] 1.1 Obtain approval for any needed dependency restore/browser download in this worktree; verify locked versions and record baseline checks before attributing failures to this change.
+- [x] 1.2 Promote sanitized public-provider probes into `provider.test.ts` for child birth during launch, initial start before/after completed content, same-millisecond and epoch/relative clocks, history overtaking and duplicate delivery; demonstrate the positive baselines and expected failing activity assertions without private instrumentation or absolute paths.
+- [x] 1.3 Correct parent-versus-child birth association using positive native ownership/invocation/start proof; verify fresh owned activity passes while foreign birth, reused identities, contradictory clocks/commands and competing invocations remain refused.
+- [x] 1.4 Bind a late initial execution start to the pending newborn launch and enrich compatible known-launch evidence monotonically; verify the equal-birth late-start case independently, sparse content/success ordering, replay idempotence and rejection of a later reused-child execution.
+- [x] 1.5 Preserve retained revocation, gap, capacity, in-flight invalidation and healthy-target behavior; run the full background/provider/normalization control suites and assert forbidden Stop cases make zero native mutations.
+- [x] 1.6 Document positive first-launch evidence and actual native-versus-synthetic evidence limits in `docs/CHAT.md`; verify descriptions against the permanent regressions without claiming exclusive screenshot attribution.
+
+## 2. Independent task activity evidence and canonical requests
+
+- [x] 2.1 Add activity, provenance, stable execution identity and independent Stop availability/reason DTOs through types, provider events, wire validation and replay; verify round trips, invalid-field rejection and unchanged V1/Claude authoritative live/terminal behavior.
+- [x] 2.2 Derive verified-task, active-session-only, unavailable and occurrence-ended states from current scoped native evidence independently of the control ledger; verify active-but-uncontrollable, historical-running-only, reused-active-child, shell-exit/capture and failed-read cases.
+- [x] 2.3 Retain truthful last-positive-observation/end clocks and invalidate freshness on observation gaps/generation replacement; verify stale snapshots cannot overwrite newer evidence and quiet covered executions do not acquire a fabricated end.
+- [x] 2.4 Link canonical pending permissions/questions to current worker occurrences using ownership and execution/tool references; verify same IDs and main-session cards survive, unlinked requests retain attention, reused-child requests are not attached to old tasks and one answer sends one native reply.
+- [x] 2.5 Update workspace activity aggregation to use independent activity and retain needs-answer priority without treating unresolved disappearance as finished; verify selected/unselected parents, missed events, duplicate terminal notices and no false successful push completion.
+- [x] 2.6 Update affected task/request API schemas, examples and `docs/CHAT.md` in this slice; verify API contracts/route coverage and typecheck with existing approved dependencies.
+
+## 3. Truthful shared worker presentation and automatic recovery
+
+- [x] 3.1 Implement the shared Working/Unresolved/Finished classifier, deduplication and ordering in worker-state/compact-work/background helpers; verify every activity state, failed/stopped Finished grouping, zero-category omission and no doubled worker aliases.
+- [x] 3.2 Render Working, Needs your answer, Session active · task unverified, Checking status…, Status unavailable · last seen … and Ended · result unavailable in compact rows and task details; verify unit/DOM tests show the exact labels and consistent counts on desktop/touch.
+- [x] 3.3 Stop task-running glyphs and growing execution timers for unobservable/ambiguous/ended states, retaining fixed known end/duration and explicit missing-time wording; verify fake-clock tests across live/replay/reconnect and inspection repaint.
+- [x] 3.4 End Checking presentation after 10 seconds per genuine cycle while preserving existing bounded recovery budgets/backoff, automatic rearming and generation cancellation; verify hung/failed/inconclusive reads, repeated repaint, unrelated events and valid late results without a manual Check again control.
+- [x] 3.5 Show disabled Stop reasons as normal task-details text reachable by keyboard and touch, and link Needs your answer to the existing canonical card; verify focus restoration, reduced motion, target separation and unchanged parent/worker Stop scopes.
+- [x] 3.6 Align `docs/CHAT.md` with labels, observation clocks, automatic recovery and independent control evidence; verify browser cases at narrow phone/tablet/desktop sizes preserve dock geometry, scroll ownership, drafts and deliberate disclosures.
+
+## 4. Private durable dismissal state
+
+- [x] 4.1 Implement versioned deterministic execution dismissal keys and positive alias resolution without child-only identity, including a separate notification-scoped provisional identity. Preserve completed qualified-identity safeguards; verify provisional dismissal before launch, replay/restart stability, source/worker contradiction isolation, exclusion of clocks/status/display text, refusal of unproven notification-to-launch transfer, current-activity/request visibility precedence and existing alias/entry/byte budgets without eviction. Exact launches may reappear when the consumed native data cannot prove the association.
+- [x] 4.2 Add a dedicated private Hub store with serialized per-entry writes, conditional revision retirement, bounded payload/entries and atomic mode-0600 persistence; verify concurrent additions, idempotence, restart, corrupt/unsafe files, save failures and explicit full-store refusal without silent eviction.
+- [x] 4.3 Add Hub-intercepted personal dismissal reads/mutations using authenticated account/stable workspace scope and existing origin protection; verify principal-selector rejection, malformed/oversized/foreign targets, no-store responses, base-path routing and zero provider mutations.
+- [x] 4.4 Implement activity/request visibility precedence and durable stale-mark retirement using authoritative child evidence and conditional revisions; verify delayed stale dismissals/responses, active-then-unavailable transitions, alias changes and restart cannot reactivate successfully retired marks. On failed/unconfirmed retirement, preserve chat availability, report the storage failure and verify the user-approved limited restart exception never hides currently verified activity or pending requests.
+- [x] 4.5 Wire dismissal cleanup into transactional/retryable workspace forget; verify all accounts' marks are removed without affecting other workspaces, personal preferences or provider history.
+- [x] 4.6 Publish the personal API contract and document account/workspace/execution scope, limits and failure behavior; verify contract tests plus independent two-account store/API integration tests before client adoption.
+
+## 5. Private single-channel synchronization and dismissal UI
+
+- [x] 5.1 Add a bounded no-cursor `personal` invalidation to the shared live protocol and endpoint, routed by principal/workspace outside shared broker fanout; verify attach/reconnect, commit-after-save ordering, unsubscribe/sign-out cleanup, account isolation and unchanged single-connection/subscription/backlog bounds.
+- [x] 5.2 Add the client subscription/read coordinator with coalescing, authoritative reconnect/selection reads and obsolete-response fences; verify account/workspace/conversation changes and missed invalidations cannot apply foreign/stale visibility or navigation.
+- [x] 5.3 Add individual presentation-only Dismiss for unavailable/ended rows and preserve Dismiss finished, using durable personal state in Hub mode; verify visible-only counts, disappearance of an empty card, no Restore/dismissed count and no provider lifecycle/request mutation.
+- [x] 5.4 Surface read/save failures without silently claiming local or synchronized success, and ignore legacy browser marks in Hub mode; verify unavailable persistence leaves/restores rows and standalone source/test presentation remains explicitly local.
+- [x] 5.5 Exercise two browsers for one account and a second account on one workspace; verify private cross-device convergence, automatic active/request resurfacing, fresh-execution visibility, restart/reconnect recovery and preserved canonical main-session answering.
+- [x] 5.6 Update SSE examples, protocol/API revision declarations and dismissal documentation; verify published schema/route coverage, base-path discipline and no extra long-lived HTTP connection in browser tests.
+
+## 6. Integrated acceptance and independent review
+
+- [ ] 6.1 Run full unit/CI tests, typecheck, API validation, license checks, build/smoke and relevant desktop/mobile browser suites using approved existing tooling; record actual pass/fail counts and separately reproduce baseline failures instead of publishing unfinished CI claims.
+- [ ] 6.2 Obtain fresh independent implementation review of the full target-branch diff, especially occurrence admission, control boundaries, canonical request handling and private-state races; correct findings and renew affected checks/review.
+- [ ] 6.3 Review changed artifacts and metadata for publication safety, reconcile tasks/docs/specs with verified behavior and determine latest-stable release-note scope; verify strict OpenSpec validation and sync deltas after acceptance. Archive after merge, per the user's explicit workflow correction; pending archive does not block the PR. Leave unrelated completed changes untouched.
+- [ ] 6.4 Present verified results, remaining limits and proposed PR text for approval, including draft-versus-ready choice; verify no publish, live deployment, service or authentication change occurs without its required authorization.
+
+## Verification evidence (2026-10-30)
+
+- Pre-loop `bun run test:ci`: **7,451 passed, 16 skipped, 0 failed**, 317 files, 184.29 seconds. Log: `~/.cache/opencode/scratch/worker-activity-implementation-20261030/lead/full-unit-final.log`. The earlier disk-exhausted run is not acceptance evidence; the subsequent two-failure run exposed an obsolete all-aliases assertion and missing black-box operation coverage, both corrected and verified in an 89-test integration rerun. Final-loop renewal is recorded below.
+- Final typecheck, API validation, build and compiled smoke passed. API lint retains the existing `WorkspaceConflict/allOf` warning. Dependency audit reports no moderate-or-higher advisory and one low KaTeX advisory; license checks audited 594 installed packages.
+- Worker-list browser acceptance: **14/14 Chromium/WebKit cases passed**, including the unchanged geometry budgets and a 390→320→390 shrink regression. Artifacts: `~/.cache/opencode/scratch/worker-activity-implementation-20261030/terminal-browser/`. These controlled source-harness cases do not replace authenticated Hub cross-device acceptance.
+- Separate native worker sessions authored and reviewed substantive corrections. Renewed provider review passed 251 targeted tests and nine negative probes; bounded Checking review passed 95 tests plus eight race/fence probes; dismissal review passed 86 tests and additional composed probes; geometry review passed 42 tests. No remaining finding in those reviewed slices.
+- Authenticated Hub dismissal renewal: **2/2 Chromium/WebKit cases passed** with three independent contexts, two accounts, private API/SSE convergence and isolation, alias reordering, activity retirement, fresh-execution isolation, offline recovery and Hub listener/store recreation from disk. Each page retains one `/api/hub/live` EventSource. Evidence: `test-results/worker-dismissals-hub.e2e.*--Hub-listener-store-restart-e2e/` acceptance JSON and screenshots. These cases use controlled child DTOs; they do not prove native request answering or an OS-process restart.
+- Pre-loop authenticated renewal: **4/4 Chromium/WebKit browser cases passed**, including native permission and question requests through the real provider/adapter/Hub/browser with a schema-correct synthetic OpenCode 2.1.2 fixture. Each engine sent exactly one permission reply and one question reply for the original canonical card/child, with no fabricated durable request fields. Ten screenshots and four acceptance JSON reports are in `test-results/worker-dismissals-native-final/`; prior evidence is preserved. Test-only fixture changes also passed 63 provider regressions, 13 bootstrap checks, three harness/evidence checks, typecheck and whitespace checks. Final-loop renewal is recorded below.
+- Fixture-evidence review is clean: 14 independent bootstrap/evidence checks and two native-request probes passed; four primary JSON reports and ten screenshot paths validated. Initial backend inspection then found the lost-retirement race, which triggered the completed fix/review loop below. Its original 129-test baseline log remains at `~/.cache/opencode/scratch/worker-activity-implementation-20261030/lead/backend-review-focused.log`.
+- Remaining workflow: approve publication text and archive after merge. The user approved the configured Git identity for this PR's existing merge and new implementation commit, and selected a ready PR after merging the newer upstream composer refactor. Main capability specs are synchronized and verified below. Publication remains gated on updated integration checks/review and PR-text approval; deployment is outside scope.
+
+### Fix/review loop renewal
+
+The user explicitly authorized repeated correction and independent review until no findings remain. The first correction fixed retained-record retirement and added nine regressions; its candidate CI passed **7,460 tests, 16 skipped, 0 failed**, authenticated browser renewal passed **4/4**, and typecheck/API/build/smoke passed. These are not final acceptance for later corrections.
+
+Standards review found only omitted timestamp units; both activity timestamp descriptions now state Unix epoch milliseconds, and the renewed standards review is clean. Independent spec/security review and lead probes then reproduced a first-record admission gap. A further lead probe reproduced a queued cross-workspace admission gap: an older dismissal was incorrectly ordered after activity when its authority read started late in the global queue. Both admission chronologies are corrected with exact bounded transient authorities and admission-order fences; persisted format and API DTOs remain unchanged. Nineteen additional regressions pass, with 157 focused tests green. Renewed full-branch Standards and Spec reviews report no findings, and four lead probes plus four independent spec probes verify stale rejection, disk-reloaded visibility and fresh conditional dismissal.
+
+The subsequent adversarial review passed the admission/lifecycle probes but found missing private failure guidance for observations joining a blocked retirement batch after its one-shot warning fired. The warning correction adds seven regressions, covers both merged and still-pending observations, and prevents an older completion from clearing newer unsaved guidance. All 164 focused tests pass. Renewed full-branch Standards and Spec reviews report zero findings; the adversarial review reports no remaining substantive finding after its 12 original probes, two new probes and 98 focused tests passed. No review exclusions or unresolved technical findings remain.
+
+Final clean-review verification:
+
+- `bun run test:ci`: **7,486 passed, 16 skipped, 0 failed**, 317 files, 190.85 seconds. Log: `~/.cache/opencode/scratch/worker-activity-implementation-20261030/lead/full-unit-clean-review.log`.
+- Final authenticated Chromium/WebKit renewal: **4/4 passed**, 44.1 seconds. All four acceptance JSON reports independently checked. Artifacts/log: `~/.cache/opencode/scratch/worker-activity-implementation-20261030/lead/clean-review-authenticated-browser/` and the adjacent `.log`. The unchanged 14-case worker-list evidence remains valid; no physical-device or harness OS-process restart claim is made.
+- Final typecheck, API validation, dependency audit, 594-package license check, build and compiled authenticated/browser smoke passed. The existing OpenAPI composition warning and low KaTeX advisory remain documented; neither is a new finding in this change.
+- Main specs synchronized after acceptance: `opencode-chat` (3 modified, 6 added requirements), `personal-workspace-state` (4 added), and `hub-live-stream` (1 modified). All approved requirement bodies match exactly; unrelated requirements and existing Purposes are preserved. Read-only idempotence checked; `openspec validate --specs` passed **56/56**, strict change validation and whitespace checks passed. No archive performed.
+- Publication safety scan found no personal absolute paths, private-key headers or token-shaped secrets in added source/planning content. The user approved publishing the configured author/committer name and email for this PR; the scoped exception is recorded in `AGENTS.md` without copying those values or rewriting the approved merge.
+
+### PR preparation (2026-10-31)
+
+Before publication, upstream advanced from `727d892` to composer-ownership refactor `7d6f112` (#570). The user chose to merge that newer upstream work and renew affected verification before creating a ready PR. Preserve the verified implementation as a local commit, integrate upstream with a merge commit rather than a rebase, and obtain approval for the final PR text. Archive remains after merge.
+
+The implementation checkpoint is `afea4fe`; merge commit `e969245` integrates `7d6f112` without conflicts or a rebase. Merged-tree typecheck and 136 focused Composer/worker tests passed. Fresh integration review reported no standards or spec findings and passed 138 targeted tests, reusing the unchanged provider/store reviews. All 97 affected browser cases passed; the four primary authenticated acceptance reports were independently checked. API validation, strict change validation, build and compiled smoke passed after the merge. Dependencies are unchanged from the accepted audit/license checks.
+
+The first post-merge CI overlapped browser/build workloads and returned **7,531 passed, 16 skipped, 2 timeout failures**: the isolated-process UI wrapper exceeded 60 seconds and the aggregate-control test exceeded 5 seconds. Both then passed alone under the unchanged deadlines: UI **35.90 seconds**, aggregate **2.17 seconds**. An earlier 30-second outer shell timeout was shorter than the UI harness deadline and is not a separate test failure. Contention remains a hypothesis, not an established cause.
+
+The full-CI rerun without competing test/build workloads passed both original cases but returned **7,532 passed, 16 skipped, 1 failed**, 318 files, 180.05 seconds. `hub end to end > registered folder mutation reports every running or starting descendant and can stop them` received HTTP 500 instead of 200 from the confirmed folder-rename operation. A separate native worker is diagnosing this test against the merged branch and pristine upstream with existing dependencies. No deadline/assertion weakening or source correction has been made; task 6.1 remains open. Log: `~/.cache/opencode/scratch/worker-activity-implementation-20261030/lead/post-upstream-unit-serial-workload.log`.
+
+The folder-rename diagnosis passed 31 authenticated focused invocations and nine whole-file invocations on HEAD (81 tests each), plus 30 focused invocations and one whole-file run on pristine upstream (80 tests). Selecting only the rename test omitted its login prerequisite and produced an unrelated 401; the reliable focused selection includes the JSON-login test. No HTTP 500 was reproduced, and neither baseline flakiness nor a feature regression was established. A diagnostic-only assertion update compares the same expected HTTP status and body together so any recurrence exposes the fixture's error response; all stopped-session assertions and deadlines remain unchanged. Evidence: `~/.cache/opencode/scratch/worker-activity-implementation-20261030/folder-rename-diagnosis/RESULTS.md`.
+
+The next full run passed folder rename but reported one Git-observer startup timeout (**7,532 passed, 16 skipped, 1 failed**, 181.43 seconds). Narrow checks passed on HEAD and unchanged upstream sources. A deterministic unnamed-event probe demonstrated a test-contract false negative: production correctly watched the half-made `.git` directory, but the test required a filename that the supported native callback may omit. The test-only correction waits for actual watch state, retains final Git-metadata/first-commit assertions and adds explicit unnamed-event coverage. Restoring only the old named-event gate reproduces the timeout in 10.30 seconds; the corrected watcher file passes **24/24**, authenticated Hub focus **2/2**, and typecheck passes. The original native CI event was not captured, so this demonstrates the false-negative mechanism without claiming its historical cause is proven.
+
+Fresh independent Standards and Spec renewal of the complete affected test/documentation change reports **zero findings on each axis**; unchanged implementation review evidence is retained. No product behavior, deadline, retry policy or expected HTTP/body/session-stop result changed.
+
+Final post-merge acceptance: `bun run test:ci` passed **7,534 tests, 16 skipped, 0 failed**, 318 files, 177.15 seconds, without competing workloads. Log: `~/.cache/opencode/scratch/worker-activity-implementation-20261030/lead/post-upstream-final-ci.log`. The 97 post-merge browser cases, API/build/compiled smoke, unchanged dependency audit/license checks and 56 capability-spec validations remain valid. Latest upstream remains `7d6f112`; latest stable remains `v0.8.0`. Publication text approval is the remaining gate; no push, PR, archive or deployment has occurred.
+
+The user subsequently approved the exact title `fix(chat): verify worker activity and sync private dismissals` and displayed PR body, including the ready status, evidence limits, compatibility/failure caveats and Release Please override. Push and ready-PR creation are authorized. Verification and preparation tasks are complete; archive remains after merge and deployment/authentication/service changes remain outside this authorization.
+
+### Merged-tree acceptance renewal (2026-11-01)
+
+PR #572 was published ready at `daa03ba`. Subsequent review-loop corrections are checkpointed locally in `0d46614`; merge commit `e7f8589` incorporates upstream `e7d6263` without rebasing or rewriting history. The separate dependency-security PR #573 is merged upstream. The only spec conflict was resolved by preserving every requirement and scenario from both parents, retaining upstream compact-density exceptions and the approved worker semantics. Application/test sources and `package.json` are byte-identical between checkpoint and merge.
+
+- Merged-tree unit CI: **7,702 passed, 16 skipped, 0 failed**, 319 files. Typecheck, API validation, audit, 594-package license check, build, compiled smoke, strict change validation and all **56 capability specs** pass. The approved frozen offline refresh with install scripts disabled installed exactly one package: `follow-redirects` 1.16.2. No moderate-or-higher advisories remain; the existing low KaTeX advisory remains.
+- Complete affected Chromium/WebKit matrix: **279/279 passed**, no retries or changed deadlines. This pre-merge evidence is reused because application/test sources are unchanged and the dependency patch affects development tooling. One earlier WebKit disclosure timeout remains unexplained; focused repetitions and the complete traced run passed, without a claimed causal fix.
+- Fresh round-11 full-change reviews: **two Standards and two Spec native Sol reviewers, all zero findings**, covering both original base `7d6f112` and current upstream `e7d6263`. Reviewers performed independent read-only source/Git inspection; they did not rerun the execution checks. Native worker defaults select Sol/Medium; no stronger runtime isolation guarantee is claimed.
+- Primary evidence: `~/.cache/opencode/scratch/worker-activity-reviewloop-20261031/ci/post-main-unit.log`, `post-main-build-smoke.log`, `post-main-specs.log`, `final-traced-browser-matrix.log` and adjacent browser artifacts. Latest stable was rechecked as **v0.8.0** on 2026-11-01, so the existing release-note scope and override still apply. Main/delta requirements remain synchronized; publication scan of added current-target content has no token/private-key/credential-URL/personal-home-path findings. The recorded Git identity exception remains narrowly scoped.
+- Limits: native-request acceptance uses schema-correct synthetic events through the real stack, not a live provider or physical device. Listener/store recreation does not demonstrate an OS-process restart. Checks used existing Bun 1.4.2 rather than declared 1.4.3; no new tooling was installed.
+
+Tasks 6.1–6.3 are renewed complete. Task 6.4 is reopened for approval of updated #572 publication text before publishing the local corrections/merge. The approved preview is a separate loopback instance with disposable state and checked-in dev login; provider/plugin startup and credential import remain unauthorized. The existing Hub, authentication configuration and deployment remain outside scope. Archive only after merge.
+
+### Live shell verification correction (in progress)
+
+The user subsequently authorized existing OpenCode credentials/configuration, plugins and MCP servers in the separate preview, without credential copying or a new login. A physical-device test then showed a fresh background shell as Unresolved immediately; its real terminal result later arrived after the requested 60 seconds. The user requested a fix with simple conversation ownership and current native activity, independent of stricter Stop authorization. Tasks 6.1–6.3 are reopened for the correction and renewed checks/review. The original user Hub remains outside scope; no feature publication or archive is authorized by this request.
+
+Live correction verification (2026-11-02): a separate native OpenCode 2.2.2 conversation reproduced Working followed by Unresolved after about one second, although current shell inventory reported the correct owner, matching command and running status. Sparse tool-success records lacked creation/run anchors later supplied by stored history. Shell activity matching now accepts compatible missing anchors through the existing monotonic enrichment helper; conflicting immutable facts and Stop proof remain unchanged. Nine direct guard cases and six public-provider variants pass, with the synthetic delivery envelopes explicitly distinguished from captured native data. The original real-provider/Hub/SSE feedback loop passes after rebuilding: Working remains until the native 30-second shell result arrives. No credential values were inspected or copied, and no agent file-editing task was submitted.
+
+Renewed full unit CI: **7,717 passed, 16 skipped, 0 failed**, 319 files. An earlier run used an incorrectly restrictive runner umask and failed the deliberately unsafe lease-mode fixture; focused comparison reproduces the failure under `077` and passes under the normal `022`, without changing code or test expectations. Typecheck, build, compiled smoke and API validation pass. Round-12 fresh full-change review is clean: **two Standards and two Spec native Sol/Medium reviewers, zero findings each**, including the uncommitted correction. They performed independent source/Git inspection, not execution acceptance. Temporary status tracing was removed. Task 6.2 is renewed complete; broader browser renewal and final evidence reconciliation remain open.
+
+The activity scenario is synchronized between the delta and main capability spec; strict change validation and all **56 capability specs** pass. Added current-target content was rescanned for private-key headers, token-shaped secrets, credential URLs and personal home paths with no findings. The latest stable release was rechecked on 2026-11-02 as **v0.8.0**, preserving the existing release-note override scope. No dependency or API schema/revision changes are introduced by this correction; accepted dependency audit/license evidence remains unchanged. Task 6.3 is renewed complete. Task 6.1 remains open for browser-renewal reconciliation, and task 6.4 remains the publication-text approval gate.
+
+Browser renewal returned **92/94** at four workers and **93/94** at two workers, without retries or changed deadlines. The initial WebKit recovery/focus cases passed three focused repetitions each; a pristine pre-fix `e7f8589` comparison then passed **94/94** at four workers. None of these failures reproduced in that single baseline sample, so they are not classified as baseline flakes. Traces prove slow JavaScript delivery in the recovery timeout, an unresolved focus-restoration failure, and a separate guidance-test synchronization deadlock after its first personal-state read was aborted. A bounded test-only correction is being prepared to wait for a completed request instead of headers followed by Playwright's unresolved `response.finished()` promise. Product code, UI expectations and deadlines remain unchanged. Tasks 6.1 and 6.2 stay open for that correction's final matrix and fresh review; no all-clean browser claim is made yet.
+
+Final browser renewal (2026-11-02): the guidance test now observes a completed request scoped to the exact workspace and seeded conversation, then preserves the original non-null response and 200/503 checks. The four guidance cases passed **12/12** repeated runs at one worker, followed by the complete affected Chromium/WebKit matrix passing **94/94** at two workers, zero retries, unchanged deadlines and tracing enabled. Earlier WebKit focus/slow-navigation failures did not recur, but their underlying causes remain unproven; neither is claimed fixed by the read-synchronization correction. No further application code changed after the passing native shell feedback loop and full unit CI. Typecheck, evidence-discipline test, strict change validation and all 56 specs pass after the E2E-only edit. Task 6.1 is renewed complete; task 6.2 awaits fresh review of the final updated change, and 6.4 still awaits publication approval.
+
+Primary correction evidence: `~/.cache/opencode/scratch/worker-activity-live-shell-fix-20261101/lead/` contains the native red/green feedback-loop results, full unit logs, build/smoke/API/spec checks and initial browser traces. `browser-diagnosis/` contains the pristine comparison, traced diagnosis, repeated guidance checks and final complete browser matrix. These are private diagnostic artifacts, not published PR attachments. The existing feature/security publication identity exception remains unchanged; no push or archive has occurred.
+
+Final round-13 full-change review is clean: **two fresh Standards and two fresh Spec native Sol/Medium reviewers, zero actionable findings each**, covering both original/current target scopes and all eight uncommitted files, including the completed-read synchronization correction. Reviewers independently inspected source and Git state, without rerunning execution checks. Task 6.2 is complete; **33/34 tasks are complete**, with only updated publication-text approval pending. The rebuilt preview was rechecked through Tailscale HTTPS with its workspace running and existing OpenCode login ready. Temporary instrumentation and the disposable baseline worktree were removed; diagnostic logs/traces are retained at the paths above. The existing Hub was not restarted or reconfigured.
+
+### Agent, dismissal recovery and Stop follow-up (2026-11-02, in progress)
+
+Further phone acceptance confirms the shell activity correction but shows a fresh agent as session-active/task-unverified, a latched private identity warning after complete identities arrive, and disabled Stop on the normally launched owned shell. The user explicitly selected **Fix all three**, retaining wrong-target protections. Tasks 6.1–6.3 are reopened. Activity must use current native evidence linked to this conversation; normal compatible evidence enrichment must not be mistaken for contradictory evidence. Dismissal recovery must not silently transfer marks, clear unresolved identity/retirement failures or revive stale marks. Normal fresh-job Stop must work while preserving real ownership, reuse, revocation, gap, capacity and fresh-validation safeguards. The existing Hub/authentication settings remain outside scope; preview changes and existing-credential use remain confined to the previously approved test setup.
+
+The user approved optional provider-proven `WorkerActivity.launchRef` and its required closed-contract update: Workspace **33**, Hub **12**, bundled-web **3**. Producer continuity derives from retained occurrence, exact native invocation and owned birth proof, not row/child/time/UI identity; it is guaranteed only within the retained native stream generation. Qualified recovery requires a post-resolution authoritative read confirming durable non-dismissed revisions for every matched alias. Unknown/ref-less activity and unconfirmed retirement retain visibility guidance. No new producer ledger or relaxed control budgets/tombstones were introduced.
+
+Current producer suites pass **1,931 tests**; contract/validation suites pass **70 tests** and API validation passes. Combined focused client/Hub suites pass **46 tests**, followed by full unit CI passing **7,786 tests, 16 skipped, zero failures**, 320 files, with stable before/after source hashes and normal `umask 022`. Typecheck and whitespace checks pass. Evidence: `~/.cache/opencode/scratch/worker-activity-all-three-20261102/verification/` and the adjacent `native/` and `lead/` directories.
+
+Round-14 full-change review used two fresh Standards and two fresh Spec native Sol workers. Both Standards reviews are clean; both Spec reviews independently found the same stale UI warning snapshot after a dismissal attempt. A new authenticated mounted-browser regression reproduced the warning remaining visible after successful retirement. The UI now leaves recoverable guidance with its client owner rather than copying it into batch feedback; skipped-entry feedback and actual client operation failures remain. All **four** focused Chromium/WebKit recovery cases pass, including this regression and reference-backed recovery/mismatched-reference visibility. These checks do not replace final full-matrix renewal or the required fresh four-clean review round.
+
+The rebuilt current preview has been restarted through its existing owned launcher, without restarting or reconfiguring the user's Hub. Real native agent/shell browser acceptance is underway. A preliminary harness attempt was stopped by an overly short outer tool timeout before submitting a model prompt; it is not product-failure evidence. The corrected bounded attempt retains the same selected OpenAI Sol/Medium route. The user requested a merge commit from latest upstream **after** the current fixes are verified, and approved the subsequent frozen dependency restore with install scripts disabled. Latest fetched main is `dcc486a`, adding Anthropic SDK 1.3.0, OpenCode client 2.2.5 and Bun 1.4.4 declarations. No merge, dependency restore, push, PR update or archive has yet been performed for this follow-up.
+
+The actual native browser attempt confirms both freshly launched agent and shell remain **Working**, with qualified execution identities and matching launch references; the partial shell's warning clears automatically after authoritative personal reads. Its child reports Sol/Medium as selected. However, **both normal Stop controls remain disabled**, so acceptance is not complete and no Stop mutation was attempted. The bounded diagnostic jobs finish naturally. The captured provider/Hub/browser result and screenshot are `lead/live-all-three-result.json` and `lead/live-all-three-failure.png`; the producer worker is correcting this reproduced native Stop refusal before final renewal. The initial 1,931-case synthetic control suite did not establish this native behavior.
+
+A further client regression reproduces partial activity followed directly by qualified terminal evidence: requiring the later update to remain active unnecessarily latched its identity fence. Resolution now accepts the same proven reference's qualified terminal/unavailable update, but still requires post-resolution authoritative non-dismissed revisions for every alias; an unretired mark stays fenced and cannot trigger a terminal-only retirement mutation. **48** focused client/Hub cases and **six** authenticated Chromium/WebKit recovery cases pass, including active and terminal qualification, stale copied-guidance recovery and mismatched-reference refusal. Final full CI/review must include these later corrections.
+
+The native Stop candidate adds the initial pending/running launcher-content snapshots to the public-provider regression. Those snapshots reported `background: false` before the same invocation's background result. They may be classified as initial snapshots only with the exact consumed native call, matching owning message/input and subsequently observed owned birth; this neither upgrades history-only evidence nor admits a real foreground conversion or reused launch. The candidate passes **86** focused safety cases and **1,945** full provider/background/normalization cases, plus typecheck/whitespace checks. Actual envelope replay remains explicitly synthetic. Lead rebuilt the owned preview and started a fresh native browser acceptance attempt; Stop is not yet claimed verified. Separate renewed dismissal/Hub/UI unit checks pass **129** tests.
+
+That second Stop candidate still fails actual native acceptance. Rather than infer another delivery sequence, a fresh Sol worker added temporary, explicitly gated metadata-only tracing to the owned preview. A third native attempt reproduced the refusal and captured **151** bounded records of actual envelope/proof/admission ordering. The frozen private `native-trace/capture-one-snapshot.jsonl` has SHA-256 `5bea22a35f9fdbe7ebf190e16e0cefe9d8e50185d5ea89de313e2177f4b3ebab`. No prompts, commands, outputs, credentials or headers enter the trace, and no Stop mutation occurred. The worker is deriving a regression/correction from this actual evidence; all temporary tracing and its private destination must be removed before final checks/publication. One instrumented-suite outer timeout was only 120 seconds while the preceding passing 1,945-case suite took 121.47 seconds; it is not claimed a test pass or established product failure. No final all-three acceptance, merge or publication claim is made yet.
+
+Trace-backed cause: the actual agent/shell progress-to-success ordering retained complete identities and current witnesses but lost background classification while merging sparse facts. Capture rows 39→42 and 63→66 establish ordering; rows 51–54 and 78–79 show the unresolved admission with `backgroundObserved: true` but missing retained `launch.background`. Filling only a missing classification from the next fact fixes the composed regression; explicit foreground evidence remains binding. Removing this correction reproduces **two** healthy-worker failures; restored, all **17** capture-derived positive/negative cases pass. The full provider/background/V2/shared-normalization suite passes **1,964 tests**, plus typecheck and whitespace checks. All temporary tracing, environment references, file sink and hardcoded private destinations were removed. The added-content/history publication scan reports zero findings across 105 changed/untracked paths. The preview has been rebuilt without tracing and the final native browser flow is running. Strict change validation and all **56** capability specs pass.
+
+**Current-tree native acceptance passes.** The real authenticated mounted Chromium client observes one partial active shell update, then qualified native Working for agent/shell and enabled normal Stop on both. Its identity warning clears after authoritative personal reads without reloading. The browser explicitly accepts the shell record/output-deletion and result-capture warning, sends exactly one Stop to the controlled diagnostic shell, receives HTTP **200**, and observes the agent finish normally and shell report its actual failed outcome rather than fabricated success. A legitimate terminal-revision dismissal **409** triggers a completed authoritative refresh followed by one new explicit dismissal action; HTTP **200** and reload prove durable finished-row dismissal. Six personal reads complete and no page errors occur. Evidence: `lead/final-native-acceptance/live-all-three-result.json` and adjacent screenshot. The earlier enabled-Stop harness pause merely omitted the required confirmation; the later dismissal-only failure omitted the specified explicit conflict retry. Neither is a new product failure. Native runtime is OpenCode 2.2.2 with client 2.1.2, using the existing OpenAI Sol/Medium route. This does not claim physical-device or real native question-tool coverage. The **100-case, seven-file Chromium/WebKit** matrix is now running before the requested main merge; final integration CI/review/publication gates remain open.
+
+The first 100-case matrix returned **99 passed, one failed** before the WebKit save-guidance scenario reached the feature. Its existing safe login diagnostics show both filled-field comparisons false, one submitted credential pair not matching the fixture, and HTTP **401**; no credential values were recorded in the diagnosis. The failed prerequisite then passed **three** focused invocations without source/deadline/retry changes. Its cause remains unattributed, not established as a baseline flake or a worker-feature regression. The initial failure artifact remains in `lead/current-browser-matrix-results/`; one complete unchanged matrix renewal is running, with no retries and the same deadlines/workers. It will be reported separately rather than replacing that evidence.
+
+The unchanged full renewal passed **100/100** cases at two workers with no retries or deadline changes (`lead/current-browser-renewal.log`, 5.0 minutes). The earlier login prerequisite failure remains unexplained and is not claimed fixed. Together with the passing actual native flow and renewed affected unit suites, current fixes are ready for the user-requested latest-main integration. Preserve them as a local implementation commit, merge fetched `dcc486a` with a merge commit, restore only the frozen lockfile with install scripts disabled, and renew full unit/API/audit/build/smoke/native/browser acceptance and four fresh reviews before publication. Archive remains after upstream PR merge, not this integration merge.
+
+### Latest-main integration and round-15 renewal (2026-11-02, in progress)
+
+Implementation checkpoint **619e7e6** preserves the thirty-file all-three correction. Merge commit **84ec22b** integrates latest fetched upstream **dcc486a** without a rebase or conflicts. Only eight upstream workflow/manifest/lockfile paths changed across that merge; application, test, contract, documentation and spec paths remain byte-identical to the checkpoint. The approved frozen restore with install scripts disabled installed exactly **five** packages, including Anthropic SDK **1.3.0** and OpenCode client **2.2.5**; the lockfile checksum is unchanged. No Bun runtime installation occurred: checks use existing **1.4.2**, while upstream now declares **1.4.4**.
+
+Merged-tree full unit CI passes **7,819 tests, 16 skipped, zero failures**, 320 files. Typecheck, API validation, audit (no moderate-or-higher advisories; existing low KaTeX advisory), 594-package license check, strict change/all **56** spec validations, build and compiled smoke pass. The rebuilt/restarted owned preview also passes the complete actual native agent/shell/Stop/warning/durable-dismissal browser flow using client **2.2.5**. The subsequent broad matrix returned **99/100**, with a WebKit touch focus assertion failing in settlement during shell confirmation; whitespace/hash-finalization steps after that failed stage were not executed. That new failure is being investigated independently, not conflated with the earlier incorrect-login-fields failure or claimed a baseline flake. Primary pipeline log: `lead/post-main-verification.log`.
+
+Round-15 fresh full-target review used two Standards and two Spec native Sol workers with read-only inspection of all **105** target paths, pinned HEAD and stable before/after hashes. Standards A and Spec B are clean. Standards B found that a successful personal GET can erase genuine failed/conflicted explicit-dismissal feedback; recovery health and action outcomes need separate ownership without restoring the old stale UI warning snapshot. Spec A found that fresh same-parent shell inventory with a different command can leave an old Stop authorization usable before the replacement birth event arrives. Both are being reproduced/corrected in disjoint client and provider slices. All four outcomes must be clean in the next fresh full-change round; these earlier clean execution checks do not establish acceptance of later fixes.
+
+Publication safety: all **eight** feature/integration commits and **11,747** first-parent added lines were scanned without secret/private-path/temporary-tracing findings. All eight commits use the configured Git identity covered by the recorded exception; no identity values were copied into diagnostic reports. Latest stable was rechecked as **v0.8.0**, preserving the approved Release Please override. No push, PR-text update or archive has occurred; tasks 6.1–6.4 remain open.
+
+### Round-16 corrections (in progress)
+
+The shell-inventory finding reproduces with **six** failing cases before correction. Positive known command or foreign-owner contradictions now revoke the occurrence/aliases through the existing bounded controls and invalidate current activity provenance, refusing concurrent Stop validation. Missing command/failed reads do not invent permanent contradictions; old observed end cannot authorize replacement removal and independent healthy workers remain controllable. **62** focused cases and **1,976** complete provider/background/V2/shared-normalization cases pass, with typecheck and whitespace checks. An old test expecting recovery after positive foreign ownership now requires sticky refusal; its independent removal-204/non-settlement coverage remains under a fresh provider.
+
+Genuine failed-POST feedback is now execution-scoped and separate from recoverable identity/storage health. Explicit per-action outcomes keep unrelated retained warnings from aborting a healthy batch. Successful explicit retries can supersede matching proven-alias failures, but unrelated GETs/saves/automatic retirement and older responses cannot erase them. Preflight identity-health refusal still recovers automatically. **52** client and **92** Hub cases pass; lead's final wording renewal also passes all **52** client cases. The action copy describes the unsuccessful attempt rather than falsely declaring current storage unhealthy. The native harness's explicit 409 retry now expects the retained conflict notice until its successful applicable action.
+
+The WebKit focus diagnosis found a deterministic real-browser mechanism: replacing a settled task strip during metadata repaint disconnects the focused result and leaves focus on BODY. An isolated native WebKit probe is RED before the fix and GREEN afterward; this proves that mechanism, not exclusive attribution of the historical failure. The candidate preserves only an exact surviving action on the same execution, without delays, fallback selection, modal/composer takeover or changed E2E deadlines. **32** task-inspection unit cases pass. Lead ran **11** focused Chromium/WebKit recovery/action/focus cases and **three** original WebKit confirmation repetitions successfully. An additional known-changed partial launch-reference boundary is being checked before freezing that focus guard. All prior source-operation/private-state/Stop guarantees and original no-DELETE/focus assertions remain in force. Installed Impeccable context confirms a narrow incumbent refinement; its mechanical detector reports no findings for the changed UI modules. No new tooling was downloaded or installed.
+
+The partial-focus boundary reproduced in both real browsers: changing `launchRef` with the same row/task IDs and absent execution IDs incorrectly focused the replacement action. The guard now includes that reference plus child/output targets, and target changes invalidate its render signature. All **32** units and **three** targeted browser cases pass, with **14** native focus scenarios per engine plus the original WebKit confirmation case. Unchanged legacy targets still retain focus. All three correction slices are frozen for the renewed full-CI/native/104-case browser pipeline and a fresh four-reviewer round.
+
+Checkpoint **0d44ade** preserves those corrections. Its complete sequential renewal passes **7,838 unit tests, 16 skipped, zero failures**, typecheck/API/audit/license/strict change/all **56** specs/build/compiled smoke, actual native all-three acceptance with client **2.2.5**, and **104/104** Chromium/WebKit cases. All **2,643** tracked file hashes remain unchanged through the pipeline. Both Standards reviews and Spec A are clean. Spec B identified a new same-command replacement counterexample: changed native start/output fields already visible in fresh validation can be missed because retained birth identity lacks those fields. The previously fixed differing-command cases remain protected; this distinct boundary is being reproduced and addressed through bounded metadata on existing native birth/control records, not a new ledger or relaxed authority. It is not the accepted race after final validation. Publication remains blocked until its correction and all four fresh reviews are clean.
+
+The birth-identity regression reproduces **six** failures for same-command replacement with changed native start/file, including concurrent Stops after the old execution ended. The correction retains native start and hashed output/context identity (plus an optional valid PID) inside existing accounted records and compares only the same native domains. Primary V2.2.2 source confirms these birth fields are assigned at creation and terminal updates change only status/exit/signal/completed; birth can precede PID assignment. Missing/malformed birth/current identity softly withholds Stop without inventing permanent revocation; compatible live enrichment/replay retains launchRef and independent Working can remain without control identity. History/current GET never supply the missing birth baseline. **101** focused cases and **2,017** full provider/background/V2/shared-normalization cases pass, plus typecheck and whitespace checks. Six authorized V2 files changed, with no new fake/API/dependency changes, raw identity paths, ledger, raised budget or cleared tombstones. Final native/full-CI/browser/four-review renewal is still required.
+
+Checkpoint **f68413b** preserves native shell-birth validation. Round-17 full CI returns **7,877 passed, 16 skipped, two failed**; subsequent pipeline stages are unexecuted. Both failures are existing shell-revert adapter cases that launch before native event coverage: their fake already supplies complete birth/current identity, but the birth is missed with zero subscribers. A scratch-only prerequisite correction establishes coverage before launch and preserves every original assertion/deadline, passing all four agent/shell local/external cases. No production guard or fake identity change is needed. Both fresh Standards reviewers and Spec B are clean on all 105 target paths. Spec A finds a concurrent agent-Stop gap: final positive foreign ownership invalidates activity but not retained control proof, allowing another delayed older-owned response to authorize an interrupt. A zero-interrupt regression and existing occurrence-revocation correction are underway. Tasks 6.1–6.4 and publication remain gated on renewed acceptance and four clean fresh reviews.
+
+The adapter prerequisite correction changes only the existing loop's pre-launch history/coverage setup and its explanatory comment. All four original cases pass (**32 assertions**), followed by the full adapter file: **593 passed, zero failed, 4,441 assertions**. No fake/product changes, assertion/deadline weakening or cold-history authority was introduced. Private evidence: `shell-fixture-integration/focused-four-green.log` and `adapter-full-green.log`.
+
+The concurrent agent-Stop probe reproduces **one wrongful interrupt** when two final lookups return foreign then older-owned identity. Fresh snapshot and final Stop checks now propagate positive foreign-parent/wrong-child identity through existing occurrence/alias revocation; incomplete responses remain recoverable. The same probe is GREEN with **zero interrupts** and both Stops refused. **28** new matrix cases and **2,045** full provider/background/V2/shared-normalization cases pass, with typecheck and whitespace checks. Only provider implementation/tests changed in that slice; no new ledger, budget, native mutation or authority source was added. Both corrections are frozen for round-18 full runtime verification and four fresh full-target reviews.
+
+Checkpoint **c4f6741** passes the full sequential renewal: **7,907 unit tests, 16 skipped, zero failures**, typecheck/API/audit/license/strict change/all **56** specs/build/compiled smoke, actual native all-three flow and **104/104** Chromium/WebKit cases. All **2,643** tracked hashes are stable. Both fresh Standards reviews and Spec A are clean. Spec B identifies additional occurrence-aware authoritative reads in reverted visibility that still ignore positive ownership/shell-identity contradictions. A complete read-site audit also locates stream ownership verification and shell output lookup needing the same semantics. The correction is being consolidated into small shared provider validation seams rather than further branch-specific rules; no new authority, ledger or scope is introduced. Source remained frozen throughout the completed pipeline; those passes are not acceptance for this subsequent correction. Final runtime and four-clean review gates remain open.
+
+The consolidated provider correction reproduces **ten** deterministic wrong mutations before its fix and passes **57** new permanent regressions, a **37**-case scratch probe, **2,102** complete provider/background/V2/shared-normalization cases and all **593** adapter cases, plus typecheck/whitespace checks. Reverted/final agent reads share identity classification; history/stream reads propagate contradictions only to associated retained occurrences; reverted/snapshot/output shell reads share native inventory classification. Output reads without a retained occurrence preserve confinement without manufacturing Stop proof. A final retained-control-only saturation check is underway before freezing this slice; the already completed runtime pipeline does not cover these newer edits.
+
+The saturation counterexample reproduces **one wrongful interrupt** for each foreign-parent/wrong-ID stream response when control proof outlives the aggregate row and no Stop is active during the contradiction. Revocation now scans existing bounded control records by parent/agent child and uses existing retirement/alias semantics, without a new ledger/index/budget. **Seven** focused cases, **2,109** full provider/background/V2/shared-normalization cases and **593** adapter cases pass, with typecheck and whitespace checks. The four implementation/test files are frozen for round-19 runtime verification and fresh independent review.
+
+Checkpoint **d8b013b** passes complete round-19 runtime verification: **7,971 unit tests, 16 skipped, zero failures**, static/API/audit/license/all **56** specs/build/compiled smoke, actual native all-three flow and **104/104** browser cases, with all **2,643** tracked hashes stable. Standards B is clean. Spec A finds a stale returned activity snapshot after reverted-shell contradiction: control/activity memory is invalidated but the response can still carry earlier Working/launchRef. Standards A and Spec B independently find foreign workspace responses filtered to missing data before private ownership classification, leaving concurrent older-owned Stop authority intact. Both are being reproduced and corrected, including final-await presentation and occurrence-aware retained-parent reads where relevant. Missing workspace/control facts remain inconclusive, ordinary readers must not expose foreign records, and independently verified activity must not depend on private Stop proof. These passing runtime checks cover the earlier frozen checkpoint, not subsequent corrections.
+
+The correction reproduces **12** foreign child/parent-workspace failures, **12** stale reverted-presentation failures and **six** equivalent stale-presentation failures during the initial no-revert boundary await. Private workspace classification and associated-cohort revocation now cover child history/stream/reverted/final reads plus snapshot/history-visibility/boundary parent reads. Activity/reference reprojection runs after visibility reads and both boundary-return paths, without treating missing private proof or aggregate saturation as contradictions. **185** focused cases, **2,179** full V2/shared-normalization cases and **593** adapter cases pass, with typecheck and whitespace checks. A final ordinary-reader/known-association probe is checking that concealing a foreign record cannot bypass revocation of an already retained occurrence; unrelated readers must not create new negative ledgers or disable healthy targets. Full runtime/four-review renewal remains pending for this slice.
+
+Ordinary session/configuration reads reproduce **16** wrong interrupts for known foreign workspace associations and **six** for same-workspace wrong identity/foreign child parent. Shared lookup now fences already-known ID/workspace associations and only mismatching child-parent associations; ordinary foreign records remain concealed. Valid nested-parent cohorts, missing fields, unrelated records and existing same-workspace return behavior are preserved, without new negative entries for unrelated reads. The final affected matrix passes **119** cases, full provider/background/V2/shared-normalization passes **2,252**, and all **593** adapter cases pass; typecheck and whitespace checks pass. All four source/test files are frozen for round-20 full runtime verification and four fresh full-target reviews.
+
+Checkpoint **ae3e1c0** passes round-20 full renewal: **8,114 unit tests, 16 skipped, zero failures**, static/API/audit/license/all **56** specs/build/compiled smoke, actual native all-three flow and **104/104** browser cases, with all **2,643** tracked hashes stable. Both Standards reviews are clean. Spec A finds stale enabled-control fields surviving visibility awaits after revocation, especially when historical ended activity correctly remains ended; native dispatch is already refused but the UI offer is wrong. Spec B finds parent-only activity invalidation extending into a healthy nested C→D cohort even though its controls are correctly scoped. The correction separates deny-only current control projection from independent activity, and parent-relationship invalidation from true identity/workspace subtree contradictions. New simultaneous outer/nested and gated-boundary regressions are being verified before round-21 acceptance; no weaker Stop or activity guarantee is accepted.
+
+Both primary probes reproduce RED and pass GREEN after correction: the old ended shell no longer offers revoked Stop, and a parent-only mismatch leaves the independently owned nested worker Working with its reference and controls intact. Deny-only current control projection covers every visibility return; scoped parent-only activity invalidation covers ordinary/history/stream/reverted/final readers while true identity/workspace contradictions retain subtree withdrawal. **72** focused cases, **2,304** full V2/shared-normalization cases and **593** adapter cases pass, with typecheck and whitespace checks. The four authorized source/test files are frozen, with no new ledger/index/budget/transport API, for round-21 full runtime and fresh four-review acceptance.
+
+Checkpoint **efe804d** passes round-21 full renewal: **8,166 unit tests, 16 skipped, zero failures**, static/API/audit/license/all **56** specs/build/compiled smoke, actual native all-three flow and **104/104** browser cases, with all **2,643** tracked hashes stable. Both Standards reviews and Spec A are clean. Spec B identifies a compatible positive execution end observed during visibility validation that does not replace the earlier returned Working snapshot. The correction reuses exact captured-occurrence activity provenance for shell/agent ends and known end clocks, independently of deny-only control projection, without quiet-state inference or borrowing another execution's end. Gated regressions and affected suites are being renewed before round-22 acceptance.
+
+The compatible-activity correction reproduces **27** gated failures for native ends, initial starts and canonical request arrival/resolution across visibility awaits. Stream/recovery now share exact-occurrence derivation from retained activity evidence and canonical request linkage; recovery cannot resurrect Working from old start proof alone, and end clocks use native proof only. Negative/reference withdrawal and deny-only control projection remain independent. **63** focused cases, **2,367** full V2/shared-normalization cases and **593** adapter cases pass, with typecheck and whitespace checks. Only provider implementation/tests changed. Round-22 four-review inspection will precede the next full runtime pipeline, avoiding redundant live diagnostics on a statically rejected candidate.
+
+Checkpoint **a611e91** receives clean Standards A, Standards B and Spec B full-target reviews. Spec A identifies an ordinary ownership contradiction between retained prelaunch birth/ownership evidence and launcher success that can be forgotten because association detection only counts admitted rows/controls/validations. The correction recognizes existing bounded prelaunch associations and fences both activity and prospective control admission before a row exists. No round-22 full runtime pipeline was started; prior full acceptance remains **efe804d**, not this newer candidate. The four-clean review and renewed runtime/publication gates remain open.
+
+The prelaunch correction reproduces **18** failures: six wrong interrupts after retained birth/start proof and twelve stale-Working cases involving verified-parent/cache-only claims. Existing bounded activity/control observations now retain the negative association before admission; replay and alias-only history cannot restore authority. A tiny generation-qualified `HistoryReuse.peek` reads only retained entries without allocation, LRU refresh, pending-read access or changed accounting. Cached ownership remains non-authorizing for birth/execution/Stop; unrelated reads and requested-child input alone remain ignored. **71** focused cases, **2,408** full V2/shared-normalization cases, **593** adapter cases and all **seven** history-reuse cases pass, with typecheck/whitespace checks. The six source/test files are frozen for round-23 fresh reviews before another full runtime pipeline.
+
+Checkpoint **5c5da23** has clean Standards A inspection. Standards B is explicitly incomplete and superseded, not acceptance evidence; its unused convenience-export observation is nonactionable. Spec B identifies native inventory bypassing shared ownership observation; Spec A identifies parent-workspace invalidation missing directly verified prelaunch children without births/tasks. Four actual public probes reproduce those gaps and pass after repair. Get/list/create SessionInfo inputs now share synchronous observation before filtering/rendering; rename's void update uses its already-classified follow-up get, while status maps/messages/receipts/partial events are not SessionInfo inputs. Parent invalidation fences the same direct verified cohort without recursion. **123** focused cases, **2,465** full V2/shared-normalization cases, **593** adapter cases and **seven** history-reuse cases pass, plus typecheck/whitespace checks. Provider/background source/test pairs are frozen for fresh round-24 review; no round-22/23 full runtime pipeline was started or claimed.
+
+### Final round-24 acceptance and publication approval (2026-11-02)
+
+Implementation HEAD **12e882c** completes the subsequent corrections. Shell Stop
+compares retained live native birth identity with fresh inventory. Native
+session records are observed before ownership filtering across get/list/create,
+prelaunch, cached-parent and concurrent reads. Positive identity/ownership
+contradictions fence affected controls and activity; parent-only mismatch does
+not revoke independently healthy nested cohorts. The generation-qualified
+history-cache peek neither allocates nor refreshes LRU/accounting state.
+Working remains independent of Stop authority; no control budgets, revocation,
+gap, capacity or in-flight protections were relaxed.
+
+- Full unit CI: **8,329 passed, 16 skipped, zero failures**, 320 files. Typecheck,
+  API validation, dependency audit, 594-package license check, strict change
+  validation, all **56** capability specs, build and compiled smoke pass. All
+  **14** delta requirement bodies match their synchronized main specs.
+- Four fresh independent full-target native Sol reviews—two Standards and two
+  Spec—are complete and clean across **107 paths / 405 hunks**. Initially
+  incomplete reviews were completed before counting them. Reviewers inspected
+  source/Git read-only; execution checks are separate. Sol identity was exposed,
+  but requested effort changes were not independently verifiable, and read-only
+  execution is not an OS-isolation guarantee.
+- Actual authenticated mounted-browser acceptance passes on **OpenCode 2.2.5 /
+  client 2.2.5**, using the existing Sol/Medium route. Agent and shell show
+  Working with normal Stop enabled; one explicitly confirmed controlled shell
+  Stop returns **200**. Identity guidance recovers automatically. A dismissal
+  **409**, authoritative refresh and explicit retry **200** lead to durable
+  dismissal after reload, with no page errors. The interrupted native attempt
+  was renewed after a server restart; earlier completed checks were preserved.
+- The final unchanged Chromium/WebKit matrix passes **104/104**, two workers,
+  zero retries and unchanged deadlines. Two earlier batches each passed
+  **103/104**, failing on different prerequisites: an unattributed bootstrap
+  SyntaxError and a WebKit login-value mismatch returning 401. Each failed case
+  passed three unchanged focused rechecks. Neither historical cause is proven,
+  and neither failure is called baseline flakiness. All **2,643** tracked hashes
+  stayed unchanged through accepted checks.
+- Primary private evidence is under
+  `~/.cache/opencode/scratch/worker-activity-all-three-20261102/`: the lead's
+  `round24-verification.log`, `round24-final-acceptance.json`,
+  `round24-resumed-native/live-all-three-result.json`, `round24-browser-final.log`
+  and adjacent browser artifacts; `round24-reviews/` retains completed coverage,
+  and `connection-diagnosis/` retains sanitized failure/recheck comparisons.
+  Raw authenticated traces are not public attachments.
+- Upstream **dcc486a** is integrated by merge **84ec22b**; the user reconfirmed
+  merge/preserve-history, not rebase or force push. The frozen dependency
+  restore used disabled install scripts and left the lockfile unchanged. Checks
+  use existing Bun **1.4.2**, while main declares **1.4.4**. Latest stable was
+  reconfirmed as **v0.8.0**; the approved unreleased-feature Release Please
+  override remains applicable. The existing OpenAPI warning and low KaTeX
+  advisory remain; no moderate-or-higher advisory is reported.
+- Upstream discussion has no inline threads or formal reviews. Claude's focused
+  store/API review found no blockers and ran no checks; Codex failed and is not
+  counted as a completed review. OpenAPI already documents 413 and 507. The
+  file-sync/rename implementation does not sync the parent directory, so docs
+  now explicitly exclude power-loss durability. Whole-store scanning is bounded;
+  indexing remains a measurement-led optimization, not a demonstrated defect.
+  User-approved follow-ups track the bootstrap investigation
+  [#579](https://github.com/tjakobsson/uatu/issues/579), WebKit login investigation
+  [#580](https://github.com/tjakobsson/uatu/issues/580), and sanitized store-load /
+  child-response diagnostics [#581](https://github.com/tjakobsson/uatu/issues/581).
+- The user approved the exact updated PR body, normal push and documentation-only
+  final checkpoint, preserving #572's title and ready status. Approval and body
+  digest are retained privately in `lead/pr572-publication-approval.json`.
+  Publication scans found no secrets or private paths in added target content;
+  the existing scoped Git-identity exception remains unchanged. Publishing uses
+  restored GitHub MCP; the declined CLI call is not retried.
+
+All **34** implementation/acceptance tasks are complete. At this checkpoint the
+new commits and approved PR body are not yet published; normal push, PR update
+and final preview-identity verification remain authorized delivery steps. The
+documentation-only delta receives fresh affected review and validation; accepted
+unchanged unit/native/browser evidence is retained. The owned preview may be
+rebuilt/restarted for its new Git identity, but the original Hub is untouched.
+No full browser/performance suite, physical-device, live native question-tool or
+OS-process-restart coverage is claimed. Native mutation APIs still lack an
+atomic occurrence precondition after final validation. Archive only after the
+upstream PR merges; no archive or upstream merge is performed here.
+
+### CI layout regression renewal (2026-11-02, in progress)
+
+Checkpoint **2edfd84** was pushed normally and ready PR #572 updated with its
+exact approved body. The rebuilt owned preview's matching Git identity,
+Connected state and OpenCode 2.2.5 readiness were verified over HTTPS, without
+new model prompts or changes to the original Hub. The final documentation
+checkpoint received four fresh clean affected reviews after correcting its
+chronological placement.
+
+GitHub CI run **41417871160** subsequently exposed three deterministic browser
+failures in functional leg 2: the 40%-width desktop pane loses the expanded
+Workers header after window shrink, and both WebKit independent-panel cases
+shift the timeline by 20 pixels when Pending collapses. All three failed their
+original attempt and both configured CI retries. The `validate` job failed only
+because that E2E leg failed. Units, contract checks, functional leg 1 and the
+performance project passed; leg 2 reported **728 passed, three failed, two flaky,
+three skipped**. The flaky cases are not claimed fixed or baseline failures.
+
+The user requested fixes. An unchanged local three-case reproduction at one
+worker, zero retries and original deadlines also fails all three, including the
+same 20-pixel WebKit shift. Tasks 6.1–6.4 are reopened for correction, renewed
+checks/four fresh reviews, evidence reconciliation and publication approval.
+Primary private reproduction evidence is under
+`~/.cache/opencode/scratch/worker-activity-ci-fixes-20261102/lead/`, including
+`exact-three-red.log` and adjacent traced results. Existing accepted worker
+activity, ownership/control, private dismissal and exact-target focus behavior
+must remain intact; no assertion/deadline weakening or automatic retry is an
+acceptable correction. Archive remains after upstream PR merge.
+
+The frozen correction reserves the measured transcript-action band before
+allocating expanded desktop work and compacts the inactive pane before falling
+back to the existing sheet. The captured short-desktop case has 218.15625px of
+remaining space: a 100px transcript-action band and 118.15625px dock now keep both
+headers and the active action reachable. WebKit's native shift is reproduced
+when unchanged dismissal guidance is replaced during disclosure repaint;
+retaining that text node prevents the shift without forced layout or corrective
+scrolling. Disabling overflow anchoring did not fix it, and the browser's exact
+internal layout algorithm is not claimed established.
+
+The added measured-budget unit regression and real-DOM text-node regression
+both fail before correction. The unchanged original three cases now pass
+**3/3**; both complete E2E files pass **8/8** twice, with additional transcript
+clearance/node-identity assertions and every original assertion retained.
+Related sheet, focus, anchor and enlargement cases pass **12/12**; colocated
+units pass **51/51**, the UI unit passes, typecheck and whitespace checks pass.
+Private commands, geometry, red/green logs and limits are in
+`~/.cache/opencode/scratch/worker-activity-ci-fixes-20261102/layout/handoff.md`.
+Broader acceptance and four fresh full-target reviews remain pending; these
+focused passes are not a claim that remote CI has passed.
+
+Final frozen-candidate renewal passes **8,330 unit tests, 16 skipped, zero
+failures**, typecheck, API validation, audit, 594-package license check, strict
+change validation, all **56** capability specs, build and compiled smoke. The
+complete previously failing functional E2E leg passes **733 tests, three skipped,
+zero failures**, four workers and zero retries. All **2,643** tracked hashes stay
+unchanged through acceptance; all **14** delta requirement bodies still exactly
+match their synchronized main specs. Primary logs and stability records are
+`lead/candidate-verification.log`, `candidate-acceptance.json`,
+`candidate-functional-leg2.log` and `candidate-hash-stability.json` under the
+private CI-fix scratch root above.
+
+Four fresh independent full-target native Sol reviews—two Standards and two
+Spec—are complete and clean across **111 paths / 414 hunks**, including all
+seven working-delta files. Spec A's initial capped return covered only 105 paths
+and was not counted clean; its same-model continuation completed the remaining
+six files/63 hunks and reverified the frozen source. Reports and exhaustive
+coverage are retained in the private root's `reviews/` subdirectories. Review
+was source/Git inspection, separate from runtime acceptance; requested High
+effort was not independently attestable. Original backend ownership/control,
+canonical requests and private-state sources are unchanged by this correction.
+
+Earlier actual OpenCode/client **2.2.5** acceptance and the earlier **104/104**
+targeted matrix are retained, not rerun for this layout-only correction. Current
+local browser renewal is the complete functional leg above plus the focused
+related checks, not the full functional/performance suite or physical devices.
+Local checks still use Bun **1.4.2** versus CI/main's **1.4.4**. The existing
+OpenAPI warning and low KaTeX advisory remain; local passes do not establish
+remote Linux CI success. Native mutation and restart-coverage limits are
+unchanged.
+
+The user approved the displayed PR evidence/summary update, normal push of the
+verified corrections and final checkpoint, and refreshing only the owned
+preview. Title and ready status remain unchanged. The separately approved
+[reply to the earlier focused review](https://github.com/tjakobsson/uatu/pull/572#issuecomment-6574711875)
+was posted once through MCP and read back; no new review was triggered. At this
+checkpoint the CI corrections are not yet pushed. All **34** acceptance tasks
+are renewed complete; final affected documentation review, identity rebuild,
+preview verification and publication are the remaining authorized delivery
+steps. Archive remains after upstream PR merge, and the original Hub is untouched.
+
+### Remaining permission-test CI failure (2026-11-02, in progress)
+
+The approved correction was committed and pushed normally as **7f4394a**.
+The exact approved PR body, unchanged title/ready status and matching HTTPS
+preview identity were verified; build and compiled smoke pass. Four fresh
+affected-documentation reviews are also clean. No model prompt, original-Hub
+change, rebase, force push or archive occurred.
+
+Remote CI run **41435701319** confirms the three original failures are fixed:
+functional leg 2 passes, along with units, contracts, performance and CodeQL.
+Functional leg 1 instead reports **653 passed, one failed**: the unreadable-file
+test in `view-and-layout.e2e.ts` times out at its setup synchronization predicate
+before selecting the denied document. All three configured attempts fail;
+`validate` fails only because of this E2E dependency. This is a distinct remaining
+failure, not evidence that the three layout corrections failed.
+
+The unchanged permission test passes **3/3** focused local repetitions at one
+worker and zero retries. That does not establish baseline flakiness or a fix.
+The test and document-update modules are byte-identical to upstream, but their
+exclusive historical cause is unproven. A bounded test/harness-only diagnosis
+is underway before any further correction; permission/authentication safety,
+the final 403/no-auto-retry assertions and all original deadlines remain binding.
+Tasks 6.1–6.4 are reopened for that remaining correction and affected review,
+reusing adequate unchanged implementation/runtime evidence. Private evidence is
+in the CI-fix scratch root's `permission/` directory; completed remote workflow
+observation is `lead/remote-ci-completion.json`.
+
+The bounded permission diagnosis establishes no justified correction. The
+original test passes six further focused repetitions (**9/9** original local
+invocations including the lead's three), and its complete file passes **13/13**.
+Twenty-two instrumented target attempts also pass; two stress failures occur
+earlier in shared boot, not at the permission wait. All temporary source probes
+are removed. Source inspection rules out quiet GETs always minting a new
+`generatedAt`; Linux timestamp precision and browser delivery remain unconfirmed.
+Before changing the predicate, inspect failing Linux values for indexed/stored
+mtime differences and browser/API generation relation. Neither local passes nor
+an unsupported synchronization rewrite resolves the remaining CI failure.
+The worker's evidence, cleanup and precise missing-data list are retained in
+`permission/worker/handoff.md`; no production, assertion, deadline or retry-policy
+change is proposed without that evidence.
+
+### Plain-language shell Stop warning (2026-11-02)
+
+The user requested clearer wording for the shell Stop warning and confirmed the
+proposed text. The shared warning now explains saved job/output deletion,
+possible final-result loss even after execution ends, output unavailability
+after reload, and OpenCode's possible Failed rather than Cancelled outcome in
+plain language. It also distinguishes that removal from deleting project files.
+This changes copy only, not confirmation, cancellation, native mutation or
+ownership/control behavior. Existing unit/browser checks are updated to preserve
+every warning consequence, with additional explicit assertions for reload and
+project-file wording; all original mutation, focus and timing assertions remain.
+
+The updated guidance assertion fails against the old warning, then all **32**
+task-inspection units and the entire affected **62-case** Chromium/WebKit browser
+file pass, two workers, zero retries. Typecheck and whitespace checks pass.
+Primary private logs are under
+`~/.cache/opencode/scratch/worker-activity-warning-copy-20261102/`.
+Four fresh affected Sol reviews—two Standards and two Spec—are clean across
+all four changed paths/five hunks. The user approved normal commit/push and an
+owned-preview restart after finishing their test jobs, with the existing PR body
+and safety behavior unchanged. At this checkpoint publication/preview refresh
+remain delivery steps; this copy change does not resolve the separate
+permission-test CI blocker.
+
+During manual preview testing, the user reports that both timed workers finish,
+the remaining worker's UI row stays Working until completion, and the controlled
+shell prints its expected output and exits with code 7. The agent's separate
+"unverified" commentary was not the UI state. The worker reported no native
+question tool, so that attempt does not establish live question-card coverage.

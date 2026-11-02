@@ -72,6 +72,7 @@ export class CoordinatedScrollOwner {
     scroller.addEventListener("touchstart", this.touchStart, { passive: true });
     scroller.addEventListener("touchmove", this.touchMove, { passive: true });
     scroller.addEventListener("keydown", this.keyDown);
+    scroller.addEventListener("pointerdown", this.pointerDown, { passive: true });
   }
 
   private active(): boolean { return !this.disposed && (this.options.active?.() ?? true); }
@@ -339,6 +340,12 @@ export class CoordinatedScrollOwner {
     } else if (this.upwardPending && movement !== "none") {
       this.upwardPending = false;
       this.options.anchor.pause(this.options.measure(true));
+    } else if (geometry.clientHeight !== previous.clientHeight && this.options.anchor.isPinned()) {
+      // Native caret positioning can move a pinned transcript upward when
+      // composer/dock chrome resizes its viewport. That is layout, not reader
+      // intent. Explicit upward input was handled above; intrinsic content
+      // changes alone still take the ordinary movement path below.
+      this.request();
     } else if (changedExtent && movement !== "up") {
       // Extent growth alone cannot speak for the reader. An unaccounted
       // upward movement can reveal intrinsic-size content at the same time;
@@ -372,6 +379,16 @@ export class CoordinatedScrollOwner {
     return (control as HTMLElement).isContentEditable || ["", "true", "plaintext-only"].includes(control.getAttribute("contenteditable") ?? "false");
   }
   private wheel = (event: WheelEvent): void => { if (event.deltaY < 0 && this.ownsInput(event)) this.pause(); };
+  private pointerDown = (event: PointerEvent): void => {
+    if (event.pointerType !== "mouse" || event.target !== this.scroller || !this.ownsInput(event)
+      || this.scroller.scrollHeight <= this.scroller.clientHeight) return;
+    const box = this.scroller.getBoundingClientRect();
+    const left = box.left + this.scroller.clientLeft;
+    const right = left + this.scroller.clientWidth;
+    // Native scrollbar input need not dispatch wheel/key events. Capture its
+    // intent before a simultaneous resize can be mistaken for caret movement.
+    if ((event.clientX >= box.left && event.clientX < left) || (event.clientX >= right && event.clientX < box.right)) this.pause();
+  };
   private touchStart = (event: TouchEvent): void => {
     this.touchY = this.ownsInput(event) && !this.inTextControl(event) ? event.touches[0]?.clientY ?? null : null;
   };
@@ -396,6 +413,7 @@ export class CoordinatedScrollOwner {
     this.scroller.removeEventListener("touchstart", this.touchStart);
     this.scroller.removeEventListener("touchmove", this.touchMove);
     this.scroller.removeEventListener("keydown", this.keyDown);
+    this.scroller.removeEventListener("pointerdown", this.pointerDown);
     this.scroller.style.setProperty("overflow-anchor", this.previousAnchoring);
     this.scroller.style.setProperty("scroll-behavior", this.previousBehavior);
     owners.delete(this.scroller);

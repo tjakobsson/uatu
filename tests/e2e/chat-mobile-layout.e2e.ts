@@ -748,6 +748,11 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`mobile layo
         await page.locator("#chat-input").focus();
       }
       await page.locator("#chat-work-dock").evaluate(node => { node.scrollTop = 0; });
+      // At 480px the yielded reading remainder cannot contain an action and
+      // its scroll insets. Work must use its explicit sheet, leaving Revert
+      // in the parent's real reading band after that sheet has been closed.
+      await expect(page.locator("#chat-work-toggle")).toBeVisible();
+      await expect(page.locator("#chat-work-toggle")).toHaveAttribute("aria-expanded", "false");
       await page.locator("#chat-items").getByRole("button", { name: "Revert message", exact: true }).last().click();
       const warning = page.locator("#chat-queue-note .chat-queue-replacement");
       await expect(warning).toContainText("delivered together with your replacement");

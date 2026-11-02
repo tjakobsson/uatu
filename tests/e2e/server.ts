@@ -468,7 +468,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
     // fake OpenCode's controls (`opencode` action).
     stack?: "opencode-v2";
     backgroundPreview?: boolean;
-    op?: "step" | "finish" | "raceDeliverOnCancel" | "state" | "resync" | "launchWorker" | "settleWorker" | "workerReport" | "disconnect" | "pauseEvents" | "reconnectEvents" | "externalRevert" | "appendHistory" | "holdNextMessageRead" | "releaseMessageRead" | "loseBackgroundResponse" | "loseWorkerResponse" | "launchShell" | "shellPhase" | "wakeParent" | "losePromptResponse" | "unknownPromptBeforeAdmission" | "loseResumeResponse" | "refuseBackground" | "launchShellOnNextSteer";
+    op?: "step" | "finish" | "raceDeliverOnCancel" | "state" | "resync" | "launchWorker" | "launchRequestWorker" | "workerObservation" | "workerRequest" | "settleWorker" | "workerReport" | "disconnect" | "pauseEvents" | "reconnectEvents" | "externalRevert" | "appendHistory" | "holdNextMessageRead" | "releaseMessageRead" | "loseBackgroundResponse" | "loseWorkerResponse" | "launchShell" | "shellPhase" | "wakeParent" | "losePromptResponse" | "unknownPromptBeforeAdmission" | "loseResumeResponse" | "refuseBackground" | "launchShellOnNextSteer";
+    requestKind?: "permission" | "question";
+    observed?: boolean;
     revertMessageId?: string | null;
     usedModel?: string;
     usedEffort?: string;
@@ -546,6 +548,15 @@ async function handleE2EChat(request: Request): Promise<Response> {
           break;
         case "launchWorker":
           if (body.conversationId) return Response.json(openCodeV2Fake.launchWorker(body.conversationId, body.background !== false, body.childId));
+          break;
+        case "launchRequestWorker":
+          if (body.conversationId) return Response.json(openCodeV2Fake.launchRequestWorker(body.conversationId));
+          break;
+        case "workerObservation":
+          if (body.childId && typeof body.observed === "boolean") { openCodeV2Fake.workerObservation(body.childId, body.observed); return Response.json({ ok: true }); }
+          break;
+        case "workerRequest":
+          if (body.childId && (body.requestKind === "permission" || body.requestKind === "question")) return Response.json(openCodeV2Fake.workerRequest(body.childId, body.requestKind));
           break;
         case "settleWorker":
           if (body.childId) { openCodeV2Fake.settleWorker(body.childId, body.workerState ?? "completed", body.text ?? "Fixture checked."); return Response.json({ ok: true }); }

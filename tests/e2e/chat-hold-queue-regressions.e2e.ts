@@ -49,6 +49,22 @@ test("sparse pending entries grow from one to two to five beside busy workers", 
     await page.locator("#chat-compact-workers > summary").click();
     await expect(page.locator("#chat-compact-workers")).not.toHaveAttribute("open");
     await expect.poll(() => page.locator("#chat-work-dock").evaluate(node => node.getBoundingClientRect().height)).toBeLessThan(80);
+    // Successful queue actions must not erase the independent local-storage
+    // guidance or make it an unmeasured third dock card.
+    const guidance = page.locator("#chat-composer-notices .chat-worker-dismissal-notice");
+    await expect(guidance).toHaveText("Worker dismissals apply only on this device.");
+    await expect(guidance).toHaveAttribute("role", "status");
+    await expect(guidance).toBeVisible();
+    await expect(page.locator("#chat-work-dock .chat-worker-dismissal-notice")).toHaveCount(0);
+    await page.locator("#chat-input").fill("Keep the draft while reading dismissal guidance");
+    const notices = page.locator("#chat-composer-notices");
+    await notices.focus(); await notices.press("End");
+    await expect(notices).toBeFocused();
+    await expect.poll(() => guidance.evaluate(node => {
+      const box = node.getBoundingClientRect(), band = node.parentElement!.getBoundingClientRect();
+      return box.top >= band.top - 1 && box.bottom <= band.bottom + 1;
+    })).toBe(true);
+    await expect(page.locator("#chat-input")).toHaveValue("Keep the draft while reading dismissal guidance");
 });
 
 test("hold portal matches Send when the fixed viewport origin differs from client coordinates", async ({ page, request }, info) => {

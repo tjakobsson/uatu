@@ -295,10 +295,11 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const summaries = await Promise.all(this.order.map(agent =>
       Promise.resolve()
         .then(() => agent.service.activity())
-        .catch((): ChatActivity => ({ working: false, awaiting: false }))));
+        .catch((): ChatActivity => ({ working: false, awaiting: false, unresolved: false }))));
     return {
       working: summaries.some(summary => summary.working === true),
       awaiting: summaries.some(summary => summary.awaiting === true),
+      unresolved: summaries.some(summary => summary.unresolved === true),
     };
   }
 

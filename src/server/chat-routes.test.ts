@@ -200,13 +200,15 @@ class FakeChatService implements WorkspaceChatService {
 
   // Workspace activity, derived as the adapter derives it: a live status is
   // working, a pending permission awaits the user. The extra fields stand in
-  // for a careless service — nothing but the two facts may reach the wire.
+  // for a careless service — nothing but the three facts may reach the wire.
   readonly activityChanges = new ConversationInventoryBroadcaster();
   readonly pendingPermissions = new Set<string>();
+  unresolved = false;
   async activity(): Promise<ChatActivity> {
     return {
       working: isLiveConversationStatus(this.conversation.status),
       awaiting: this.pendingPermissions.size > 0,
+      unresolved: this.unresolved,
       conversationId: this.conversation.id,
       title: this.conversation.title,
     } as ChatActivity;
@@ -1330,8 +1332,8 @@ class FrameReader {
   }
 }
 
-function activityFrame(data: { working: boolean; awaiting: boolean }): string {
-  return `event: activity\ndata: ${JSON.stringify(data)}\n\n`;
+function activityFrame(data: { working: boolean; awaiting: boolean; unresolved?: boolean }): string {
+  return `event: activity\ndata: ${JSON.stringify({ ...data, unresolved: data.unresolved ?? false })}\n\n`;
 }
 
 async function openActivity(
@@ -1351,6 +1353,22 @@ async function untilSubscribers(service: FakeChatService, count: number): Promis
 }
 
 describe("workspace activity route", () => {
+  test("uncertainty-only changes serialize the third boolean without leaking service fields", async () => {
+    const service = new FakeChatService();
+    const { frames } = await openActivity(service);
+    try {
+      expect(await frames.next()).toBe(": open\n\n");
+      expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+      service.unresolved = true;
+      service.activityChanges.invalidate();
+      const frame = await frames.next();
+      expect(frame).toBe(activityFrame({ working: false, awaiting: false, unresolved: true }));
+      expect(Object.keys(JSON.parse(frame.split("\ndata: ")[1]!))).toEqual(["working", "awaiting", "unresolved"]);
+      service.unresolved = false;
+      service.activityChanges.invalidate();
+      expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+    } finally { await frames.reader.cancel(); }
+  });
   test("requires the workspace credential and subscribes to nothing without it", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/activity"] as { GET(request: Request): Promise<Response> };
@@ -1373,7 +1391,7 @@ describe("workspace activity route", () => {
     await frames.reader.cancel();
   });
 
-  test("a status change and a pending permission each produce exactly one event carrying only the two facts", async () => {
+  test("a status change and a pending permission each produce exactly one event carrying only the three facts", async () => {
     const service = new FakeChatService();
     const { frames } = await openActivity(service);
     expect(await frames.next()).toBe(": open\n\n");
@@ -1397,9 +1415,10 @@ describe("workspace activity route", () => {
       expect(frame).not.toContain("id:");
       const data = JSON.parse(frame.split("\ndata: ")[1]!) as Record<string, unknown>;
       // The fake also returns its conversation id and title; neither leaks.
-      expect(Object.keys(data)).toEqual(["working", "awaiting"]);
+      expect(Object.keys(data)).toEqual(["working", "awaiting", "unresolved"]);
       expect(typeof data.working).toBe("boolean");
       expect(typeof data.awaiting).toBe("boolean");
+      expect(typeof data.unresolved).toBe("boolean");
     }
 
     service.settlePermission("permission-1");

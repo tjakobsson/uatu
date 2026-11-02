@@ -1,0 +1,103 @@
+# Spec Delta
+
+## ADDED Requirements
+
+### Requirement: Worker dismissals are private durable account state
+The Hub SHALL persist worker-summary dismissals for the authenticated account, stable workspace, agent-qualified conversation and exact execution. Marks SHALL survive Hub/workspace restarts, synchronize across that account's devices and never apply to another account or execution. Provider history, task lifecycle, navigation and geometry SHALL remain unchanged.
+
+#### Scenario: Same account uses two devices
+- **WHEN** one device successfully dismisses an unavailable execution and another connected device for the same account shows that workspace and conversation
+- **THEN** both converge on the dismissed summary without reload or manual status checking
+- **AND** reconnecting or reopening on that account retrieves the same durable marks
+
+#### Scenario: Accounts and executions are isolated
+- **WHEN** another account views the workspace, or a new execution reuses the same child session
+- **THEN** the first account's old dismissal hides neither the other account's row nor the new execution
+
+### Requirement: Personal dismissal mutations use authenticated scope and atomic storage
+Dismissal reads/writes SHALL derive the account from Hub authentication, validate workspace/conversation/execution scope, reject caller-selected accounts and protect cookie mutations against cross-origin requests. Concurrent dismissals SHALL merge without losing unrelated marks. Successful responses SHALL reflect durable atomic saves; failure SHALL NOT claim synchronization or silently substitute device-local success.
+
+#### Scenario: Concurrent devices dismiss different executions
+- **WHEN** two authorized devices dismiss different executions concurrently
+- **THEN** both durable marks remain present and repeated additions are idempotent
+- **AND** unrelated personal preferences remain unchanged
+
+#### Scenario: Unauthorized or malformed mutation
+- **WHEN** a request selects another account, has invalid or oversized identifiers, targets an unavailable workspace, or violates cookie-origin protection
+- **THEN** the Hub refuses it without a provider mutation or disclosure of another account's marks
+
+#### Scenario: Persistence is unavailable
+- **WHEN** a dismissal cannot be durably stored
+- **THEN** the client reports that it could not save the dismissal and leaves or restores the row
+- **AND** it does not claim cross-device success or treat the failure as a worker failure
+
+#### Scenario: An unsuccessful dismissal is followed by a healthy personal-state read
+- **WHEN** an explicit dismissal POST fails or conflicts and a later authoritative personal-state GET succeeds
+- **THEN** the failed-action feedback remains tied to that dismissal rather than implying the action completed
+- **AND** unrelated reads, automatic retirement and other successful dismissals do not erase it
+- **AND** a new applicable explicit action can supersede the feedback without retaining a stale copy of recovered identity or storage-health guidance
+
+### Requirement: Personal dismissal invalidations do not disclose other accounts
+Connected clients SHALL receive dismissal changes only within their authenticated account and authorized workspace scope, then reconcile authoritative personal state. Personal marks SHALL NOT enter shared workspace activity or conversation payloads. Missed invalidations SHALL recover on reconnect or conversation selection without changing navigation, disclosure choices or focus.
+
+#### Scenario: Workspace is shared by two accounts
+- **WHEN** account A changes a dismissal while A and B subscribe to the same workspace
+- **THEN** only A's authorized clients receive its personal invalidation and can read its marks
+- **AND** B's activity stream, summary visibility and personal-state responses reveal no information about A's dismissal
+
+#### Scenario: Client misses the dismissal update
+- **WHEN** an account reconnects after another device dismissed work
+- **THEN** its authoritative personal-state read converges without replaying any execution mutation
+
+### Requirement: Dismissal storage preserves execution identity through recovery
+Dismissal identity SHALL remain stable through pagination, live/history reconciliation and restart, but SHALL NOT be based on child session ID alone or an ambiguous alias. Marks SHALL be bounded with explicit failure rather than silently dropping committed dismissals. Verified activity SHALL override stale marks; successful retirement SHALL require a later explicit action to dismiss again. Failed retirement SHALL follow the availability policy below. Forgetting a workspace SHALL clear its marks for all accounts.
+
+#### Scenario: Alias folds or result arrives
+- **WHEN** another representation of the same positively identified execution is recovered
+- **THEN** it retains the same dismissal scope without hiding any unrelated occurrence
+- **AND** an ambiguous identity is not persisted as a broad session-level dismissal
+
+#### Scenario: Notification is dismissed before its launch is known
+- **WHEN** a V2 notification-only row has complete valid native notification identity but no proven launch association
+- **THEN** the user can dismiss that notification using a separate versioned identity scoped to the account, stable workspace and parent conversation
+- **AND** its identity derives from the parent conversation, notification source, native inbox ID and worker ID, not clocks, status or display text
+- **AND** the mark hides only that notification through replay and restart without supplying current activity or Stop authority
+
+#### Scenario: Launch appears without exact notification association proof
+- **WHEN** an exact launch row replaces or accompanies a dismissed provisional notification without positive proof that both identify the same occurrence
+- **THEN** the launch remains visible and does not inherit the notification's dismissal
+- **AND** child/time uniqueness, a UI fold or a shared bare call/task/result identifier does not authorize transfer
+- **AND** no automatic carry-over is claimed while the consumed native data lacks the required proof
+
+#### Scenario: Notification identity is contradictory or incomplete
+- **WHEN** notification source or worker evidence contradicts an earlier notification identity
+- **THEN** the new identity does not inherit the old mark and ambiguous aliases do not converge
+- **AND** incomplete native identity keeps the row visible with dismissal guidance
+- **AND** verified current activity and canonical pending requests retain visibility precedence over provisional marks
+
+#### Scenario: Activity wins a race with dismissal
+- **WHEN** verified activity or a linked blocking request is newer than the state the user dismissed
+- **THEN** that evidence remains visible despite a delayed dismissal response or stale client write
+- **AND** after successful durable retirement, later unavailability does not automatically reactivate the obsolete dismissal
+
+#### Scenario: A partial launch gains its qualified identity
+- **WHEN** an active observation lacks a complete dismissal identity but carries a provider-proven launch reference, later updates prove that same launch's qualified execution identities, and authoritative retirement is confirmed after that resolution
+- **THEN** the client can clear the matched identity fence and guidance automatically without reopening the conversation
+- **AND** the launch reference is never persisted as a dismissal key, treated as an execution alias or used as Stop authorization
+
+#### Scenario: Launch continuity or retirement remains unproven
+- **WHEN** the reference is absent, names a different native launch, or cannot be matched to a post-resolution authoritative retirement acknowledgment
+- **THEN** affected work remains visible with identity or storage guidance rather than reviving old dismissal marks
+- **AND** row, call or child identifiers, display clocks, stream generation and UI folding alone do not establish continuity
+- **AND** stale responses, unrelated qualified workers and failed writes do not discharge the unresolved fence
+
+#### Scenario: Retirement storage fails while activity returns
+- **WHEN** the Hub cannot confirm persistence of retirement for an old dismissal
+- **THEN** verified activity, transcript content and canonical pending requests remain available without waiting for that save
+- **AND** the client reports the personal-state storage failure without treating it as a worker failure
+- **AND** an old dismissal may reapply only to an unavailable row after restart during that failure; it never hides currently verified activity or pending requests
+
+#### Scenario: Workspace is forgotten or storage is full
+- **WHEN** the workspace is forgotten
+- **THEN** all accounts' dismissal marks for that stable workspace are removed through the forget lifecycle
+- **AND** when the mark budget cannot accept a new dismissal, it refuses that write explicitly instead of silently evicting committed marks

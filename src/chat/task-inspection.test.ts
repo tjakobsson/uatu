@@ -104,10 +104,49 @@ describe("task inspection panel", () => {
     const view = panel();
     const task = item({ taskId: "uncertain", taskType: "agent", childConversationId: "child", stateUncertain: true });
     view.show({ conversationId: "one", taskId: task.taskId, view: "transcript" }, task);
-    expect(hosts().strip.textContent).toContain("Status unavailable — reconnecting");
+    expect(hosts().strip.textContent).toContain("Status unavailable · last seen unknown");
+    expect(live().filter(entry => entry.kind === "interval")).toHaveLength(0);
     expect(hosts().strip.querySelector("[data-stop-task]")).toBeNull();
     view.sync({ ...task, stateUncertain: false });
     expect(hosts().strip.querySelector("[data-stop-task]")).not.toBeNull();
+    view.close();
+  });
+
+  test("verified ended shell removal keeps ordinary destructive guidance and no execution timer", () => {
+    const view = panel();
+    const task = item({ taskType: "shell", activity: { kind: "ended", endedAt: 60_000 }, control: { available: true } });
+    view.show({ conversationId: "parent", taskId: task.taskId, view: "output" }, task);
+    expect(hosts().strip.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(false);
+    expect(hosts().strip.textContent).toContain("Ended · result unavailable");
+    expect(hosts().strip.textContent).toContain("deletes this job’s saved record and output");
+    expect(hosts().strip.textContent).toContain("even if it has already finished");
+    expect(hosts().strip.textContent).toContain("Uatu may lose the final result");
+    expect(hosts().strip.textContent).toContain("output won’t be available after reload");
+    expect(hosts().strip.textContent).toContain("OpenCode may show “Failed” instead of “Cancelled”");
+    expect(hosts().strip.textContent).toContain("Your project files are not deleted.");
+    expect(hosts().strip.querySelector("[data-task-elapsed]")).toBeNull();
+    expect(live().filter(entry => entry.kind === "interval")).toHaveLength(0);
+    view.sync({ ...task, control: { available: false, reason: "Exact job proof unavailable" } });
+    expect(hosts().strip.querySelector("[data-stop-task]")).toBeNull();
+    expect(hosts().strip.textContent).toContain("Exact job proof unavailable");
+    view.close();
+  });
+
+  test("activity and disabled Stop reasons are visible without hover while uncertain clocks stay stopped", () => {
+    const view = panel();
+    const task = item({ taskType: "agent", stateUncertain: true, activity: { kind: "working", observedAt: 50_000 }, control: { available: false, reason: "Stop unavailable: this execution's control proof is missing" } });
+    view.show({ conversationId: "parent", taskId: task.taskId, view: "transcript" }, task);
+    expect(hosts().strip.textContent).toContain("Working");
+    expect(hosts().strip.textContent).toContain(task.control!.reason!);
+    expect(hosts().strip.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(true);
+    expect(live().filter(entry => entry.kind === "interval")).toHaveLength(1);
+    for (const kind of ["needs-answer", "checking", "session-active", "unavailable", "ended"] as const) {
+      view.sync({ ...task, activity: { kind, observedAt: 50_000, endedAt: 60_000, ...(kind === "needs-answer" ? { request: { id: "q", kind: "question" as const } } : {}) } });
+      expect(live().filter(entry => entry.kind === "interval")).toHaveLength(0);
+      expect(hosts().strip.querySelector("[data-task-elapsed]")).toBeNull();
+      expect(hosts().strip.textContent).toContain(task.control!.reason!);
+    }
+    expect(hosts().strip.textContent).toContain("Ended · result unavailable");
     view.close();
   });
 
@@ -169,6 +208,17 @@ describe("task inspection panel", () => {
     view.close();
     expect(strip.hidden).toBe(true);
     expect(strip.childNodes.length).toBe(0);
+  });
+
+  test("a reused task id repaints the exact occurrence's result even when its metadata matches", () => {
+    const view = panel();
+    const task = item({ id: "task:first", taskId: "reused", status: "completed" });
+    view.show({ conversationId: "parent", taskId: task.taskId, view: "transcript" }, task);
+    const first = hosts().strip.querySelector("[data-task-result]")!;
+    view.sync({ ...task, id: "task:second" });
+    expect(first.isConnected).toBe(false);
+    expect(hosts().strip.querySelector("[data-task-result]")?.getAttribute("data-task-result")).toBe("task:second");
+    view.close();
   });
 
   test("settled inspection states the outcome and links to its canonical result without repeating the report", () => {

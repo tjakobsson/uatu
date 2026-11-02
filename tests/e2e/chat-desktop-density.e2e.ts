@@ -1,5 +1,6 @@
 import { expect, test } from "./fixtures";
 import { openChatPanel, openChatPending, openChatWorkers } from "./chat-helpers";
+import { captureScreenshot, saveEvidence } from "./evidence";
 
 test("legacy Queue default cannot change Enter or Alt+Enter, including after reload", async ({ page, request }) => {
   await page.addInitScript(() => localStorage.setItem("uatu:presentation:v1:%2F:chat-delivery", "queue"));
@@ -33,7 +34,7 @@ test("legacy Queue default cannot change Enter or Alt+Enter, including after rel
   expect(await page.evaluate(() => localStorage.getItem("uatu:presentation:v1:%2F:chat-delivery"))).toBe("queue");
 });
 
-for (const fraction of [0.4, 0.8]) test(`desktop density follows pane width (${fraction})`, async ({ page, request }) => {
+for (const fraction of [0.4, 0.8]) test(`desktop density follows pane width (${fraction})`, async ({ page, request }, info) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.addInitScript(fraction => localStorage.setItem("uatu:presentation:v1:%2F:uatu:chat-panel", JSON.stringify({ open: true, fraction })), fraction);
   // An upgrading browser may still have the retired Queue default.
@@ -82,8 +83,22 @@ for (const fraction of [0.4, 0.8]) test(`desktop density follows pane width (${f
   // Shrinking the actual window yields reading space, not unreachable Stop.
   await page.setViewportSize({ width: 1440, height: 500 });
   await expect(page.locator("#chat-stop")).toBeInViewport();
+  await saveEvidence(info, "short-desktop-geometry.json", JSON.stringify(await page.evaluate(() => ({
+    root: document.documentElement.outerHTML.match(/^<html[^>]*>/)?.[0],
+    nodes: [...document.querySelectorAll<HTMLElement>("#chat-surface > *, #chat-compact-workers > summary, #chat-queue-header")].map(node => ({
+      id: node.id, class: node.className, box: node.getBoundingClientRect().toJSON(), style: node.getAttribute("style"),
+      display: getComputedStyle(node).display, min: getComputedStyle(node).minHeight, max: getComputedStyle(node).maxHeight,
+    })),
+  })), null, 2));
   await expect(page.locator("#chat-compact-workers > summary")).toBeInViewport();
   await expect(page.locator("[data-pending-toggle]")).toBeInViewport();
+  const shortReading = await page.locator("#chat-timeline").evaluate(node => {
+    const css = getComputedStyle(node);
+    return { height: node.clientHeight, action: node.querySelector(".chat-message-revert")!.getBoundingClientRect().height
+      + parseFloat(css.scrollPaddingTop) + parseFloat(css.scrollPaddingBottom) };
+  });
+  expect(shortReading.height).toBeGreaterThanOrEqual(shortReading.action);
+  await captureScreenshot(page, info, `short-desktop-${fraction}`);
   await page.evaluate(() => localStorage.setItem("uatu:presentation:v1:%2F:chat-delivery", "queue"));
   await input.fill("Ignore the retired keyboard preference");
   await expect(page.locator("#chat-keyboard-hint")).toHaveText("Enter: steer · Alt+Enter: queue");

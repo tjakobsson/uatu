@@ -40,6 +40,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       await page.locator("#chat-queue-content").evaluate(n => n.scrollTop = 140);
       const before = await offsets();
       expect(before["chat-timeline"]).toBeGreaterThan(0);
+      const dismissalText = await page.locator(".chat-worker-dismissal-notice").evaluateHandle(node => node.firstChild);
       // A final-position poll misses a transient clamp followed by the owner's
       // correction in the same render. Record the native position *before*
       // each assignment as well as the mutation microtask and next paint.
@@ -66,6 +67,10 @@ for (const engine of ["chromium", "webkit"] as const) {
       await page.evaluate(() => (window as unknown as { pendingCloseDone: Promise<void> }).pendingCloseDone);
       const pendingClose = await page.evaluate(() => (window as unknown as { pendingCloseSamples: Array<{ phase: string; top: number; range: number }> }).pendingCloseSamples);
       await saveEvidence(info, "pending-close-geometry.json", JSON.stringify({ before, samples: pendingClose }, null, 2));
+      // Unchanged composer guidance must not be removed/reinserted while the
+      // disclosure reallocates its band: WebKit can shift native scroll there.
+      expect(await dismissalText.evaluate(node => node === document.querySelector(".chat-worker-dismissal-notice")!.firstChild)).toBe(true);
+      await dismissalText.dispose();
       expect(pendingClose.some(sample => sample.phase === "mutation")).toBe(true);
       expect(pendingClose.some(sample => sample.phase === "frame")).toBe(true);
       for (const sample of pendingClose) {

@@ -106,6 +106,33 @@ async function readLive(open: (signal: AbortSignal) => Promise<Response>): Promi
 const cursorOf = (generation: string, sequence: number) => encodeReplayCursor({ generation, sequence });
 const dataOf = (envelope: LiveEnvelope) => (envelope.event as { data: unknown }).data;
 
+test("personal invalidations are endpoint-private, no-cursor, coalesced and detached", async () => {
+  const broker = { subscribe() { throw new Error("personal must bypass broker"); } } as unknown as LiveBroker;
+  const endpoint = new LiveEndpoint({ broker, resolveWorkspace: id => id });
+  const a = await readLive(async signal => endpoint.openStream(new Request('http://test/api/hub/live?ws=ws&subs=[{"topic":"personal","cursor":"old"}]', { signal }), { user: "alice", sessionId: "a" }));
+  const b = await readLive(async signal => endpoint.openStream(new Request('http://test/api/hub/live?ws=ws&subs=[{"topic":"personal"}]', { signal }), { user: "bob", sessionId: "b" }));
+  try {
+    await a.waitFor(r => r.envelopes.length === 1, "attach invalidation");
+    await b.waitFor(r => r.envelopes.length === 1, "second attach invalidation");
+    expect(a.envelopes[0]).toEqual({ ws: "ws", topic: "personal", cursor: "", event: { kind: "data", data: { category: "worker-dismissals" } } });
+    endpoint.invalidatePersonal("alice", "other");
+    endpoint.invalidatePersonal("alice", "ws");
+    await a.waitFor(r => r.envelopes.length === 2, "private invalidation");
+    expect(b.envelopes).toHaveLength(1);
+    endpoint.invalidatePersonal("alice", "ws", "unavailable");
+    await a.waitFor(r => r.envelopes.length === 3, "private storage warning");
+    expect(a.envelopes.at(-1)?.event).toEqual({ kind: "unavailable" });
+    endpoint.invalidatePersonal("alice", "ws", "ready");
+    await a.waitFor(r => r.envelopes.length === 5, "private storage recovery and authoritative refresh");
+    expect(a.envelopes.slice(-2).map(envelope => envelope.event.kind)).toEqual(["ready", "data"]);
+    expect(b.envelopes).toHaveLength(1);
+    expect((await endpoint.changeSubscriptions(new Request("http://test", { method: "POST", body: JSON.stringify({ remove: [{ topic: "personal" }] }) }), a.hello!, { user: "alice", sessionId: "a" })).status).toBe(200);
+    endpoint.invalidatePersonal("alice", "ws");
+    endpoint.endStreamsForSession("a");
+    expect(endpoint.streamCount()).toBe(1);
+  } finally { endpoint.endAll(); await a.cancel(); await b.cancel(); }
+});
+
 // ---------------------------------------------------------------------------
 // In-process: the endpoint over a broker with a controllable source.
 

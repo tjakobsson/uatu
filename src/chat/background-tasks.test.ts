@@ -9,6 +9,30 @@ const task = (taskId: string, status: "running" | "completed" | "failed" | "stop
 });
 
 describe("background work in the composer", () => {
+  test("verified activity is running independently of unavailable Stop proof", () => {
+    const active: BackgroundTaskItem = { ...task("a", "running"), stateUncertain: true,
+      activity: { kind: "working", observedAt: 10 }, control: { available: false } };
+    expect(backgroundStatusLabel([active])).toBe("1 background task running · Task a");
+    expect(runningBackgroundTasks([active])).toEqual([active]);
+  });
+
+  test("an ended execution without a result remains possible work but is not announced running", () => {
+    const ended: BackgroundTaskItem = { ...task("a", "running"), activity: { kind: "ended", endedAt: 10 } };
+    expect(runningBackgroundTasks([ended])).toEqual([ended]);
+    expect(backgroundStatusLabel([ended])).toBe("Ended · result unavailable");
+    expect(backgroundStatusLabel([task("b", "running"), ended])).toBe("1 background task running · 1 unresolved");
+  });
+
+  test("pending requests and ambiguous or missing evidence retain the shared truthful labels", () => {
+    const pending: BackgroundTaskItem = { ...task("a", "running"), stateUncertain: true,
+      activity: { kind: "needs-answer", request: { id: "request-a", kind: "question" } } };
+    expect(backgroundStatusLabel([pending])).toBe("Needs your answer");
+    expect(backgroundStatusLabel([{ ...task("a", "running"), activity: { kind: "session-active" } }])).toBe("Session active · task unverified");
+    expect(backgroundStatusLabel([{ ...task("a", "running"), activity: { kind: "unavailable" } }])).toBe("Status unavailable · last seen unknown");
+    // The composer does not own the bounded Checking presentation deadline.
+    expect(backgroundStatusLabel([{ ...task("a", "running"), activity: { kind: "checking" } }])).toBe("1 background task unresolved");
+  });
+
   test("unknown liveness is not announced as confirmed running", () => {
     expect(backgroundStatusLabel([{ ...task("a", "running"), stateUncertain: true }])).toContain("Status unavailable");
     expect(backgroundStatusLabel([task("b", "running"), { ...task("a", "running"), stateUncertain: true }])).toBe("1 background task running · 1 status unavailable");

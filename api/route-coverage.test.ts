@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { readYaml } from "../scripts/validate-api";
+import { WORKER_DISMISSALS_PATH } from "../src/hub/worker-dismissals-api";
 import {
   CHILD_ACTIVITY_PATH,
   CHILD_NOTIFICATIONS_PATH,
@@ -145,6 +146,8 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubDeleteCredential", "const action ="],
     ["workspaceGetPersonalState", 'suffix === "/api/personal-state"'],
     ["workspacePatchPersonalState", 'suffix === "/api/personal-state"'],
+    ["hubGetWorkerDismissals", "suffix === WORKER_DISMISSALS_PATH"],
+    ["hubUpdateWorkerDismissal", "suffix === WORKER_DISMISSALS_PATH"],
     ["hubAcknowledgeWorkspaceActivity", 'suffix === "/api/activity-viewed"'],
     // The agent accounts family dispatches on its path prefix to one handler.
     ["hubGetAgentAccounts", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
@@ -174,6 +177,7 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
   // classified by the child-route check.
   expect(source).toContain("const SESSION_PATH = /^\\/s\\/([^/]+)(\\/|$)/;");
   const hubServedWorkspacePaths = [...source.matchAll(/suffix === "([^"]+)"/g)].map(match => `/s/{workspaceId}${match[1]!}`);
+  if (source.includes("suffix === WORKER_DISMISSALS_PATH")) hubServedWorkspacePaths.push(`/s/{workspaceId}${WORKER_DISMISSALS_PATH}`);
   expect(hubServedWorkspacePaths.length).toBeGreaterThan(0);
   expect(hubServedWorkspacePaths.filter(path => !publicPaths.has(path))).toEqual([]);
   expect(hub.filter(item => item.path.startsWith("/s/") && !hubServedWorkspacePaths.includes(item.path)).map(item => item.operationId)).toEqual([]);

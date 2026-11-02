@@ -14,6 +14,10 @@ describe("expanded work capacity", () => {
     expect(expandedWorkBudget(300, 150)).toEqual({ reading: 60, capacity: 240 });
     expect(expandedWorkBudget(140, 90)).toEqual({ reading: 32, capacity: 108 });
   });
+  test("retains a whole transcript action band before compacting desktop work", () => {
+    expect(expandedWorkBudget(218.15625, 160, "desktop", 100)).toEqual({ reading: 100, capacity: 118.15625 });
+    expect(expandedWorkBudget(80, 160, "desktop", 100)).toEqual({ reading: 80, capacity: 0 });
+  });
   test("yields its preferred strip to whole actions, retaining a truthful small strip", () => {
     expect(expandedWorkBudget(100, 90)).toEqual({ reading: 10, capacity: 90 });
     expect(expandedWorkBudget(100, 160)).toEqual({ reading: 10, capacity: 90 });

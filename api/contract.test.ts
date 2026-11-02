@@ -42,10 +42,10 @@ type Inventory = { operations: Array<{ operationId: string; domain: string; meth
 type Streaming = { channels: Record<string, unknown>; schemas: Record<string, object> };
 
 describe("API contract structure", () => {
-  test("admission uncertainty is optional, closed, and restricted to unconfirmed entries in Workspace 31", async () => {
+  test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([31, 11, 3]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([33, 12, 3]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -62,6 +62,29 @@ describe("API contract structure", () => {
     const previous = createAjv().compile(schemaForAjv({ ...schema, properties: previousProperties }, spec.components.schemas));
     expect(previous(entry)).toBe(false);
     const { admissionUncertaintyId: _value, ...legacy } = entry;
+    expect(previous(legacy)).toBe(true);
+  });
+  test("worker launch references are optional continuity data in the expanded closed activity schema", async () => {
+    const { parseConversationItem } = await import("../src/chat/validation");
+    const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const schemas = spec.components.schemas;
+    const validate = createAjv().compile(schemaForAjv(schemas.ConversationItem, schemas));
+    const legacy = { id: "worker", type: "background_task", taskId: "worker", description: "Worker", status: "running", createdAt: 0,
+      activity: { kind: "working" }, control: { available: false } };
+    const item = { ...legacy, activity: { ...legacy.activity, launchRef: "launch-ref:fixture" } };
+    expect(validate(legacy), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate(item), JSON.stringify(validate.errors)).toBe(true);
+    expect(parseConversationItem(item)).toEqual(item);
+    for (const launchRef of [null, "", true, "x".repeat(513), "å".repeat(257), "ref invalid", "ref\ninvalid", "ref\u007finvalid"]) {
+      const invalid = { ...item, activity: { ...item.activity, launchRef } };
+      expect(validate(invalid)).toBe(false);
+      expect(() => parseConversationItem(invalid)).toThrow();
+    }
+    const activity = schemas.WorkerActivity as { properties: Record<string, object> };
+    const { launchRef: _reference, ...previousProperties } = activity.properties;
+    const previousSchemas = { ...schemas, WorkerActivity: { ...activity, properties: previousProperties } };
+    const previous = createAjv().compile(schemaForAjv(schemas.ConversationItem, previousSchemas));
+    expect(previous(item)).toBe(false);
     expect(previous(legacy)).toBe(true);
   });
   test("background terminal report clocks agree across closed wire validators and retain absence", async () => {
@@ -205,14 +228,15 @@ describe("API contract structure", () => {
       readYaml<{ channels: Record<string, { path?: string }> }>("api/streaming.yaml"),
       readYaml<{ exclusions: Array<{ id: string; pathPattern?: string; reason?: string }> }>("api/exclusions.yaml"),
     ]);
-    // The Hub serves personal state and the activity acknowledgement itself
+    // The Hub serves personal state, dismissals and the activity acknowledgement itself
     // under the workspace prefix, so they are Hub operations. Nothing the
     // Hub proxies to the child is public.
     const personalStatePath = "/s/{workspaceId}/api/personal-state";
     const activityViewedPath = "/s/{workspaceId}/api/activity-viewed";
-    expect(Object.keys(openapi.paths).filter(path => path.startsWith("/s/")).sort()).toEqual([activityViewedPath, personalStatePath]);
+    const workerDismissalsPath = "/s/{workspaceId}/api/personal-worker-dismissals";
+    expect(Object.keys(openapi.paths).filter(path => path.startsWith("/s/")).sort()).toEqual([activityViewedPath, personalStatePath, workerDismissalsPath]);
     const hubServed = inventory.operations.filter(operation => operation.path.startsWith("/s/"));
-    expect(hubServed.map(operation => operation.operationId).sort()).toEqual(["hubAcknowledgeWorkspaceActivity", "workspaceGetPersonalState", "workspacePatchPersonalState"]);
+    expect(hubServed.map(operation => operation.operationId).sort()).toEqual(["hubAcknowledgeWorkspaceActivity", "hubGetWorkerDismissals", "hubUpdateWorkerDismissal", "workspaceGetPersonalState", "workspacePatchPersonalState"]);
     for (const operation of hubServed) {
       expect(operation).toMatchObject({ domain: "hub", runtime: "src/hub/server.ts" });
       expect(operation.childPath).toBeUndefined();
@@ -222,6 +246,8 @@ describe("API contract structure", () => {
     const personalState = openapi.paths[personalStatePath] as Record<"get" | "patch", { tags?: string[] }>;
     const activityViewed = openapi.paths[activityViewedPath] as Record<"post", { tags?: string[] }>;
     expect([personalState.get.tags, personalState.patch.tags, activityViewed.post.tags]).toEqual([["Hub"], ["Hub"], ["Hub"]]);
+    const dismissals = openapi.paths[workerDismissalsPath] as Record<"get" | "post", { tags?: string[] }>;
+    expect([dismissals.get.tags, dismissals.post.tags]).toEqual([["Hub"], ["Hub"]]);
     // New operation IDs begin with `hub`. The personal-state IDs predate the
     // move to the Hub domain and are kept, since a rename breaks generated clients.
     const retainedIds = new Set(hubServed.map(operation => operation.operationId));

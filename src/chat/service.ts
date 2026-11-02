@@ -297,7 +297,7 @@ export class LazyChatService implements WorkspaceChatService {
   async subscribeInventory(options: { signal?: AbortSignal } = {}) { return (await this.requireAdapter()).subscribeInventory(options.signal); }
   // The current adapter only, never requireAdapter(): reading activity must
   // not start the runtime. No adapter means nothing can be working or waiting.
-  async activity(): Promise<ChatActivity> { return this.adapter?.activity() ?? { working: false, awaiting: false }; }
+  async activity(): Promise<ChatActivity> { return this.adapter?.activity() ?? { working: false, awaiting: false, unresolved: false }; }
   async subscribeActivity(options: { signal?: AbortSignal } = {}) { return this.activityChanges.subscribe(options.signal); }
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }

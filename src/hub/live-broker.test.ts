@@ -15,6 +15,16 @@ import {
   type LiveUpstreamSource,
 } from "./live-broker";
 
+test("personal subscriptions are refused before shared broker cache/fanout or diagnostics", () => {
+  let opened = 0;
+  const broker = new LiveBroker({ isRunning: () => true, workspaceIds: () => [], async open() { opened++; throw new Error("must not open"); } });
+  try {
+    expect(() => broker.subscribe({ write() { throw new Error("must not fan out"); } }, "ws", { topic: "personal" })).toThrow("personal topics belong to the authenticated endpoint");
+    expect(opened).toBe(0);
+    expect(broker.upstreamCount()).toBe(0);
+  } finally { broker.dispose(); }
+});
+
 // A child stand-in: every upstream the broker opens is a controllable SSE
 // response the test writes frames into and can end or refuse. Nothing
 // crosses a socket, so timing is the broker's alone.
@@ -221,6 +231,32 @@ describe("refcounted upstreams (2.1)", () => {
 });
 
 describe("cursors, replay, and topic-scoped resync (2.2)", () => {
+  test("trusted observation precedes live and catch-up delivery and never interrupts canonical chat", async () => {
+    const observed: unknown[] = [];
+    const child = fakeSource({ refuse: path => {
+      if (!path.includes(`?cursor=${encodeURIComponent(cursorOf("g1", 1))}`)) return null;
+      const frames = [2, 3, 4, 5, 6].map(sequence => chatFrame("g1", sequence)).join("");
+      return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(frames)); } }), { headers: { "content-type": "text/event-stream" } });
+    } });
+    const live = broker(child.source, { replayBufferBytes: 260, observeConversation(workspace, parent, data) {
+      expect(workspace).toBe("ws"); expect(parent).toBe("c"); observed.push(data);
+      throw new Error("synthetic personal persistence failure");
+    } });
+    const first = sink(); live.subscribe(first, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 3) });
+    await waitFor(() => child.opened.length === 1, "live upstream");
+    child.opened[0]!.push(": open\n\n");
+    for (const sequence of [4, 5, 6]) child.opened[0]!.push(chatFrame("g1", sequence));
+    await waitFor(() => first.envelopes.length === 4, "live delivery despite observation failure");
+    const behind = sink();
+    live.subscribe({ write(envelope) {
+      if (envelope.event.kind === "data") expect(observed).toContainEqual(envelope.event.data);
+      behind.write(envelope);
+    } }, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 1) });
+    await waitFor(() => behind.envelopes.some(envelope => envelope.event.kind === "ready"), "replay merge");
+    expect(behind.envelopes.filter(envelope => envelope.event.kind === "data").map(envelope => envelope.cursor)).toEqual([2, 3, 4, 5, 6].map(sequence => cursorOf("g1", sequence)));
+    expect(observed.some(value => (value as { sequence: number }).sequence === 2)).toBe(true);
+    expect(child.opened).toHaveLength(1); // No observation-owned upstream.
+  });
   test("document joiners receive a materialized snapshot after live patches", async () => {
     const child = fakeSource();
     const live = broker(child.source);
@@ -1016,6 +1052,101 @@ describe("finished (fix-workspace-activity-states D2/D3)", () => {
   const latestFor = (s: ReturnType<typeof sink>, ws: string) => facts(s.envelopes.filter(e => e.ws === ws).at(-1)!);
   const push = (child: ReturnType<typeof fakeSource>, working: boolean, awaiting: boolean) =>
     child.opened[0]!.push(`event: activity\ndata: {"working":${working},"awaiting":${awaiting}}\n\n`);
+
+  const working = { working: true, awaiting: false, unresolved: false };
+  const unresolved = { working: false, awaiting: false, unresolved: true };
+  const quiet = { working: false, awaiting: false, unresolved: false };
+  const awaiting = { working: true, awaiting: true, unresolved: false };
+  for (const scenario of [
+    { name: "observed work finishes after unresolved clears without renewed Working", states: [working, unresolved, quiet, quiet], finished: [false, false, true, true], writes: 1 },
+    { name: "recovered Working can subsequently finish", states: [working, unresolved, working, quiet], finished: [false, false, false, true], writes: 1 },
+    { name: "first-seen unresolved does not invent prior work", states: [unresolved, quiet], finished: [false, false], writes: 0 },
+    { name: "first-seen awaiting does not invent prior work", states: [awaiting, quiet], finished: [false, false], writes: 0 },
+    { name: "awaiting still cancels completion eligibility", states: [working, awaiting, quiet], finished: [false, false, false], writes: 0 },
+    { name: "awaiting cancels even a pending unresolved epoch", states: [working, { ...unresolved, awaiting: true }, unresolved, quiet], finished: [false, false, false, false], writes: 0 },
+    { name: "new Working rearms after awaiting cancelled an unresolved epoch", states: [working, { ...unresolved, awaiting: true }, unresolved, working, quiet], finished: [false, false, false, false, true], writes: 1 },
+  ]) test(scenario.name, async () => {
+    const child = fakeSource({ running: new Set(["a"]), workspaces: ["a"] });
+    let writes = 0, frames = 0;
+    const live = broker(child.source, { marks: { read: () => ({ finishedAt: new Map(), viewedAt: new Map() }), write: () => { writes++; } } });
+    // This public observer runs after activity fanout, providing a deterministic
+    // ingestion barrier even when the public summary is unchanged.
+    live.observeWorktrees({ attached() {}, interest() {}, activity(_workspace, activity) {
+      expect(Object.keys(activity).sort()).toEqual(["awaiting", "finished", "running", "working"]);
+      frames++;
+    } });
+    const alice = sink();
+    live.subscribeActivity(alice, "alice");
+    await waitFor(() => child.opened.length === 1, "activity watch");
+    for (const [index, state] of scenario.states.entries()) {
+      child.opened[0]!.push(`event: activity\ndata: ${JSON.stringify(state)}\n\n`);
+      await waitFor(() => frames === index + 1, "activity evidence ingested");
+      expect(latestFor(alice, "a")).toEqual({ running: true, working: state.working, awaiting: state.awaiting, finished: scenario.finished[index]! });
+      expect(Object.keys(latestFor(alice, "a")).sort()).toEqual(["awaiting", "finished", "running", "working"]);
+    }
+    expect(writes).toBe(scenario.writes);
+  });
+
+  test("unresolved hides a retained old finish without stamping another epoch, including for new feeds", async () => {
+    const child = fakeSource({ running: new Set(["a"]), workspaces: ["a"] });
+    let frames = 0, writes = 0;
+    const live = broker(child.source, { marks: { read: () => ({ finishedAt: new Map([["a", 1]]), viewedAt: new Map() }), write: () => { writes++; } } });
+    live.observeWorktrees({ attached() {}, interest() {}, activity() { frames++; } });
+    const alice = sink(); live.subscribeActivity(alice, "alice");
+    await waitFor(() => child.opened.length === 1, "activity watch");
+    child.opened[0]!.push(`event: activity\ndata: ${JSON.stringify(unresolved)}\n\n`);
+    await waitFor(() => frames === 1, "unresolved ingested");
+    expect(latestFor(alice, "a").finished).toBe(false);
+    const bob = sink(); live.subscribeActivity(bob, "bob");
+    expect(latestFor(bob, "a").finished).toBe(false);
+    live.acknowledgeViewed("alice", "a");
+    const writesAfterViewed = writes;
+    child.opened[0]!.push(`event: activity\ndata: ${JSON.stringify(quiet)}\n\n`);
+    await waitFor(() => frames === 2, "quiet ingested");
+    expect(latestFor(alice, "a").finished).toBe(false);
+    expect(latestFor(bob, "a").finished).toBe(true);
+    expect(writes).toBe(writesAfterViewed);
+  });
+
+  for (const boundary of ["transport failure", "session stop", "workspace forget", "Hub restart"] as const) {
+    test(`an unresolved completion epoch does not survive ${boundary}`, async () => {
+      const child = fakeSource({ running: new Set(["a"]), workspaces: ["a"] });
+      let live = broker(child.source, { retryMinMs: 1, retryMaxMs: 2 });
+      let frames = 0;
+      const observe = () => live.observeWorktrees({ attached() {}, interest() {}, activity() { frames++; } });
+      observe();
+      const alice = sink(); live.subscribeActivity(alice, "alice");
+      await waitFor(() => child.opened.length === 1, "activity watch");
+      for (const [index, state] of [working, unresolved].entries()) {
+        child.opened[0]!.push(`event: activity\ndata: ${JSON.stringify(state)}\n\n`);
+        await waitFor(() => frames === index + 1, "activity evidence ingested");
+      }
+      let next = 1;
+      if (boundary === "transport failure") {
+        child.opened[0]!.end();
+        await waitFor(() => !latestFor(alice, "a").running, "transport failure observed");
+      } else if (boundary === "session stop") {
+        child.setRunning("a", false);
+        expect(latestFor(alice, "a").running).toBe(false);
+        child.setRunning("a", true);
+      } else if (boundary === "workspace forget") {
+        live.forgetWorkspace("a");
+        live.subscribeActivity(sink(), "bob");
+        // The lingering upstream can be reused, but its prior epoch cannot.
+        next = 0;
+      } else {
+        live.dispose();
+        live = broker(child.source);
+        observe();
+        live.subscribeActivity(alice, "alice");
+      }
+      await waitFor(() => child.opened[next] !== undefined, "new activity watch");
+      const beforeQuiet = frames;
+      child.opened[next]!.push(`event: activity\ndata: ${JSON.stringify(quiet)}\n\n`);
+      await waitFor(() => frames > beforeQuiet, "quiet ingested after boundary");
+      expect(latestFor(alice, "a")).toEqual({ running: true, working: false, awaiting: false, finished: false });
+    });
+  }
 
   // Two users with feeds, the child open and confirmed working.
   async function workingWorkspace() {

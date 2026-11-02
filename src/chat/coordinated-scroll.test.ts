@@ -13,17 +13,18 @@ function fixture() {
   let sequence = 0;
   let top = 300;
   let extent = 600;
+  let viewport = 300;
   let itemTop = 0;
   let active = true;
   const writes: number[] = [];
   Object.defineProperties(element, {
-    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(value, extent - 300)); writes.push(top); } },
-    scrollHeight: { get: () => extent }, clientHeight: { value: 300 },
+    scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(value, extent - viewport)); writes.push(top); } },
+    scrollHeight: { get: () => extent }, clientHeight: { get: () => viewport },
   });
   const anchor = new TimelineAnchorController();
   const options = {
     anchor, active: () => active,
-    measure: () => ({ scrollTop: top, scrollHeight: extent, clientHeight: 300,
+    measure: () => ({ scrollTop: top, scrollHeight: extent, clientHeight: viewport,
       items: [{ id: "line", top: itemTop - top, bottom: itemTop - top + 1000 }] }),
     requestFrame: (callback: FrameRequestCallback) => { frames.set(++sequence, callback); return sequence; },
     cancelFrame: (id: number) => { frames.delete(id); },
@@ -31,7 +32,8 @@ function fixture() {
   const owner = new CoordinatedScrollOwner(element, options);
   disposals.push(() => owner.dispose());
   return { element, owner, anchor, frames, writes, options, document,
-    grow: (height: number) => { extent = height; top = Math.min(top, extent - 300); },
+    grow: (height: number) => { extent = height; top = Math.min(top, extent - viewport); },
+    resize: (height: number) => { viewport = height; },
     move: (value: number) => { top = value; },
     shift: (value: number) => { itemTop = value; },
     hide: () => { active = false; },
@@ -137,6 +139,60 @@ describe("coordinated scrolling", () => {
     f.flush();
     expect(f.element.scrollTop).toBe(100);
     expect(f.anchor.hasUnseen()).toBe(true);
+  });
+  test("explicit latest survives native viewport-resize scrolling after composer submission", () => {
+    const f = fixture();
+    // Replay the browser's event ordering: Send has explicitly resumed
+    // following, then its composer/dock resize moves the native scroll offset
+    // upward without any wheel, touch, scrollbar or keyboard input.
+    f.resize(606); f.grow(1608); f.owner.latest(); f.flush();
+    expect(f.element.scrollTop).toBe(1002);
+    f.resize(568); f.move(982); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.frames.size).toBe(1);
+    f.flush();
+    expect(f.element.scrollTop).toBe(1040);
+    expect(f.writes).toEqual([1002, 1040]);
+  });
+  for (const gesture of ["wheel", "touch", "keyboard", "scrollbar"] as const) test(`${gesture} upward intent wins over a simultaneous viewport resize`, () => {
+    const f = fixture();
+    f.resize(606); f.grow(1608); f.owner.latest(); f.flush();
+    if (gesture === "wheel") f.event("wheel", { deltaY: -20 });
+    if (gesture === "touch") { f.event("touchstart", { touches: [{ clientY: 100 }] }); f.event("touchmove", { touches: [{ clientY: 120 }] }); }
+    if (gesture === "keyboard") f.event("keydown", { key: "PageUp" });
+    if (gesture === "scrollbar") {
+      Object.defineProperties(f.element, { clientWidth: { value: 200 }, clientLeft: { value: 0 } });
+      Object.defineProperty(f.element, "getBoundingClientRect", { value: () => ({ left: 0, right: 216 }) });
+      f.event("pointerdown", { pointerType: "mouse", clientX: 208 });
+    }
+    f.resize(568); f.move(982); f.event("scroll"); f.owner.request(true); f.flush();
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.element.scrollTop).toBe(982);
+  });
+  test("remote dock resizing preserves the paused semantic anchor instead of resuming following", () => {
+    const f = fixture();
+    f.resize(606); f.grow(1686); f.move(377); f.owner.pause(); f.owner.request(); f.flush();
+    f.resize(568); f.grow(1608); f.owner.request(true); f.flush();
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.anchor.hasUnseen()).toBe(true);
+    expect(f.element.scrollTop).toBe(377);
+  });
+  test("only native scrollbar gutters, not content clicks, interrupt pinned resize following", () => {
+    const f = fixture();
+    Object.defineProperties(f.element, { clientWidth: { value: 200 }, clientLeft: { value: 16 } });
+    Object.defineProperty(f.element, "getBoundingClientRect", { value: () => ({ left: 0, right: 216 }) });
+    f.owner.latest(); f.flush();
+    f.event("pointerdown", { pointerType: "mouse", clientX: 100 });
+    expect(f.anchor.isPinned()).toBe(true);
+    f.event("pointerdown", { pointerType: "touch", clientX: 8 });
+    expect(f.anchor.isPinned()).toBe(true);
+    // A native left-side scrollbar (e.g. RTL) owns the same explicit intent.
+    f.event("pointerdown", { pointerType: "mouse", clientX: 8 });
+    expect(f.anchor.isPinned()).toBe(false);
+    f.owner.dispose(); f.owner.latest();
+    f.anchor.jumpToLatest({ scrollTop: 300, clientHeight: 300, scrollHeight: 600, items: [] });
+    f.event("pointerdown", { pointerType: "mouse", clientX: 8 });
+    expect(f.anchor.isPinned()).toBe(true);
   });
   test("an unconsumed upward gesture cannot replace the reading anchor on a later clamp", () => {
     const f = fixture();
