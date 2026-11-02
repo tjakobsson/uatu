@@ -539,6 +539,16 @@ inspection action rather than the parent composer.
 Reconnect reads history, pending results and current execution evidence.
 Complete history is reused only within a connected event generation, invalidated
 by session events, and reread after disconnection; execution/inbox evidence stays fresh.
+Unavailable child-session lookups do not make the parent's own transcript
+unreadable. Child details and controls still require verified ownership; a
+partial worker check is not evidence that omitted workers finished or disappeared.
+Later successful reads can restore those details without restarting the agent.
+The whole V2 history read has a bounded 25-second window, separate from the
+shorter worker checks. Reverted settled results stay hidden even when child
+details are unavailable; missing details alone do not hide a visible worker.
+Child cost/model reconstruction also has a bounded optional-read window.
+Unavailable accounting keeps its known values without inventing zero or
+completeness, and a later read can retry rather than blocking parent history.
 Missing evidence means **Status unavailable**, not finished or cancelled; an
 unverified worker cannot be stopped. This is not a promise of execution survival
 across service restarts. Reused child sessions can have ambiguous results, and
@@ -697,6 +707,10 @@ complete trust model and network guidance.
   and requests a fresh view when that boundary changes. Missing rows in a
   history page alone never authorize removal. Recovery does not replay a
   prompt or resume paused work.
+- **History loads but worker details are missing:** unavailable child-session
+  checks do not erase the parent's transcript. Child details still need verified
+  ownership, and missing details do not mean that work finished. A later
+  successful read can restore them.
 - **A scheduled wakeup never fired:** a row that reads as lost means the
   workspace stopped or the process exited before it fired, so ask the
   agent to schedule it again. A row that reads as paused fires again once

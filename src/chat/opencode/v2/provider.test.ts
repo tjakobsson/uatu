@@ -1276,7 +1276,9 @@ describe("OpenCode 2.x provider: sessions", () => {
     const server = fakeOpenCode({
       "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; frame("server.connected", {}); } }), { headers: { "content-type": "text/event-stream" } }),
       "GET /api/session/ses_parent": () => session("ses_parent"),
-      "GET /api/session/ses_parent/message": () => ({ data: [{ ...fixture.launch, content: [launch("history_child")] }], cursor: {} }),
+      "GET /api/session/ses_parent/message": () => ({ data: [{ ...fixture.launch, content: [{ type: "text", id: "parent_text", text: "Parent history remains readable" }, launch("history_child")] }], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/session/active": () => ({}),
       "GET /api/session/:id": async ({ path }) => {
         outstanding++; peak = Math.max(peak, outstanding);
         try {
@@ -1299,7 +1301,7 @@ describe("OpenCode 2.x provider: sessions", () => {
       if (event.eventType === "session.message.content.updated") { acknowledge?.(); acknowledge = undefined; }
     } })();
     let pump = consume();
-    const childCalls = () => server.calls.filter(call => call.path.startsWith("/api/session/") && call.path !== "/api/session/ses_parent" && !call.path.endsWith("/message"));
+    const childCalls = () => server.calls.filter(call => /^\/api\/session\/(child|history_child)/.test(call.path) && !call.path.endsWith("/message"));
     try {
       await provider.waitForEventStream(controller.signal);
       const counts = [];
@@ -1310,7 +1312,17 @@ describe("OpenCode 2.x provider: sessions", () => {
       expect(counts).toEqual([4, 4, 4]);
       expect(childCalls()).toHaveLength(4);
       for (let batch = 0; batch < 3; batch++) expect(events.flatMap(event => event.updates)).toContainEqual(expect.objectContaining({ kind: "text", text: `Text ${batch}` }));
-      await expect(provider.listMessages("ses_parent", { limit: 1 })).rejects.toThrow("capacity");
+      // Optional child enrichment must not make the parent's transcript depend
+      // on a free ownership slot. No unverified worker target may escape.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const history = await provider.listMessages("ses_parent", { limit: 1 });
+        expect(history.items).toContainEqual(expect.objectContaining({ type: "assistant_message", markdown: "Parent history remains readable" }));
+        expect(history.items.some(item => item.type === "background_task")).toBe(false);
+        expect(history.items).toContainEqual(expect.objectContaining({ type: "tool", output: expect.stringContaining("The subagent is working") }));
+        expect(history.items.some(item => "childConversationId" in item && item.childConversationId)).toBe(false);
+      }
+      // Inventory and Stop recovery still require positive ownership coverage.
+      await expect(provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).rejects.toThrow("capacity");
       expect(childCalls()).toHaveLength(4);
       controller.abort(); await pump;
       controller = new AbortController(); pump = consume();
@@ -1340,6 +1352,148 @@ describe("OpenCode 2.x provider: sessions", () => {
       expect(server.calls.every(call => call.method === "GET")).toBe(true);
     } finally { controller.abort(); held.forEach(read => read.release()); await pump; await provider.dispose(); }
   }, 10_000);
+  for (const unavailable of ["ownership", "execution boundaries"] as const) test(`parent history survives hung child ${unavailable} and later recovers enrichment`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let hanging = true;
+    const held: Array<() => void> = [];
+    const wait = () => new Promise<void>(resolve => { held.push(resolve); });
+    const server = fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "GET /api/session/ses_parent/message": () => ({ data: [{ ...fixture.launch, content: [{ type: "text", text: "Parent answer" }, ...fixture.launch.content] }], cursor: {} }),
+      "GET /api/session/ses_child": async () => {
+        if (hanging && unavailable === "ownership") await wait();
+        return session("ses_child", { parentID: "ses_parent" });
+      },
+      "GET /api/session/ses_child/message": async () => {
+        if (hanging && unavailable === "execution boundaries") await wait();
+        return { data: [], cursor: {} };
+      },
+    });
+    const provider = server.provider();
+    try {
+      // A caller deadline outlives the optional enrichment budget, not vice versa.
+      const signal = AbortSignal.timeout(2_500);
+      const history = await provider.listMessages("ses_parent", { limit: 50, signal });
+      expect(signal.aborted).toBe(false);
+      expect(history.items).toContainEqual(expect.objectContaining({ type: "assistant_message", markdown: "Parent answer" }));
+      expect(history.items).toContainEqual(expect.objectContaining({ type: "tool", output: expect.stringContaining("The subagent is working") }));
+      if (unavailable === "ownership") {
+        expect(history.items.some(item => item.type === "background_task" || "childConversationId" in item && item.childConversationId)).toBe(false);
+        expect(server.requests("GET", "/api/session/ses_child/message")).toHaveLength(0);
+      } else {
+        expect(history.items).toContainEqual(expect.objectContaining({ type: "background_task", status: "running", stateUncertain: true }));
+      }
+      hanging = false;
+      held.forEach(release => release());
+      const recovered = await provider.listMessages("ses_parent", { limit: 50 });
+      expect(recovered.items).toContainEqual(expect.objectContaining({ type: "background_task", status: "running", childConversationId: "ses_child" }));
+      expect(recovered.items).toContainEqual(expect.objectContaining({ type: "tool", childConversationId: "ses_child" }));
+      expect(server.requests("GET", "/api/session/ses_child/message").length).toBeGreaterThan(0);
+      expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    } finally { held.forEach(release => release()); await provider.dispose(); }
+  }, 5_000);
+  for (const required of ["transcript", "session"] as const) test(`optional enrichment does not hide an unavailable parent ${required}`, async () => {
+    const server = fakeOpenCode({
+      "GET /api/session/ses_parent": () => required === "session" ? new Response(null, { status: 500 }) : session("ses_parent"),
+      "GET /api/session/ses_parent/message": () => required === "transcript" ? new Response(null, { status: 500 }) : { data: [], cursor: {} },
+    });
+    const provider = server.provider();
+    try { await expect(provider.listMessages("ses_parent", { limit: 50 })).rejects.toThrow(); }
+    finally { await provider.dispose(); }
+  });
+  for (const suffix of ["none", "worker", "reused-worker", "alias"] as const) test(`partial prefix enrichment cannot authorize worker exclusions (${suffix})`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const hidden = structuredClone(suffix === "alias" ? fixture.converted : fixture.launch);
+    hidden.id = "hidden_launch"; hidden.time.created = 110;
+    hidden.content[0].id = "hidden_call";
+    hidden.content[0].state.metadata.sessionID = suffix === "alias" || suffix === "reused-worker" ? "ses_child" : "hidden_child";
+    if (suffix === "reused-worker") hidden.content[0].time = { created: 110, completed: 120 };
+    let reads = 0;
+    const server = fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent", { revert: { messageID: "boundary" } }),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch, { id: "boundary", type: "user", time: { created: 100 }, payload: { text: "Hidden turn" } }, ...(suffix !== "none" ? [hidden] : [])], cursor: {} }),
+      "GET /api/session/ses_child": () => ++reads === 1 ? new Response(null, { status: 500 }) : session("ses_child", { parentID: "ses_parent" }),
+      "GET /api/session/hidden_child": () => session("hidden_child", { parentID: "ses_parent" }),
+      "GET /api/session/ses_child/message": () => ({ data: suffix === "reused-worker" ? [{ id: "child_idle", type: "idle", time: { created: 40 } }] : [], cursor: {} }),
+      "GET /api/session/hidden_child/message": () => ({ data: [], cursor: {} }),
+    });
+    const provider = server.provider();
+    try {
+      const history = await provider.listMessages("ses_parent", { limit: 50 });
+      expect(history.revertVisibility?.excludedItemIds.toSorted()).toEqual([
+        "message:boundary", ...(suffix === "worker" || suffix === "reused-worker" ? ["task:v2:ses_parent:hidden_call"] : []), ...(suffix !== "none" ? ["tool:hidden_call"] : []),
+      ].toSorted());
+      expect(history.items.map(item => item.id)).toEqual(["tool:call_worker"]);
+      expect(history.completeItems?.map(item => item.id)).toEqual(["tool:call_worker"]);
+      expect(history.items.some(item => "childConversationId" in item && item.childConversationId)).toBe(false);
+      // The next independent read can recover metadata; this snapshot never
+      // turns a transient prefix omission into deletion authority.
+      const recovered = await provider.listMessages("ses_parent", { limit: 50 });
+      expect(recovered.items).toContainEqual(expect.objectContaining({ type: "background_task", id: "task:v2:ses_parent:call_worker" }));
+      expect(recovered.revertVisibility?.excludedItemIds).not.toContain("task:v2:ses_parent:call_worker");
+      expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    } finally { await provider.dispose(); }
+  });
+  for (const retainLaunch of [false, true]) test(`raw task visibility survives unavailable ownership (${retainLaunch ? "retained launch" : "hidden launch"})`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const server = fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent", { revert: { messageID: retainLaunch ? fixture.stored.id : fixture.launch.id } }),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch, fixture.stored], cursor: {} }),
+      "GET /api/session/ses_child": () => new Response(null, { status: 500 }),
+    });
+    const provider = server.provider();
+    try {
+      const history = await provider.listMessages("ses_parent", { limit: 50 });
+      expect(history.items.map(item => item.id)).toEqual(retainLaunch ? ["tool:call_worker"] : []);
+      expect(history.revertVisibility?.excludedItemIds.includes("task:v2:ses_parent:call_worker")).toBe(!retainLaunch);
+      expect(history.revertVisibility?.excludedItemIds).toContain("task:v2:ses_parent:notification:msg_result");
+      expect(server.requests("GET", "/api/session/ses_child/message")).toHaveLength(0);
+      expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    } finally { await provider.dispose(); }
+  });
+  for (const origin of ["launcher", "notification"] as const) test(`unverified revert exclusions match previously emitted ${origin} identities without granting Stop`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const message = origin === "launcher" ? fixture.launch : fixture.stored;
+    const makeServer = (verified: boolean) => fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent", verified ? {} : { revert: { messageID: message.id } }),
+      "GET /api/session/ses_parent/message": () => ({ data: [message], cursor: {} }),
+      "GET /api/session/ses_child": () => verified ? session("ses_child", { parentID: "ses_parent" }) : new Response(null, { status: 500 }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    });
+    const healthy = makeServer(true).provider();
+    const unavailable = makeServer(false), provider = unavailable.provider();
+    try {
+      const emitted = (await healthy.listMessages("ses_parent", { limit: 50 })).items.filter(item => item.type === "background_task");
+      expect(emitted).toHaveLength(1);
+      const task = emitted[0]!;
+      const hidden = await provider.listMessages("ses_parent", { limit: 50 });
+      expect(hidden.items).toEqual([]);
+      expect(hidden.revertVisibility?.excludedItemIds).toContain(task.id);
+      expect(unavailable.requests("GET", "/api/session/ses_child/message")).toHaveLength(0);
+      await expect(provider.stopTask("ses_parent", task.taskId)).rejects.toThrow();
+      expect(unavailable.calls.every(call => call.method === "GET")).toBe(true);
+    } finally { await healthy.dispose(); await provider.dispose(); }
+  });
+  test("successful prefix enrichment followed by unavailable full enrichment preserves retained worker visibility", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let reads = 0;
+    const server = fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent", { revert: { messageID: "boundary" } }),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch, { id: "boundary", type: "user", time: { created: 100 }, payload: { text: "Hidden turn" } }], cursor: {} }),
+      "GET /api/session/ses_child": () => ++reads === 2 ? new Response(null, { status: 500 }) : session("ses_child", { parentID: "ses_parent" }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    });
+    const provider = server.provider();
+    try {
+      const history = await provider.listMessages("ses_parent", { limit: 50 });
+      expect(history.revertVisibility?.excludedItemIds).toEqual(["message:boundary"]);
+      expect(history.items).toContainEqual(expect.objectContaining({ type: "background_task", id: "task:v2:ses_parent:call_worker" }));
+      expect(reads).toBe(2);
+      const recovered = await provider.listMessages("ses_parent", { limit: 50 });
+      expect(recovered.revertVisibility?.excludedItemIds).toEqual(["message:boundary"]);
+      expect(recovered.items).toContainEqual(expect.objectContaining({ type: "background_task", id: "task:v2:ses_parent:call_worker" }));
+    } finally { await provider.dispose(); }
+  });
   test("paged and staged-revert folds reuse only parentage while refreshing cost and visible worker state", async () => {
     const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
     let boundary: string | undefined;

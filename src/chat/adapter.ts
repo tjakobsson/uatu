@@ -364,6 +364,9 @@ type SteerAdmission = { conversationId: string; id: string; submissionId: string
 // Total withdrawal budget for cancellation, terminal events and bounded
 // list/history recovery (D7).
 const DEFAULT_STEER_WITHDRAW_TIMEOUT_MS = 5_000;
+// Whole transcript/inbox/stream handoff, below the browser's ordinary 30s GET
+// budget. Independent of the shorter mutation and worker-recovery deadlines.
+const DEFAULT_HISTORY_READ_TIMEOUT_MS = 25_000;
 // Steers known to have been delivered, so a late withdrawal of one is told
 // "already delivered" rather than merely "not held".
 const DELIVERED_STEERS_LIMIT = 64;
@@ -415,6 +418,9 @@ export type ChatAdapterOptions = {
   id?: () => string;
   // Total deadline for cancellation, settlement and read-side recovery.
   steerWithdrawTimeoutMs?: number;
+  historyReadTimeoutMs?: number;
+  /** Optional native accounting enrichment; independent of required history. */
+  accountingReadTimeoutMs?: number;
   automaticBackgroundTimeoutMs?: number;
   steerAdmissionTimeoutMs?: number;
   // Called when activity() may read differently than it last did (already
@@ -543,6 +549,9 @@ export class ChatAdapter {
   // tombstone cache. Each read releases its set on success or failure.
   private readonly inboxReads = new Map<string, Set<Set<string>>>();
   private readonly steerWithdrawTimeoutMs: number;
+  private readonly historyReadTimeoutMs: number;
+  private readonly accountingReadTimeoutMs: number;
+  private readonly nativeAccountingReads = new Map<string, { controller: AbortController; promise: Promise<void>; callers: number }>();
   private readonly automaticBackgroundTimeoutMs: number;
   private readonly steerAdmissionTimeoutMs: number;
   private inboxClock = 0;
@@ -620,6 +629,8 @@ export class ChatAdapter {
     this.metrics = options.metrics;
     this.id = options.id ?? randomUUID;
     this.steerWithdrawTimeoutMs = options.steerWithdrawTimeoutMs ?? DEFAULT_STEER_WITHDRAW_TIMEOUT_MS;
+    this.historyReadTimeoutMs = options.historyReadTimeoutMs ?? DEFAULT_HISTORY_READ_TIMEOUT_MS;
+    this.accountingReadTimeoutMs = options.accountingReadTimeoutMs ?? 1_000;
     this.automaticBackgroundTimeoutMs = options.automaticBackgroundTimeoutMs ?? 15_000;
     this.steerAdmissionTimeoutMs = options.steerAdmissionTimeoutMs ?? 30_000;
     this.onActivityChange = options.onActivityChange;
@@ -759,7 +770,7 @@ export class ChatAdapter {
     const stream = this.pumpController;
     const lifetime = new AbortController();
     const signal = AbortSignal.any([lifetime.signal, ...(stream ? [stream.signal] : [])]);
-    const timer = setTimeout(() => lifetime.abort(), 5_000);
+    const timer = setTimeout(() => lifetime.abort(), this.historyReadTimeoutMs);
     let fence: ReturnType<ConversationProjection["beginHistoryRead"]> | undefined;
     let ready = false;
     let unavailable!: () => void;
@@ -1006,7 +1017,7 @@ export class ChatAdapter {
     // child rather than per open (the aggregate is still computed here, not
     // fetched per render) — and in parallel, so a fan-out costs one round trip
     // rather than one each.
-    await this.attributeLaunchers(id, items, page.completeItems);
+    await this.attributeLaunchers(id, items, page.completeItems, coverage?.signal);
     coverage?.assertCurrent();
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
@@ -3315,7 +3326,8 @@ export class ChatAdapter {
    * transcript opened at the same moment — is not on the chain, and is awaited
    * like any other so its figure lands here too.
    */
-  private reconstructAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string> = new Set()): Promise<void> {
+  private reconstructAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string> = new Set(), signal?: AbortSignal): Promise<void> {
+    if (this.provider.waitForEventStream) return this.reconstructNativeAttribution(parentId, childId, ancestry, signal);
     const key = attributionKey(parentId, childId);
     const existing = this.attributionReconstructions.get(key);
     if (existing) return existing;
@@ -3329,7 +3341,47 @@ export class ChatAdapter {
     return pending;
   }
 
+  private async reconstructNativeAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string>, callerSignal?: AbortSignal): Promise<void> {
+    if (callerSignal?.aborted || this.disposed) return;
+    const key = attributionKey(parentId, childId);
+    let owner = this.nativeAccountingReads.get(key);
+    if (!owner || owner.controller.signal.aborted) {
+      const controller = new AbortController();
+      const signal = controller.signal;
+      const timer = setTimeout(() => controller.abort(), this.accountingReadTimeoutMs);
+      const retired = new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+      const current = { controller, promise: Promise.resolve(), callers: 0 };
+      this.nativeAccountingReads.set(key, current);
+      const epoch = this.attributionReadEpoch(key);
+      current.promise = Promise.race([
+        this.reconstructAttributionRead(key, childId, epoch, new Set([...ancestry, childId]), signal),
+        retired,
+      ]).finally(() => {
+        clearTimeout(timer);
+        controller.abort();
+        if (this.nativeAccountingReads.get(key) === current) this.nativeAccountingReads.delete(key);
+      });
+      owner = current;
+    }
+    owner.callers++;
+    let departed: (() => void) | undefined;
+    try {
+      if (!callerSignal) await owner.promise;
+      else await Promise.race([owner.promise, new Promise<void>(resolve => {
+        departed = () => resolve();
+        callerSignal.addEventListener("abort", departed, { once: true });
+        if (callerSignal.aborted) resolve();
+      })]);
+    } finally {
+      if (departed) callerSignal!.removeEventListener("abort", departed);
+      // A waiter cannot retire work still serving another current caller.
+      if (--owner.callers === 0) owner.controller.abort();
+    }
+  }
+
   private invalidateNativeHistoryAccounting(): void {
+    for (const owner of this.nativeAccountingReads.values()) owner.controller.abort();
+    this.nativeAccountingReads.clear();
     // V2 has no replay. A previous generation's completeness (or pending
     // reconstruction) cannot stand in for the child's current stored history.
     this.completeAttributions.clear();
@@ -3337,7 +3389,7 @@ export class ChatAdapter {
     for (const key of this.attributionEpochs.keys()) this.attributionEpochs.set(key, ++this.attributionSequence);
   }
 
-  private async reconstructAttributionRead(key: string, childId: string, epoch: number, ancestry: ReadonlySet<string>): Promise<void> {
+  private async reconstructAttributionRead(key: string, childId: string, epoch: number, ancestry: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
     const byModel = new Map<string, MessageModel>();
     const byPrompt = new Map<string, string>();
@@ -3358,7 +3410,9 @@ export class ChatAdapter {
       let complete: ConversationItem[] | undefined;
       let paged: ConversationItem[] = [];
       do {
-        const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
+        signal?.throwIfAborted();
+        const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT, ...(signal ? { signal } : {}) });
+        signal?.throwIfAborted();
         sessionCostUsd = page.sessionCostUsd;
         for (const reported of page.accounting) {
           if (reported.usage) byMessage.set(reported.messageId, reported.usage);
@@ -3381,7 +3435,8 @@ export class ChatAdapter {
       // leaves this tally unmarked too — banked for what it holds, but read
       // again on the next open rather than listing an incomplete nest for good.
       for (const grandchildId of new Set(transcript.launchers.map(launcher => launcher.conversationId))) {
-        await this.reconstructAttribution(childId, grandchildId, ancestry);
+        signal?.throwIfAborted();
+        await this.reconstructAttribution(childId, grandchildId, ancestry, signal);
         if (!this.completeAttributions.has(attributionKey(childId, grandchildId))) descendantsIncomplete = true;
       }
     } catch {
@@ -3390,7 +3445,7 @@ export class ChatAdapter {
     // Eviction clears every live value this read would merge. A completion
     // from before that boundary must not repopulate the cleared maps and mark
     // a potentially incomplete answer authoritative.
-    if (this.attributionEpochs.get(key) !== epoch) return;
+    if (signal?.aborted || this.attributionEpochs.get(key) !== epoch) return;
     // Live events that landed while the read was in flight are newer than
     // the stored snapshot — for those the live figure wins, or the stale
     // snapshot would be banked permanently once the events fall behind the
@@ -4331,14 +4386,14 @@ export class ChatAdapter {
    * replacement puts in a projection's place — raw rows from the provider,
    * which carry no attribution of their own.
    */
-  private async attributeLaunchers(id: string, items: ConversationItem[], complete?: readonly ConversationItem[]): Promise<void> {
+  private async attributeLaunchers(id: string, items: ConversationItem[], complete?: readonly ConversationItem[], signal?: AbortSignal): Promise<void> {
     const unattributed = [...new Set(items.flatMap(item =>
       // Reconcile on an existing parent refresh at most once per 30 seconds,
       // including settled children changed while disconnected. No polling loop.
       (item.type === "tool" || item.type === "background_task") && item.childConversationId && Date.now() - (this.completeAttributions.get(attributionKey(id, item.childConversationId)) ?? 0) >= 30_000
         ? [item.childConversationId]
         : []))];
-    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId)));
+    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId, new Set(), signal)));
     // A row's figure depends on its place among ALL the rows that launched
     // the same child — the k-th row states the k-th task. A page holds only
     // some of them, so the order is taken from the complete transcript where

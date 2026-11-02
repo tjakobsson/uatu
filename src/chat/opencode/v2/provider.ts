@@ -21,7 +21,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { pendingPermissionFields, number as numberField } from "../normalization";
-import { BackgroundControls, BackgroundWorkers, launcherChanged, retainLauncherEvidence, sameLauncherIdentity, type ControlRead, type LauncherEvidence, type WorkerOccurrenceEvidence } from "./background";
+import { BackgroundControls, BackgroundWorkers, launcherChanged, nativeLauncherTaskId, nativeNotificationTaskId, retainLauncherEvidence, sameLauncherIdentity, type ControlRead, type LauncherEvidence, type WorkerOccurrenceEvidence } from "./background";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, pendingInboxEntry, prepareStoredMessage, storedAccounting, storedPromptId, supportedFormFields, type V2Evidence } from "./normalization";
 import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 import { TASK_OUTPUT_TAIL_MAX_BYTES } from "../../types";
@@ -350,7 +350,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     let completeRead = false;
     try {
     const signal = this.readSignal(options.signal);
-    const { complete, info, boundaryId, visible, normalized, excludedItemIds, version, end } = await this.readHistoryVisibility(sessionId, signal, controlRead, options.cursor);
+    const { complete, info, boundaryId, visible, normalized, excludedItemIds, version, end } = await this.readHistoryVisibility(sessionId, signal, controlRead, options.cursor, true);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const page = visible.slice(start, end);
     const reversible = reversibleContext(complete, info);
@@ -380,7 +380,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     } finally { this.controls.endRead(controlRead, completeRead); }
   }
 
-  private async readHistoryVisibility(sessionId: string, signal: AbortSignal, controlRead: ControlRead, cursor?: string) {
+  private async readHistoryVisibility(sessionId: string, signal: AbortSignal, controlRead: ControlRead, cursor?: string, optionalEnrichment = false) {
     const complete = await this.allMessages(sessionId, signal);
     const info = await this.lookupSession(sessionId, signal);
     const boundaryId = stringValue(asRecord(asRecord(info).revert).messageID);
@@ -388,9 +388,24 @@ export class OpenCodeV2Provider implements ChatProvider {
     const visible = boundaryIndex >= 0 ? complete.slice(0, boundaryIndex) : complete;
     const version = historyVersion([visible, boundaryId]);
     const end = historyPageEnd(cursor, version, visible.length);
-    const normalized = await this.backgroundHistory(sessionId, visible, signal, controlRead);
-    const allNormalized = boundaryIndex >= 0 ? await this.backgroundHistory(sessionId, complete, signal, controlRead) : normalized;
-    const excludedItemIds = [...allNormalized.keys()].filter(id => !normalized.has(id));
+    const normalized = await this.backgroundHistory(sessionId, visible, signal, controlRead, true, optionalEnrichment);
+    const allNormalized = boundaryIndex >= 0 ? await this.backgroundHistory(sessionId, complete, signal, controlRead, true, optionalEnrichment) : normalized;
+    // An optional prefix omission is not native visibility evidence. A full
+    // fold may recover that metadata, but only rows first introduced by the
+    // actual hidden suffix can become exclusions. Keep canonical alias origins
+    // even when a later suffix update overwrites their normalized map entry.
+    const excludedItemIds = [...allNormalized.keys()].filter(id => !normalized.has(id)
+      && (!optionalEnrichment || boundaryIndex >= 0 && allNormalized.origins.get(id)! >= boundaryIndex));
+    if (optionalEnrichment && boundaryIndex >= 0 && allNormalized.unverifiedChildren.size > 0) {
+      const retained = backgroundIdentityCandidates(sessionId, visible);
+      const excluded = new Set(excludedItemIds);
+      for (const [id, child] of backgroundIdentityCandidates(sessionId, complete.slice(boundaryIndex))) {
+        if (allNormalized.unverifiedChildren.has(child) && !retained.has(id) && !normalized.has(id) && !excluded.has(id)) {
+          excluded.add(id);
+          excludedItemIds.push(id);
+        }
+      }
+    }
     signal.throwIfAborted();
     return { complete, info, boundaryId, visible, normalized, allNormalized, excludedItemIds, version, end };
   }
@@ -403,8 +418,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     return boundary;
   }
 
-  private async backgroundHistory(sessionId: string, visible: StoredMessage[], signal = this.readSignal(), controlRead?: ControlRead, overlay = true) {
-    signal = AbortSignal.any([signal, AbortSignal.timeout(5_000)]);
+  private async backgroundHistory(sessionId: string, visible: StoredMessage[], signal = this.readSignal(), controlRead?: ControlRead, overlay = true, optionalEnrichment = false) {
+    const transcriptSignal = signal;
+    // Child enrichment has its own lifetime. Its deadline must leave time to
+    // return the required parent transcript, and never turn missing metadata
+    // into permission or a complete inventory. Strict control reads still fail.
+    signal = AbortSignal.any([signal, AbortSignal.timeout(optionalEnrichment ? 1_000 : 5_000)]);
     // A finite complete-history fold is discarded after this read; only
     // long-lived stream memory uses the retention budget/fallback.
     const executionHistory = new Map<string, readonly number[]>();
@@ -424,7 +443,8 @@ export class OpenCodeV2Provider implements ChatProvider {
         return child ? [child] : [];
       })));
     const verified = new Set<string>();
-    await this.verifyChildren(children, sessionId, signal, child => verified.add(child));
+    await this.verifyChildren(children, sessionId, signal, child => verified.add(child), optionalEnrichment);
+    if (optionalEnrichment && controlRead && verified.size !== children.size) this.controls.incompleteRead(controlRead);
     // Unverified ownership filters out the worker row below. That omission
     // cannot discharge inventory for a native background launch still in history.
     if (controlRead && prepared.some(message => [...message.tools.values()].some(tool => tool.name === "subagent" && tool.fact.background === true
@@ -446,10 +466,16 @@ export class OpenCodeV2Provider implements ChatProvider {
         } catch { unavailableChildren.add(child); }
       }
     }
-    signal.throwIfAborted();
+    (optionalEnrichment ? transcriptSignal : signal).throwIfAborted();
     const normalized = new Map<string, { item: import("../../types").ConversationItem; index: number }>();
+    const origins = new Map<string, number>();
     visible.forEach((message, index) => {
-      for (const item of normalizeStoredMessage(message, true, { workers, parent: sessionId }, prepared[index])) {
+      for (let item of normalizeStoredMessage(message, true, { workers, parent: sessionId }, prepared[index])) {
+        if (!origins.has(item.id)) origins.set(item.id, index);
+        if (optionalEnrichment && item.type === "tool" && item.childConversationId && !verified.has(item.childConversationId)) {
+          const { childConversationId: _unverified, ...transcript } = item;
+          item = transcript;
+        }
         // The stored-message seam returns items rather than remove operations.
         // Retire the notification-first placeholder as soon as the same
         // provider result has acquired its canonical launch identity.
@@ -460,7 +486,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         }
         const unavailable = item.type === "background_task" && item.status === "running" && item.childConversationId && unavailableChildren.has(item.childConversationId);
         if (unavailable && controlRead) this.controls.incompleteRead(controlRead);
-        normalized.set(item.id, { item: unavailable ? { ...item, stateUncertain: true } : item, index });
+        normalized.set(item.id, { item: unavailable && item.type === "background_task" ? { ...item, stateUncertain: true } : item, index });
       }
     });
     for (const update of workers.finishHistory()) if (update.kind === "upsert") {
@@ -470,7 +496,8 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (overlay) for (const [id, entry] of normalized) if (entry.item.type === "background_task") normalized.set(id, { ...entry,
       item: this.controls.project(entry.item, workers.occurrence(entry.item.taskId), controlRead, workers.controlWitnesses(entry.item.taskId)) });
     this.eventMemory?.workers.enforceBudget();
-    return Object.assign(normalized, { occurrences: workers.evidenceSnapshot(), workers });
+    return Object.assign(normalized, { occurrences: workers.evidenceSnapshot(), workers, origins,
+      unverifiedChildren: new Set([...children].filter(child => !verified.has(child))) });
   }
 
   async reconcileBackgroundTasks(sessionId: string, options?: { fresh?: boolean; signal?: AbortSignal }): Promise<import("../../types").BackgroundTaskItem[]> {
@@ -827,7 +854,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private lookupChild(sessionId: string, signal: AbortSignal): Promise<SessionRecord | null> {
     signal.throwIfAborted();
     // No pending queue: at capacity the stream preserves unrelated parts and
-    // history recovery reports unavailable until a real read settles.
+    // strict inventory recovery reports unavailable until a real read settles.
     if (this.childLookupsOutstanding >= 4) throw new Error("Child ownership lookup capacity unavailable");
     this.childLookupsOutstanding++;
     const read = this.lookupSession(sessionId, signal).finally(() => { this.childLookupsOutstanding--; });
@@ -899,8 +926,8 @@ export class OpenCodeV2Provider implements ChatProvider {
         try {
           if (await this.verifiedChild(child, parent, signal)) verified(child);
         } catch (error) {
-          // Stream lookup failures must not eat unrelated parts of the frame;
-          // recovery retains its stronger failed-read-is-unknown contract.
+          // Stream/transcript enrichment cannot eat unrelated parent content;
+          // strict inventory recovery retains failed-read-is-unknown semantics.
           if (!tolerateUnavailable) throw error;
         }
       }
@@ -1947,6 +1974,24 @@ function toSession(info: unknown): ProviderSession {
     updatedAt: typeof time.updated === "number" ? time.updated : 0,
     ...(parentId ? { parentId } : {}),
   };
+}
+
+// Parent-native identities authorize hiding a reverted row even when optional
+// child ownership is unavailable. These candidates never authorize a read,
+// publish content/state, or enter the worker/control fold. Include cold alias
+// and notification identities that an earlier projection could have retained.
+function backgroundIdentityCandidates(parent: string, messages: StoredMessage[]): Map<string, string> {
+  const identities = new Map<string, string>();
+  for (const message of messages) {
+    const prepared = prepareStoredMessage(message);
+    for (const tool of prepared.tools.values()) {
+      if (tool.name === "subagent" && tool.fact.call && tool.fact.reportedChild) identities.set(`task:${nativeLauncherTaskId(parent, tool.fact.call)}`, tool.fact.reportedChild);
+    }
+    const notice = prepared.notification;
+    const id = messageIdentity(message);
+    if (id && notice?.valid && notice.status && notice.source === "subagent" && notice.worker) identities.set(`task:${nativeNotificationTaskId(parent, id)}`, notice.worker);
+  }
+  return identities;
 }
 
 function messageIdentity(value: unknown): string {
