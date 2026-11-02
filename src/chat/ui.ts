@@ -1150,10 +1150,13 @@ export function initChat(api = new ChatApiClient()): void {
       !workerDismissible(worker) || !(worker.activity?.executionId ? workerExecutionIds(worker).some(id => dismissed.has(id)) : dismissed.has(worker.id) || worker.references.some(id => dismissed.has(id))));
     if (dismissalBatchFeedback?.conversationId !== projection?.conversationId) dismissalBatchFeedback = null;
     const skipped = dismissalBatchFeedback?.skipped ?? 0;
-    dismissalNotice.textContent = personalDismissals ? [...new Set([
+    const dismissalText = personalDismissals ? [...new Set([
       personalDismissals.error,
       skipped ? `Skipped ${skipped} worker${skipped === 1 ? "" : "s"} with an unverified execution identity; ${skipped === 1 ? "it remains" : "they remain"} visible.` : "",
     ].filter(Boolean))].join(" ") : (workers.length ? "Worker dismissals apply only on this device." : "");
+    // Replacing unchanged composer text during disclosure allocation can make
+    // WebKit move the timeline before the next geometry read. Keep its node.
+    if (dismissalNotice.textContent !== dismissalText) dismissalNotice.textContent = dismissalText;
     dismissalNotice.hidden = !dismissalNotice.textContent;
     const summary = workerSummary(workers);
     compactWorkersLabel.textContent = summary;
@@ -3619,7 +3622,7 @@ export function initChat(api = new ChatApiClient()): void {
     set("--chat-work-full-floor", fullFloor);
     syncExpandedWorkBudget(scroller, fullFloor);
     const hardAvailable = parseFloat(scroller.style.getPropertyValue("--chat-work-hard-available"));
-    const cramped = (document.documentElement.dataset.uiMode === "touch" || document.documentElement.hasAttribute("data-chat-work-expanded"))
+    const cramped = (document.documentElement.dataset.uiMode === "touch" || scroller.hasAttribute("data-work-content-expanded") || document.documentElement.hasAttribute("data-chat-work-expanded"))
       && Number.isFinite(hardAvailable) && fullFloor > hardAvailable;
     scroller.toggleAttribute("data-work-cramped", cramped);
     const active = scroller.dataset.workActive;
@@ -4945,18 +4948,27 @@ export function initChat(api = new ChatApiClient()): void {
     const css = getComputedStyle(surface);
     const fixed = measureSurfaceChromeHeight(surface, dock, (parseFloat(css.paddingTop) || 0) + (parseFloat(css.paddingBottom) || 0));
     const compactDesktop = document.documentElement.dataset.uiMode === "desktop" && window.matchMedia("(pointer: fine) and (hover: hover)").matches;
-    const { reading, capacity: inlineCapacity } = expandedWorkBudget(surface.clientHeight - fixed, minimumWork, compactDesktop ? "desktop" : "comfortable");
+    const available = Math.max(0, surface.clientHeight - fixed);
+    const actionReading = document.documentElement.dataset.uiMode === "desktop" && !overlay ? transcriptActionReading() : 0;
+    const { reading, capacity: inlineCapacity } = expandedWorkBudget(available, minimumWork, compactDesktop ? "desktop" : "comfortable", actionReading);
     const capacity = overlay && form
       ? Math.max(0, form.getBoundingClientRect().top - surface.getBoundingClientRect().top)
       : inlineCapacity;
     for (const [element, property, value] of [
       [dock, "--chat-work-expanded-capacity", capacity],
-      [dock, "--chat-work-hard-available", overlay ? capacity : Math.max(0, surface.clientHeight - fixed)],
+      [dock, "--chat-work-hard-available", overlay ? capacity : Math.max(0, available - actionReading)],
       [surface, "--chat-expanded-reading", reading],
     ] as const) {
       const pixels = `${value}px`;
       if (element.style.getPropertyValue(property) !== pixels) element.style.setProperty(property, pixels);
     }
+  }
+  function transcriptActionReading(): number {
+    if (!timeline) return 0;
+    const action = timeline.querySelector<HTMLElement>(".chat-message-revert");
+    const css = getComputedStyle(timeline);
+    return action ? action.getBoundingClientRect().height
+      + (parseFloat(css.scrollPaddingTop) || 0) + (parseFloat(css.scrollPaddingBottom) || 0) : 0;
   }
   function syncDesktopWorkLayout() {
     if (!surface || !form || !input || !timeline || typeof getComputedStyle !== "function") return;
@@ -4983,13 +4995,11 @@ export function initChat(api = new ChatApiClient()): void {
     // The expanded allocator may yield almost all reading space to work. A
     // nonzero remainder is not necessarily usable: native scrolling cannot
     // expose even one transcript action beneath its sticky header/insets.
-    // In that case use the existing desktop work sheet, not overlapping cards.
-    const transcriptAction = timeline.querySelector<HTMLElement>(".chat-message-revert");
-    const timelineCss = getComputedStyle(timeline);
-    const actionReading = transcriptAction ? transcriptAction.getBoundingClientRect().height
-      + (parseFloat(timelineCss.scrollPaddingTop) || 0) + (parseFloat(timelineCss.scrollPaddingBottom) || 0) : 0;
+    // Compact the inactive pane first; if that still cannot fit, use the
+    // existing desktop work sheet, not overlapping cards.
+    const actionReading = transcriptActionReading();
     const floor = Math.max(allocatedReading, actionReading);
-    const minimum = Math.max(52, parseFloat(dock.style.getPropertyValue("--chat-work-full-floor")) || 0);
+    const minimum = Math.max(52, parseFloat(dock.style.getPropertyValue(dock.hasAttribute("data-work-cramped") ? "--chat-work-floor" : "--chat-work-full-floor")) || 0);
     const constrained = hasWork && surface.clientHeight - fixed - floor < minimum;
     root.toggleAttribute("data-chat-work-constrained", constrained);
     if (!constrained) {

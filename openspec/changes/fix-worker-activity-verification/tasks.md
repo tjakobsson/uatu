@@ -290,3 +290,93 @@ No full browser/performance suite, physical-device, live native question-tool or
 OS-process-restart coverage is claimed. Native mutation APIs still lack an
 atomic occurrence precondition after final validation. Archive only after the
 upstream PR merges; no archive or upstream merge is performed here.
+
+### CI layout regression renewal (2026-11-02, in progress)
+
+Checkpoint **2edfd84** was pushed normally and ready PR #572 updated with its
+exact approved body. The rebuilt owned preview's matching Git identity,
+Connected state and OpenCode 2.2.5 readiness were verified over HTTPS, without
+new model prompts or changes to the original Hub. The final documentation
+checkpoint received four fresh clean affected reviews after correcting its
+chronological placement.
+
+GitHub CI run **41417871160** subsequently exposed three deterministic browser
+failures in functional leg 2: the 40%-width desktop pane loses the expanded
+Workers header after window shrink, and both WebKit independent-panel cases
+shift the timeline by 20 pixels when Pending collapses. All three failed their
+original attempt and both configured CI retries. The `validate` job failed only
+because that E2E leg failed. Units, contract checks, functional leg 1 and the
+performance project passed; leg 2 reported **728 passed, three failed, two flaky,
+three skipped**. The flaky cases are not claimed fixed or baseline failures.
+
+The user requested fixes. An unchanged local three-case reproduction at one
+worker, zero retries and original deadlines also fails all three, including the
+same 20-pixel WebKit shift. Tasks 6.1–6.4 are reopened for correction, renewed
+checks/four fresh reviews, evidence reconciliation and publication approval.
+Primary private reproduction evidence is under
+`~/.cache/opencode/scratch/worker-activity-ci-fixes-20261102/lead/`, including
+`exact-three-red.log` and adjacent traced results. Existing accepted worker
+activity, ownership/control, private dismissal and exact-target focus behavior
+must remain intact; no assertion/deadline weakening or automatic retry is an
+acceptable correction. Archive remains after upstream PR merge.
+
+The frozen correction reserves the measured transcript-action band before
+allocating expanded desktop work and compacts the inactive pane before falling
+back to the existing sheet. The captured short-desktop case has 218.15625px of
+remaining space: a 100px transcript-action band and 118.15625px dock now keep both
+headers and the active action reachable. WebKit's native shift is reproduced
+when unchanged dismissal guidance is replaced during disclosure repaint;
+retaining that text node prevents the shift without forced layout or corrective
+scrolling. Disabling overflow anchoring did not fix it, and the browser's exact
+internal layout algorithm is not claimed established.
+
+The added measured-budget unit regression and real-DOM text-node regression
+both fail before correction. The unchanged original three cases now pass
+**3/3**; both complete E2E files pass **8/8** twice, with additional transcript
+clearance/node-identity assertions and every original assertion retained.
+Related sheet, focus, anchor and enlargement cases pass **12/12**; colocated
+units pass **51/51**, the UI unit passes, typecheck and whitespace checks pass.
+Private commands, geometry, red/green logs and limits are in
+`~/.cache/opencode/scratch/worker-activity-ci-fixes-20261102/layout/handoff.md`.
+Broader acceptance and four fresh full-target reviews remain pending; these
+focused passes are not a claim that remote CI has passed.
+
+Final frozen-candidate renewal passes **8,330 unit tests, 16 skipped, zero
+failures**, typecheck, API validation, audit, 594-package license check, strict
+change validation, all **56** capability specs, build and compiled smoke. The
+complete previously failing functional E2E leg passes **733 tests, three skipped,
+zero failures**, four workers and zero retries. All **2,643** tracked hashes stay
+unchanged through acceptance; all **14** delta requirement bodies still exactly
+match their synchronized main specs. Primary logs and stability records are
+`lead/candidate-verification.log`, `candidate-acceptance.json`,
+`candidate-functional-leg2.log` and `candidate-hash-stability.json` under the
+private CI-fix scratch root above.
+
+Four fresh independent full-target native Sol reviews—two Standards and two
+Spec—are complete and clean across **111 paths / 414 hunks**, including all
+seven working-delta files. Spec A's initial capped return covered only 105 paths
+and was not counted clean; its same-model continuation completed the remaining
+six files/63 hunks and reverified the frozen source. Reports and exhaustive
+coverage are retained in the private root's `reviews/` subdirectories. Review
+was source/Git inspection, separate from runtime acceptance; requested High
+effort was not independently attestable. Original backend ownership/control,
+canonical requests and private-state sources are unchanged by this correction.
+
+Earlier actual OpenCode/client **2.2.5** acceptance and the earlier **104/104**
+targeted matrix are retained, not rerun for this layout-only correction. Current
+local browser renewal is the complete functional leg above plus the focused
+related checks, not the full functional/performance suite or physical devices.
+Local checks still use Bun **1.4.2** versus CI/main's **1.4.4**. The existing
+OpenAPI warning and low KaTeX advisory remain; local passes do not establish
+remote Linux CI success. Native mutation and restart-coverage limits are
+unchanged.
+
+The user approved the displayed PR evidence/summary update, normal push of the
+verified corrections and final checkpoint, and refreshing only the owned
+preview. Title and ready status remain unchanged. The separately approved
+[reply to the earlier focused review](https://github.com/tjakobsson/uatu/pull/572#issuecomment-6574711875)
+was posted once through MCP and read back; no new review was triggered. At this
+checkpoint the CI corrections are not yet pushed. All **34** acceptance tasks
+are renewed complete; final affected documentation review, identity rebuild,
+preview verification and publication are the remaining authorized delivery
+steps. Archive remains after upstream PR merge, and the original Hub is untouched.
