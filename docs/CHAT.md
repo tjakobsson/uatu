@@ -651,6 +651,11 @@ during visibility validation disables the old Stop offer even for ended,
 unsettled jobs. A parent-only relationship mismatch withdraws only the affected
 child associations, preserving independently owned nested workers; true identity
 or workspace contradictions retain their subtree safeguards.
+Stream and recovery share exact-occurrence activity derivation, so compatible
+native ends, starts and canonical request changes observed during visibility
+validation are not overwritten by an earlier snapshot. Recovery reuses retained
+positive activity rather than reviving Working from old start evidence alone;
+end clocks come only from native proof.
 
 Partial live updates may carry a provider-proven `launchRef` before their complete
 execution identity is available. This reference lets the same launch recover

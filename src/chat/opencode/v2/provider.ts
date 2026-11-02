@@ -753,7 +753,33 @@ export class OpenCodeV2Provider implements ChatProvider {
     return { ...item, stateUncertain: true, control: { available: false, reason: item.control?.reason ?? "Worker control is no longer confirmed" } };
   }
 
+  private currentWorkerActivity(occurrence: WorkerOccurrenceEvidence, observedAt?: number): import("../../types").WorkerActivity | undefined {
+    const workers = this.eventMemory?.workers, live = workers?.activityEvidence(occurrence);
+    if (!workers || !live) return;
+    const last = workers.lastActivity(occurrence.taskId, occurrence);
+    // Stream projection derives a new observation; recovery only reuses its
+    // already-retained positive projection. Old start proof alone must not
+    // resurrect activity after an inconclusive/failed current inventory read.
+    if (observedAt === undefined && last?.kind !== "working" && last?.kind !== "needs-answer" && last?.kind !== "ended") return;
+    const ended = live.executionEnd;
+    if (!ended && (live.uncertain || !live.executionStart && !workers.shellActivity(live))) return;
+    const executionAliases = workerExecutionIds(occurrence);
+    const activity: import("../../types").WorkerActivity = ended
+      ? { kind: "ended", observedAt: last?.observedAt, endedAt: ended.created, executionId: executionAliases[0], generation: this.streamGeneration }
+      : { kind: "working", observedAt: observedAt ?? last?.observedAt, executionId: executionAliases[0], generation: this.streamGeneration };
+    if (executionAliases.length) activity.executionAliases = executionAliases;
+    const launchRef = this.workerLaunchReference(occurrence);
+    if (launchRef) activity.launchRef = launchRef;
+    const request = !ended && workers.linkedRequest(occurrence.taskId, occurrence);
+    if (request) { activity.kind = "needs-answer"; activity.request = request; }
+    return activity;
+  }
+
   private projectWorkerActivity(item: import("../../types").BackgroundTaskItem, occurrence?: WorkerOccurrenceEvidence, contradicted = false): import("../../types").BackgroundTaskItem {
+    if (item.status === "running" && item.activity?.kind !== "ended" && occurrence) {
+      const current = this.currentWorkerActivity(occurrence);
+      if (current) item = { ...item, activity: current };
+    }
     // Missing Stop proof, partial identity and projection saturation are not
     // activity contradictions. Only native negative provenance withdraws A.
     if (!item.activity || !contradicted && (!occurrence || !this.eventMemory?.workers.activityContradicted(occurrence))) return item;
@@ -1312,20 +1338,14 @@ export class OpenCodeV2Provider implements ChatProvider {
           }
           const projectWorker = (item: import("../../types").BackgroundTaskItem) => {
             const occurrence = memory.workers.occurrence(item.taskId);
-            const live = occurrence && memory.workers.activityEvidence(occurrence);
             const executionAliases = workerExecutionIds(occurrence), executionId = executionAliases[0];
             const lastSeen = memory.workers.lastActivity(item.taskId, occurrence)?.observedAt;
             const projected = this.controls.project(item, occurrence, undefined, memory.workers.controlWitnesses(item.taskId));
-            const activity: import("../../types").WorkerActivity = live?.executionEnd
-              ? { kind: "ended", observedAt: lastSeen, endedAt: live.executionEnd.created, executionId, generation: this.streamGeneration }
-              : live && !live.uncertain && (live.executionStart || memory.workers.shellActivity(live))
-                ? { kind: "working", observedAt: Date.now(), executionId, generation: this.streamGeneration }
-                : { kind: evidence.execution?.phase === "started" ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
+            const activity: import("../../types").WorkerActivity = occurrence && this.currentWorkerActivity(occurrence, Date.now())
+              || { kind: evidence.execution?.phase === "started" ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
             if (executionAliases.length) activity.executionAliases = executionAliases;
             const launchRef = this.workerLaunchReference(occurrence);
             if (launchRef) activity.launchRef = launchRef;
-            const request = live && memory.workers.linkedRequest(item.taskId, occurrence);
-            if (request && activity.kind === "working") { activity.kind = "needs-answer"; activity.request = request; }
             if (item.status === "running") memory.workers.rememberActivity(item.taskId, activity, occurrence);
             return { ...projected, activity: item.status === "running" ? activity : this.terminalWorkerActivity(item.taskId, occurrence, item.activity) };
           };

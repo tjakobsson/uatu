@@ -8,7 +8,7 @@ import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../../
 import { createOpenCodeV2Provider, formAnswerFromChoices, type OpenCodeV2Provider } from "./provider";
 import { ChatAdapter, SteerAlreadyDeliveredError, SteerWithdrawalUnconfirmedError } from "../../adapter";
 import { compactWorkers, workerSummary } from "../../compact-work";
-import { workerState, workerExecutionClockRuns, workerCanStop } from "../../worker-state";
+import { workerState, workerExecutionClockRuns, workerCanStop, workerStateLabel } from "../../worker-state";
 import { workerDismissalIdentities } from "../../worker-dismissal-identity";
 import { visibleWorkers } from "../../worker-dismissal-client";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
@@ -2035,6 +2035,126 @@ test(`reverted activity rechecks native provenance after its final boundary awai
       expect(row?.control?.reason).toBeString();
       await expect(provider.stopTask("ses_parent", taskId)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
       expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(0);
+    }
+  } finally { release(); await pending?.catch(() => undefined); lifetime.abort(); await pump; await provider.dispose(); }
+});
+
+for (const kind of ["shell", "agent"] as const) for (const view of ["initial", "hidden-final", "prefix-final"] as const)
+for (const change of (kind === "shell" ? ["end", "unmatched-end", "foreign-end", "quiet", "historical-end", "reused-end", "end-then-contradiction", "contradiction-then-end"]
+  : ["end", "unmatched-end", "foreign-end", "quiet", "historical-end", "reused-end", "initial-start", "permission-arrival", "permission-resolution", "question-arrival", "question-resolution", "end-then-contradiction", "contradiction-then-end"]))
+test(`visibility returns current compatible activity after its last await (${kind}/${view}/${change})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = kind === "shell" ? fixture.shell : fixture.launch;
+  if (kind === "agent") launch.content[0].time = { created: 20, ran: 20, completed: 30 };
+  const info: ShellInfo = { id: "sh_fixture", command: "printf fixture", status: "running", cwd: WORKSPACE, shell: "/bin/sh",
+    file: "/fixture/old.out", pid: 123, metadata: { sessionID: "ses_parent" }, time: { started: 75 } };
+  let armed = false, parentReads = 0, foreign = false, wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined, sequence = 0;
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const boundaryId = view === "prefix-final" ? "msg_boundary" : launch.id, sequences = new Map<string, number>();
+  const frame = (type: string, data: unknown, created: number, directory = WORKSPACE) => {
+    const aggregateID = (data as { sessionID?: string }).sessionID;
+    const seq = aggregateID ? (sequences.get(aggregateID) ?? 0) + 1 : undefined;
+    if (aggregateID && type.startsWith("session.")) sequences.set(aggregateID, seq!);
+    wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `current-activity-${++sequence}`, type, data, created,
+      ...(aggregateID && type.startsWith("session.") ? { durable: { aggregateID, seq, version: 1 } } : {}), location: { directory } })}\n\n`));
+  };
+  const childTool = { sessionID: "ses_child", assistantMessageID: "child-message", id: "child-tool" };
+  const permission: PermissionAsked["data"] = { id: "canonical-permission", sessionID: "ses_child", action: "question", resources: ["*"], source: { type: "tool", messageID: childTool.assistantMessageID, id: childTool.id } };
+  const question: FormCreated["data"]["form"] = { id: "canonical-question", sessionID: "ses_child", title: "Questions", fields: [{ key: "q0", type: "string", title: "Choose", description: "Proceed?", custom: true, options: [{ value: "Yes", label: "Yes", description: "Proceed" }] }], metadata: { kind: "question", tool: { messageID: childTool.assistantMessageID, id: childTool.id } } };
+  let permissions: PermissionAsked["data"][] = [], forms: FormCreated["data"]["form"][] = [];
+  const canonical = new Map<string, import("../../types").ConversationItem>();
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}, 1); } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/active": () => change === "initial-start" ? {} : ({ ses_child: { type: "running" } }),
+    "GET /api/session/ses_parent": async () => {
+      const captured = session("ses_parent", { ...(view === "initial" ? {} : { revert: { messageID: boundaryId } }), ...(foreign ? { location: { directory: "/foreign" } } : {}) });
+      if (armed && ++parentReads === (view === "initial" ? 2 : 4)) { entered(); await gate; }
+      return captured;
+    },
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_parent", time: { created: 22, updated: 23 } }),
+    "GET /api/session/ses_parent/message": () => ({ data: [launch, ...(view === "prefix-final" ? [{ id: "msg_boundary", type: "user", text: "Hidden suffix", time: { created: 100 } }] : [])], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    "GET /api/shell/sh_fixture": () => scoped(info),
+    "GET /api/permission/request": () => scoped(permissions),
+    "GET /api/form": () => scoped(forms),
+    "DELETE /api/shell/sh_fixture": () => undefined,
+    "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
+  });
+  const provider = server.provider(), lifetime = new AbortController();
+  const pump = (async () => { for await (const event of provider.events(lifetime.signal)) {
+    for (const update of event.updates) if (update.kind === "upsert" && (update.item.type === "permission" || update.item.type === "question")) canonical.set(update.item.id, update.item);
+    if (event.eventType !== "server.connected") { acknowledge?.(); acknowledge = undefined; }
+  } })();
+  const send = (type: string, data: unknown, at: number, directory?: string) => new Promise<void>(resolve => { acknowledge = resolve; frame(type, data, at, directory); });
+  const nativeEnd = () => kind === "shell" ? send("shell.exited", { id: info.id, status: "exited", exit: 0 }, 90)
+    : send("session.execution.succeeded", { sessionID: "ses_child" }, 90);
+  const contradiction = async () => { foreign = true; expect(await provider.getSession("ses_parent")).toBeNull(); foreign = false; };
+  const arrive = async () => {
+    if (change.startsWith("permission")) { permissions = [permission]; await send("permission.asked", permission, 34); }
+    else { forms = [question]; await send("form.created", { form: question }, 34); }
+  };
+  let pending: ReturnType<typeof provider.reconcileBackgroundTasks> | undefined;
+  const taskId = kind === "shell" ? "v2:ses_parent:call_shell" : "v2:ses_parent:call_worker";
+  try {
+    await provider.waitForEventStream(lifetime.signal);
+    const common = { sessionID: "ses_parent", assistantMessageID: launch.id, id: launch.content[0].id };
+    await send("session.tool.input.started", { ...common, name: kind === "shell" ? "shell" : "subagent" }, kind === "shell" ? 70 : 20);
+    await send("session.tool.called", { ...common, input: launch.content[0].state.input, executed: kind === "agent" }, kind === "shell" ? 71 : 20);
+    if (kind === "shell") await send("shell.created", { info }, 75);
+    else {
+      await send("session.created", { sessionID: "ses_child", parentID: "ses_parent", projectID: "global", slug: "child", version: "2.1.2", location: { directory: WORKSPACE } }, 22);
+      if (change !== "initial-start") await send("session.execution.started", { sessionID: "ses_child" }, 23);
+    }
+    await send("session.message.content.updated", { sessionID: "ses_parent", messageID: launch.id, content: launch.content }, kind === "shell" ? 80 : 30);
+    if (change === "historical-end") {
+      if (kind === "shell") await send("shell.exited", { id: info.id, status: "exited", exit: 0 }, 85);
+      else await send("session.execution.succeeded", { sessionID: "ses_child" }, 85);
+    }
+    if (change.startsWith("permission") || change.startsWith("question")) {
+      await send("session.tool.input.started", { ...childTool, name: "question" }, 31);
+      await send("session.tool.called", { ...childTool, input: { questions: [{ header: "Choose", question: "Proceed?", options: [{ label: "Yes", description: "Proceed" }] }] }, executed: true }, 32);
+      if (change.endsWith("resolution")) {
+        await arrive();
+        expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity?.kind).toBe("needs-answer");
+      }
+    }
+    armed = true; pending = provider.reconcileBackgroundTasks("ses_parent", { fresh: true }); await started;
+    if (change === "end" || change === "historical-end") await nativeEnd();
+    else if (change === "unmatched-end") await send(kind === "shell" ? "shell.exited" : "session.execution.succeeded", kind === "shell" ? { id: "sh_other", status: "exited", exit: 0 } : { sessionID: "ses_other" }, 90);
+    else if (change === "foreign-end") await send(kind === "shell" ? "shell.exited" : "session.execution.succeeded", kind === "shell" ? { id: info.id, status: "exited", exit: 0 } : { sessionID: "ses_child" }, 90, "/foreign");
+    else if (change === "initial-start") await send("session.execution.started", { sessionID: "ses_child" }, 23);
+    else if (change === "reused-end") {
+      if (kind === "shell") await send("shell.created", { info: { ...info, time: { started: 85 }, file: "/fixture/replacement.out" } }, 85);
+      else await send("session.execution.started", { sessionID: "ses_child" }, 85);
+      await nativeEnd();
+    }
+    else if (change.endsWith("arrival")) await arrive();
+    else if (change.endsWith("resolution")) {
+      permissions = []; forms = [];
+      if (change.startsWith("permission")) await send("permission.replied", { sessionID: "ses_child", requestID: permission.id, reply: "once" }, 35);
+      else await send("form.replied", { sessionID: "ses_child", id: question.id, answer: { q0: "Yes" } }, 35);
+    } else if (change === "end-then-contradiction") { await nativeEnd(); await contradiction(); }
+    else if (change === "contradiction-then-end") { await contradiction(); await nativeEnd(); }
+    release(); const [row] = await pending;
+    const ended = change === "end" || change === "historical-end" || change === "end-then-contradiction", revoked = change.includes("contradiction") || change === "reused-end";
+    expect(row?.status).toBe("running");
+    expect(row?.activity?.kind).toBe(ended ? "ended" : revoked ? "unavailable" : change.endsWith("arrival") ? "needs-answer" : "working");
+    expect(workerExecutionClockRuns(row!)).toBe(!ended && !revoked && !change.endsWith("arrival"));
+    if (ended) {
+      expect(row?.activity?.endedAt).toBe(change === "historical-end" ? 85 : 90);
+      expect(workerStateLabel(row!.status, row!.stateUncertain, row!.activity)).toBe("Ended · result unavailable");
+    } else expect(row?.activity?.endedAt).toBeUndefined();
+    if (revoked) { expect(row?.activity?.launchRef).toBeUndefined(); expect(workerCanStop(row!)).toBe(false); }
+    if (change === "end" || change === "historical-end") {
+      expect(workerCanStop(row!)).toBe(kind === "shell");
+      if (kind === "shell") { await provider.stopTask("ses_parent", taskId); expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(1); }
+    }
+    if (change.endsWith("arrival") || change.endsWith("resolution")) {
+      const request: NonNullable<import("../../types").WorkerActivity["request"]> = change.startsWith("permission") ? { id: permission.id, kind: "permission" } : { id: question.id, kind: "question" };
+      if (change.endsWith("arrival")) expect(row?.activity?.request).toEqual(request); else expect(row?.activity?.request).toBeUndefined();
+      expect([...canonical.values()].filter(item => (item.type === "permission" || item.type === "question") && item.requestId === request.id)).toEqual([expect.objectContaining({ requestId: request.id, status: change.endsWith("arrival") ? "pending" : "resolved" })]);
     }
   } finally { release(); await pending?.catch(() => undefined); lifetime.abort(); await pump; await provider.dispose(); }
 });

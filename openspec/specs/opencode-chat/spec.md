@@ -3699,6 +3699,7 @@ When occurrence-specific evidence proves execution ended but no correlated termi
 #### Scenario: Execution end is known and report is missing
 - **WHEN** an authoritative execution boundary is positively linked to the task and no correlated outcome is available
 - **THEN** the row shows Ended · result unavailable, remains inspectable and offers presentation-only dismissal
+- **AND** recovery return paths incorporate a compatible retained native end observed during visibility validation, using its known end clock rather than returning an older Working snapshot
 - **AND** it does not contribute to Finished or emit a successful-completion notification
 
 #### Scenario: Correlated result arrives later
