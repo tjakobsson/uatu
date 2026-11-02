@@ -67,7 +67,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@fission-ai/openspec": "1.14.0",
+    "@fission-ai/openspec": "1.16.0",
     "@playwright/test": "^1.62.1",
     "@redocly/cli": "^2.0.0",
     "ajv": "^8.17.1",
