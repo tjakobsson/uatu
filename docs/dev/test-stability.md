@@ -19,7 +19,7 @@ Status describes investigation work, not issue closure or GitHub CI acceptance.
 | Order | Issue | Investigation | Status |
 | --- | --- | --- | --- |
 | 1 | [#563](https://github.com/tjakobsson/uatu/issues/563) | Reproduce credential-test contamination from inherited Git/SSH projection; preserve the credential behavior under test. | completed (unreproduced; issue unresolved) |
-| 2 | [#560](https://github.com/tjakobsson/uatu/issues/560) | Attribute the isolated chat UI wrapper timeout to child execution, output handling or shutdown. | in_progress |
+| 2 | [#560](https://github.com/tjakobsson/uatu/issues/560) | Attribute the isolated chat UI wrapper timeout to child execution, output handling or shutdown. | completed (aggregate cap verified; issue remains open) |
 | 3 | [#536](https://github.com/tjakobsson/uatu/issues/536) | Investigate the remaining clipboard rejection and native-watcher final-write timeout separately; account for the polling failures already addressed by #511. | completed (unreproduced; issue unresolved) |
 | 4 | [#233](https://github.com/tjakobsson/uatu/issues/233) | Investigate the remaining macOS find-next shortcut failure; distinguish it from the document-tree case addressed by #462. | completed (unreproduced; issue unresolved) |
 | 4 | [#253](https://github.com/tjakobsson/uatu/issues/253) | Map reported load-sensitive failures, including comments, against #462 before investigating the remaining mechanisms. | completed (unreproduced; issue unresolved) |
@@ -283,3 +283,90 @@ The existing real 60-second CI failure is the UI call-site regression; no artifi
 short-budget UI failure is substituted. This correction does not explain Linux's
 slower execution or establish a fix for the earlier 20-minute job hang. The revised
 PR description was separately approved to disclose the outer deadline change.
+
+## Post-candidate results — 2026-11-03
+
+This section reconciles the historical milestones above with the completed
+validation of candidate **`8d9dd9c0974ede71bea6ac3f35bc06de4058e90a`**, against the
+source baseline **`ffd92c36203dc47d1a6254e5aef319d0d8cc1453`**. The results identify
+the tested commit explicitly; they do not claim that a later evidence-only
+documentation commit was itself executed three times.
+
+### Completed Linux CI validations
+
+[Workflow run 41619579386](https://github.com/tjakobsson/uatu/actions/runs/41619579386)
+completed successfully at the same candidate SHA in all three workflow attempts.
+Attempts 2 and 3 were separately approved complete repetitions of the already
+successful workflow, not failed-job-only retries or independent PR-triggered runs.
+Manual dispatch of the PR-only ref had been rejected; no workflow, account or
+authentication settings were changed to obtain these repetitions.
+
+| Workflow attempt | Required validation | Unit passes / skips / failures | UI wrapper duration |
+| --- | --- | --- | --- |
+| [1](https://github.com/tjakobsson/uatu/actions/runs/41619579386/job/125861660800) | passed | 8,348 / 16 / 0 | 59,905.14 ms |
+| [2](https://github.com/tjakobsson/uatu/actions/runs/41619579386/job/125880030810) | passed | 8,348 / 16 / 0 | 59,853.47 ms |
+| [3](https://github.com/tjakobsson/uatu/actions/runs/41619579386/job/125988657104) | passed | 8,348 / 16 / 0 | 59,359.10 ms |
+
+Every attempt completed all **186 UI child cases / 1,145 assertions**, including
+the 17 cases missing from the earlier 60-second failure. The unsafe-lease fixture
+also passed in every attempt. All six affected browser cases each had exactly one
+completion record at retry 0: original and regression cases for permission mtime,
+variant authentication promotion, and attachment publication.
+
+These results meet the targeted Linux acceptance criteria for the four setup
+corrections and the measured UI aggregate-cap correction. They do **not** establish
+retry-free stability of the entire suite:
+
+| Attempt | Unrelated failures recovered through test retries | Already-passed cases replayed |
+| --- | --- | --- |
+| 1 | Pending scroller, inventory visibility, WebKit caption, single queued `/reload` | 16 inventory cases |
+| 2 | Pending scroller, WebKit caption, single queued `/reload` | 0 |
+| 3 | Pending scroller, terminal live-buffer find | 0 |
+
+The repeated 125-pixel scroller movement and the other recovered failures remain
+unresolved. The whole-workflow repetitions are disclosed separately from the
+per-test retry results; a green required check does not turn those retries into
+first-attempt passes.
+
+### Exact-candidate local failures remain evidence
+
+The single full local unit run at the same clean candidate on macOS/Bun 1.4.4
+completed naturally in 204.36 seconds with **8,346 passes, 16 skips and 2 failures**.
+The UI child passed all 186 cases / 1,145 assertions in 47.81 seconds. The failed
+run was not replaced by a green rerun:
+
+- `src/chat/adapter.test.ts`: unchanged native rediscovery expected four reads,
+  received three. The unchanged focused case passed 21/21 subsequent executions;
+  no cause or fix was established.
+- `src/chat/opencode/v2/background.test.ts`: the live-aggregate case exceeded its
+  unchanged five-second budget. Focused checks reproduced five failures in 21
+  executions. Five private diagnostic executions retained all 2,200 mutations and
+  13,201 assertions; measured bodies took 1.83–2.18 seconds, with 88–91% of measured
+  body cost in the full-state oracle and 124–182 ms in product mutation calls.
+  Those measurements did not reproduce or explain the timeout cost spikes. No
+  assertion, product code or deadline was changed for this case.
+
+### Follow-up reproduction limits
+
+- Inventory visibility: ten unchanged attempts passed with four workers and no
+  retries. The CI call-count mismatch was not reproduced; no fix is claimed.
+- Terminal live-buffer find: ten unchanged attempts produced four whole-test
+  passes, four bootstrap failures before typing, and two timeouts after the body
+  assertions completed. Six attempts completed the marker/find assertions; none
+  reproduced CI's exact missing-marker failure. The bootstrap and later timeout
+  causes remain unproven, not attributed to the startup parse errors.
+- The earlier metadata-navigation, iPad-viewport, caption and queued-reload limits
+  remain as recorded above. Neither passing focused attempts nor a different
+  timeout establishes a fix for the reported failure.
+
+Local probes used macOS; the final CI validations used Linux and pinned Bun 1.4.4
+with four workers. Neither Linux WebKit nor these fixtures establish native Apple
+WebKit or physical-device behavior. Main typechecking passed; the supplemental
+diagnostic-integration check still reports the same nine pre-existing fixture
+typing errors described in the diagnostic evidence note.
+
+The five narrow corrections have targeted acceptance evidence. Startup-script
+failure bytes, the earlier job-level hang and the remaining failure mechanisms
+are still unresolved. No initial issue was closed, and no whole-suite stability
+or merge-readiness claim is made. PR #587 remains draft pending an explicit
+readiness decision.
