@@ -222,8 +222,12 @@ of retry-free suite stability.
   Newly encountered retry-assisted failures were the WebKit docked/fullscreen iPad
   viewport case (chat above the visible work area), the WebKit long-caption
   wide-threshold case (work width 1,230 instead of at most 642), and the two-queued
-  `/reload` case (prompt-response timeout). Their focused investigations remain
-  pending; none is claimed fixed.
+  `/reload` case (prompt-response timeout). Ten local iPad attempts and ten
+  two-queued-reload attempts passed without retries. The caption case passed 3/10;
+  seven attempts instead exhausted their 30-second budget after the inspected
+  geometry assertions had passed, including three context-close errors. This
+  did not reproduce the exact CI geometry failure or establish a timeout cause.
+  No fix is claimed for these cases; private traces are retained.
 
 The committed diagnostic candidate `7d75eb95`, with only pending documentation,
 then passed its single full local unit check: **8,348 passed, 16 skipped, 0 failed**
@@ -231,3 +235,51 @@ across 322 files, 84,718 assertions, 194.02 seconds. Candidate source and manife
 were unchanged during execution. Both diagnostic test files were collected;
 owned processes exited naturally with no observed survivors or cleanup signals.
 This local result does not replace the final candidate's GitHub CI verification.
+
+## Diagnostic candidate `3108918f`: CI remains blocked
+
+[Run 41611072260](https://github.com/tjakobsson/uatu/actions/runs/41611072260)
+failed required validation. Unit tests reported 8,347 passes, 16 skips and one
+failure: the original UI wrapper reached 60,001.38 ms. Inherited child output now
+shows 169 completed child cases whose reported durations sum to 59,759.27 ms;
+17 of the 186 cases had not completed. This supports aggregate-budget exhaustion
+during test work rather than proving a single stuck assertion. The appropriate
+budget and remaining workload are under investigation; no timeout change or
+cleanup fix is claimed at this milestone.
+
+Functional leg 1 passed all 655 tests without retries. Both permission cases
+passed on retry 0 for a third CI run (3,853 ms and 4,170 ms). Both variant cases
+passed on retry 0 for a second run (1,349 ms and 1,394 ms). These targeted passes
+do not override the failing required unit job.
+
+Functional leg 2 again passed only after retry for the 125-pixel Pending-scroller
+movement and WebKit caption geometry. A newly encountered manual-background case
+compared its initial empty attachment snapshot with `preserved.png` after the
+operation; upload publication versus preservation was investigated next. Product
+behavior remains unchanged; subsequent controlled setup evidence is recorded below.
+
+The approved PR description was published and read back successfully; PR #587
+remains draft. No further issues were closed. Required final-candidate CI and
+repeatable stability of unresolved cases remain outstanding.
+
+## Next candidate: attachment receipt and aggregate UI allowance
+
+- `761896ad` waits for the uploaded attachment to be published before taking its
+  preservation baseline. The unchanged local case passed 10/10, while removing
+  only the new readiness assertion failed its controlled regression 3/3. Restored
+  original and regression cases passed 20/20 with four workers and no retries.
+  Independent review is clean. See [attachment evidence](test-stability-attachment-publication.md);
+  this is a setup fix, not a product-backgrounding fix.
+- `cb77ef57` changes only the isolated UI suite's aggregate cap from 60 to 75 s,
+  sized from measured CI progress and explicit engineering allowances. All child
+  code, assertions and individual deadlines are unchanged. The real local wrapper
+  passed 186 child cases / 1,145 assertions. A first hanging-child check did not
+  establish natural cleanup; a subsequent native-exit forensic check did, without
+  intervention. Both results remain in the [budget evidence](test-stability-ui-budget.md).
+  Independent review is clean, conditional on three first-attempt Linux CI
+  validations and passing required final-candidate checks.
+
+The existing real 60-second CI failure is the UI call-site regression; no artificial
+short-budget UI failure is substituted. This correction does not explain Linux's
+slower execution or establish a fix for the earlier 20-minute job hang. The revised
+PR description was separately approved to disclose the outer deadline change.
