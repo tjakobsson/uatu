@@ -1733,7 +1733,8 @@ test("real V2 an inbox read from an ended subscription cannot overwrite the next
   } finally { release(); await reading?.catch(() => undefined); await adapter.dispose(); await pump; await fake.stop(); }
 });
 
-for (const origin of ["composer", "held"] as const) for (const delivery of ["stored", "covered", "covered-with-eviction"] as const) test(`real V2 lost steer acknowledgement keeps original ${origin} correlation after ${delivery} delivery recovery`, async () => {
+for (const origin of ["composer", "held"] as const) for (const delivery of ["stored", "covered", "covered-with-eviction"] as const)
+for (const lateRow of delivery === "covered-with-eviction" ? [false, true] : [false]) test(`real V2 lost steer acknowledgement keeps original ${origin} correlation after ${delivery} delivery recovery${lateRow ? " with a newer native row" : ""}`, async () => {
   const directory = process.cwd();
   const fake = startOpenCodeV2Fake({ directory });
   let blockEvents = false, requested!: () => void, release!: () => void;
@@ -1757,7 +1758,34 @@ for (const origin of ["composer", "held"] as const) for (const delivery of ["sto
   const stored = { id: "11111111-2222-4333-8444-555555555555", mimeType: "image/png", absolutePath: "/fixture/11111111-2222-4333-8444-555555555555.png" };
   const attachment = { id: stored.id, name: "original.png", mimeType: stored.mimeType };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, maxProjections: delivery === "covered-with-eviction" ? 1 : undefined, resolveAttachment: async id => id === stored.id ? stored : null });
+  const readOwner = new AsyncLocalStorage<boolean>();
+  let releaseBoundary!: () => void, capturedBoundary!: () => void, boundaryReads = 0;
+  const boundaryCaptured = new Promise<void>(resolve => { capturedBoundary = resolve; });
+  const boundaryGate = new Promise<void>(resolve => { releaseBoundary = resolve; });
+  const injected: NormalizedProviderEvent[] = [];
+  if (lateRow) {
+    const background = provider.reconcileBackgroundTasks!.bind(provider);
+    provider.reconcileBackgroundTasks = (...args) => readOwner.run(false, () => background(...args));
+    const boundary = provider.getHistoryRevertBoundary!.bind(provider);
+    provider.getHistoryRevertBoundary = async (...args) => {
+      const marker = await boundary(...args);
+      // The delivery dirties the captured first read. Pin its second pass
+      // after native IO, before the covered read merges newer projected rows.
+      if (readOwner.getStore() && ++boundaryReads === 2) { capturedBoundary(); await boundaryGate; }
+      return marker;
+    };
+    const events = provider.events.bind(provider);
+    provider.events = async function* (signal) {
+      for await (const event of events(signal)) {
+        while (injected.length) yield injected.shift()!;
+        yield event;
+      }
+    };
+  }
   let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  let lateSubscription: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let newerCreatedAt: number | undefined;
+  let unrelated: ConversationItem | undefined;
   try {
     const session = await provider.createSession("Recovered original correlation");
     await adapter.prompt(session.id, "initial", "Initial work");
@@ -1783,7 +1811,7 @@ for (const origin of ["composer", "held"] as const) for (const delivery of ["sto
       try {
         captureInbox = true;
         release();
-        reading = adapter.history(session.id);
+        reading = readOwner.run(true, () => adapter.history(session.id));
         void reading.catch(() => undefined);
         await inboxCaptured;
         fake.step(session.id); // This generation never saw the enqueue payload.
@@ -1807,28 +1835,59 @@ for (const origin of ["composer", "held"] as const) for (const delivery of ["sto
           } finally { observer.events.cancel(); await observerPump; }
         }
         releaseInbox();
+        if (lateRow) {
+          await boundaryCaptured;
+          const native = (await provider.listMessages(session.id, { limit: 100 })).items.find(item => item.type === "user_message" && item.text === draft.text);
+          if (native?.type !== "user_message") throw new Error("Expected the delivered native user row");
+          lateSubscription = await adapter.subscribe(session.id);
+          // The real provider's row has no Uatu request nonce. Deliver it at
+          // the public provider-event seam after both bounded cache and old
+          // projection have departed. The same native ID has newer contents;
+          // an unrelated ID with the old text must not borrow its correlation.
+          newerCreatedAt = native.createdAt + 1;
+          const newer = { ...native, text: "Newer native wording", createdAt: newerCreatedAt };
+          unrelated = { ...native, id: "message:unrelated-native-row", createdAt: newerCreatedAt + 1 };
+          injected.push({ conversationId: session.id, eventType: "session.message.content.updated", outcome: "handled", updates: [
+            { kind: "upsert", item: newer }, { kind: "upsert", item: unrelated },
+          ] });
+          const applied = (async () => {
+            const remaining = new Set([native.id, unrelated!.id]);
+            for await (const event of lateSubscription!.events) {
+              if (event.type === "item.upsert") remaining.delete(event.item.id);
+              if (!remaining.size) return;
+            }
+            throw new Error("Expected both newer native rows to reach the subscription");
+          })();
+          fake.finish(session.id); // Wake the real stream to deliver the queued row.
+          await applied;
+          releaseBoundary();
+        }
         snapshot = await reading;
         if (delivery !== "covered-with-eviction") {
           await waitUntil(() => browser.items.some(item => item.type === "user_message" && item.text === draft.text));
           expect(browser.items.find(item => item.type === "user_message" && item.text === draft.text)).toHaveProperty("requestId", draft.requestId);
         } else {
           const replacement = await adapter.subscribe(session.id);
-          expect(replacement.snapshot.items.find(item => item.type === "user_message" && item.text === draft.text)).toHaveProperty("requestId", draft.requestId);
+          expect(replacement.snapshot.items.find(item => item.type === "user_message" && item.text === (lateRow ? "Newer native wording" : draft.text))).toHaveProperty("requestId", draft.requestId);
+          if (lateRow) expect(replacement.snapshot.items.find(item => item.id === unrelated!.id)).toEqual(unrelated!);
           replacement.events.cancel();
         }
       } finally { client.events.cancel(); await clientPump; }
     }
-    const rows = snapshot.items.filter(item => item.type === "user_message" && item.text === draft.text);
+    const rows = snapshot.items.filter(item => item.type === "user_message" && item.text === (lateRow ? "Newer native wording" : draft.text));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveProperty("requestId", draft.requestId);
     const native = (await provider.listMessages(session.id, { limit: 100 })).items.find(item => item.id === rows[0]!.id);
     if (native?.type !== "user_message") throw new Error("Expected the real native stored user row");
-    expect(rows[0]).toEqual({ ...native, requestId: draft.requestId }); // Native text, images and execution timestamp are unchanged.
+    // Native contents remain exact, including a newer row merged by the
+    // covered fence. Only the owned request nonce is restored.
+    expect(rows[0]).toEqual({ ...native, ...(lateRow ? { text: "Newer native wording", createdAt: newerCreatedAt } : {}), requestId: draft.requestId });
+    if (lateRow) expect(snapshot.items.find(item => item.id === unrelated!.id)).toEqual(unrelated!);
     expect(snapshot.configuration).toEqual(initial.configuration);
     expect(snapshot.queued).toEqual([]);
     expect(projectionFromSnapshot(snapshot, [draft]).acceptedDrafts).toEqual([]);
     expect(fake.state().calls.filter(call => call.includes("/prompt"))).toHaveLength(delivery === "covered-with-eviction" ? 68 : 2);
-  } finally { release(); releaseInbox(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+  } finally { release(); releaseInbox(); releaseBoundary(); lateSubscription?.events.cancel(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 });
 
 for (const projected of [false, true]) test(`real V2 bounded correlation expiry ${projected ? "preserves an already projected request" : "does not invent an expired request"}`, async () => {

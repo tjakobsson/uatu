@@ -2974,6 +2974,11 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **WHEN** a worker terminal event arrives while recovery is reading an older running launch
 - **THEN** applying recovery and the event stream leaves one terminal worker with its report
 
+#### Scenario: A concurrent delivery update omits the original client nonce
+- **WHEN** a covered history read owns the original native-message-to-request correlation and a newer concurrent native user row without that client nonce wins the live merge, including under projection or cache pressure
+- **THEN** history and the following subscription retain the original request identity for that exact native message while preserving the newer content
+- **AND** unrelated native messages do not acquire that identity, and correlation retention remains bounded
+
 #### Scenario: An oversized settled result is unchanged across handoff
 - **WHEN** a recovered snapshot contains a settled worker result larger than the replay retention window, covers the current accounting/progress updates, and no further updates intervene
 - **THEN** subscribing from that snapshot cursor does not request a retention-gap resync merely because the snapshot includes the oversized result
@@ -3013,6 +3018,12 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **THEN** missing child metadata alone does not authorize removal of a worker whose native origin remains visible
 - **AND** a previously projected settled worker whose native origin is hidden does not merge back into the transcript merely because its child metadata is unavailable
 - **AND** independently verified live detached work retains its existing visibility and control protections
+
+#### Scenario: Undo replacement receives incomplete worker enrichment
+- **WHEN** undo hides a later user message while an earlier settled worker's native origin remains visible and child enrichment is temporarily unavailable
+- **THEN** reversible projection replacement and the next subscription snapshot retain the worker's appropriate verified presentation, known accounting, and inspection identity rather than deleting them from page absence alone
+- **AND** explicit hidden-origin exclusions still remove reverted work, with existing independently live-work overrides
+- **AND** retained presentation does not renew Stop authority, bypass current contradictions, or allow cancelled or superseded reconciliation to replace current state
 
 #### Scenario: A reverted result was previously a fallback notice
 - **WHEN** unavailable child ownership caused a delivered result to be retained as a fallback notice, and a later native revert hides that result

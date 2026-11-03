@@ -619,6 +619,9 @@ by session events, and reread after disconnection; execution/inbox evidence stay
 An unchanged recovered snapshot does not need another resync solely because it
 contains a large settled result. Genuine progress after that snapshot can still
 exceed the bounded replay window and require authoritative recovery.
+A covered read also preserves a recovered message's original request identity
+when a newer native update omits its client nonce, without assigning that identity
+to unrelated messages or enlarging correlation retention.
 Unavailable child-session lookups do not make the parent's own transcript
 unreadable. Child details and controls still require verified ownership; a
 partial worker check is not evidence that omitted workers finished or disappeared.
@@ -626,6 +629,10 @@ Later successful reads can restore those details without restarting the agent.
 The whole V2 history read has a bounded 25-second window, separate from the
 shorter worker checks. Reverted settled results stay hidden even when child
 details are unavailable; missing details alone do not hide a visible worker.
+Undo's replacement snapshot follows the same rule: temporary child enrichment
+failure alone does not discard an earlier visible settled worker, its known
+accounting, or inspection identity. Explicitly hidden native origins still remove
+reverted work, and retained presentation never renews Stop authority.
 This also removes a hidden result's earlier fallback notice if ownership later
 recovers and the result's presentation identity changes, so the next subscription
 snapshot cannot restore that reverted notice.

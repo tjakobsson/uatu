@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClientError } from "@opencode/client";
@@ -193,6 +194,81 @@ for (const recovers of [false, true]) test(`same adapter removes reverted fallba
   } finally { lifetime.abort(); await adapter.dispose(); }
 });
 
+for (const paged of [false, true]) for (const canonical of [false, true]) for (const hidden of [false, true]) test(`degraded undo replacement ${hidden ? "removes hidden" : "retains visible"} settled ${canonical ? "canonical" : "notification"} workers (${paged ? "paged" : "complete"})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const user = (id: string, created: number) => ({ ...STORED.find(message => message.type === "user"), id, sessionID: "ses_parent", text: id, time: { created } });
+  const note = { id: "msg_old_note", type: "synthetic", text: "An unrelated removed transcript row", time: { created: 2 } };
+  const work = [...(canonical ? [fixture.launch] : []), fixture.stored];
+  let records = [user("msg_first", 1), note, ...(hidden ? [user("msg_later", 10), ...work] : [...work, user("msg_later", 70)])];
+  let boundary: string | undefined, unavailable = false, opened = 0, closed = 0;
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      opened++;
+      controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [session("ses_parent")], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", boundary ? { revert: { messageID: boundary } } : {}),
+    "GET /api/session/ses_child": () => unavailable ? new Response(null, { status: 503 }) : session("ses_child", { parentID: "ses_parent", cost: 0.125 }),
+    "GET /api/session/ses_parent/message": () => ({ data: records, cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }),
+    "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]),
+    "GET /api/form": () => scoped([]),
+    "POST /api/session/ses_parent/revert/stage": ({ body }) => {
+      boundary = (body as { messageID: string }).messageID;
+      records = records.filter(message => message.id !== note.id);
+      return { messageID: boundary };
+    },
+  });
+  const provider = server.provider();
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const lifetime = new AbortController();
+  const workerId = canonical ? "task:v2:ses_parent:call_worker" : "task:v2:ses_parent:notification:msg_result";
+  try {
+    const first = await adapter.history("ses_parent");
+    const worker = first.items.find(item => item.id === workerId);
+    expect(worker).toMatchObject({ type: "background_task", status: "completed", childConversationId: "ses_child", workerSession: { costUsd: 0.125 }, control: { available: false } });
+    expect(first.items.some(item => item.id === "notice:msg_old_note")).toBe(true);
+    const small = await provider.listMessages("ses_parent", { limit: 1 });
+    expect(small.nextCursor).toBeDefined();
+    if (paged) {
+      // Exercise the public adapter seam without the provider's optional
+      // whole-transcript optimization. Each page still comes from native IO.
+      const listMessages = provider.listMessages.bind(provider);
+      provider.listMessages = async (id, options) => {
+        const { completeItems: _complete, ...page } = await listMessages(id, { ...options, limit: 1 });
+        return page;
+      };
+    }
+    // Reconnect retires healthy ownership reuse; the same projection survives.
+    await adapter.stopEventPump();
+    unavailable = true;
+    void adapter.startEventPump();
+    expect(await adapter.undo("ses_parent", "undo-degraded")).toMatchObject({ outcome: "changed", state: { staged: true } });
+    const page = await provider.listMessages("ses_parent", { limit: 1 });
+    expect(page.revertVisibility?.excludedItemIds).toContain("message:msg_later");
+    if (hidden) expect(page.revertVisibility?.excludedItemIds).toContain(workerId);
+    else expect(page.revertVisibility?.excludedItemIds).toEqual(["message:msg_later"]);
+    const subscription = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+    subscription.events.cancel();
+    const after = subscription.snapshot.items;
+    expect(after.some(item => item.id === "message:msg_later" || item.id === "notice:msg_old_note")).toBe(false);
+    if (hidden) {
+      expect(after.some(item => item.type === "background_task" || item.id === "notice:msg_result")).toBe(false);
+    } else {
+      expect(after.filter(item => item.id === workerId || item.id === "notice:msg_result")).toEqual([worker!]);
+    }
+    expect(server.calls.filter(call => call.method !== "GET").map(call => [call.method, call.path, call.body])).toEqual([
+      ["POST", "/api/session/ses_parent/revert/stage", { messageID: "msg_later" }],
+    ]);
+  } finally {
+    lifetime.abort(); await adapter.dispose();
+    expect(closed).toBe(opened);
+  }
+});
+
 test("fallback notice exclusions preserve visible native results after ownership recovers", async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   const hidden = { ...fixture.stored, id: "msg_hidden_result" };
@@ -209,6 +285,182 @@ test("fallback notice exclusions preserve visible native results after ownership
     expect(page.revertVisibility?.excludedItemIds).not.toContain("notice:msg_result");
     expect(server.calls.every(call => call.method === "GET")).toBe(true);
   } finally { await provider.dispose(); }
+});
+
+describe("native reversible replacement coverage", () => {
+  function setup(options: { gate?: boolean; running?: boolean; cold?: boolean } = {}) {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const user = (id: string, created: number) => ({ ...STORED.find(message => message.type === "user"), id, sessionID: "ses_parent", text: id, time: { created } });
+    const state = { boundary: undefined as string | undefined, unavailable: options.cold ?? false,
+      records: [user("msg_first", 1), fixture.launch, ...(options.running ? [] : [fixture.stored]), user("msg_later", 70)] as Array<Record<string, unknown>> };
+    let release!: () => void, entered!: (signal: AbortSignal) => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const captured = new Promise<AbortSignal>(resolve => { entered = resolve; });
+    let armed = false, parentReads = 0, opened = 0, closed = 0;
+    // Pin the gate to the public mutation, not an ambient inventory read.
+    const mutationReads = new AsyncLocalStorage<boolean>();
+    const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+    const server = fakeOpenCode({
+      "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        opened++; streams.add(controller);
+        controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+        signal.addEventListener("abort", () => { closed++; streams.delete(controller); controller.close(); }, { once: true });
+      } }), { headers: { "content-type": "text/event-stream" } }),
+      "GET /api/session": () => ({ data: [session("ses_parent")], cursor: {} }),
+      "GET /api/session/ses_parent": async ({ signal }) => {
+        const info = session("ses_parent", state.boundary ? { revert: { messageID: state.boundary } } : {});
+        if (armed && mutationReads.getStore() && options.gate && ++parentReads === 2) {
+          armed = false; entered(signal); await gate;
+        }
+        return info;
+      },
+      "GET /api/session/ses_child": () => state.unavailable ? new Response(null, { status: 503 }) : session("ses_child", { parentID: "ses_parent", cost: 0.125 }),
+      "GET /api/session/ses_parent/message": () => ({ data: [...state.records], cursor: {} }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+      "GET /api/session/:id/inbox": () => ({ data: [] }),
+      "GET /api/session/active": () => ({}),
+      "GET /api/permission/request": () => scoped([]),
+      "GET /api/form": () => scoped([]),
+      "POST /api/session/ses_parent/revert/stage": ({ body }) => {
+        state.boundary = (body as { messageID: string }).messageID;
+        armed = true; parentReads = 0;
+        return { messageID: state.boundary };
+      },
+    });
+    const provider = server.provider();
+    const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+    const lifetime = new AbortController();
+    return { state, server, provider, adapter, captured, release, lifetime,
+      undo(requestId: string) { return mutationReads.run(true, () => adapter.undo("ses_parent", requestId)); },
+      finish() {
+        state.records.splice(state.records.length - 1, 0, fixture.stored);
+        const events = [
+          { id: "evt_launch", created: 30, type: "session.message.content.updated", durable: { aggregateID: "ses_parent", seq: 1, version: 1 }, data: { sessionID: "ses_parent", messageID: fixture.launch.id, content: fixture.launch.content } },
+          fixture.terminal,
+          { id: "evt_result", created: 41, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } },
+          fixture.delivered,
+        ];
+        for (const event of events) for (const stream of streams) stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+      },
+      async dispose() {
+        release(); lifetime.abort(); await adapter.dispose();
+        expect(closed).toBe(opened);
+        expect(server.calls.filter(call => call.method !== "GET").map(call => [call.method, call.path])).toEqual([["POST", "/api/session/ses_parent/revert/stage"]]);
+      },
+    };
+  }
+
+  test("undo supersedes a cold fallback when ownership recovers", async () => {
+    const context = setup({ cold: true });
+    const { adapter, state, lifetime } = context;
+    try {
+      expect((await adapter.history("ses_parent")).items.some(item => item.id === "notice:msg_result")).toBe(true);
+      state.unavailable = false;
+      const existing = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+      await adapter.undo("ses_parent", "recover-undo");
+      const next = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+      next.events.cancel(); existing.events.cancel();
+      expect(next.snapshot.items.filter(item => item.id === "notice:msg_result" || item.type === "background_task")).toEqual([
+        expect.objectContaining({ id: "task:v2:ses_parent:call_worker", status: "completed", resultId: "msg_result", childConversationId: "ses_child", workerSession: { effort: null, costUsd: 0.125 } }),
+      ]);
+      const delivered = [];
+      for await (const event of existing.events) delivered.push(event);
+      expect(delivered).toContainEqual(expect.objectContaining({ type: "item.remove", itemId: "notice:msg_result" }));
+    } finally { await context.dispose(); }
+  });
+
+  test("undo rereads a captured view when its native boundary changes", async () => {
+    const context = setup({ gate: true });
+    const { adapter, state, captured, release, lifetime } = context;
+    let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
+    try {
+      await adapter.history("ses_parent");
+      mutation = context.undo("changed-context");
+      await captured;
+      // Another client's native boundary now hides the earlier worker too.
+      state.boundary = "msg_first";
+      release();
+      expect(await mutation).toMatchObject({ state: { staged: true, canUndo: false } });
+      const next = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+      next.events.cancel();
+      expect(next.snapshot.items).toEqual([]);
+    } finally { release(); await mutation; await context.dispose(); }
+  });
+
+  test("cancelled undo coverage cannot publish its late transcript into a new generation", async () => {
+    const context = setup({ gate: true });
+    const { adapter, state, captured, release, lifetime } = context;
+    let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
+    try {
+      await adapter.history("ses_parent");
+      mutation = context.undo("cancelled-context");
+      const transport = await captured;
+      await adapter.stopEventPump();
+      expect(await mutation).toMatchObject({ outcome: "changed" });
+      expect(transport.aborted).toBe(true);
+      state.boundary = "msg_first";
+      void adapter.startEventPump();
+      const current = await adapter.history("ses_parent");
+      expect(current.items).toEqual([]);
+      release();
+      const next = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+      next.events.cancel();
+      expect(next.snapshot.items).toEqual([]);
+    } finally { release(); await mutation; await context.dispose(); }
+  });
+
+  test("paged undo retains exact exclusions when a new turn commits its staged suffix during the read", async () => {
+    const context = setup({ gate: true });
+    const { adapter, provider, state, captured, release, lifetime } = context;
+    // Put this settled worker in the later turn, so undo must remove it.
+    state.records.splice(1, 0, state.records.pop()!);
+    state.records[1] = { ...state.records[1]!, time: { created: 10 } };
+    let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
+    try {
+      expect((await adapter.history("ses_parent")).items).toContainEqual(expect.objectContaining({ id: "task:v2:ses_parent:call_worker" }));
+      const listMessages = provider.listMessages.bind(provider);
+      provider.listMessages = async (id, options) => {
+        const { completeItems: _complete, ...page } = await listMessages(id, { ...options, limit: 1 });
+        return page;
+      };
+      mutation = context.undo("committed-context");
+      await captured;
+      // A native replacement commits the discarded branch out of storage.
+      // Its new complete source cannot restate the old suffix's exclusions.
+      state.records = [state.records[0]!, { ...state.records[1]!, id: "msg_replacement", text: "New committed turn", time: { created: 80 } }];
+      state.boundary = undefined;
+      release();
+      expect(await mutation).toMatchObject({ state: { staged: false } });
+      const next = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+      next.events.cancel();
+      expect(next.snapshot.items.map(item => item.id)).toEqual(["message:msg_first", "message:msg_replacement"]);
+    } finally { release(); await mutation; await context.dispose(); }
+  });
+
+  test("undo replacement keeps a newer worker terminal event over its captured running row", async () => {
+    const context = setup({ gate: true, running: true });
+    const { adapter, captured, release, lifetime } = context;
+    let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
+    try {
+      const initial = await adapter.history("ses_parent");
+      expect(initial.items).toContainEqual(expect.objectContaining({ id: "task:v2:ses_parent:call_worker", status: "running" }));
+      const existing = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+      const terminal = (async () => {
+        for await (const event of existing.events) if (event.type === "item.upsert" && event.item.id === "task:v2:ses_parent:call_worker"
+          && event.item.type === "background_task" && event.item.status === "completed") return;
+        throw new Error("worker terminal event was not delivered");
+      })();
+      mutation = context.undo("terminal-context");
+      await captured;
+      context.finish();
+      await terminal;
+      release(); await mutation;
+      const next = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+      next.events.cancel();
+      expect(next.snapshot.items).toContainEqual(expect.objectContaining({ id: "task:v2:ses_parent:call_worker", status: "completed", resultId: "msg_result", control: { available: false } }));
+      expect(next.snapshot.items.some(item => item.id === "notice:msg_result" || item.id === "message:msg_later")).toBe(false);
+    } finally { release(); await mutation; await context.dispose(); }
+  });
 });
 
 test("required child history survives a shared optional enrichment deadline", async () => {

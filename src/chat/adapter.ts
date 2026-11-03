@@ -130,7 +130,7 @@ type InventorySessionMetadata = {
   title: string;
   deleted: boolean;
 };
-type HistoryCoverage = { signal: AbortSignal; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string> };
+type HistoryCoverage = { signal: AbortSignal; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; replacement?: true };
 class HistoryReadChangedError extends Error {}
 
 export class InteractionConflictError extends Error {
@@ -518,6 +518,9 @@ export class ChatAdapter {
   private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly configurationReads = new Map<string, Promise<ConversationConfiguration>>();
   private readonly nativeHistoryReads = new Map<string, { stream: AbortController | null; promise: Promise<ConversationSnapshot>; recovery: { dirty: boolean } }>();
+  // Unlike the reusable-read cache, this set also covers paging and reversible
+  // replacement. Each bounded owner retires in readCoveredHistory's finally.
+  private readonly nativeHistoryOwners = new Map<string, Set<{ stream: AbortController | null; recovery: { dirty: boolean }; replacement: boolean }>>();
   private readonly promptAdmissions = new Map<string, Promise<void>>();
   private readonly reversibleHistory = new Map<string, ReversibleHistoryState>();
   // Set before an interrupt or rewrite read. Provider idle events can arrive
@@ -764,7 +767,17 @@ export class ChatAdapter {
     return promise;
   }
 
-  private async readCoveredHistory(id: string, options: { cursor?: string; limit?: number }, recovery: { dirty: boolean }): Promise<ConversationSnapshot> {
+  private markNativeHistoryDirty(id: string, replacementsOnly = false): boolean {
+    let marked = false;
+    for (const owner of this.nativeHistoryOwners.get(id) ?? []) {
+      if (owner.stream !== this.pumpController || replacementsOnly && !owner.replacement) continue;
+      owner.recovery.dirty = true;
+      marked = true;
+    }
+    return marked;
+  }
+
+  private async readCoveredHistory(id: string, options: { cursor?: string; limit?: number }, recovery: { dirty: boolean }, replacement?: { isCurrent?: () => boolean }): Promise<ConversationSnapshot> {
     // Pin only already-known native identities for this bounded read owner.
     // Pending owners can depart, and the global delivery cache can evict,
     // before a native history row (including a dirty reread) is applied.
@@ -775,6 +788,10 @@ export class ChatAdapter {
     // complete visible source. Released with this bounded read, not cached.
     const revertExclusions = new Set<string>();
     const stream = this.pumpController;
+    const owner = { stream, recovery, replacement: replacement !== undefined };
+    let owners = this.nativeHistoryOwners.get(id);
+    if (!owners) this.nativeHistoryOwners.set(id, owners = new Set());
+    owners.add(owner);
     const lifetime = new AbortController();
     const signal = AbortSignal.any([lifetime.signal, ...(stream ? [stream.signal] : [])]);
     const timer = setTimeout(() => lifetime.abort(), this.historyReadTimeoutMs);
@@ -796,7 +813,8 @@ export class ChatAdapter {
         for (const [nativeId, requestId] of this.snapshotSteerCorrelations(id)) steerCorrelations.set(nativeId, requestId);
         const generation = this.backgroundStreamGeneration;
         const assertCurrent = () => {
-          if (signal.aborted || this.disposed || this.pumpController !== stream || generation !== this.backgroundStreamGeneration) throw new Error("Inbox recovery unavailable");
+          if (signal.aborted || this.disposed || this.pumpController !== stream || generation !== this.backgroundStreamGeneration
+            || replacement?.isCurrent && !replacement.isCurrent()) throw new Error("Inbox recovery unavailable");
         };
         // A delivery whose enqueue predates this subscription has no native
         // payload to replay. Reread storage, never invent a row from dock text.
@@ -806,7 +824,7 @@ export class ChatAdapter {
           recovery.dirty = false;
           fence = this.projection(id).beginHistoryRead();
           try {
-            const snapshot = await this.readHistory(id, options, { signal, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations });
+            const snapshot = await this.readHistory(id, options, { signal, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, ...(replacement ? { replacement: true } : {}) });
             inboxReconciled = true;
             assertCurrent();
             if (!recovery.dirty) return snapshot;
@@ -820,6 +838,8 @@ export class ChatAdapter {
       throw error;
     }
     finally {
+      owners.delete(owner);
+      if (!owners.size && this.nativeHistoryOwners.get(id) === owners) this.nativeHistoryOwners.delete(id);
       clearTimeout(timer);
       signal.removeEventListener("abort", unavailable);
       fence?.release();
@@ -842,8 +862,28 @@ export class ChatAdapter {
     const attributionOwner = parentId ? this.projections.get(parentId) : undefined;
     const inspectionKey = parentId ? attributionKey(parentId, id) : undefined;
     const inspectionEpoch = inspectionKey ? this.attributionReadEpoch(inspectionKey) : undefined;
-    const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
+    let page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
     coverage?.assertCurrent();
+    if (coverage?.replacement && !page.completeItems) {
+      // Replacement needs the whole visible transcript, not just its newest
+      // page. V2 normally supplies completeItems; other covered providers may
+      // instead require paging under the same owner and native boundary.
+      page = { ...page, items: [...page.items], accounting: [...page.accounting],
+        ...(page.workerResultFallbacks ? { workerResultFallbacks: [...page.workerResultFallbacks] } : {}),
+        ...(page.revertVisibility ? { revertVisibility: { ...page.revertVisibility, excludedItemIds: [...page.revertVisibility.excludedItemIds] } } : {}) };
+      let next = page.nextCursor;
+      while (next !== undefined) {
+        const older = await this.provider.listMessages(id, { cursor: next, limit: RECONSTRUCTION_READ_LIMIT, signal: coverage.signal });
+        coverage.assertCurrent();
+        if (older.revertVisibility?.boundaryId !== page.revertVisibility?.boundaryId) throw new HistoryReadChangedError();
+        page.items.unshift(...older.items);
+        page.accounting.unshift(...older.accounting);
+        if (older.workerResultFallbacks) (page.workerResultFallbacks ??= []).push(...older.workerResultFallbacks);
+        if (older.revertVisibility) page.revertVisibility!.excludedItemIds.push(...older.revertVisibility.excludedItemIds);
+        next = older.nextCursor;
+      }
+      page.completeItems = page.items;
+    }
     if (coverage && page.revertVisibility && this.provider.getHistoryRevertBoundary) {
       for (const itemId of page.revertVisibility.excludedItemIds) if (this.projection(id).has(itemId)) coverage.revertExclusions.add(itemId);
     }
@@ -866,7 +906,7 @@ export class ChatAdapter {
     // that complete source for recovery, never the bounded visible page.
     const configuration = await this.configuration(id);
     coverage?.assertCurrent();
-    const items = page.items.map(item => this.correlateSteerMessage(id, item, coverage?.steerCorrelations));
+    const items = (coverage?.replacement ? page.completeItems ?? page.items : page.items).map(item => this.correlateSteerMessage(id, item, coverage?.steerCorrelations));
     // A conversation's price is the sum of every message's, and the client
     // folds it from the usage carriers it holds — so the newest page alone
     // would present a partial figure that grows as older pages load. Where
@@ -1149,7 +1189,10 @@ export class ChatAdapter {
       const held = new Set(items.map(item => item.id));
       for (const item of page.completeItems) if (!held.has(item.id)) items.push(this.correlateSteerMessage(id, item, coverage.steerCorrelations));
     }
-    if (coverage) items.splice(0, items.length, ...coverage.merge(items));
+    // A newer native row can replace its correlated history copy in the
+    // change fence. Reapply only the read-owned native-ID correlation, keeping
+    // that row's newer contents even after its old cache/projection departed.
+    if (coverage) items.splice(0, items.length, ...coverage.merge(items).map(item => this.correlateSteerMessage(id, item, coverage.steerCorrelations)));
     // The live-task snapshot above was taken before several awaits; a task
     // that settled in the projection meanwhile keeps its settled row.
     for (let index = 0; index < items.length; index += 1) {
@@ -1204,17 +1247,27 @@ export class ChatAdapter {
         const current = projection.get(fallback.id);
         if (current && sameConversationItems([current], [fallback])) projection.apply({ kind: "remove", itemId: fallback.id });
       }
-      // Recovery is also for clients already listening when V2 reconnects.
-      // Publish recovered values, not just a silent seed of the next snapshot.
-      for (const item of items) {
-        const current = projection.get(item.id);
-        if (!current || !sameConversationItems([current], [item])) projection.apply({ kind: "upsert", item });
+      const replace = coverage?.replacement && (reversibleHistory && !sameReversibleHistory(previousReversibleHistory, reversibleHistory)
+        || !sameConversationItems(projection.items(), items));
+      if (replace) {
+        // Worker retention, exact exclusions and result supersession above
+        // apply equally to replacement. Ordinary transcript rows get no such
+        // retention. Commit only after the covered read's final validation.
+        this.eventCoalescer?.discard(id);
+        projection.replace(items);
+      } else {
+        // Recovery is also for clients already listening when V2 reconnects.
+        // Publish recovered values, not just a silent seed of the next snapshot.
+        for (const item of items) {
+          const current = projection.get(item.id);
+          if (!current || !sameConversationItems([current], [item])) projection.apply({ kind: "upsert", item });
+        }
       }
       if (reversibleHistory) {
         projection.reconciledHistoryVisibility = { state: reversibleHistory, ...(visibility ? { boundaryId: visibility.boundaryId } : {}) };
         this.rememberReversibleHistory(id, reversibleHistory);
       }
-      if (removed || visibilityChanged) projection.replay.publish({ type: "resync", reason: "conversation-rewritten" });
+      if (!replace && (removed || visibilityChanged)) projection.replay.publish({ type: "resync", reason: "conversation-rewritten" });
     } else projection.seed(items);
     if (this.provider.reconcileBackgroundTasks) this.syncBackgroundState(id);
     // A reopened conversation whose agent still holds live work is in the
@@ -2839,6 +2892,19 @@ export class ChatAdapter {
   }
 
   private async reconcileReversibleHistory(conversationId: string, isCurrent?: () => boolean): Promise<ReversibleHistoryState> {
+    if (this.provider.waitForEventStream) {
+      if (!this.pumpPromise) void this.startEventPump().catch(() => undefined);
+      const projection = this.projection(conversationId);
+      const before = projection.items();
+      const previous = this.reversibleHistory.get(conversationId);
+      // Native replacement consumes the same bounded, generation-covered
+      // history reconciliation as navigation. Optional page omissions cannot
+      // discard known workers or renew their control authority.
+      const snapshot = await this.readCoveredHistory(conversationId, { limit: RECONSTRUCTION_READ_LIMIT }, { dirty: false }, { isCurrent });
+      const state = snapshot.reversibleHistory!;
+      if (!sameReversibleHistory(previous, state) || !sameConversationItems(before, snapshot.items)) await this.rebuildChildAttribution(conversationId);
+      return state;
+    }
     const provider = this.requireReversibleHistoryProvider();
     const [items, state] = await Promise.all([
       this.authoritativeVisibleHistory(conversationId, isCurrent),
@@ -2978,13 +3044,6 @@ export class ChatAdapter {
       items.push(...page.items);
       cursor = page.nextCursor;
     } while (cursor !== undefined);
-    if (this.provider.waitForEventStream && this.provider.reconcileBackgroundTasks) {
-      let live: BackgroundTaskItem[];
-      try { live = await this.provider.reconcileBackgroundTasks(conversationId); }
-      catch { live = this.projection(conversationId).items().filter((item): item is BackgroundTaskItem => item.type === "background_task" && item.status === "running" && !item.foreground).map(unverifyWorkerTask); }
-      if (isCurrent && !isCurrent()) throw new Error("reversible history reconciliation was cancelled");
-      for (const task of live) if (task.status === "running" && !task.foreground && !items.some(item => item.id === task.id)) items.push(task);
-    }
     if (!this.liveTurns.has(conversationId)) {
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index]!;
@@ -4053,17 +4112,13 @@ export class ChatAdapter {
         // A coalesced add/remove may never reach the timeline. Active reads
         // still need its occurrence identity to respect the newer removal.
         this.projections.get(normalized.conversationId)?.touchWorkerOccurrences(timelineUpdates);
-        if (this.provider.waitForEventStream && this.projections.get(normalized.conversationId)?.reconciledHistoryVisibility?.state.staged) {
-          const reading = this.nativeHistoryReads.get(normalized.conversationId);
-          if (reading?.stream === this.pumpController) reading.recovery.dirty = true;
-        }
+        if (this.provider.waitForEventStream) this.markNativeHistoryDirty(normalized.conversationId,
+          !this.projections.get(normalized.conversationId)?.reconciledHistoryVisibility?.state.staged);
         coalescer.push(normalized.conversationId, timelineUpdates);
         if (this.provider.waitForEventStream && normalized.updates.some(update => update.kind === "inbox" && update.delta.kind === "settled"
           && update.delta.outcome === "delivered" && !this.projection(normalized.conversationId!).has(`message:${update.delta.id}`)
           && !timelineUpdates.some(candidate => candidate.kind === "upsert" && candidate.item.id === `message:${update.delta.id}`))) {
-          const reading = this.nativeHistoryReads.get(normalized.conversationId);
-          if (reading?.stream === this.pumpController) reading.recovery.dirty = true;
-          else void this.history(normalized.conversationId).catch(() => undefined);
+          if (!this.markNativeHistoryDirty(normalized.conversationId)) void this.history(normalized.conversationId).catch(() => undefined);
         }
         // OpenCode never emits `question.v2.asked`, so the arrival of the
         // `question` tool part is the only live signal that a question was
