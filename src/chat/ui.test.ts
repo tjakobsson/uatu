@@ -16,15 +16,12 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       const child = Bun.spawn({
         cmd: [process.execPath, "test", import.meta.path],
         env: { ...process.env, [CHILD_PROCESS_FLAG]: "1" },
-        stdout: "pipe",
-        stderr: "pipe",
+        // Keep child output visible even if this wrapper times out.
+        stdout: "inherit",
+        stderr: "inherit",
       });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+      const exitCode = await child.exited;
+      expect(exitCode).toBe(0);
       // The child runs this whole file, including a case that waits on the
       // surface's one-second clock and two that wait out the output view's
       // four-second retry; the default five seconds leaves it no room, and a
