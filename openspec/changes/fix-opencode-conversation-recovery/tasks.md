@@ -12,6 +12,10 @@ The user subsequently approved a third reproduced P2: a fallback result notice r
 
 Section 6 verification passed 8,376 unit tests with 16 skipped and zero failures, plus 3,109 affected tests and all three new fallback-visibility regressions. Typecheck, build/version/smoke, the 593-package license check, dependency audit, and all 58 strict OpenSpec items passed. Fresh parallel Sol Standards and Spec reviews of the full corrected PR found no actionable issues. Runtime, advisory, E2E, and authenticated mobile/SSE limits above remain unchanged.
 
+The user approved a fourth reproduced P2 after reviewing the latest comments: visible fallback notices and completed workers can duplicate the same native result across degraded and recovered history. Section 7 tracks explicit same-result supersession and subscriber removal; final verification and review are reopened. CI for `a07fd377` passed both E2E legs, performance tests, contracts, specs, and CodeQL, but its unit job timed out in the reversible-history browser integration wrapper, causing `validate` to fail. This CI failure is under separate diagnosis; a passing local suite does not establish green CI.
+
+Section 7 passed 13 focused tests, 3,152 affected tests, and a final full local run of 8,389 passed / 16 skipped / zero failures. A preceding full run had one timeout in the unchanged file-observer overlap test; its isolated 34-test suite and the subsequent full rerun passed without assertion or timeout changes. Typecheck, build/version/smoke, the 593-package license check, audit, and all 58 strict OpenSpec items passed. Fresh parallel Sol Standards and Spec reviews of the complete change were clean. Fresh GitHub CI remains a separate post-push check; authenticated iPhone/live-SSE recovery remains unverified.
+
 ## 1. Preserve the verified recovery baseline
 
 - [x] 1.1 Separate optional provider child enrichment from required parent reads, with regression coverage for lookup saturation, hung ownership/execution history, required parent failures, and later retry; verified by the completed provider/adapter run of 2,115 passing tests.
@@ -49,5 +53,11 @@ Section 6 verification passed 8,376 unit tests with 16 skipped and zero failures
 - [x] 6.1 Add a same-adapter public history/subscription regression and witness failure before correction: a delivered result initially retained as a fallback notice must disappear from both history and the next subscription snapshot after a native revert, whether child ownership remains unavailable or recovers.
 - [x] 6.2 Include possible fallback notice identities in authoritative hidden-suffix removals without broad absence-based adapter deletion; verify visible-prefix origin vetoes, canonical/alias exclusions, independently live work, and ownership/Stop safeguards remain intact.
 - [x] 6.3 Align the design, capability delta/main spec, and chat guidance with enrichment-independent fallback identity removal; verify main and delta recovery requirements match exactly without losing scenarios.
+
+## 7. Supersede duplicate visible fallback results
+
+- [x] 7.1 Add permanent public provider/adapter regressions and witness failure before correction for healthy → degraded reconnect → recovered history and cold degraded → recovered history; verify one presentation of each native result in history and subscription snapshots.
+- [x] 7.2 Supersede a fallback notice only when a retained or recovered verified worker represents the same native result; remove the duplicate from returned history and retained projection, publish removal to existing subscribers, and preserve notices without matching verified workers, unrelated notices/results, canonical aliases, stream fences, ownership/Stop, and live/revert safeguards.
+- [x] 7.3 Align design, capability delta/main spec, and chat guidance with explicit same-result supersession; verify the main and delta recovery requirements match exactly without losing scenarios.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.

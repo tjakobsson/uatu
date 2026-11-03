@@ -1191,6 +1191,19 @@ export class ChatAdapter {
         projection.apply({ kind: "remove", itemId });
         removed = true;
       }
+      // A visible native result can change presentation when ownership
+      // enrichment recovers. Neither page absence nor a notice-shaped id is
+      // removal authority: require the provider's exact fallback relation and
+      // an already verified worker for the same result AND child. Retained
+      // settled workers can supply that representation during a lookup outage.
+      for (const { resultId, childConversationId, fallback } of page.workerResultFallbacks ?? []) {
+        if (coverage?.changed(fallback.id) || !items.some(item => item.type === "background_task" && item.taskType === "agent"
+          && !item.stateUncertain && item.resultId === resultId && item.childConversationId === childConversationId)) continue;
+        const index = items.findIndex(item => item.id === fallback.id && sameConversationItems([item], [fallback]));
+        if (index >= 0) items.splice(index, 1);
+        const current = projection.get(fallback.id);
+        if (current && sameConversationItems([current], [fallback])) projection.apply({ kind: "remove", itemId: fallback.id });
+      }
       // Recovery is also for clients already listening when V2 reconnects.
       // Publish recovered values, not just a silent seed of the next snapshot.
       for (const item of items) {

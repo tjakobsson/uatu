@@ -80,6 +80,88 @@ const scoped = <T>(data: T) => ({ location: { directory: WORKSPACE }, data });
 const skillInfo = (id: string, overrides: { name?: string; description?: string } = {}) => ({ id, name: overrides.name ?? id, ...(overrides.description ? { description: overrides.description } : {}), path: `/ws/.opencode/skills/${id}/SKILL.md`, content: `# ${id}` });
 const notFound = (sessionID: string) => Response.json({ _tag: "SessionNotFoundError", sessionID, message: `Session not found: ${sessionID}` }, { status: 404 });
 
+test("fallback relations describe only actual visible native subagent results, without granting ownership", async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const hidden = { ...fixture.stored, id: "msg_hidden" };
+  const server = fakeOpenCode({
+    "GET /api/session/ses_parent": () => session("ses_parent", { revert: { messageID: hidden.id } }),
+    "GET /api/session/ses_child": () => new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => ({ data: [fixture.stored,
+      { id: "msg_unrelated", type: "synthetic", text: "Unrelated note", time: { created: 43 } },
+      { ...fixture.stored, id: "msg_shell", metadata: { source: "shell", shellID: "sh_fixture" } },
+      hidden], cursor: {} }),
+  });
+  const provider = server.provider();
+  try {
+    const page = await provider.listMessages("ses_parent", { limit: 100 });
+    expect(page.workerResultFallbacks).toEqual([{ resultId: "msg_result", childConversationId: "ses_child",
+      fallback: { id: "notice:msg_result", type: "notice", createdAt: 42, level: "info", message: fixture.stored.text } }]);
+    expect(page.items.some(item => item.type === "background_task")).toBe(false);
+    expect(page.items).toContainEqual(expect.objectContaining({ id: "notice:msg_result", type: "notice" }));
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { await provider.dispose(); }
+});
+
+for (const cold of [false, true]) for (const canonical of [false, true]) test(`visible result supersedes its fallback across ${cold ? "cold degradation" : "degraded reconnect"} (${canonical ? "canonical" : "notification"} worker)`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  let unavailable = cold, opened = 0, closed = 0;
+  const unrelated = { id: "msg_note", type: "synthetic", time: { created: 43 }, text: "An unrelated native note" };
+  const unmatched = { ...fixture.stored, id: "msg_unmatched", metadata: { ...fixture.stored.metadata, childID: "ses_unverified" },
+    text: fixture.stored.text.replaceAll("ses_child", "ses_unverified") };
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      opened++;
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+      controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [session("ses_parent")], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_child": () => unavailable ? new Response(null, { status: 503 }) : session("ses_child", { parentID: "ses_parent" }),
+    "GET /api/session/ses_unverified": () => new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => ({ data: [...(canonical ? [fixture.launch] : []), fixture.stored, unrelated, unmatched], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }),
+    "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]),
+    "GET /api/form": () => scoped([]),
+  });
+  const adapter = new ChatAdapter({ provider: server.provider(), workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const lifetime = new AbortController();
+  const workerId = canonical ? "task:v2:ses_parent:call_worker" : "task:v2:ses_parent:notification:msg_result";
+  try {
+    if (!cold) {
+      const healthy = await adapter.history("ses_parent");
+      expect(healthy.items).toContainEqual(expect.objectContaining({ id: workerId, type: "background_task", resultId: "msg_result" }));
+      await adapter.stopEventPump();
+      unavailable = true;
+      void adapter.startEventPump();
+    }
+    const degraded = await adapter.history("ses_parent");
+    expect(degraded.items.filter(item => item.id === "notice:msg_result" || item.id === workerId).map(item => item.id)).toEqual([cold ? "notice:msg_result" : workerId]);
+    expect(degraded.items).toContainEqual(expect.objectContaining({ id: "notice:msg_unmatched", type: "notice" }));
+    const existing = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+    unavailable = false;
+    const recovered = await adapter.history("ses_parent");
+    const next = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+    for (const snapshot of [recovered, next.snapshot]) {
+      expect(snapshot.items.filter(item => item.id === "notice:msg_result" || item.type === "background_task" && item.resultId === "msg_result")).toEqual([
+        expect.objectContaining({ id: workerId, type: "background_task", resultId: "msg_result", status: "completed" }),
+      ]);
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ id: "notice:msg_unmatched", type: "notice" }));
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ id: "notice:msg_note", type: "notice", message: unrelated.text }));
+    }
+    existing.events.cancel();
+    const delivered = [];
+    for await (const event of existing.events) delivered.push(event);
+    if (cold) expect(delivered).toContainEqual(expect.objectContaining({ type: "item.remove", itemId: "notice:msg_result" }));
+    expect(delivered).not.toContainEqual(expect.objectContaining({ type: "item.remove", itemId: "notice:msg_unmatched" }));
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally {
+    lifetime.abort(); await adapter.dispose();
+    expect(closed).toBe(opened);
+  }
+});
+
 for (const recovers of [false, true]) test(`same adapter removes reverted fallback result notices when ownership ${recovers ? "recovers" : "stays unavailable"}`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   let reverted = false;

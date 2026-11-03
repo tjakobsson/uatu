@@ -57,6 +57,12 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **AND** neither the history response nor the next subscription snapshot exposes the hidden fallback result
 - **AND** visible-prefix origins and independently verified live work retain their existing safeguards
 
+#### Scenario: A visible result changes presentation during enrichment recovery
+- **WHEN** a retained or recovered verified worker and a fallback notice represent the same native result, either after a healthy result degrades during reconnect or after a cold degraded read recovers
+- **THEN** history and subscription snapshots contain one presentation of that result rather than both rows
+- **AND** the fallback notice is superseded in the retained projection and its removal is delivered to existing subscribers
+- **AND** notices without a corresponding verified worker and unrelated notices/results remain visible, while canonical worker aliases, stream fences, ownership/Stop, and native live/revert safeguards remain intact
+
 #### Scenario: Authoritative history is slower than a worker check
 - **WHEN** the parent's authoritative history succeeds within its bounded history-read window but takes longer than the short worker-recovery budget
 - **THEN** the conversation loads without treating that short worker budget as a deadline for the entire transcript

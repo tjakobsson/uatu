@@ -626,6 +626,10 @@ details are unavailable; missing details alone do not hide a visible worker.
 This also removes a hidden result's earlier fallback notice if ownership later
 recovers and the result's presentation identity changes, so the next subscription
 snapshot cannot restore that reverted notice.
+For a visible result, a retained or recovered verified worker also supersedes
+the same native result's fallback notice in history and subscription snapshots;
+existing subscribers receive the notice removal. Without a matching verified
+worker, the fallback remains readable. Unrelated notices and results are retained.
 Child cost/model reconstruction also has a bounded optional-read window.
 Unavailable accounting keeps its known values without inventing zero or
 completeness, and a later read can retry rather than blocking parent history.

@@ -2997,6 +2997,36 @@ class FakeProvider implements ChatProvider {
 
 type RawPage = { items: ProviderMessage[]; nextCursor?: string; configurationItems?: ProviderMessage[] };
 
+describe("native result fallback supersession", () => {
+  for (const evidence of ["matching", "missing relation", "missing worker", "unverified worker", "different child", "different result", "different kind", "changed notice"] as const) {
+    test(`fallback retirement requires an exact relation and verified representation (${evidence})`, async () => {
+      const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+      provider.sessions = [fixtureSession("parent")];
+      const fallback: Extract<ConversationItem, { type: "notice" }> = { id: "notice:result", type: "notice", createdAt: 2, level: "info", message: "Native result" };
+      const notice = evidence === "changed notice" ? { ...fallback, message: "An unrelated replacement at the same id" } : fallback;
+      const worker: BackgroundTaskItem = { id: "task:worker", type: "background_task", taskId: "worker", taskType: evidence === "different kind" ? "shell" : "agent",
+        description: "Worker", createdAt: 1, status: "completed", resultId: evidence === "different result" ? "other-result" : "result",
+        childConversationId: evidence === "different child" ? "other-child" : "child", ...(evidence === "unverified worker" ? { stateUncertain: true } : {}) };
+      let recovered = false;
+      provider.listMessages = async () => ({ items: recovered && evidence !== "missing worker" ? [worker] : [notice], accounting: [],
+        ...(evidence === "missing relation" ? {} : { workerResultFallbacks: [{ resultId: "result", childConversationId: "child", fallback }] }) });
+      const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+      try {
+        expect((await adapter.history("parent")).items).toContainEqual(notice);
+        const existing = await adapter.subscribe("parent");
+        recovered = true;
+        await adapter.history("parent");
+        const next = await adapter.subscribe("parent");
+        expect(next.snapshot.items.some(item => item.id === notice.id)).toBe(evidence !== "matching");
+        existing.events.cancel(); next.events.cancel();
+        const delivered: ChatEvent[] = [];
+        for await (const event of existing.events) delivered.push(event);
+        expect(delivered.some(event => event.type === "item.remove" && event.itemId === notice.id)).toBe(evidence === "matching");
+      } finally { await adapter.dispose(); }
+    });
+  }
+});
+
 describe("native optional accounting ownership", () => {
   const launcher = (id: string, childConversationId: string): ToolItem => ({
     id, type: "tool", name: "subagent", status: "completed", createdAt: 1, input: "{}", childConversationId,

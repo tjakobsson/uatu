@@ -207,6 +207,11 @@ export type ProviderHistoryPage = {
   // unavailable optional enrichment. Own accounting remains usable, but this
   // page cannot establish a complete descendant tree. Not a public wire field.
   visibleDescendantsIncomplete?: true;
+  // Exact alternate presentations of visible native subagent results. This
+  // relation alone grants no ownership: a matching verified worker must also
+  // represent the same result and child before the fallback can be retired.
+  // Internal recovery evidence, not a timeline/wire field.
+  workerResultFallbacks?: Array<{ resultId: string; childConversationId: string; fallback: Extract<ConversationItem, { type: "notice" }> }>;
   nextCursor?: string;
 };
 

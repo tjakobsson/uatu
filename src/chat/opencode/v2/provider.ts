@@ -384,6 +384,13 @@ export class OpenCodeV2Provider implements ChatProvider {
       accounting,
       ...(typeof info?.cost === "number" && Number.isFinite(info.cost) && info.cost >= 0 ? { sessionCostUsd: info.cost } : {}),
       completeItems: [...normalized.values()].map(({ item }) => item),
+      workerResultFallbacks: visible.flatMap(message => {
+        const notice = prepareStoredMessage(message).notification;
+        if (message.type !== "synthetic" || !notice?.valid || !notice.status || notice.source !== "subagent" || !notice.worker) return [];
+        const childConversationId = notice.worker;
+        return normalizeStoredMessage(message).flatMap(fallback => fallback.type === "notice"
+          ? [{ resultId: messageIdentity(message), childConversationId, fallback }] : []);
+      }),
       revertVisibility: { boundaryId: boundaryId ?? null, state: reversible.state, excludedItemIds },
       ...(boundaryId ? { deliveryHistoryIncomplete: true as const } : {}),
       ...(normalized.descendantsIncomplete ? { visibleDescendantsIncomplete: true as const } : {}),
