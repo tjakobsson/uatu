@@ -62,6 +62,10 @@ Visible results also need explicit identity supersession. A retained or recovere
 
 Use `listMessages()` and `history()`, the seams already approved by the user. Extend adapter coverage to a verified child whose transcript hangs after the provider's optional check, nested accounting, cancellation/late responses, and successful later retry. Keep provider capacity, asymmetric enrichment, hidden/visible aliases, and detached-live revert tests meaningful.
 
+The remaining CI retention-gap assertion concerns the same public history/subscription handoff with a settled worker payload larger than the replay ring. Local repetitions have not established its trigger. Gate native step and usage deliveries deterministically before choosing a correction: redundant unchanged-row publication calls for a production fix, while legitimate progress still pending calls for explicit test synchronization. Preserve the replay budget and unchanged-snapshot no-resync assertion in either case; increasing limits or assuming an unrelated flake is not acceptance evidence.
+
+Controlled delivery reproduced the exact failing assertion eight times: the model was already updated while usage was still pending, then cost changed from `null` to `0.001` and legitimately republished the oversized row. A small-output control stayed green. The correction is test-only: the concurrent-read barrier now waits for consumed native usage and exact accumulated worker cost, preserving the original model checks, replay budget, and no-resync assertion. Paired gated cases retain the distinction between legitimate intervening progress and a fully applied unchanged snapshot. One hundred focused repetitions and the affected suites passed; no redundant product publication or cursor defect was demonstrated. Fresh CI remains necessary to verify the previously failing environment.
+
 ## Risks / Trade-offs
 
 - [Accounting is temporarily unavailable] → Preserve available values without inventing zero or completeness; retry on later reads.

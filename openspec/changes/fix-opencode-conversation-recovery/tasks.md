@@ -16,6 +16,10 @@ The user approved a fourth reproduced P2 after reviewing the latest comments: vi
 
 Section 7 passed 13 focused tests, 3,152 affected tests, and a final full local run of 8,389 passed / 16 skipped / zero failures. A preceding full run had one timeout in the unchanged file-observer overlap test; its isolated 34-test suite and the subsequent full rerun passed without assertion or timeout changes. Typecheck, build/version/smoke, the 593-package license check, audit, and all 58 strict OpenSpec items passed. Fresh parallel Sol Standards and Spec reviews of the complete change were clean. Fresh GitHub CI remains a separate post-push check; authenticated iPhone/live-SSE recovery remains unverified.
 
+CI attempt 2 for `5f2d5d30` passed the earlier three failures but failed the unchanged oversized-worker history/subscription regression with an unexpected `retention-gap` resync (8,388 passed / 16 skipped / one failed). Thirty local focused repetitions and forced-clock/delayed-subscription probes did not reproduce it. The user approved fixing this remaining failure in this PR, starting with deterministic event ordering rather than assuming flakiness or weakening replay limits. Section 8 tracks that correction; final local verification and independent review are reopened.
+
+Section 8's controlled schedule reproduced the failure eight times while accounting was genuinely pending. The test-only synchronization correction passed 100 focused repetitions, 3,124 affected tests, and a full local run of 8,391 passed / 16 skipped / zero failures. Typecheck, build/version/smoke, licenses (593 packages), audit, and all 58 strict OpenSpec items passed; fresh parallel Sol Standards and Spec reviews were clean. No product code, replay budget, or original no-resync assertion changed. Fresh CI remains pending under task 8.4; the controlled reproduction does not by itself establish CI's exact triggering event sequence.
+
 ## 1. Preserve the verified recovery baseline
 
 - [x] 1.1 Separate optional provider child enrichment from required parent reads, with regression coverage for lookup saturation, hung ownership/execution history, required parent failures, and later retry; verified by the completed provider/adapter run of 2,115 passing tests.
@@ -59,5 +63,12 @@ Section 7 passed 13 focused tests, 3,152 affected tests, and a final full local 
 - [x] 7.1 Add permanent public provider/adapter regressions and witness failure before correction for healthy → degraded reconnect → recovered history and cold degraded → recovered history; verify one presentation of each native result in history and subscription snapshots.
 - [x] 7.2 Supersede a fallback notice only when a retained or recovered verified worker represents the same native result; remove the duplicate from returned history and retained projection, publish removal to existing subscribers, and preserve notices without matching verified workers, unrelated notices/results, canonical aliases, stream fences, ownership/Stop, and live/revert safeguards.
 - [x] 7.3 Align design, capability delta/main spec, and chat guidance with explicit same-result supersession; verify the main and delta recovery requirements match exactly without losing scenarios.
+
+## 8. Make oversized-result history/subscription handoff reliable
+
+- [x] 8.1 Establish and minimize a deterministic public-seam reproduction of the CI retention-gap failure by gating native step/usage events around history/subscription handoff; witness the exact assertion fail and identify whether a redundant publication or legitimate pending progress invalidates the cursor.
+- [x] 8.2 Correct the confirmed cause with regression coverage, preserving the replay byte budget, no-resync assertion for unchanged snapshots, meaningful event/progress assertions, and all stream, accounting, ownership/Stop, and live/revert safeguards; remove temporary diagnostics and rerun the original scenario.
+- [x] 8.3 Align design, affected capability acceptance, and chat guidance with the proven correction; preserve existing scenarios and distinguish a test synchronization correction from a production behavior change.
+- [ ] 8.4 Verify the published correction's fresh CI results, including the unit/validate gates; report any actual remaining failure or access/runtime blocker rather than treating local success or a rerun as proof of its cause.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.

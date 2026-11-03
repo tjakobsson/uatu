@@ -616,6 +616,9 @@ inspection action rather than the parent composer.
 Reconnect reads history, pending results and current execution evidence.
 Complete history is reused only within a connected event generation, invalidated
 by session events, and reread after disconnection; execution/inbox evidence stays fresh.
+An unchanged recovered snapshot does not need another resync solely because it
+contains a large settled result. Genuine progress after that snapshot can still
+exceed the bounded replay window and require authoritative recovery.
 Unavailable child-session lookups do not make the parent's own transcript
 unreadable. Child details and controls still require verified ownership; a
 partial worker check is not evidence that omitted workers finished or disappeared.

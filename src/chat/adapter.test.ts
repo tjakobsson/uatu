@@ -326,22 +326,41 @@ test("covered V2 snapshot preserves a rename published during its history read",
 for (const large of [false, true]) test(`real V2 unchanged parent and child snapshots do not repeatedly request resync${large ? " with oversized settled worker output" : ""}`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let reportChild: string | undefined, usageEventsApplied = 0;
+  const events = provider.events.bind(provider);
+  provider.events = async function* (signal) {
+    for await (const event of events(signal)) {
+      yield event;
+      if (event.conversationId === reportChild && event.eventType === "session.usage.updated") usageEventsApplied++;
+    }
+  };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
   try {
     const parent = (await provider.createSession("Repeated recovery")).id;
     const worker = fake.launchWorker(parent, true);
+    reportChild = worker.childId;
     if (large) {
       fake.settleWorker(worker.childId, "completed", "Large worker result. ".repeat(14_000));
       fake.launchWorker(parent, true, worker.childId);
     }
     const listMessages = provider.listMessages.bind(provider);
-    let report = 0, reporting = false;
+    let report = 0, reporting = false, cost = 0;
     provider.listMessages = async (id, options) => {
       const page = await listMessages(id, options);
       if (large && reporting && id === parent) {
         const model = `Concurrent report ${++report}`;
+        cost += 0.001;
         fake.workerReport(worker.childId, model, "high", 0.001);
         await waitUntil(() => adapter.projectionForTests(parent).items().some(item => (item.type === "tool" || item.type === "background_task") && item.workerSession?.model === model));
+        // Step-start exposes the model before step-end/usage changes the same
+        // oversized settled row. Complete that real progress inside the read,
+        // so the subsequent cursor handoff actually tests unchanged snapshots.
+        await waitUntil(() => {
+          const rows = adapter.projectionForTests(parent).items()
+            .filter(item => (item.type === "tool" || item.type === "background_task") && item.childConversationId === worker.childId);
+          return usageEventsApplied >= report && rows.length > 0
+            && rows.every(item => (item.type === "tool" || item.type === "background_task") && item.workerSession?.model === model && item.workerSession.costUsd === cost);
+        });
       }
       return page;
     };
@@ -360,6 +379,57 @@ for (const large of [false, true]) test(`real V2 unchanged parent and child snap
       expect(resyncs).toEqual([[], [], []]);
     }
   } finally { await adapter.dispose(); await fake.stop(); }
+});
+
+for (const lateUsage of [false, true]) test(`real V2 oversized settled result handoff ${lateUsage ? "resyncs for intervening usage" : "does not resync after usage is applied"}`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let armed = false, blocked = false, usageApplied = false;
+  const events = provider.events.bind(provider);
+  provider.events = async function* (signal) {
+    for await (const event of events(signal)) {
+      if (armed && event.eventType === "session.step.ended") {
+        armed = false;
+        blocked = true;
+        await gate;
+      }
+      yield event;
+      // Resumption means the adapter has consumed this native update.
+      if (event.eventType === "session.usage.updated") usageApplied = true;
+    }
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Pending worker usage")).id;
+    const worker = fake.launchWorker(parent, true);
+    fake.settleWorker(worker.childId, "completed", "Large worker result. ".repeat(14_000));
+    await adapter.history(parent);
+    armed = true;
+    fake.workerReport(worker.childId, "Concurrent report", "high", 0.001);
+    await waitUntil(() => blocked);
+    if (!lateUsage) { release(); await waitUntil(() => usageApplied); }
+    const snapshot = await adapter.history(parent);
+    expect(snapshot.items.find(item => item.type === "background_task")).toMatchObject({
+      workerSession: { model: "Concurrent report", costUsd: lateUsage ? null : 0.001 },
+    });
+    release();
+    await waitUntil(() => usageApplied);
+    const client = await adapter.subscribe(parent, { cursor: snapshot.cursor });
+    client.events.cancel();
+    const replay: ChatEvent[] = [];
+    for await (const event of client.events) replay.push(event);
+    expect(client.snapshot.items.find(item => item.type === "background_task")).toMatchObject({
+      workerSession: { model: "Concurrent report", costUsd: 0.001 },
+    });
+    expect(client.snapshot.items.find(item => item.type === "tool")).toMatchObject({ usage: { input: 1200, output: 100 } });
+    const resyncs = replay.filter(event => event.type === "resync");
+    // A genuine cost update cannot fit in the ring with this settled output;
+    // only the fully applied, unchanged handoff must remain resync-free.
+    if (lateUsage) expect(resyncs).toMatchObject([{ reason: "retention-gap" }]);
+    else expect(resyncs).toEqual([]);
+  } finally { release(); await adapter.dispose(); await fake.stop(); }
 });
 
 for (const kind of ["agent", "shell"] as const) for (const local of [false, true]) test(`real V2 ${local ? "local" : "external"} revert keeps live ${kind} but removes its hidden settlement`, async () => {

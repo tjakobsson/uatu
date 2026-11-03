@@ -16,6 +16,11 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **WHEN** a worker terminal event arrives while recovery is reading an older running launch
 - **THEN** applying recovery and the event stream leaves one terminal worker with its report
 
+#### Scenario: An oversized settled result is unchanged across handoff
+- **WHEN** a recovered snapshot contains a settled worker result larger than the replay retention window, covers the current accounting/progress updates, and no further updates intervene
+- **THEN** subscribing from that snapshot cursor does not request a retention-gap resync merely because the snapshot includes the oversized result
+- **AND** genuine later progress that exceeds replay retention can still require authoritative resynchronization
+
 #### Scenario: Navigation and pagination preserve the worker
 - **WHEN** the user switches sessions or workspaces, then returns to a parent whose launch is on an older page
 - **THEN** current worker state and its child inspection link are available without manually loading every older page
