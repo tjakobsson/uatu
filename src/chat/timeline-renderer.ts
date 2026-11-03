@@ -1,5 +1,6 @@
 import { appUrl } from "../shared/app-url";
 import { backgroundTasksByTool } from "./background-tasks";
+import { activeInteractionRequests } from "./interaction-order";
 import { workerExecutionClockRuns, workerState, workerStateLabel } from "./worker-state";
 import type { BackgroundTaskItem } from "./types";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
@@ -115,26 +116,7 @@ export class TimelineRenderer {
     }
     const dirty: HTMLElement[] = [];
     const ordered: HTMLElement[] = [];
-    // Answerable is decided per owning conversation, not per timeline. With one
-    // conversation's items this is exactly the old rule — the newest pending
-    // request wins. With a subagent's request shown alongside the parent's,
-    // each conversation gets its own active slot, so one cannot block the
-    // other. `requirePending` applies the same rule server-side, per owner —
-    // and the SAME COMPARATOR: newest createdAt, ties broken by id. Array
-    // order is not that comparator (reconciled requests share one Date.now()
-    // and keep provider order), and disagreeing with the server enables a
-    // card whose every answer gets a stale-interaction conflict.
-    const activeByOwner = new Map<string, { id: string; createdAt: number }>();
-    for (const item of projection.items) {
-      if (item.type !== "permission" && item.type !== "question") continue;
-      if (item.status !== "pending") continue;
-      const owner = item.conversationId ?? projection.conversationId;
-      const current = activeByOwner.get(owner);
-      if (!current || item.createdAt > current.createdAt || (item.createdAt === current.createdAt && item.id > current.id)) {
-        activeByOwner.set(owner, { id: item.id, createdAt: item.createdAt });
-      }
-    }
-    const activeRequests = new Set<string>([...activeByOwner.values()].map(entry => entry.id));
+    const activeRequests = new Set(activeInteractionRequests(projection.items, projection.conversationId).map(item => item.id));
     const toolRows = toolRowIndex(projection.items);
     const workers = backgroundTasksByTool(projection.items);
 
@@ -1933,7 +1915,7 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // intents has no generic pair and so no stage.
   const body = pending && active
     ? renderPermissionActions(item, permissionScopeNote, confirming)
-    : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : "";
+    : pending ? `<p class="chat-request-outcome">Waiting its turn. Answer the first pending permission.</p>` : "";
   const state = requestState(item.status, active);
   const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${escapeHtml(permissionOutcomeLabel(item.outcome, item))}</span>` : requestBadge(state);
   // What "Allow" would apply, shown where the choice is made. Only while the
@@ -2149,7 +2131,7 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, o
   // the summary and drops the answered form. Its prompts stay in the collapsed
   // body so what was asked remains reachable.
   const resolvedBody = item.questions.map(question => `<p class="chat-request-asked">${escapeHtml(question.prompt)}</p>`).join("");
-  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary class="chat-primary-button">${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject title="Declines this question set — the agent is told and continues without answers">Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : resolvedBody;
+  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary class="chat-primary-button">${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject title="Declines this question set — the agent is told and continues without answers">Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn. Answer the active request first.</p>` : resolvedBody;
   const state = requestState(item.status, active);
   const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</span>` : requestBadge(state);
   // A dialog or elicitation says who is asking above the form, offers the

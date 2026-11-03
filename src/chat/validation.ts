@@ -268,12 +268,13 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "alwaysPatterns", "status", "outcome", "diff", "plan", "choices", "choiceId", "sourceToolId", "mcp"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "queueOrder", "action", "resources", "alwaysPatterns", "status", "outcome", "diff", "plan", "choices", "choiceId", "sourceToolId", "mcp"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
   expectTimelineBase(record, "permission");
   expectIdentity(record.requestId, "permission request id");
+  if (record.queueOrder !== undefined) expectTimestamp(record.queueOrder, "permission queue order");
   expectNonEmptyString(record.action, "permission action");
   // Empty is legitimate: a plan approval affects no named resource.
   expectStringArray(record.resources, "permission resources", record.plan === undefined);
