@@ -329,7 +329,11 @@ describe("Hub state-root lease", () => {
     const cases: Array<{ name: string; setup(leasePath: string): Promise<void>; message: RegExp }> = [
       {
         name: "unsafe mode",
-        setup: async leasePath => { await writeFile(leasePath, "", { mode: 0o644 }); },
+        setup: async leasePath => {
+          await writeFile(leasePath, "", { mode: 0o644 });
+          // Creation modes are masked by the process umask; this fixture must be unsafe.
+          await chmod(leasePath, 0o644);
+        },
         message: /exactly mode 0600/,
       },
       {
@@ -366,6 +370,7 @@ describe("Hub state-root lease", () => {
       await ensureStateDir(stateRoot);
       const leasePath = path.join(stateRoot, ".hub-lease");
       await fixture.setup(leasePath);
+      if (fixture.name === "unsafe mode") expect((await lstat(leasePath)).mode & 0o777).toBe(0o644);
       await expect(acquireHubStateLease(stateRoot), fixture.name).rejects.toThrow(fixture.message);
       if (fixture.name === "unsafe mode") expect((await lstat(leasePath)).mode & 0o777).toBe(0o644);
     }
