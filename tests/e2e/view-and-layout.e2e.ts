@@ -219,10 +219,15 @@ async function checkUnreadableDocument(page: Page, subMillisecondMtime: boolean)
     await expect.poll(async () => {
       const state: StatePayload = await page.request.get("/api/state").then(response => response.json());
       const indexedDocument = state.roots.flatMap(root => root.docs).find(doc => doc.id === filePath);
-      // The intended Date has millisecond precision; a filesystem can store
-      // the preceding microsecond (for example, 8437.999 instead of 8438).
-      // Compare at that precision while still rejecting the prior timestamp,
-      // which is a full second older.
+      // Filesystems can round utimes' millisecond target slightly; as in the
+      // Linux CI failure trace, the stored mtime can keep the preceding
+      // microsecond (for example, 8437.999 instead of 8438), so an exact
+      // comparison would wait forever on that fractional timestamp. The
+      // requested Date is whole-millisecond (Math.ceil + 1000), so comparing
+      // with Math.round at that precision accepts such rounding — a tighter
+      // window than the upstream ±2 ms tolerance, which addressed the same
+      // mismatch — while still rejecting the prior timestamp, which is a
+      // full second older.
       if (!indexedDocument || Math.round(indexedDocument.mtimeMs) !== setupMtime.getTime()) return false;
       return page.evaluate(
         generatedAt => Number(document.body.dataset.stateGeneratedAt ?? 0) >= generatedAt,

@@ -2,6 +2,19 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 12 / Workspace 34 - Unreleased (permission queue order)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed permission items may carry optional `queueOrder`, a nonnegative number ordering pending permissions within the current adapter generation. Smaller positions are answered first per owning conversation, independently of transcript timestamps and lexical request ids. Recovery preserves the provider's pending-list order.
+- The renderer, request shortcut, and server approval guard select the same FIFO head. A parent recovery also retires externally answered permissions from a retained owning projection, so a missed reply cannot block the next approval.
+
+### Migration
+
+Strict workspace-payload consumers must regenerate against revision 34 because revision 33's closed permission object rejects the optional field. Preserve `queueOrder` through snapshots and live updates and use it to select the first pending permission per owner. Positions are presentation ordering within one adapter generation, not durable identities or timestamps. Continue addressing replies by the owning conversation and request id. Hub revision remains 12 and bundled-web revision remains 3; workspace revision participates in matching-assets checks.
+
 ## Hub 12 / Workspace 33 - Unreleased (partial launch continuity)
 
 Compatibility: breaking (workspace)

@@ -21,19 +21,19 @@ test("outstanding requests are counted, reachable, and clear at zero", async ({ 
   const id = seeded.conversation.id;
   const jump = page.locator("#chat-requests-jump");
   const timeline = page.locator("#chat-timeline");
-  const target = page.locator('[data-chat-item-id="permission:p2"]');
+  const target = page.locator('[data-chat-item-id="permission:p0"]');
   // How much of the answerable card the timeline is actually showing. The
   // pill's rule is about that band, not about the window, so a card clipped
   // by the scroller is measured here rather than with toBeInViewport.
   const shownHeight = () => timeline.evaluate(element => {
-    const card = element.querySelector('[data-chat-item-id="permission:p2"]')?.getBoundingClientRect();
+    const card = element.querySelector('[data-chat-item-id="permission:p0"]')?.getBoundingClientRect();
     if (!card) return -1;
     const band = element.getBoundingClientRect();
     return Math.max(0, Math.min(card.bottom, band.bottom) - Math.max(card.top, band.top));
   });
   await expect(jump).toBeHidden();
 
-  // Transcript above the requests, so the newest one can be scrolled out of
+  // Transcript above the requests, so the first one can be scrolled out of
   // the band. Without it the conversation never scrolls and the two halves of
   // the rule below cannot be told apart.
   for (const i of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) {
@@ -87,16 +87,16 @@ test("outstanding requests are counted, reachable, and clear at zero", async ({ 
   await expect(jump).toHaveText("");
 
   // Recovered requests can share a timestamp and arrive in provider order.
-  // Admission breaks that tie by greatest id, not by whichever arrived last.
-  for (const requestId of ["z", "a"]) {
+  // Queue metadata wins over lexical ids and the transcript's timestamp sort.
+  for (const [requestId, queueOrder] of [["z", 2], ["a", 1]] as const) {
     await request.post("/__e2e/chat", { data: { action: "item", conversationId: id, item: {
-      id: `permission:${requestId}`, type: "permission", createdAt: 20, requestId,
+      id: `permission:${requestId}`, type: "permission", createdAt: 20, requestId, queueOrder,
       action: "bash", resources: [`cmd-${requestId}`], status: "pending",
     } } });
   }
-  await expect(jump).toHaveAttribute("data-request-target", "permission:z");
-  await expect(page.locator('[data-chat-item-id="permission:z"]')).toHaveAttribute("data-request-state", "needs-answer");
-  await expect(page.locator('[data-chat-item-id="permission:a"]')).toHaveAttribute("data-request-state", "queued");
+  await expect(jump).toHaveAttribute("data-request-target", "permission:a");
+  await expect(page.locator('[data-chat-item-id="permission:a"]')).toHaveAttribute("data-request-state", "needs-answer");
+  await expect(page.locator('[data-chat-item-id="permission:z"]')).toHaveAttribute("data-request-state", "queued");
 });
 
 async function visitVariantWorkspace(page: Page, token: string, onNavigated?: () => void): Promise<void> {
@@ -347,9 +347,11 @@ test.describe("Allow always asks for confirmation", () => {
     await captureScreenshot(page, testInfo, "after-confirmation-wildcard-desktop");
     await wildcard.getByRole("button", { name: "Cancel" }).click();
 
-    // A newer request with nothing reusable becomes the answerable one.
+    // The newer request waits until the current permission has been answered.
     await publish(request, id, shell("bare", 21, [], "skill", ["review-code"]));
     const bareCard = page.locator('[data-chat-item-id="permission:bare"]');
+    await expect(bareCard).toHaveAttribute("data-request-state", "queued");
+    await fetchCard.getByRole("button", { name: "Allow once" }).click();
     await bareCard.getByRole("button", { name: "Allow always" }).click();
     const bare = bareCard.locator("[data-permission-confirming]");
     await expect(bare.locator(".chat-request-confirm-lead")).toContainText("no reusable pattern");
@@ -357,7 +359,7 @@ test.describe("Allow always asks for confirmation", () => {
     await expect(bare.locator(".chat-request-always")).toHaveCount(0);
     await expect(bare.locator(".chat-request-scope")).toHaveCount(0);
     await captureScreenshot(page, testInfo, "after-confirmation-no-pattern-desktop");
-    expect(await replies(request)).toEqual([]);
+    expect(await replies(request)).toEqual([{ interactionId: "fetch", outcome: "approved-once" }]);
   });
 
   test("a request resolved elsewhere closes its confirmation; once and reject still reply on one click", async ({ page, request }) => {
