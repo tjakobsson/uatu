@@ -2582,9 +2582,9 @@ describe("permission choices state the authority they grant", () => {
     expect(host.querySelector("[data-permission-confirming]")).toBeNull();
     expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Allowed always");
 
-    // Queued behind a newer request: not answerable, so not confirming.
+    // Queued behind an earlier request: not answerable, so not confirming.
     renderer.confirming.add(permission.id);
-    renderer.render(host, projectionWith([permission, { ...permission, id: "permission:p2", requestId: "p2", createdAt: 4 }]), new Set());
+    renderer.render(host, projectionWith([permission, { ...permission, id: "permission:p2", requestId: "p2", createdAt: 0 }]), new Set());
     expect(renderer.confirming.has(permission.id)).toBe(false);
   });
 
@@ -2676,8 +2676,8 @@ describe("a request's state is visible without reading it", () => {
     const host = target();
     renderer.render(host, projectionWith([
       { ...base, id: "permission:done", createdAt: 1, requestId: "done", status: "resolved", outcome: "approved-once" },
-      { ...base, id: "permission:queued", createdAt: 2, requestId: "queued", status: "pending" },
-      { ...base, id: "permission:active", createdAt: 3, requestId: "active", status: "pending" },
+      { ...base, id: "permission:active", createdAt: 2, requestId: "active", status: "pending" },
+      { ...base, id: "permission:queued", createdAt: 3, requestId: "queued", status: "pending" },
     ]), new Set());
     return host;
   }
@@ -2686,8 +2686,8 @@ describe("a request's state is visible without reading it", () => {
     const host = stack();
     const states = [...host.querySelectorAll("[data-request-state]")]
       .map(node => (node as HTMLElement).dataset.requestState);
-    // Newest pending is answerable; the older pending one waits its turn.
-    expect(states).toEqual(["resolved", "queued", "needs-answer"]);
+    // New arrivals cannot displace the request awaiting an answer.
+    expect(states).toEqual(["resolved", "needs-answer", "queued"]);
   });
 
   test("the distinction is not colour alone", () => {
@@ -2736,27 +2736,24 @@ describe("requests owned by different conversations do not block each other", ()
       { ...perm, id: "permission:child", createdAt: 3, requestId: "child", conversationId: "sub-1" },
     ]), new Set());
     const state = (id: string) => (host.querySelector(`[data-chat-item-id="${id}"]`) as HTMLElement).dataset.requestState;
-    // The parent's newest is answerable, and so is the subagent's — one does
+    // The parent's oldest is answerable, and so is the subagent's — one does
     // not consume the other's slot.
-    expect(state("permission:own-new")).toBe("needs-answer");
+    expect(state("permission:own-new")).toBe("queued");
     expect(state("permission:child")).toBe("needs-answer");
-    expect(state("permission:own-old")).toBe("queued");
+    expect(state("permission:own-old")).toBe("needs-answer");
   });
 
-  test("timestamp ties resolve by id, matching the server's admission rule", () => {
+  test("queue order wins over timestamp ties and transcript order", () => {
     const renderer = new TimelineRenderer();
     const host = target();
-    // Reconciled requests share one Date.now(); provider order put the
-    // server-losing candidate LAST, which array order would wrongly enable.
+    // Transcript sorting and lexical ids do not determine permission order.
     renderer.render(host, projectionWith([
-      { ...perm, id: "permission:req-b", createdAt: 5, requestId: "req-b" },
-      { ...perm, id: "permission:req-a", createdAt: 5, requestId: "req-a" },
+      { ...perm, id: "permission:req-b", createdAt: 5, requestId: "req-b", queueOrder: 2 },
+      { ...perm, id: "permission:req-a", createdAt: 5, requestId: "req-a", queueOrder: 1 },
     ]), new Set());
     const state = (id: string) => (host.querySelector(`[data-chat-item-id="${id}"]`) as HTMLElement).dataset.requestState;
-    // requirePending breaks the tie toward the greater id — the UI must too,
-    // or every enabled answer is refused as stale.
-    expect(state("permission:req-b")).toBe("needs-answer");
-    expect(state("permission:req-a")).toBe("queued");
+    expect(state("permission:req-b")).toBe("queued");
+    expect(state("permission:req-a")).toBe("needs-answer");
   });
 
   test("a surfaced subagent request says who is asking", () => {
@@ -2772,7 +2769,7 @@ describe("requests owned by different conversations do not block each other", ()
     expect(host.querySelector('[data-chat-item-id="permission:own"]')?.textContent).not.toContain("Requested by");
   });
 
-  test("a single-owner timeline behaves exactly as before", () => {
+  test("a single-owner permission queue is FIFO", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     renderer.render(host, projectionWith([
@@ -2780,7 +2777,7 @@ describe("requests owned by different conversations do not block each other", ()
       { ...perm, id: "permission:b", createdAt: 2, requestId: "b", conversationId: "c1" },
     ]), new Set());
     const states = [...host.querySelectorAll("[data-request-state]")].map(n => (n as HTMLElement).dataset.requestState);
-    expect(states).toEqual(["queued", "needs-answer"]);
+    expect(states).toEqual(["needs-answer", "queued"]);
   });
 });
 

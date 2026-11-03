@@ -19,6 +19,7 @@ import { setActiveTab } from "../shell/tab-bar";
 import { expandChatPanel, isChatPanelOpen } from "./surface";
 import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "./surface-visibility";
 import { newRequestId } from "./ids";
+import { activeInteractionRequests } from "./interaction-order";
 import { insertCommand, localHistoryOperation, matchingCommands, parsePromptSlashCommand, sideQuestionOperation, slashCommandQuery, type LocalHistoryOperation } from "./slash-commands";
 import { LatestRefresh } from "./latest-refresh";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
@@ -1554,8 +1555,7 @@ export function initChat(api = new ChatApiClient()): void {
     const outstanding = projection
       ? projection.items.filter(item => (item.type === "permission" || item.type === "question") && item.status === "pending")
       : [];
-    const target = outstanding.reduce<(typeof outstanding)[number] | undefined>((newest, item) =>
-      !newest || item.createdAt > newest.createdAt || (item.createdAt === newest.createdAt && item.id > newest.id) ? item : newest, undefined);
+    const target = projection ? activeInteractionRequests(projection.items, projection.conversationId)[0] : undefined;
     // Skipped when nothing changed: rewriting the pill's text every frame
     // replaces the text node a finger may be resting on.
     const signature = `${outstanding.length}\u0001${target?.id ?? ""}`;
@@ -1567,8 +1567,7 @@ export function initChat(api = new ChatApiClient()): void {
       } else {
         const noun = outstanding.length === 1 ? "request needs" : "requests need";
         requestsJump.textContent = `${outstanding.length} ${noun} your answer`;
-        // The answerable one is the newest; that is where the jump lands,
-        // because it is the only one a user can act on right now.
+        // Jump only to an answerable head, never a request waiting behind it.
         requestsJump.dataset.requestTarget = target!.id;
       }
     }

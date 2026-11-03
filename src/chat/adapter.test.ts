@@ -29,6 +29,7 @@ import { notificationPipeline } from "../../tests/notification-pipeline";
 import { startOpenCodeV2Fake } from "../../tests/e2e/opencode-v2-fake";
 import { addAcceptedDraft, applyChatEvent, projectionFromSnapshot } from "./projection";
 import { LiveBroker } from "../hub/live-broker";
+import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
 
 describe("independent background workspace activity", () => {
@@ -6490,6 +6491,57 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(adapter.projectionForTests("session").items()).toContainEqual(expect.objectContaining({ type: "notice", level: "error", message: "failed" }));
   });
 
+  test("permission FIFO keeps the current request active as newer requests arrive", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    try {
+      for (const [id, timestamp] of [["z", 100], ["a", 100], ["middle", 1]] as const) {
+        applyEvent(adapter, "session", { type: "permission.v2.asked", data: { id, sessionID: "session", action: "shell", resources: [id], timestamp } });
+      }
+      const items = adapter.projectionForTests("session").items();
+      expect(activeInteractionRequests(items, "session")[0]?.id).toBe("permission:z");
+      await expect(adapter.respondPermission("session", "a", "too-early", "approved-once")).rejects.toBeInstanceOf(InteractionConflictError);
+      for (const id of ["z", "a", "middle"]) {
+        await adapter.respondPermission("session", id, `answer-${id}`, "approved-once");
+        await expect(adapter.respondPermission("session", id, `duplicate-${id}`, "approved-once")).rejects.toBeInstanceOf(InteractionConflictError);
+      }
+      expect(provider.permissionReplies.map(reply => reply.requestId)).toEqual(["z", "a", "middle"]);
+    } finally { await adapter.dispose(); }
+  });
+
+  test.each([false, true])("permission FIFO recovery preserves provider order across equal timestamps and mirrored owners (observed=%s)", async observed => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let pending = ["z", "a"].map(requestId => ({ requestId, conversationId: "child", action: "shell", resources: [requestId] }));
+    provider.listPermissions = async () => pending;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    try {
+      // Only the later ask was observed before reconnect. Recovery must put
+      // the missed earlier ask ahead of it, in both copies of the request.
+      if (observed) applyEvent(adapter, "child", { type: "permission.v2.asked", data: { id: "a", sessionID: "child", action: "shell", resources: ["a"], timestamp: 1 } });
+      const first = await adapter.history("parent");
+      expect(activeInteractionRequests(first.items, "parent")[0]?.id).toBe("permission:z");
+      // The owner guard agrees even before its transcript has been opened.
+      await expect(adapter.respondPermission("child", "a", "too-early", "approved-once")).rejects.toBeInstanceOf(InteractionConflictError);
+      expect(activeInteractionRequests(adapter.projectionForTests("child").items(), "child")[0]?.id).toBe("permission:z");
+      // Opening the child recovers the same queue positions, not a new queue.
+      await adapter.history("child");
+      for (const owner of ["parent", "child"]) {
+        expect(activeInteractionRequests(adapter.projectionForTests(owner).items(), owner)[0]?.id).toBe("permission:z");
+      }
+      await adapter.respondPermission("child", "z", "first", "approved-once");
+      pending = pending.filter(request => request.requestId !== "z");
+      await adapter.history("parent");
+      await adapter.respondPermission("child", "a", "second", "approved-once");
+      expect(provider.permissionReplies).toEqual([
+        { sessionId: "child", requestId: "z", reply: "once" },
+        { sessionId: "child", requestId: "a", reply: "once" },
+      ]);
+      expect(adapter.projectionForTests("parent").items().filter(item => item.type === "permission").every(item => item.status === "resolved")).toBe(true);
+    } finally { await adapter.dispose(); }
+  });
+
   test("supports permission outcomes exactly once and refuses stale duplicates", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -7089,8 +7141,8 @@ describe("pending permission recovery", () => {
     expect(announced.map(notification => [notification.conversationId, notification.sourceId]).sort()).toEqual([
       ["parent", JSON.stringify(["child", "perm_child"])], ["parent", JSON.stringify(["child", "que_child"])],
     ]);
-    await adapter.respondQuestion("parent", "que_child", "c1", { kind: "answered", answers: [["A"]] });
     await adapter.respondPermission("parent", "perm_child", "c2", "approved-once");
+    await adapter.respondQuestion("parent", "que_child", "c1", { kind: "answered", answers: [["A"]] });
     await adapter.stopEventPump();
     await pump;
     expect(events.flatMap(event => event.type === "resolved" ? [event.id] : []).sort()).toEqual(announced.map(notification => notification.id).sort());
