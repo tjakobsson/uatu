@@ -128,6 +128,11 @@ export type NormalizedEventOutcome =
   | "unparseable";
 
 export type NormalizedProviderEvent = {
+  // Exact persisted native message/call origins observed on this event's
+  // confined conversation. Delivery proves a result's stored origin; enqueue
+  // alone does not. Internal presentation provenance, never control proof.
+  workerOriginUpdates?: WorkerOrigin[];
+  workerResultFallbacks?: WorkerResultFallback[];
   catalogsChanged?: boolean;
   conversationId?: string;
   updates: NormalizedProviderUpdate[];
@@ -181,7 +186,46 @@ export type NormalizedProviderEvent = {
 // row state that task's spend rather than the whole session's.
 export type StoredMessageAccounting = { messageId: string; createdAt: number; usage?: TokenUsage; model?: string; effort?: string; promptId?: string };
 
+// Agent and shell inspection identities are distinct. outputFile is opaque to
+// the adapter; provider-specific native shell-ID encoding stays below the seam.
+export type WorkerOrigin = { messageId: string; toolUseId?: string; childConversationId?: string; outputFile?: string; taskType?: "agent" | "shell" };
+
+// Internal evidence lease, independent of the message transport deadline.
+// Retention must happen while the previous owner is current; every successor
+// has its own bounded signal and releases without retiring sibling readers.
+export type WorkerSourceGuard = { isCurrent: () => boolean; retain: (signal: AbortSignal) => WorkerSourceGuard };
+// Invalidation-only watch for retained associations, registered before I/O.
+// A snapshot contains only scoped counterproof, never ownership admission.
+// Successive snapshots belong to the same bounded owner, so a failed transport
+// cannot erase its already-observed counterproof on the next read attempt.
+export type WorkerAssociationWatch = {
+  // Extend before publication. Existing candidates and counterproof keep their
+  // revisions; adding a retained relation supplies no ownership authority.
+  include: (childIds: readonly string[]) => void;
+  snapshot: () => { workerSource: WorkerSourceGuard; contradictedChildren: readonly string[] };
+};
+export type WorkerResultFallback = { resultId: string; childConversationId: string; fallback: Extract<ConversationItem, { type: "notice" }> };
+// Recovery's captured ownership and pending-result evidence, independent of
+// transcript origin coverage. Consumers retain the lease synchronously before
+// the shared recovery transport retires; this never grants Stop authority.
+export type WorkerRecoverySource = { workerSource: WorkerSourceGuard; workerAssociationContradictions: string[]; workerResultFallbacks: WorkerResultFallback[] };
+
 export type ProviderHistoryPage = {
+  // Complete visible raw parent-origin inventory from this same confined
+  // transcript/boundary read, independent of optional worker enrichment.
+  // Presentation provenance only: never child ownership or Stop authority.
+  // Omitted for providers without this evidence; not a public wire field.
+  workerOriginCoverage?: WorkerOrigin[];
+  // Separate authorities: hidden delivered reports do not erase their visible
+  // launches; positive ownership contradictions revoke associations, whereas
+  // unavailable enrichment alone does not. Same read/context as coverage.
+  hiddenWorkerResultIds?: string[];
+  workerAssociationContradictions?: string[];
+  // Bounded read-owner guard for later ownership observations. Internal only;
+  // capture freezes even unavailable/unattempted candidates. Later positive
+  // evidence requires rereading, not publishing the old page's assumptions.
+  isWorkerSourceCurrent?: () => boolean;
+  workerSource?: WorkerSourceGuard;
   // Includes hidden/reverted/compaction spend where the provider reports it.
   // No message-level fallback: even a complete transcript can omit such spend.
   sessionCostUsd?: number;
@@ -211,7 +255,7 @@ export type ProviderHistoryPage = {
   // relation alone grants no ownership: a matching verified worker must also
   // represent the same result and child before the fallback can be retired.
   // Internal recovery evidence, not a timeline/wire field.
-  workerResultFallbacks?: Array<{ resultId: string; childConversationId: string; fallback: Extract<ConversationItem, { type: "notice" }> }>;
+  workerResultFallbacks?: WorkerResultFallback[];
   nextCursor?: string;
 };
 
@@ -441,7 +485,8 @@ export interface ChatProvider {
   /** Scoped evidence, including terminal results and uncertain last-known rows.
    * Unlike a live-only list, absence is never an instruction to cancel a task.
    */
-  reconcileBackgroundTasks?(sessionId: string, options?: { fresh?: boolean; signal?: AbortSignal }): Promise<import("./types").BackgroundTaskItem[]>;
+  reconcileBackgroundTasks?(sessionId: string, options?: { fresh?: boolean; signal?: AbortSignal; onSource?: (source: WorkerRecoverySource) => void }): Promise<import("./types").BackgroundTaskItem[]>;
+  watchWorkerAssociations?(parentId: string, childIds: readonly string[], options: { signal: AbortSignal }): WorkerAssociationWatch;
   backgroundBlockingWork?(sessionId: string): Promise<void>;
   /** Native one-shot context answer, with no admission, tool loop or turn interruption. */
   generate?(sessionId: string, prompt: string): Promise<string>;

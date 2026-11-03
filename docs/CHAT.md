@@ -259,9 +259,11 @@ prices are available. Missing aggregate data remains unknown, not a partial sum.
 OpenCode can itself report zero for unpriced models: this is a reported zero,
 not a promise of free billing. Reused-child occurrences repeat one session snapshot
 without adding it to task/parent receipts or including descendant costs. Recovery
-uses existing child-history accounting; inspection reuses its own bounded read,
-and parent refreshes revalidate cached child history at most every 30 seconds,
-not on every paint. Ordered live removals protect model/effort/token accounting
+uses existing child-history accounting; inspection reuses its own bounded read.
+Parent refreshes normally revalidate cached child history at most every 30 seconds,
+not on every paint. Covered reads also revalidate cached nested associations and
+retry changed source evidence before publication, even within that interval.
+Ordered live removals protect model/effort/token accounting
 from older refresh and inspection reads; a later live upsert may recreate the
 message. Removal fences are bounded: retiring one invalidates older reads first,
 and parent-cache eviction clears its fences. Native lifetime cost remains separate
@@ -633,6 +635,15 @@ Undo's replacement snapshot follows the same rule: temporary child enrichment
 failure alone does not discard an earlier visible settled worker, its known
 accounting, or inspection identity. Explicitly hidden native origins still remove
 reverted work, and retained presentation never renews Stop authority.
+If another client commits the revert before Uatu sees its staged boundary,
+discarded settled worker results must still disappear rather than return from
+retained state. Separate native-origin evidence preserves visible workers under
+unavailable enrichment without confusing them with committed-away work;
+positively recovered inbox and independently live work keep their own safeguards.
+An earlier visible launcher does not preserve a later reverted report. Fresh
+ownership evidence that contradicts the parent or workspace revokes retained
+child inspection and accounting associations; temporary lookup failure alone
+does not establish such a contradiction.
 This also removes a hidden result's earlier fallback notice if ownership later
 recovers and the result's presentation identity changes, so the next subscription
 snapshot cannot restore that reverted notice.

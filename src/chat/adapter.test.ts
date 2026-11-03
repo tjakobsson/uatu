@@ -31,6 +31,34 @@ import { addAcceptedDraft, applyChatEvent, projectionFromSnapshot } from "./proj
 import { LiveBroker } from "../hub/live-broker";
 import type { LiveEnvelope } from "../shared/live-protocol";
 
+for (const action of ["remove", "replace", "upsert", "seed", "evict"] as const)
+test(`fallback result source authority retires projection provenance on ${action}`, async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent"), fixtureSession("other")];
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+  const notice: Extract<ConversationItem, { type: "notice" }> = { id: "notice:native-result", type: "notice", createdAt: 1, level: "info", message: "Actual fallback report" };
+  const relation = { resultId: "native-result", childConversationId: "child", fallback: notice };
+  try {
+    let projection = adapter.projectionForTests("parent");
+    projection.upsert(notice);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false); // Shape/id alone proves nothing.
+    projection.rememberWorkerFallbacks([notice], [{ ...relation, fallback: { ...notice, message: "Different report" } }]);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false);
+    projection.rememberWorkerFallbacks([notice], [relation]);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(true);
+    expect(projection.workerFallbackOriginAbsent(notice, [{ messageId: relation.resultId }])).toBe(false);
+    if (action === "remove") projection.apply({ kind: "remove", itemId: notice.id });
+    if (action === "replace") projection.replace([]);
+    if (action === "upsert") projection.upsert({ ...notice, message: "Unrelated same-id update" });
+    if (action === "seed") projection.seed([{ ...notice, message: "Unrelated same-id seed" }]);
+    if (action === "evict") { await adapter.history("other"); projection = adapter.projectionForTests("parent"); }
+    projection.upsert(notice);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false);
+    const next = await adapter.subscribe("parent"); next.events.cancel();
+    expect(next.snapshot.items).toContainEqual(notice);
+    expect(next.snapshot).not.toHaveProperty("workerResultFallbacks");
+  } finally { await adapter.dispose(); }
+});
+
 describe("independent background workspace activity", () => {
   for (const legacy of [false, true]) test(`stream loss withdraws evicted verified activity while preserving legacy work (${legacy})`, async () => {
     const provider = new FakeProvider();

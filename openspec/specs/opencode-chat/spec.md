@@ -3025,11 +3025,28 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **AND** explicit hidden-origin exclusions still remove reverted work, with existing independently live-work overrides
 - **AND** retained presentation does not renew Stop authority, bypass current contradictions, or allow cancelled or superseded reconciliation to replace current state
 
+#### Scenario: Another client commits a revert before the staged view is read
+- **WHEN** current authoritative native history has already dropped a reverted suffix before Uatu reads any staged boundary or exclusions
+- **THEN** replacement does not resurrect discarded settled workers, their reports, accounting presentation, or inspection targets from the retained projection merely because current history has no exclusions
+- **AND** separate exact raw-native-origin coverage distinguishes committed-away origins from visible workers omitted by optional enrichment; normalized page absence, shared child identity, and projected ordering alone do not authorize deletion or retention
+- **AND** positively recovered inbox work and independently live work retain their existing provenance, uncertainty, and control safeguards
+
 #### Scenario: A reverted result was previously a fallback notice
 - **WHEN** unavailable child ownership caused a delivered result to be retained as a fallback notice, and a later native revert hides that result
 - **THEN** authoritative removals include the fallback identity whether ownership remains unavailable or recovers and changes the result's normalized identity
 - **AND** neither the history response nor the next subscription snapshot exposes the hidden fallback result
 - **AND** visible-prefix origins and independently verified live work retain their existing safeguards
+
+#### Scenario: A visible launcher and its result straddle a revert boundary
+- **WHEN** a worker's launch remains visible but its later stored result is authoritatively hidden or committed away
+- **THEN** replacement retains only the appropriate visible-launch presentation, not the discarded result's report or result-derived terminal fields, whether optional enrichment succeeds or is unavailable
+- **AND** independently current inbox or execution evidence keeps its own visibility and control safeguards
+
+#### Scenario: Fresh ownership evidence contradicts a retained child association
+- **WHEN** a fresh child lookup positively reports a different parent or workspace during replacement reconciliation
+- **THEN** retained worker and tool presentations do not restore that contradicted child inspection or accounting association
+- **AND** parent-owned historical text can remain without the contradicted association, while unavailable optional lookups alone do not establish that contradiction
+- **AND** cancelled or superseded reads cannot revoke or restore associations on behalf of a newer view
 
 #### Scenario: A visible result changes presentation during enrichment recovery
 - **WHEN** a retained or recovered verified worker and a fallback notice represent the same native result, either after a healthy result degrades during reconnect or after a cold degraded read recovers

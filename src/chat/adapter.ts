@@ -4,7 +4,7 @@ import { AgentNotificationTracker, type AgentNotificationEvent } from "./notific
 import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
-import type { InboxDelta, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle, StoredMessageAccounting } from "./provider";
+import type { InboxDelta, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle, StoredMessageAccounting, ProviderHistoryPage, WorkerSourceGuard, WorkerResultFallback, WorkerRecoverySource, WorkerAssociationWatch } from "./provider";
 import { describeToolDetail } from "./tool-detail";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
 import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
@@ -130,8 +130,75 @@ type InventorySessionMetadata = {
   title: string;
   deleted: boolean;
 };
-type HistoryCoverage = { signal: AbortSignal; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; replacement?: true };
+type CachedAssociationCounterproof = { parentId: string; childIds: readonly string[]; transcriptKeys: ReadonlySet<string> };
+type HistoryCoverage = { signal: AbortSignal; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; replacement?: true };
 class HistoryReadChangedError extends Error {}
+
+/** Evidence flows from shared accounting owners to each enclosing read before
+ * transport retirement. Followers own independent leases, including transitive
+ * sources already collected before they joined. Nothing survives their signal. */
+class WorkerSourceRead {
+  private readonly guards: Array<{ guard: WorkerSourceGuard; accountingKey?: string }> = [];
+  private readonly followers = new Set<WorkerSourceRead>();
+  constructor(private readonly signal: AbortSignal) {}
+  observe(source: WorkerSourceGuard, accountingKey?: string): void {
+    if (this.signal.aborted) return;
+    const guard = source.retain(this.signal);
+    this.guards.push({ guard, accountingKey });
+    for (const follower of this.followers) follower.observe(guard, accountingKey);
+  }
+  follow(read: WorkerSourceRead): () => void {
+    for (const { guard, accountingKey } of this.guards) read.observe(guard, accountingKey);
+    this.followers.add(read);
+    return () => { this.followers.delete(read); };
+  }
+  assertCurrent(): void {
+    if (this.guards.some(({ guard }) => !guard.isCurrent())) throw new HistoryReadChangedError();
+  }
+  hasAccountingPage(key: string): boolean {
+    return this.guards.some(({ accountingKey }) => accountingKey === key);
+  }
+}
+
+/** One enclosing read's growing presentation graph. New edges enter watches
+ * before cache/projection publication, including while an attempt is awaiting
+ * its final boundary. Only counterproof changes revisions or requests a retry. */
+class CachedAssociationRead {
+  private readonly groups = new Map<string, { watch: WorkerAssociationWatch; children: Set<string>; transcriptKeys: Set<string> }>();
+  private readonly attempts = new Set<{ sources: WorkerSourceRead; evidence: CachedAssociationCounterproof[] }>();
+  constructor(readonly id: string, private readonly signal: AbortSignal,
+    private readonly create: NonNullable<ChatProvider["watchWorkerAssociations"]>) {}
+
+  include(parentId: string, childId: string, ownerKey?: string): void {
+    if (this.signal.aborted) return;
+    let group = this.groups.get(parentId);
+    if (!group) {
+      group = { watch: this.create(parentId, [], { signal: this.signal }), children: new Set(), transcriptKeys: new Set() };
+      this.groups.set(parentId, group);
+      // Attach the empty revision first: cached counterproof found by include()
+      // must also invalidate an attempt that has already reached its boundary.
+      for (const attempt of this.attempts) this.attach(attempt, parentId, group);
+    }
+    if (ownerKey) group.transcriptKeys.add(ownerKey);
+    if (group.children.has(childId)) return;
+    group.children.add(childId);
+    group.watch.include([childId]);
+  }
+
+  begin(sources: WorkerSourceRead) {
+    const attempt = { sources, evidence: [] as CachedAssociationCounterproof[] };
+    for (const [parentId, group] of this.groups) this.attach(attempt, parentId, group);
+    this.attempts.add(attempt);
+    return { evidence: attempt.evidence, release: () => { this.attempts.delete(attempt); } };
+  }
+
+  private attach(attempt: { sources: WorkerSourceRead; evidence: CachedAssociationCounterproof[] }, parentId: string,
+    group: { watch: WorkerAssociationWatch; transcriptKeys: ReadonlySet<string> }): void {
+    const snapshot = group.watch.snapshot();
+    attempt.sources.observe(snapshot.workerSource);
+    attempt.evidence.push({ parentId, transcriptKeys: group.transcriptKeys, childIds: snapshot.contradictedChildren });
+  }
+}
 
 export class InteractionConflictError extends Error {
   constructor(message = "interaction request is stale or already resolved") {
@@ -521,6 +588,7 @@ export class ChatAdapter {
   // Unlike the reusable-read cache, this set also covers paging and reversible
   // replacement. Each bounded owner retires in readCoveredHistory's finally.
   private readonly nativeHistoryOwners = new Map<string, Set<{ stream: AbortController | null; recovery: { dirty: boolean }; replacement: boolean }>>();
+  private readonly nativeAssociationReads = new Set<CachedAssociationRead>();
   private readonly promptAdmissions = new Map<string, Promise<void>>();
   private readonly reversibleHistory = new Map<string, ReversibleHistoryState>();
   // Set before an interrupt or rewrite read. Provider idle events can arrive
@@ -561,7 +629,7 @@ export class ChatAdapter {
   private readonly steerWithdrawTimeoutMs: number;
   private readonly historyReadTimeoutMs: number;
   private readonly accountingReadTimeoutMs: number;
-  private readonly nativeAccountingReads = new Map<string, { controller: AbortController; promise: Promise<void>; callers: number }>();
+  private readonly nativeAccountingReads = new Map<string, { controller: AbortController; promise: Promise<void>; callers: number; sources: WorkerSourceRead }>();
   private readonly automaticBackgroundTimeoutMs: number;
   private readonly steerAdmissionTimeoutMs: number;
   private inboxClock = 0;
@@ -800,7 +868,16 @@ export class ChatAdapter {
     let unavailable!: () => void;
     const expired = new Promise<never>((_resolve, reject) => { unavailable = () => reject(new Error("Inbox recovery unavailable")); });
     signal.addEventListener("abort", unavailable, { once: true });
+    let associationRead: CachedAssociationRead | undefined;
     try {
+      // Retained graph edges need a read-owned invalidation watch before any
+      // transport can hang or expire. Accounting success is not a prerequisite.
+      if (this.provider.watchWorkerAssociations) {
+        associationRead = new CachedAssociationRead(id, signal, this.provider.watchWorkerAssociations.bind(this.provider));
+        this.nativeAssociationReads.add(associationRead);
+        this.watchCachedAssociations(associationRead);
+        for (const item of this.projections.get(id)?.items() ?? []) this.watchProjectionAssociations(id, item);
+      }
       return await Promise.race([(async () => {
         // V2 cannot replay the handshake gap. History AND inbox must be read
         // after the native server.connected frame, on the same owned stream.
@@ -820,17 +897,26 @@ export class ChatAdapter {
         // payload to replay. Reread storage, never invent a row from dock text.
         // The whole handoff, including rereads, shares one bounded lifetime.
         let inboxReconciled = false;
+        let refreshAttribution = false;
         while (true) {
           recovery.dirty = false;
           fence = this.projection(id).beginHistoryRead();
+          const attempt = new AbortController();
+          const attemptSignal = AbortSignal.any([signal, attempt.signal]);
+          const workerSources = new WorkerSourceRead(attemptSignal);
+          const associations = associationRead?.begin(workerSources);
+          const cachedAssociations = associations?.evidence ?? [];
           try {
-            const snapshot = await this.readHistory(id, options, { signal, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, ...(replacement ? { replacement: true } : {}) });
+            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, ...(replacement ? { replacement: true } : {}) });
             inboxReconciled = true;
             assertCurrent();
             if (!recovery.dirty) return snapshot;
           } catch (error) {
             if (!(error instanceof HistoryReadChangedError)) throw error;
-          } finally { fence.release(); }
+            // Retry current association proof without deleting another read's
+            // banked accounting or completeness stamps.
+            refreshAttribution = true;
+          } finally { associations?.release(); attempt.abort(); fence.release(); }
         }
       })(), expired]);
     } catch (error) {
@@ -838,6 +924,7 @@ export class ChatAdapter {
       throw error;
     }
     finally {
+      if (associationRead) this.nativeAssociationReads.delete(associationRead);
       owners.delete(owner);
       if (!owners.size && this.nativeHistoryOwners.get(id) === owners) this.nativeHistoryOwners.delete(id);
       clearTimeout(timer);
@@ -864,6 +951,7 @@ export class ChatAdapter {
     const inspectionEpoch = inspectionKey ? this.attributionReadEpoch(inspectionKey) : undefined;
     let page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
     coverage?.assertCurrent();
+    if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
     if (coverage?.replacement && !page.completeItems) {
       // Replacement needs the whole visible transcript, not just its newest
       // page. V2 normally supplies completeItems; other covered providers may
@@ -907,6 +995,126 @@ export class ChatAdapter {
     const configuration = await this.configuration(id);
     coverage?.assertCurrent();
     const items = (coverage?.replacement ? page.completeItems ?? page.items : page.items).map(item => this.correlateSteerMessage(id, item, coverage?.steerCorrelations));
+    const sourceProjection = this.projection(id);
+    const revokedChildren = new Set(page.workerAssociationContradictions);
+    const fallbackRelations = [...(page.workerResultFallbacks ?? [])];
+    const positiveFallbacks = new Set<string>();
+    const hiddenReports = new Set(page.hiddenWorkerResultIds);
+    const positiveReports = new Set<string>();
+    const resetReports = new Set<string>();
+    const revokedRows = new Set<string>();
+    for (const item of sourceProjection.items()) if (item.type === "background_task" && item.resultId) {
+      if (page.workerOriginCoverage && sourceProjection.workerReportOriginAbsent(item, page.workerOriginCoverage)) hiddenReports.add(item.resultId);
+      if (hiddenReports.has(item.resultId) && page.workerOriginCoverage && sourceProjection.workerLaunchOriginPresent(item, page.workerOriginCoverage)) resetReports.add(item.id);
+    }
+    // Source authority is applied before attribution and again after the live
+    // merge. A launcher, a delivered report and a child association have
+    // independent provenance; none can vouch for the others.
+    const reconcileWorkerSource = () => {
+      const retained: ConversationItem[] = [];
+      for (const item of items) {
+        if ((item.type === "tool" || item.type === "background_task") && item.childConversationId && revokedChildren.has(item.childConversationId)) {
+          revokedRows.add(item.id);
+          if (item.type === "background_task") {
+            for (const relation of fallbackRelations) if (relation.resultId === item.resultId
+              && relation.childConversationId === item.childConversationId && !hiddenReports.has(relation.resultId)) retained.push(relation.fallback);
+            continue;
+          }
+          const { childConversationId: _child, usage: _usage, model: _model, descendants: _descendants, workerSession: _session, ...transcript } = item;
+          retained.push(transcript);
+          continue;
+        }
+        if (item.type === "background_task" && (item.resultId
+          ? hiddenReports.has(item.resultId) && !positiveReports.has(item.resultId) && page.workerOriginCoverage && sourceProjection.workerLaunchOriginPresent(item, page.workerOriginCoverage)
+          : resetReports.has(item.id))) {
+          resetReports.add(item.id);
+          const prefix = page.completeItems?.find(candidate => candidate.id === item.id && candidate.type === "background_task" && !candidate.resultId);
+          const base = prefix?.type === "background_task" ? prefix : item;
+          const { resultId: _result, summary: _summary, terminalReportedAt: _terminal, workerSession: _session, usage: _usage, activity: _activity, ...launch } = base;
+          retained.push({ ...launch, status: "running", stateUncertain: true, activity: { kind: "unavailable" }, control: { available: false, reason: "Visible launch has no current execution proof" } });
+          continue;
+        }
+        retained.push(item);
+      }
+      items.splice(0, items.length, ...new Map(retained.map(item => [item.id, item])).values());
+    };
+    const reconcileRetainedAccounting = (projection: ConversationProjection) => {
+      const contradicted = new Map((coverage?.cachedAssociations ?? []).map(evidence => [evidence.parentId, new Set(evidence.childIds)]));
+      const hasCounterproof = [...contradicted.values()].some(children => children.size);
+      const reconcile = (item: ToolItem): { item: ToolItem; revoked: boolean } => {
+        if (!hasCounterproof || !item.childConversationId || !item.descendants?.length) return { item, revoked: false };
+        const byId = new Map(item.descendants.map(line => [line.id, line]));
+        const allowed = new Map<string, boolean>();
+        const current = (line: SubagentLine, ancestry = new Set<string>()): boolean => {
+          if (ancestry.has(line.id)) return true; // A cycle alone is not scoped counterproof.
+          const known = allowed.get(line.id);
+          if (known !== undefined) return known;
+          const parent = byId.get(line.parentId);
+          const parentSession = parent?.conversationId ?? (line.parentId === item.id ? item.childConversationId : undefined);
+          const retained = !(parentSession && contradicted.get(parentSession)?.has(line.conversationId))
+            && (!parent || current(parent, new Set([...ancestry, line.id])));
+          allowed.set(line.id, retained);
+          return retained;
+        };
+        const descendants = item.descendants.filter(line => current(line));
+        if (descendants.length === item.descendants.length) return { item, revoked: false };
+        const { descendants: _prior, ...own } = item;
+        return { item: { ...own, ...(descendants.length ? { descendants } : {}) }, revoked: true };
+      };
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index]!;
+        if (item.type === "background_task" && item.taskType === "agent" && item.childConversationId) {
+          const prior = projection.get(item.id);
+          const key = attributionKey(id, item.childConversationId);
+          const calls = (worker: BackgroundTaskItem) => [...new Set([...(worker.toolUseIds ?? []), ...(worker.toolUseId ? [worker.toolUseId] : [])])].sort();
+          const sameOccurrence = prior?.type === "background_task" && prior.taskType === item.taskType
+            && prior.taskId === item.taskId && prior.createdAt === item.createdAt
+            && prior.childConversationId === item.childConversationId && prior.outputFile === item.outputFile
+            && prior.resultId === item.resultId && JSON.stringify(calls(prior)) === JSON.stringify(calls(item))
+            && !(prior.activity?.launchRef && item.activity?.launchRef && prior.activity.launchRef !== item.activity.launchRef);
+          if (coverage && this.provider.watchWorkerAssociations && sameOccurrence && prior.workerSession
+            && !coverage.workerSources.hasAccountingPage(key) && !resetReports.has(item.id)
+            && !(item.resultId && hiddenReports.has(item.resultId) && !positiveReports.has(item.resultId))) {
+            // Eviction plus failed enrichment is not a new unknown report.
+            // Preserve only this surviving occurrence's session metadata; any
+            // current cached component or returned accounting page wins. Never
+            // copy result usage, summary, activity, visibility or Stop proof.
+            const report = item.workerSession ?? workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key));
+            const priorModel = report.model === undefined && !this.childModels.has(key) && prior.workerSession.model !== undefined;
+            items[index] = { ...item, workerSession: { ...report,
+              ...(priorModel ? { model: prior.workerSession.model, effort: prior.workerSession.effort } : {}),
+              costUsd: report.costUsd == null && !this.childSessionCosts.has(key) ? prior.workerSession.costUsd : report.costUsd,
+            } };
+          }
+          continue;
+        }
+        if (item.type !== "tool" || !item.childConversationId) continue;
+        const prior = projection.get(item.id);
+        const sameAssociation = prior?.type === "tool" && prior.childConversationId === item.childConversationId && prior.createdAt === item.createdAt;
+        let candidate = item;
+        if (sameAssociation) {
+          // Explicit current denial governs the materialized row even when the
+          // sparse candidate has no lines and its accounting cache was evicted.
+          if (reconcile(prior).revoked) revokedRows.add(item.id);
+          const key = attributionKey(id, item.childConversationId);
+          if (coverage && this.provider.watchWorkerAssociations && !this.childTranscripts.has(key) && !coverage.workerSources.hasAccountingPage(key)) {
+            // No accounting page arrived: retain this exact row's known
+            // presentation, including during replacement. A returned source
+            // page instead keeps its own visibility authority, even if its
+            // deeper accounting later expires before banking a transcript.
+            candidate = { ...item,
+              ...(item.workerSession === undefined && prior.workerSession ? { workerSession: prior.workerSession } : {}),
+              ...(item.model === undefined && prior.model ? { model: prior.model } : {}),
+              ...(item.usage === undefined && prior.usage ? { usage: prior.usage } : {}),
+              ...(item.descendants === undefined && prior.descendants ? { descendants: prior.descendants } : {}),
+            };
+          }
+        }
+        const reconciled = reconcile(candidate);
+        items[index] = reconciled.item;
+        if (reconciled.revoked) revokedRows.add(item.id);
+      }
+    };
     // A conversation's price is the sum of every message's, and the client
     // folds it from the usage carriers it holds — so the newest page alone
     // would present a partial figure that grows as older pages load. Where
@@ -972,14 +1180,21 @@ export class ChatAdapter {
     // V2 supplies positive evidence, not an authoritative live-only list.
     // An omitted worker or failed read must never manufacture cancellation.
     const nativeLiveTasks = new Set<string>();
+    const recoveredWorkerIds = new Set<string>();
     if (this.provider.reconcileBackgroundTasks) {
       let recovered: BackgroundTaskItem[];
+      let recoverySources: WorkerRecoverySource[] = [];
       try {
         if (this.pumpPromise && !this.backgroundConnected) {
           await this.backgroundReady;
           if (!this.backgroundConnected) throw new Error("Background stream is disconnected");
         }
-        recovered = await this.provider.reconcileBackgroundTasks(id, coverage ? { signal: coverage.signal } : undefined);
+        recovered = await this.provider.reconcileBackgroundTasks(id, coverage ? { signal: coverage.signal, onSource: source => {
+          // Capture before the shared recovery transport retires. These leases
+          // guard inbox/live associations through this read's final handoff.
+          coverage.workerSources.observe(source.workerSource);
+          recoverySources.push(source);
+        } } : undefined);
       }
       catch {
         recovered = [];
@@ -989,6 +1204,14 @@ export class ChatAdapter {
         }
       }
       coverage?.assertCurrent();
+      coverage?.workerSources.assertCurrent();
+      for (const source of recoverySources) {
+        for (const child of source.workerAssociationContradictions) revokedChildren.add(child);
+        fallbackRelations.push(...source.workerResultFallbacks);
+        for (const relation of source.workerResultFallbacks) positiveFallbacks.add(relation.fallback.id);
+      }
+      for (const task of recovered) recoveredWorkerIds.add(task.id);
+      for (const task of recovered) if (task.resultId) positiveReports.add(task.resultId);
       if (this.provider.waitForEventStream) for (const task of recovered) if (task.status === "running" && !task.foreground) nativeLiveTasks.add(task.id);
       const { byId, supersedes } = indexRecoveredBackgroundTasks(recovered);
       for (const known of [...this.projection(id).items(), ...items]) {
@@ -1004,6 +1227,10 @@ export class ChatAdapter {
       for (const task of byId.values()) {
         const index = items.findIndex(item => item.id === task.id);
         if (index < 0) items.push(task); else items[index] = task;
+      }
+      for (const source of recoverySources) for (const relation of source.workerResultFallbacks) {
+        if (!items.some(item => item.id === relation.fallback.id) && !items.some(item => item.type === "background_task" && !item.stateUncertain
+          && item.resultId === relation.resultId && item.childConversationId === relation.childConversationId && !revokedChildren.has(relation.childConversationId))) items.push(relation.fallback);
       }
     }
     const liveTasks = this.provider.reconcileBackgroundTasks ? null : await this.liveBackgroundTasks(id);
@@ -1064,7 +1291,16 @@ export class ChatAdapter {
     // child rather than per open (the aggregate is still computed here, not
     // fetched per render) — and in parallel, so a fan-out costs one round trip
     // rather than one each.
-    await this.attributeLaunchers(id, items, page.completeItems, coverage?.signal);
+    coverage?.assertCurrent();
+    if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+    coverage?.workerSources.assertCurrent();
+    for (const evidence of coverage?.cachedAssociations ?? []) {
+      this.revokeCachedAssociations(evidence);
+      if (evidence.parentId === id) for (const child of evidence.childIds) revokedChildren.add(child);
+    }
+    reconcileWorkerSource();
+    for (const child of revokedChildren) this.revokeChildAttribution(id, child);
+    await this.attributeLaunchers(id, items, page.completeItems, coverage?.signal, page.workerSource ? coverage?.workerSources : undefined, coverage?.refreshAttribution);
     coverage?.assertCurrent();
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
@@ -1176,6 +1412,8 @@ export class ChatAdapter {
       // rows or exclusions; reread within the existing bounded stream owner.
       throw new HistoryReadChangedError();
     }
+    if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+    coverage?.workerSources.assertCurrent();
     const projection = this.projection(id);
     const reconciledVisibility = projection.reconciledHistoryVisibility;
     const previousReversibleHistory = reconciledVisibility?.state ?? this.reversibleHistory.get(id);
@@ -1214,12 +1452,26 @@ export class ChatAdapter {
       if (current?.type === "scheduled_wakeup" && (current.status === "fired" || current.status === "cancelled")) items[index] = current;
     }
     if (this.provider.waitForEventStream) {
+      reconcileWorkerSource();
+      // A concurrent projection publication can carry pre-counterproof lines
+      // through the live merge. Current scoped denial also governs that copy.
+      reconcileRetainedAccounting(projection);
       let removed = false;
       const visible = new Set(page.completeItems?.map(item => item.id));
       // The revalidated CURRENT marker is direct exclusion authority, even
       // for a late update of that same discarded row. Earlier-marker evidence
       // survives a commit only against complete coverage and the live fence.
       const excluded = new Set(visibility?.excludedItemIds);
+      if (coverage && page.workerOriginCoverage) for (const known of projection.items()) {
+        // Only previously observed exact native origins can disappear. A
+        // successful current inbox/live recovery has its own positive source;
+        // unresolved running work is never settled by transcript absence.
+        if (known.type === "background_task" && known.status !== "running" && !known.foreground
+          && !recoveredWorkerIds.has(known.id) && !coverage.changed(known.id)
+          && projection.workerOriginsAbsent(known, page.workerOriginCoverage)) excluded.add(known.id);
+        if (known.type === "notice" && !positiveFallbacks.has(known.id) && !coverage.changed(known.id)
+          && projection.workerFallbackOriginAbsent(known, page.workerOriginCoverage)) excluded.add(known.id);
+      }
       if (visibility && page.completeItems) for (const itemId of coverage!.revertExclusions) {
         if (!visible.has(itemId) && !coverage!.changed(itemId)) excluded.add(itemId);
       }
@@ -1239,7 +1491,7 @@ export class ChatAdapter {
       // removal authority: require the provider's exact fallback relation and
       // an already verified worker for the same result AND child. Retained
       // settled workers can supply that representation during a lookup outage.
-      for (const { resultId, childConversationId, fallback } of page.workerResultFallbacks ?? []) {
+      for (const { resultId, childConversationId, fallback } of fallbackRelations) {
         if (coverage?.changed(fallback.id) || !items.some(item => item.type === "background_task" && item.taskType === "agent"
           && !item.stateUncertain && item.resultId === resultId && item.childConversationId === childConversationId)) continue;
         const index = items.findIndex(item => item.id === fallback.id && sameConversationItems([item], [fallback]));
@@ -1249,6 +1501,19 @@ export class ChatAdapter {
       }
       const replace = coverage?.replacement && (reversibleHistory && !sameReversibleHistory(previousReversibleHistory, reversibleHistory)
         || !sameConversationItems(projection.items(), items));
+      // Fresh nested reconciliation can withdraw attribution without changing
+      // the parent launcher itself. Use the same replacement semantics as live
+      // attribution updates; an ordinary sparse upsert would resurrect it.
+      if (coverage) for (const item of items) if (item.type === "tool" && item.childConversationId && !coverage.changed(item.id)
+        && this.childTranscripts.has(attributionKey(id, item.childConversationId))) {
+        const current = projection.get(item.id);
+        if (current?.type === "tool" && withdraws(current, item)) revokedRows.add(item.id);
+      }
+      // Ordinary upserts intentionally preserve terminal/sparse data. Exact
+      // source revocation must replace it instead of merging hidden fields back.
+      if (!replace) for (const itemId of new Set([...resetReports, ...revokedRows])) if (projection.has(itemId)) projection.apply({ kind: "remove", itemId });
+      if (page.workerOriginCoverage) projection.rememberWorkerOrigins(items, page.workerOriginCoverage, coverage?.changed);
+      projection.rememberWorkerFallbacks(items, fallbackRelations, coverage?.changed);
       if (replace) {
         // Worker retention, exact exclusions and result supersession above
         // apply equally to replacement. Ordinary transcript rows get no such
@@ -3407,8 +3672,8 @@ export class ChatAdapter {
    * transcript opened at the same moment — is not on the chain, and is awaited
    * like any other so its figure lands here too.
    */
-  private reconstructAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string> = new Set(), signal?: AbortSignal): Promise<void> {
-    if (this.provider.waitForEventStream) return this.reconstructNativeAttribution(parentId, childId, ancestry, signal);
+  private reconstructAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string> = new Set(), signal?: AbortSignal, sources?: WorkerSourceRead): Promise<void> {
+    if (this.provider.waitForEventStream) return this.reconstructNativeAttribution(parentId, childId, ancestry, signal, sources);
     const key = attributionKey(parentId, childId);
     const existing = this.attributionReconstructions.get(key);
     if (existing) return existing;
@@ -3422,7 +3687,7 @@ export class ChatAdapter {
     return pending;
   }
 
-  private async reconstructNativeAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string>, callerSignal?: AbortSignal): Promise<void> {
+  private async reconstructNativeAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string>, callerSignal?: AbortSignal, sources?: WorkerSourceRead): Promise<void> {
     if (callerSignal?.aborted || this.disposed) return;
     const key = attributionKey(parentId, childId);
     let owner = this.nativeAccountingReads.get(key);
@@ -3431,7 +3696,7 @@ export class ChatAdapter {
       const signal = controller.signal;
       const timer = setTimeout(() => controller.abort(), this.accountingReadTimeoutMs);
       const retired = new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
-      const current = { controller, promise: Promise.resolve(), callers: 0 };
+      const current = { controller, promise: Promise.resolve(), callers: 0, sources: new WorkerSourceRead(signal) };
       this.nativeAccountingReads.set(key, current);
       const epoch = this.attributionReadEpoch(key);
       // Completeness belongs to this refresh, not an earlier successful read.
@@ -3440,7 +3705,7 @@ export class ChatAdapter {
       // Retired reads cannot clear a newer owner's successful stamp later.
       this.completeAttributions.delete(key);
       current.promise = Promise.race([
-        this.reconstructAttributionRead(key, childId, epoch, new Set([...ancestry, childId]), signal),
+        this.reconstructAttributionRead(key, childId, epoch, new Set([...ancestry, childId]), signal, current.sources),
         retired,
       ]).finally(() => {
         clearTimeout(timer);
@@ -3450,6 +3715,7 @@ export class ChatAdapter {
       owner = current;
     }
     owner.callers++;
+    const unfollow = sources ? owner.sources.follow(sources) : undefined;
     let departed: (() => void) | undefined;
     try {
       if (!callerSignal) await owner.promise;
@@ -3459,6 +3725,7 @@ export class ChatAdapter {
         if (callerSignal.aborted) resolve();
       })]);
     } finally {
+      unfollow?.();
       if (departed) callerSignal!.removeEventListener("abort", departed);
       // A waiter cannot retire work still serving another current caller.
       if (--owner.callers === 0) owner.controller.abort();
@@ -3475,7 +3742,83 @@ export class ChatAdapter {
     for (const key of this.attributionEpochs.keys()) this.attributionEpochs.set(key, ++this.attributionSequence);
   }
 
-  private async reconstructAttributionRead(key: string, childId: string, epoch: number, ancestry: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
+  private revokeChildAttribution(parentId: string, childId: string): void {
+    const key = attributionKey(parentId, childId);
+    this.attributionReadEpoch(key, true);
+    this.nativeAccountingReads.get(key)?.controller.abort();
+    this.childUsage.delete(key); this.childModels.delete(key); this.childPrompts.delete(key); this.childTranscripts.delete(key);
+    this.childSessionCosts.delete(key); this.completeAttributions.delete(key);
+  }
+
+  private watchCachedAssociations(read: CachedAssociationRead, pending?: { key: string; transcript: ChildTranscript }): void {
+    const visited = new Set<string>();
+    const visit = (parentId: string, childId: string, ancestry: ReadonlySet<string>, ownerKey?: string) => {
+      if (ancestry.has(childId)) return;
+      read.include(parentId, childId, ownerKey);
+      const key = attributionKey(parentId, childId);
+      if (visited.has(key)) return;
+      visited.add(key);
+      const next = new Set([...ancestry, childId]);
+      const transcript = pending?.key === key ? pending.transcript : this.childTranscripts.get(key);
+      for (const launcher of transcript?.launchers ?? []) visit(childId, launcher.conversationId, next, key);
+    };
+    const prefix = `${read.id}${ATTRIBUTION_SEPARATOR}`;
+    const keys = new Set(this.childTranscripts.keys());
+    if (pending) keys.add(pending.key);
+    for (const key of keys) if (key.startsWith(prefix)) visit(read.id, key.slice(prefix.length), new Set([read.id]));
+  }
+
+  private bankChildTranscript(key: string, transcript: ChildTranscript): void {
+    // Register the proposed graph synchronously, before banking it or retiring
+    // its producer's leases. Other readers may later import its decorated rows.
+    for (const read of this.nativeAssociationReads) this.watchCachedAssociations(read, { key, transcript });
+    this.bankAttribution(this.childTranscripts, key, transcript);
+  }
+
+  private watchProjectionAssociations(id: string, item: ConversationItem): void {
+    if ((item.type !== "tool" && item.type !== "background_task") || !item.childConversationId) return;
+    const reads = [...this.nativeAssociationReads].filter(read => read.id === id);
+    if (!reads.length) return;
+    for (const read of reads) read.include(id, item.childConversationId);
+    if (item.type !== "tool" || !item.descendants?.length) return;
+    type Node = { session: string; ownerKey: string; ancestry: ReadonlySet<string> };
+    const nodes = new Map<string, Node>([[item.id, { session: item.childConversationId, ownerKey: attributionKey(id, item.childConversationId), ancestry: new Set([id, item.childConversationId]) }]]);
+    const lines = new Map(item.descendants.map(line => [line.id, line]));
+    const visit = (line: SubagentLine, ancestry: ReadonlySet<string>): Node | undefined => {
+      if (ancestry.has(line.id)) return;
+      const known = nodes.get(line.id);
+      if (known) return known;
+      const next = new Set([...ancestry, line.id]);
+      const parentLine = lines.get(line.parentId);
+      const parent = nodes.get(line.parentId) ?? (parentLine ? visit(parentLine, next) : undefined);
+      if (!parent || parent.ancestry.has(line.conversationId)) return;
+      for (const read of reads) read.include(parent.session, line.conversationId, parent.ownerKey);
+      const node = { session: line.conversationId, ownerKey: attributionKey(parent.session, line.conversationId), ancestry: new Set([...parent.ancestry, line.conversationId]) };
+      nodes.set(line.id, node);
+      return node;
+    };
+    for (const line of item.descendants) visit(line, new Set());
+  }
+
+  private revokeCachedAssociations(evidence: CachedAssociationCounterproof): void {
+    if (!evidence.childIds.length) return;
+    const revoked = new Set(evidence.childIds);
+    for (const child of revoked) this.revokeChildAttribution(evidence.parentId, child);
+    for (const key of evidence.transcriptKeys) {
+      const transcript = this.childTranscripts.get(key);
+      if (!transcript) continue;
+      const launchers = transcript.launchers.filter(launcher => !revoked.has(launcher.conversationId));
+      if (launchers.length === transcript.launchers.length) continue;
+      // Retire only this parent transcript's old reconstruction. Preserve its
+      // own known spend/prompts while withdrawing the contradicted child edge.
+      this.attributionReadEpoch(key, true);
+      this.nativeAccountingReads.get(key)?.controller.abort();
+      this.completeAttributions.delete(key);
+      this.bankChildTranscript(key, { ...transcript, launchers });
+    }
+  }
+
+  private async reconstructAttributionRead(key: string, childId: string, epoch: number, ancestry: ReadonlySet<string>, signal?: AbortSignal, sources?: WorkerSourceRead): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
     const byModel = new Map<string, MessageModel>();
     const byPrompt = new Map<string, string>();
@@ -3483,6 +3826,8 @@ export class ChatAdapter {
     let descendantsIncomplete = false;
     let sessionCostUsd: number | undefined;
     const readStartedAt = this.attributionSequence;
+    const revokedDescendants = new Set<string>();
+    const sourceGuards: Array<() => boolean> = [];
     try {
       // Every message, in one read: banking a partial tally would permanently
       // underreport the child, because a banked key is never re-read. The
@@ -3499,6 +3844,12 @@ export class ChatAdapter {
         signal?.throwIfAborted();
         const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT, ...(signal ? { signal } : {}) });
         signal?.throwIfAborted();
+        if (page.isWorkerSourceCurrent) {
+          if (!page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+          sourceGuards.push(page.isWorkerSourceCurrent);
+        }
+        if (page.workerSource) sources?.observe(page.workerSource, key);
+        for (const child of page.workerAssociationContradictions ?? []) revokedDescendants.add(child);
         if (page.visibleDescendantsIncomplete) descendantsIncomplete = true;
         sessionCostUsd = page.sessionCostUsd;
         for (const reported of page.accounting) {
@@ -3514,6 +3865,7 @@ export class ChatAdapter {
       // each under the prompt it followed. A launcher that leads back into
       // the chain being read (a loop in the data) is not listed.
       transcript = readChildTranscript(complete ?? paged, ancestry);
+      transcript.launchers = transcript.launchers.filter(launcher => !revokedDescendants.has(launcher.conversationId));
       for (const promptId of byPrompt.values()) if (!transcript.prompts.some(prompt => prompt.id === promptId)) transcript.prompts.push({ id: promptId });
       // The child's own subagents are squared against their stores the same
       // way (recursively), each under its own key: nothing is rolled up into
@@ -3523,16 +3875,23 @@ export class ChatAdapter {
       // again on the next open rather than listing an incomplete nest for good.
       for (const grandchildId of new Set(transcript.launchers.map(launcher => launcher.conversationId))) {
         signal?.throwIfAborted();
-        await this.reconstructAttribution(childId, grandchildId, ancestry, signal);
+        await this.reconstructAttribution(childId, grandchildId, ancestry, signal, sources);
         if (!this.completeAttributions.has(attributionKey(childId, grandchildId))) descendantsIncomplete = true;
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof HistoryReadChangedError) throw error;
       return;
     }
     // Eviction clears every live value this read would merge. A completion
     // from before that boundary must not repopulate the cleared maps and mark
     // a potentially incomplete answer authoritative.
     if (signal?.aborted || this.attributionEpochs.get(key) !== epoch) return;
+    if (sourceGuards.some(current => !current())) throw new HistoryReadChangedError();
+    sources?.assertCurrent();
+    // Commit negative association evidence only with this reconstruction's
+    // still-current owner/epoch. An older or cancelled read cannot retire a
+    // newer positive descendant owner, cache or inspection association.
+    for (const child of revokedDescendants) this.revokeChildAttribution(childId, child);
     // Live events that landed while the read was in flight are newer than
     // the stored snapshot — for those the live figure wins, or the stale
     // snapshot would be banked permanently once the events fall behind the
@@ -3564,7 +3923,7 @@ export class ChatAdapter {
     const liveTranscript = this.childTranscripts.get(key);
     if (liveTranscript) {
       for (const prompt of liveTranscript.prompts) if (!transcript.prompts.some(known => known.id === prompt.id)) transcript.prompts.push(prompt);
-      for (const launcher of liveTranscript.launchers) if (!transcript.launchers.some(known => known.id === launcher.id)) transcript.launchers.push(launcher);
+      for (const launcher of liveTranscript.launchers) if (!revokedDescendants.has(launcher.conversationId) && !transcript.launchers.some(known => known.id === launcher.id)) transcript.launchers.push(launcher);
     }
     // A launcher removed while this read was in flight is newer than the
     // transcript it returned, and must not come back with it.
@@ -3579,7 +3938,7 @@ export class ChatAdapter {
     this.bankAttribution(this.childUsage, key, byMessage);
     this.bankAttribution(this.childModels, key, byModel);
     this.bankAttribution(this.childPrompts, key, byPrompt);
-    this.bankAttribution(this.childTranscripts, key, transcript);
+    this.bankChildTranscript(key, transcript);
     if ((this.childSessionCosts.get(key)?.sequence ?? 0) <= readStartedAt) this.bankSessionCost(key, sessionCostUsd);
     if (descendantsIncomplete) return;
     // Squared against the store until eviction or the bounded refresh age.
@@ -3692,7 +4051,7 @@ export class ChatAdapter {
       // known: prompts reach a session one at a time, in order.
       const transcript = this.childTranscripts.get(key) ?? { prompts: [], launchers: [] };
       if (!transcript.prompts.some(prompt => prompt.id === promptId)) {
-        this.bankAttribution(this.childTranscripts, key, { ...transcript, prompts: [...transcript.prompts, { id: promptId }] });
+        this.bankChildTranscript(key, { ...transcript, prompts: [...transcript.prompts, { id: promptId }] });
       }
     }
     if (removedMessageId !== undefined) {
@@ -3802,7 +4161,7 @@ export class ChatAdapter {
       changed = true;
     }
     if (!changed) return;
-    this.bankAttribution(this.childTranscripts, key, { prompts, launchers });
+    this.bankChildTranscript(key, { prompts, launchers });
     this.decorateLauncherRows(parentId, conversationId, coalescer);
     await this.refreshAncestors(parentId, coalescer);
   }
@@ -3947,12 +4306,26 @@ export class ChatAdapter {
   }
 
   private async pump(signal: AbortSignal): Promise<void> {
+    // Metadata follows coalescer-owned item objects, never the wire item.
+    // Discarded/unmaterialized updates leave no projection provenance entry.
+    const sourceOrigins = new WeakMap<ConversationItem, NonNullable<NormalizedProviderEvent["workerOriginUpdates"]>>();
+    const sourceFallbacks = new WeakMap<ConversationItem, WorkerResultFallback[]>();
     const coalescer = new ProviderUpdateCoalescer({
       windowMs: this.coalesceWindowMs,
       // The window folds repeated upserts the way the projection applies
       // them, so a sparse frame landing right behind a full one cannot
       // strip what the full one carried (a 2.x tool call's input).
-      mergeUpsert: mergeInteraction,
+      mergeUpsert: (current, incoming) => {
+        const merged = mergeInteraction(current, incoming);
+        const origins = new Map([...(sourceOrigins.get(current) ?? []), ...(sourceOrigins.get(incoming) ?? [])]
+          .map(origin => [origin.toolUseId ? `call:${origin.toolUseId}` : `result:${origin.messageId}`, origin]));
+        if (origins.size) sourceOrigins.set(merged, [...origins.values()]);
+        const fallbacks = [...new Map([...(sourceFallbacks.get(current) ?? []), ...(sourceFallbacks.get(incoming) ?? [])]
+          .filter(relation => sameConversationItems([merged], [relation.fallback]))
+          .map(relation => [relation.fallback.id, relation])).values()];
+        if (fallbacks.length) sourceFallbacks.set(merged, fallbacks);
+        return merged;
+      },
       onFlush: async (conversationId, updates) => {
         // Not gated on the abort signal: a graceful stop still applies
         // whatever the coalescer buffered in its final window.
@@ -3972,7 +4345,17 @@ export class ChatAdapter {
           return;
         }
         const workerProgress = this.observeBackgroundSource(conversationId, projection, updates);
-        for (const update of updates) projection.apply(update.kind === "upsert" ? { ...update, item: this.correlateSteerMessage(conversationId, update.item) } : update);
+        for (const update of updates) {
+          projection.apply(update.kind === "upsert" ? { ...update, item: this.correlateSteerMessage(conversationId, update.item) } : update);
+          if (update.kind === "upsert" && sourceOrigins.has(update.item)) {
+            const current = projection.get(update.item.id);
+            if (current) projection.rememberWorkerOrigins([current], sourceOrigins.get(update.item)!, undefined, true);
+          }
+          if (update.kind === "upsert" && sourceFallbacks.has(update.item)) {
+            const current = projection.get(update.item.id);
+            if (current) projection.rememberWorkerFallbacks([current], sourceFallbacks.get(update.item)!);
+          }
+        }
         const recovery = this.backgroundRecoveries.get(conversationId);
         if (recovery) for (const id of recovery.progress.keys()) if (!projection.has(id)) recovery.progress.delete(id);
         if (workerProgress) this.scheduleBackgroundRecovery(conversationId, true);
@@ -4112,6 +4495,18 @@ export class ChatAdapter {
         // A coalesced add/remove may never reach the timeline. Active reads
         // still need its occurrence identity to respect the newer removal.
         this.projections.get(normalized.conversationId)?.touchWorkerOccurrences(timelineUpdates);
+        if (normalized.workerOriginUpdates?.length) {
+          const projection = this.projection(normalized.conversationId);
+          // Delivery can confirm an already projected notification-only result.
+          // Launcher origins instead follow their verified normalized upsert,
+          // so a reused call cannot re-anchor an unrelated retained row.
+          projection.rememberWorkerOrigins(projection.items(), normalized.workerOriginUpdates.filter(origin => !origin.toolUseId), undefined, true);
+          for (const update of timelineUpdates) if (update.kind === "upsert" && update.item.type === "background_task") sourceOrigins.set(update.item, normalized.workerOriginUpdates);
+        }
+        if (normalized.workerResultFallbacks?.length) for (const update of timelineUpdates) if (update.kind === "upsert") {
+          const relations = normalized.workerResultFallbacks.filter(relation => sameConversationItems([update.item], [relation.fallback]));
+          if (relations.length) sourceFallbacks.set(update.item, relations);
+        }
         if (this.provider.waitForEventStream) this.markNativeHistoryDirty(normalized.conversationId,
           !this.projections.get(normalized.conversationId)?.reconciledHistoryVisibility?.state.staged);
         coalescer.push(normalized.conversationId, timelineUpdates);
@@ -4528,14 +4923,19 @@ export class ChatAdapter {
    * replacement puts in a projection's place — raw rows from the provider,
    * which carry no attribution of their own.
    */
-  private async attributeLaunchers(id: string, items: ConversationItem[], complete?: readonly ConversationItem[], signal?: AbortSignal): Promise<void> {
+  private async attributeLaunchers(id: string, items: ConversationItem[], complete?: readonly ConversationItem[], signal?: AbortSignal, sources?: WorkerSourceRead, refresh = false): Promise<void> {
     const unattributed = [...new Set(items.flatMap(item =>
-      // Reconcile on an existing parent refresh at most once per 30 seconds,
-      // including settled children changed while disconnected. No polling loop.
-      (item.type === "tool" || item.type === "background_task") && item.childConversationId && Date.now() - (this.completeAttributions.get(attributionKey(id, item.childConversationId)) ?? 0) >= 30_000
+      // Reconcile on parent refresh, normally at most once per 30 seconds.
+      // Nested association proof and changed-source retries bypass that cache;
+      // neither path introduces polling or refreshes on every paint.
+      (item.type === "tool" || item.type === "background_task") && item.childConversationId
+        && (refresh || Date.now() - (this.completeAttributions.get(attributionKey(id, item.childConversationId)) ?? 0) >= 30_000
+          // A cached nested transcript is accounting, not fresh association
+          // proof. Reconcile its edges under this enclosing read's leases.
+          || sources && (this.childTranscripts.get(attributionKey(id, item.childConversationId))?.launchers.length ?? 0) > 0)
         ? [item.childConversationId]
         : []))];
-    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId, new Set(), signal)));
+    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId, new Set(), signal, sources)));
     // A row's figure depends on its place among ALL the rows that launched
     // the same child — the k-th row states the k-th task. A page holds only
     // some of them, so the order is taken from the complete transcript where
@@ -4900,7 +5300,7 @@ export class ChatAdapter {
       pending: itemId => this.trackInteraction(id, itemId, true),
       settled: itemId => this.trackInteraction(id, itemId, false),
       cleared: () => this.forgetInteractions(id),
-    });
+    }, item => this.watchProjectionAssociations(id, item));
     // Seed existing event truth without firing a new transition: recreating a
     // view is not evidence of another execution and must not fence a Stop.
     projection.status = this.liveTurns.get(id) ?? this.stoppingTurns.get(id)?.status ?? "idle";
@@ -4994,6 +5394,82 @@ export type ProjectionInteractionHooks = {
 };
 
 export class ConversationProjection {
+  // Bound to projected worker rows, not a historical/tombstone cache. Exact
+  // native message/call anchors survive optional enrichment outages only.
+  private readonly workerOrigins = new Map<string, { createdAt: number; worker?: string; taskType?: string; keys: Set<string> }>();
+  // Only exact, actually materialized fallback relations enter this map. Its
+  // lifetime and size are bounded by this projection's notice rows, not ids
+  // guessed from notice-shaped strings or arbitrary synthetic messages.
+  private readonly workerFallbacks = new Map<string, WorkerResultFallback>();
+
+  workerFallbackOriginAbsent(item: ConversationItem, source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): boolean {
+    const prior = this.workerFallbacks.get(item.id);
+    return !!prior && sameConversationItems([item], [prior.fallback])
+      && !source.some(origin => !origin.toolUseId && origin.messageId === prior.resultId);
+  }
+
+  rememberWorkerFallbacks(items: ConversationItem[], relations: readonly WorkerResultFallback[], changed?: (id: string) => boolean): void {
+    const candidates = new Map(items.map(item => [item.id, item]));
+    for (const relation of relations) {
+      const item = candidates.get(relation.fallback.id);
+      if (item && !changed?.(item.id) && sameConversationItems([item], [relation.fallback])) this.workerFallbacks.set(item.id, relation);
+    }
+  }
+
+  private pruneWorkerFallback(item: ConversationItem): void {
+    const prior = this.workerFallbacks.get(item.id);
+    if (prior && !sameConversationItems([item], [prior.fallback])) this.workerFallbacks.delete(item.id);
+  }
+
+  private matchingWorkerOrigins(item: BackgroundTaskItem, source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): Set<string> {
+    const calls = new Set([...(item.toolUseIds ?? []), ...(item.toolUseId ? [item.toolUseId] : [])]);
+    return new Set(source.filter(origin => (!origin.taskType || origin.taskType === item.taskType) && (!origin.childConversationId || origin.childConversationId === item.childConversationId)
+      && (!origin.outputFile || origin.outputFile === item.outputFile)
+      && (origin.toolUseId ? calls.has(origin.toolUseId) : origin.messageId === item.resultId))
+      .map(origin => JSON.stringify([origin.messageId, origin.toolUseId ?? null])));
+  }
+
+  workerOriginsAbsent(item: BackgroundTaskItem, source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): boolean {
+    const prior = this.workerOrigins.get(item.id);
+    if (!prior || prior.createdAt !== item.createdAt || prior.worker !== (item.childConversationId ?? item.outputFile) || prior.taskType !== item.taskType) return false;
+    const current = this.matchingWorkerOrigins(item, source);
+    return ![...prior.keys].some(key => current.has(key));
+  }
+
+  workerReportOriginAbsent(item: BackgroundTaskItem, source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): boolean {
+    const prior = this.workerOrigins.get(item.id);
+    if (!item.resultId || !prior || prior.createdAt !== item.createdAt || prior.worker !== (item.childConversationId ?? item.outputFile) || prior.taskType !== item.taskType) return false;
+    const key = JSON.stringify([item.resultId, null]);
+    return prior.keys.has(key) && !this.matchingWorkerOrigins(item, source).has(key);
+  }
+
+  workerLaunchOriginPresent(item: BackgroundTaskItem, source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): boolean {
+    const prior = this.workerOrigins.get(item.id);
+    if (!prior || prior.createdAt !== item.createdAt || prior.worker !== (item.childConversationId ?? item.outputFile) || prior.taskType !== item.taskType) return false;
+    const current = this.matchingWorkerOrigins(item, source);
+    return [...prior.keys].some(key => (JSON.parse(key) as [string, string | null])[1] !== null && current.has(key));
+  }
+
+  rememberWorkerOrigins(items: ConversationItem[], source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>, changed?: (id: string) => boolean, append = false): void {
+    for (const item of items) {
+      if (item.type !== "background_task" || changed?.(item.id)) continue;
+      const keys = this.matchingWorkerOrigins(item, source);
+      if (!keys.size) continue;
+      const worker = item.childConversationId ?? item.outputFile;
+      const prior = this.workerOrigins.get(item.id);
+      if (append && prior?.createdAt === item.createdAt && prior.worker === worker && prior.taskType === item.taskType) {
+        const calls = new Set([...(item.toolUseIds ?? []), ...(item.toolUseId ? [item.toolUseId] : [])]);
+        const incomingCalls = new Set(source.flatMap(origin => origin.toolUseId ? [origin.toolUseId] : []));
+        for (const key of prior.keys) {
+          const [message, call] = JSON.parse(key) as [string, string | null];
+          // At most one live anchor per retained native call/result. A reused
+          // call cannot accumulate an unbounded per-row history registry.
+          if (call ? calls.has(call) && !incomingCalls.has(call) : message === item.resultId) keys.add(key);
+        }
+      }
+      this.workerOrigins.set(item.id, { createdAt: item.createdAt, worker, taskType: item.taskType, keys });
+    }
+  }
   status: ConversationStatus = "idle";
   // Last boundary whose timeline was reconciled, not merely read for queue
   // policy. Projection eviction naturally retires this view's authority.
@@ -5058,6 +5534,9 @@ export class ConversationProjection {
     // Every interaction request's lifecycle, so the adapter can keep an
     // eviction-proof record of what awaits the user.
     private readonly interactions?: ProjectionInteractionHooks,
+    // Presentation relationships must reach active enclosing reads before the
+    // row is visible to their live merge, including direct seeds/replacements.
+    private readonly beforePublish?: (item: ConversationItem) => void,
   ) {}
 
   has(itemId: string): boolean {
@@ -5103,6 +5582,8 @@ export class ConversationProjection {
   seed(items: ConversationItem[]): void {
     for (const item of items) {
       const merged = mergeInteraction(this.timeline.get(item.id), item);
+      this.pruneWorkerFallback(merged);
+      this.beforePublish?.(merged);
       this.timeline.set(item.id, merged);
       if (merged.type === "permission" || merged.type === "question") {
         if (merged.status === "pending") this.interactions?.pending(merged.id);
@@ -5114,6 +5595,9 @@ export class ConversationProjection {
   }
 
   replace(items: ConversationItem[]): ChatEvent {
+    const retained = new Set(items.map(item => item.id));
+    for (const id of this.workerOrigins.keys()) if (!retained.has(id)) this.workerOrigins.delete(id);
+    for (const id of this.workerFallbacks.keys()) if (!retained.has(id)) this.workerFallbacks.delete(id);
     this.replacementRevision++;
     for (const id of this.timeline.keys()) this.historyChanged(id);
     for (const item of items) this.historyChanged(item.id);
@@ -5127,6 +5611,8 @@ export class ConversationProjection {
   apply(update: NormalizedProviderUpdate): ChatEvent | undefined {
     if (update.kind === "upsert") return this.upsert(update.item);
     if (update.kind === "remove") {
+      this.workerOrigins.delete(update.itemId);
+      this.workerFallbacks.delete(update.itemId);
       this.touchWorker(this.timeline.get(update.itemId));
       this.historyChanged(update.itemId);
       this.timeline.delete(update.itemId);
@@ -5185,6 +5671,7 @@ export class ConversationProjection {
   upsert(item: ConversationItem): ChatEvent | undefined {
     const current = this.timeline.get(item.id);
     const merged = mergeInteraction(current, item);
+    this.pruneWorkerFallback(merged);
     this.touchWorker(current);
     this.touchWorker(merged);
     // A settled request clears the adapter's record even when the frame is
@@ -5204,6 +5691,7 @@ export class ConversationProjection {
     // accepts empty resources exactly when a plan is present.
     if (merged.type === "permission" && merged.resources.length === 0 && merged.plan === undefined) return undefined;
     this.historyChanged(item.id);
+    this.beforePublish?.(merged);
     this.timeline.set(item.id, merged);
     if ((merged.type === "permission" || merged.type === "question") && merged.status === "pending") this.interactions?.pending(merged.id);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
