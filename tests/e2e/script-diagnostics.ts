@@ -23,7 +23,17 @@ export class ScriptDiagnostics {
   private path(raw: string): string | null {
     try {
       const url = new URL(raw);
-      const path = url.pathname.startsWith(this.basePath) ? "/" + url.pathname.slice(this.basePath.length) : "";
+      const stripped = url.pathname.startsWith(this.basePath) ? "/" + url.pathname.slice(this.basePath.length) : "";
+      // Under a Hub mount the shell's bundle refs carry the mount prefix only
+      // (relocateShellHtml emits /s/<id>/chunk-….js, not /__uatu/asset), so the
+      // actual mounted shape is normalized to the canonical asset namespace
+      // before the allowlist. The prefix strip above keeps other sessions,
+      // outside-of-prefix and nested paths out; the allowlist below stays
+      // filename-scoped, so /api and arbitrary paths are still rejected.
+      const path = this.basePath !== "/"
+        && /^\/[A-Za-z0-9_.-]+-[a-z0-9]{8}\.js$/.test(stripped)
+        ? "/__uatu/asset/" + stripped.slice(1)
+        : stripped;
       return url.origin === this.origin && !url.username && !url.password
         && /^\/__uatu\/asset\/[A-Za-z0-9_.-]+-[a-z0-9]{8}\.js$/.test(path)
         ? path : null;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { relocateShellHtml } from "../../src/server/navigation";
 import { ScriptDiagnostics } from "./script-diagnostics";
 
 const origin = "http://127.0.0.1:20000";
@@ -36,15 +37,32 @@ describe("failure-only static script diagnostics", () => {
   });
   test("mounted Hub scripts emit only canonical static paths, not private session prefixes", async () => {
     const f = fixture({basePath:"/s/PRIVATE-workspace/"});
-    const url = origin + "/s/PRIVATE-workspace" + asset + "?token=SECRET";
+    const url = origin + "/s/PRIVATE-workspace/chunk-abcdefgh.js?token=SECRET";
     f.track(url); f.capture.pageError(syntax(url)); await f.capture.flush();
     expect(f.records).toMatchObject([{path:asset, outcome:"received"}]);
     expect(JSON.stringify(f.records)).not.toMatch(/PRIVATE|workspace|SECRET|token/);
   });
+  test("collectors track the bundle URL emitted by relocateShellHtml under a Hub mount", async () => {
+    const mount = "/s/alpha/";
+    const shell = '<script type="module" src="/chunk-abcdefgh.js"></script>';
+    const src = /src="([^"]+)"/.exec(relocateShellHtml(shell, mount))![1]!;
+    expect(src).toBe("/s/alpha/chunk-abcdefgh.js");
+    const f = fixture({basePath: mount});
+    f.track(origin + src + "?token=SECRET");
+    f.capture.pageError(syntax(origin + src + "?token=SECRET")); await f.capture.flush();
+    expect(f.reads()).toBe(1);
+    expect(f.records).toEqual([{path:asset, category:"SyntaxError", line:42, column:7, outcome:"received", byteLength:bytes.length, sha256:createHash("sha256").update(bytes).digest("hex")}]);
+    expect(JSON.stringify(f.records)).not.toMatch(/SECRET|token|alpha/);
+  });
   test("mounted collectors reject other sessions and arbitrary path prefixes", async () => {
     const f = fixture({basePath:"/s/PRIVATE-workspace/"});
-    for (const prefix of ["/s/other", "/private", ""]) {
-      f.track(origin + prefix + asset); f.capture.pageError(syntax(origin + prefix + asset));
+    for (const url of [
+      origin + "/s/other/chunk-abcdefgh.js",
+      origin + "/private/chunk-abcdefgh.js",
+      origin + "/chunk-abcdefgh.js",
+      origin + "/s/PRIVATE-workspace/decoy/chunk-abcdefgh.js",
+    ]) {
+      f.track(url); f.capture.pageError(syntax(url));
     }
     await f.capture.flush(); expect(f.records).toEqual([]); expect(f.reads()).toBe(0);
   });
