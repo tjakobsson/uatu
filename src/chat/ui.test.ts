@@ -22,11 +22,11 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       });
       const exitCode = await child.exited;
       expect(exitCode).toBe(0);
-      // The child runs this whole file, including a case that waits on the
-      // surface's one-second clock and two that wait out the output view's
-      // four-second retry; the default five seconds leaves it no room, and a
-      // timeout here reports as the wrong test failing.
-    }, 60_000);
+      // This cap covers the whole isolated suite, not one child test. Linux
+      // CI reached 59.76s of passing cases with 17 still to run; allow room
+      // for the remaining work and scheduling variation. Child test budgets
+      // remain independent, and the suite still has a finite deadline.
+    }, 75_000);
   });
 } else {
 describe("chat reversible-history composer", () => {

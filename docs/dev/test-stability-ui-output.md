@@ -1,5 +1,9 @@
 # UI child output: diagnostic milestone, not a timeout fix
 
+This note records the diagnostic change at `b5f889fa`. Subsequent child output
+supported a separate [aggregate-budget correction](test-stability-ui-budget.md);
+that later change and its acceptance criteria are not part of this milestone.
+
 ## Problem observed
 
 The isolated UI wrapper reached its unchanged 60-second deadline in two Linux
