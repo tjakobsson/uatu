@@ -24,7 +24,8 @@
 // contexts loading the dev bundle cost enough to time out
 // personal-state.e2e.ts under load, where this log costs nothing measurable.
 
-import { test as base, type Browser, type BrowserContext, type Page, type TestInfo, type TestType } from "@playwright/test";
+import { test as base, type Browser, type BrowserContext, type Page, type Request, type TestInfo, type TestType } from "@playwright/test";
+import { ScriptDiagnostics } from "./script-diagnostics";
 
 type Engine = "chromium" | "webkit";
 
@@ -32,14 +33,14 @@ type Engine = "chromium" | "webkit";
 // the newest lines are the ones that explain how a failure ended.
 const MAX_LINES = 2_000;
 
-type Log = { started: number; lines: string[]; dropped: number };
+type Log = { started: number; lines: string[]; dropped: number; scripts: Set<ScriptDiagnostics> };
 
 const logs = new WeakMap<TestInfo, Log>();
 
 function logFor(testInfo: TestInfo): Log {
   let log = logs.get(testInfo);
   if (!log) {
-    log = { started: Date.now(), lines: [], dropped: 0 };
+    log = { started: Date.now(), lines: [], dropped: 0, scripts: new Set() };
     logs.set(testInfo, log);
   }
   return log;
@@ -82,18 +83,69 @@ function lifecycleProbe(): void {
   window.addEventListener("unhandledrejection", event => report(`unhandledrejection ${String(event.reason)}`));
 }
 
-async function instrumentContext(context: BrowserContext, log: Log, label: string): Promise<void> {
+// Exported for listener-level tests without launching a browser.
+export async function instrumentContext(context: BrowserContext, log: Log, label: string): Promise<void> {
+  // A response belongs to the page/navigation that started its request, not
+  // whichever navigation is current when a late response arrives.
+  const pages = new WeakMap<Page, {scripts: ScriptDiagnostics; committed: boolean}>();
+  const requests = new WeakMap<Request, ScriptDiagnostics>();
+  const owned = new Set<ScriptDiagnostics>();
+  const retire = (scripts: ScriptDiagnostics) => {
+    scripts.dispose();
+    owned.delete(scripts);
+    void scripts.flush().then(() => log.scripts.delete(scripts), () => log.scripts.delete(scripts));
+  };
+  context.on("request", request => {
+    try {
+      // Playwright can throw for frame() during early navigation/service workers.
+      const frame = request.frame();
+      if (frame.parentFrame()) return;
+      const page = frame.page();
+      if (request.isNavigationRequest()) {
+        const previous = pages.get(page);
+        if (previous) retire(previous.scripts);
+        pages.delete(page);
+        const url = new URL(request.url());
+        if (url.protocol !== "http:" && url.protocol !== "https:") return;
+        const scripts = new ScriptDiagnostics(url.origin,
+          record => push(log, label, `script-failure ${JSON.stringify(record)}`),
+          {basePath: /^\/s\/[^/]+\//.exec(url.pathname)?.[0] ?? "/"});
+        pages.set(page, {scripts, committed:false});
+        owned.add(scripts);
+        log.scripts.add(scripts);
+      } else if (request.resourceType() === "script") {
+        const state = pages.get(page);
+        if (state?.committed) requests.set(request, state.scripts);
+      }
+    } catch { /* Optional diagnostics must not fail the test. */ }
+  });
+  context.on("close", () => { for (const scripts of owned) retire(scripts); });
   context.on("console", message => {
     const location = message.location();
     const where = location.url ? ` (${redactUrl(location.url)}:${location.lineNumber})` : "";
     push(log, label, `console.${message.type()} ${message.text()}${where}`);
   });
-  context.on("weberror", error => push(log, label, `pageerror ${error.error().stack ?? error.error().message}`));
+  context.on("weberror", error => {
+    try {
+      const page = error.page();
+      const state = page ? pages.get(page) : undefined;
+      // Errors while a new document is pending have ambiguous ownership.
+      if (state?.committed) state.scripts.pageError(error.error());
+    } catch { /* Best effort, including a page already closed. */ }
+    push(log, label, `pageerror ${error.error().stack ?? error.error().message}`);
+  });
   context.on("request", request => {
     if (QUIET_RESOURCES.has(request.resourceType())) return;
     push(log, label, `request ${request.method()} ${redactUrl(request.url())} [${request.resourceType()}]`);
   });
   context.on("response", response => {
+    try {
+      const redirected = response.status() >= 300 && response.status() < 400;
+      if (!redirected && response.request().resourceType() === "script") {
+        requests.get(response.request())?.track({url: response.url(), contentLength: response.headers()["content-length"] ?? null,
+          readBody: () => response.body()});
+      }
+    } catch { /* Response metadata may be unavailable during teardown. */ }
     if (QUIET_RESOURCES.has(response.request().resourceType())) return;
     push(log, label, `response ${response.status()} ${response.request().method()} ${redactUrl(response.url())}`);
   });
@@ -102,10 +154,19 @@ async function instrumentContext(context: BrowserContext, log: Log, label: strin
   });
   const watchPage = (page: Page) => {
     page.on("framenavigated", frame => {
-      if (frame === page.mainFrame()) push(log, label, `navigated ${redactUrl(frame.url())}`);
+      if (frame === page.mainFrame()) {
+        const state = pages.get(page);
+        if (state) state.committed = true;
+        push(log, label, `navigated ${redactUrl(frame.url())}`);
+      }
     });
     page.on("crash", () => push(log, label, "page crashed"));
-    page.on("close", () => push(log, label, "page closed"));
+    page.on("close", () => {
+      const state = pages.get(page);
+      if (state) retire(state.scripts);
+      pages.delete(page);
+      push(log, label, "page closed");
+    });
   };
   // `browser.newPage` hands back a page its context already announced.
   for (const page of context.pages()) watchPage(page);
@@ -169,12 +230,16 @@ export function withEngineBrowsers<T extends {}, W extends {}>(test: TestType<T,
         return {
           newContext,
           newPage: async (...args: Parameters<Browser["newPage"]>) => (await newContext(...args)).newPage(),
-          close: async () => { await Promise.all([...opened].map(context => context.close())); },
+          close: async () => {
+            await Promise.all([...log.scripts].map(scripts => scripts.flush()));
+            await Promise.all([...opened].map(context => context.close()));
+          },
           version: () => shared.version(),
         };
       });
       // A test that timed out never reached its own `finally`; its contexts
       // must not outlive it in the worker's browser.
+      await Promise.all([...log.scripts].map(scripts => scripts.flush()));
       await Promise.all([...opened].map(context => context.close().catch(() => {})));
     },
   });
@@ -195,6 +260,7 @@ export function attachPageDiagnosticsOnFailure(test: TestType<any, any>): void {
     const log = logs.get(testInfo);
     logs.delete(testInfo);
     if (!log || testInfo.status === testInfo.expectedStatus) return;
+    await Promise.all([...log.scripts].map(scripts => scripts.flush()));
     const header = log.dropped > 0 ? [`(${log.dropped} earlier lines dropped)`] : [];
     await testInfo.attach("page-diagnostics", {
       body: [...header, ...log.lines].join("\n"),
