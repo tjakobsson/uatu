@@ -197,10 +197,37 @@ needed. The first failed full run remains part of the record.
 The separate [UI output diagnostic](test-stability-ui-output.md), committed as
 `b5f889fa`, forwards child stdout/stderr while retaining the original exit assertion
 and deadline. Fresh independent Sol review found no actionable findings. It is an
-observability improvement, not a fix for the timeout. The startup-script diagnostic
-remains uncommitted: independent review found response-ownership and optional
-listener-safety defects that must be corrected before publication.
+observability improvement, not a fix for the timeout. The
+[startup-script diagnostic](test-stability-script-diagnostics.md) is committed as
+`7d75eb95` after correcting independent review findings about response ownership,
+listener safety and redirects. Its 18 focused cases passed three executions each;
+a real-browser probe passed six scenarios across Chromium and WebKit. It is not a
+parser-error reproduction or a root-cause fix. Final-candidate CI verification
+of the diagnostic commits remains pending.
 
 The lease fixture and variant-authentication setup fixes were pushed in separate
 commits through `04c95acf`. [CI run 41606357013](https://github.com/tjakobsson/uatu/actions/runs/41606357013)
-is in progress; it does not contain the later UI-output diagnostic commit.
+completed with successful required validation, but four browser cases passed only
+after retry. It does not contain the later diagnostic commits and is not evidence
+of retry-free suite stability.
+
+- Original permission case and fractional-mtime regression passed on retry 0
+  (4,041 ms and 3,763 ms): their second first-attempt CI pass.
+- Original variant boundary case and delayed-promotion regression passed on retry 0
+  (1,426 ms and 1,680 ms): their first first-attempt CI pass.
+- Unit tests passed 8,330/8,330 with 16 skipped. The unsafe-lease fixture passed;
+  the original UI wrapper passed in 59,392.88 ms, close to its unchanged 60-second
+  budget. That pass does not attribute or fix its previous timeouts.
+- The same WebKit Pending-scroller case again moved the timeline by 125 px.
+  Newly encountered retry-assisted failures were the WebKit docked/fullscreen iPad
+  viewport case (chat above the visible work area), the WebKit long-caption
+  wide-threshold case (work width 1,230 instead of at most 642), and the two-queued
+  `/reload` case (prompt-response timeout). Their focused investigations remain
+  pending; none is claimed fixed.
+
+The committed diagnostic candidate `7d75eb95`, with only pending documentation,
+then passed its single full local unit check: **8,348 passed, 16 skipped, 0 failed**
+across 322 files, 84,718 assertions, 194.02 seconds. Candidate source and manifest
+were unchanged during execution. Both diagnostic test files were collected;
+owned processes exited naturally with no observed survivors or cleanup signals.
+This local result does not replace the final candidate's GitHub CI verification.
