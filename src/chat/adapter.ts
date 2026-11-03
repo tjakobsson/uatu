@@ -1097,8 +1097,7 @@ export class ChatAdapter {
           if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id) || coverage?.changed(existing.id)) continue;
           if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
           projection.apply({ kind: "remove", itemId: existing.id });
-          this.permissionCreatedAt.delete(existing.id);
-          this.resolveAnnounced(existing.id);
+          this.retireRecoveredPermission(existing);
         }
       }
     } catch {
@@ -4296,7 +4295,8 @@ export class ChatAdapter {
               || fence.changed(known.id)
               || (this.announced.get(known.id)?.tick ?? 0) > interactionTick) continue;
             projection.apply({ kind: "remove", itemId: known.id });
-            this.resolveAnnounced(known.id);
+            if (known.type === "permission") this.retireRecoveredPermission(known);
+            else this.resolveAnnounced(known.id);
           }
           for (const item of result.value) {
             if (fence.changed(item.id)) continue;
@@ -4422,6 +4422,17 @@ export class ChatAdapter {
     const owner = this.projections.get(item.conversationId);
     const current = owner?.get(item.id);
     if (owner && (!current || !sameConversationItems([current], [item]))) owner.upsert(item);
+  }
+
+  /** An accepted pending-list absence retires the owning copy too. Otherwise
+   * a parent can enable the next permission while the owner's FIFO still
+   * blocks it behind an externally answered request whose reply was missed. */
+  private retireRecoveredPermission(item: PermissionRequest): void {
+    const owner = item.conversationId ? this.projections.get(item.conversationId) : undefined;
+    const current = owner?.get(item.id);
+    if (owner && current?.type === "permission" && current.status === "pending") owner.apply({ kind: "remove", itemId: item.id });
+    this.permissionCreatedAt.delete(item.id);
+    this.resolveAnnounced(item.id);
   }
 
   /** The provider's live background tasks for this conversation, as running rows. */

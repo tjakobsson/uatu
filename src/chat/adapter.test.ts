@@ -6542,6 +6542,37 @@ describe("prompt, abort, permission, and question mutations", () => {
     } finally { await adapter.dispose(); }
   });
 
+  test.each(["history", "inventory"] as const)("parent %s recovery removes externally answered permissions from the owner's FIFO", async recovery => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let pending = ["a", "b"].map(requestId => ({ requestId, conversationId: "child", action: "shell", resources: [requestId] }));
+    provider.listPermissions = async () => pending;
+    if (recovery === "inventory") Object.assign(provider, {
+      reconcileBackgroundTasks: async (id: string) => id === "parent" ? [{ id: "task:worker", type: "background_task", taskId: "worker", childConversationId: "child", description: "Worker", createdAt: 1, status: "running" }] : [],
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    let pump: Promise<void> | undefined;
+    try {
+      // The child is retained, but only the parent is refreshed after the
+      // external answer. No reply event arrives to retire the child's copy.
+      const child = adapter.projectionForTests("child");
+      await adapter.history("parent");
+      expect(activeInteractionRequests(child.items(), "child")[0]?.id).toBe("permission:a");
+      pending = pending.filter(request => request.requestId !== "a");
+      if (recovery === "history") await adapter.history("parent");
+      else {
+        pump = adapter.startEventPump();
+        provider.eventQueue.push({ type: "server.connected", data: {} });
+        await waitUntil(() => !adapter.projectionForTests("parent").has("permission:a"));
+      }
+      expect(child.has("permission:a")).toBe(false);
+      expect(activeInteractionRequests(child.items(), "child")[0]?.id).toBe("permission:b");
+      await adapter.respondPermission("child", "b", "next", "approved-once");
+      expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "b", reply: "once" }]);
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally { await adapter.dispose(); await pump; }
+  });
+
   test("supports permission outcomes exactly once and refuses stale duplicates", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
