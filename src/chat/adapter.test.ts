@@ -6542,7 +6542,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     } finally { await adapter.dispose(); }
   });
 
-  test.each(["history", "inventory"] as const)("parent %s recovery removes externally answered permissions from the owner's FIFO", async recovery => {
+  test.each(["history", "inventory", "child-history"] as const)("%s recovery removes externally answered permissions from retained owning and mirrored FIFOs", async recovery => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
     let pending = ["a", "b"].map(requestId => ({ requestId, conversationId: "child", action: "shell", resources: [requestId] }));
@@ -6553,19 +6553,19 @@ describe("prompt, abort, permission, and question mutations", () => {
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
     let pump: Promise<void> | undefined;
     try {
-      // The child is retained, but only the parent is refreshed after the
-      // external answer. No reply event arrives to retire the child's copy.
+      // Both copies are retained, but only one is refreshed after the external
+      // answer. No reply event arrives to retire the other copy.
       const child = adapter.projectionForTests("child");
       await adapter.history("parent");
       expect(activeInteractionRequests(child.items(), "child")[0]?.id).toBe("permission:a");
       pending = pending.filter(request => request.requestId !== "a");
-      if (recovery === "history") await adapter.history("parent");
-      else {
+      if (recovery === "inventory") {
         pump = adapter.startEventPump();
         provider.eventQueue.push({ type: "server.connected", data: {} });
         await waitUntil(() => !adapter.projectionForTests("parent").has("permission:a"));
-      }
+      } else await adapter.history(recovery === "history" ? "parent" : "child");
       expect(child.has("permission:a")).toBe(false);
+      expect(adapter.projectionForTests("parent").has("permission:a")).toBe(false);
       expect(activeInteractionRequests(child.items(), "child")[0]?.id).toBe("permission:b");
       await adapter.respondPermission("child", "b", "next", "approved-once");
       expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "b", reply: "once" }]);
