@@ -61,6 +61,18 @@ bun run test:e2e tests/e2e/chat-requests.e2e.ts --project=e2e \
   --repeat-each=10 --workers=4 --retries=0 --reporter=line
 ```
 
+The complete changed file subsequently passed **12/12** tests in 10.8 seconds
+with four workers, no retries and unchanged default budgets:
+
+```sh
+bun run test:e2e tests/e2e/chat-requests.e2e.ts --project=e2e \
+  --workers=4 --retries=0 --reporter=line
+```
+
+The target and shared fixture remained unchanged during that run; concurrent
+diagnostic and documentation edits mean it is not evidence for one exact clean
+commit. No target or startup failure occurred, and cleanup checks passed.
+
 Renewed independent Sol review found no actionable findings after the ordering
 correction. Whitespace and cleanup checks passed. Raw logs, source snapshots and
 failure artifacts remain private; authentication-bearing traces are not public
