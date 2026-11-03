@@ -6542,6 +6542,34 @@ describe("prompt, abort, permission, and question mutations", () => {
     } finally { await adapter.dispose(); }
   });
 
+  test.each([false, true])("child recovery mirrors its recovered FIFO into a retained parent (known=%s)", async known => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const permission = (requestId: string) => ({ requestId, conversationId: "child", action: "shell", resources: [requestId] });
+    let pending = known ? [permission("b")] : [];
+    provider.listPermissions = async () => pending;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    try {
+      await adapter.history("parent");
+      pending = [permission("a"), permission("b")];
+      await adapter.history("child");
+      for (const id of ["parent", "child"]) {
+        const items = adapter.projectionForTests(id).items();
+        expect(items.filter(item => item.type === "permission").map(item => item.id).sort()).toEqual(["permission:a", "permission:b"]);
+        expect(activeInteractionRequests(items, id)[0]?.id).toBe("permission:a");
+      }
+      await adapter.respondPermission("child", "a", "first", "approved-once");
+      for (const id of ["parent", "child"]) {
+        expect(activeInteractionRequests(adapter.projectionForTests(id).items(), id)[0]?.id).toBe("permission:b");
+      }
+      await adapter.respondPermission("child", "b", "second", "approved-once");
+      expect(provider.permissionReplies).toEqual([
+        { sessionId: "child", requestId: "a", reply: "once" },
+        { sessionId: "child", requestId: "b", reply: "once" },
+      ]);
+    } finally { await adapter.dispose(); }
+  });
+
   test.each(["history", "inventory", "child-history"] as const)("%s recovery removes externally answered permissions from retained owning and mirrored FIFOs", async recovery => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

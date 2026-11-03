@@ -1195,7 +1195,7 @@ export class ChatAdapter {
     } else projection.seed(items);
     for (let index = 0; index < items.length; index++) {
       const item = items[index]!;
-      this.syncPermissionOwner(item);
+      this.syncRecoveredPermission(item);
       // Another read may have corrected the shared order while this read
       // awaited parentage. Return the same canonical metadata as the guard.
       if (item.type === "permission") items[index] = projection.get(item.id) ?? item;
@@ -4304,7 +4304,7 @@ export class ChatAdapter {
               this.announced.set(item.id, { owner: item.conversationId ?? id, destination: id, tick: ++this.interactionClock });
             }
             projection.apply({ kind: "upsert", item });
-            this.syncPermissionOwner(item);
+            this.syncRecoveredPermission(item);
           }
         }
         this.syncBackgroundState(id);
@@ -4365,6 +4365,9 @@ export class ChatAdapter {
     if (!this.provider.listPermissions) return [];
     const startedAt = this.permissionQueueOrder.beginRead();
     const pending = await this.provider.listPermissions();
+    // A child-only refresh also needs its verified parent destination. Cache
+    // that metadata before the accepted recovery is published synchronously.
+    if (pending.some(request => request.conversationId === id)) await this.parentOf(id).catch(() => null);
     const ids = pending.map(request => `permission:${request.requestId}`);
     this.permissionQueueOrder.reconcile(ids, startedAt);
     const listed = new Set(ids);
@@ -4415,13 +4418,20 @@ export class ChatAdapter {
   }
 
   /** Called only after the read's resolution/history fences have accepted it.
-   * A parent can discover an earlier child request; its owner's guard must
-   * know that head too, without an unfenced read resurrecting removed asks. */
-  private syncPermissionOwner(item: ConversationItem): void {
+   * Whichever transcript recovered a queue head, its retained owner and
+   * mirrored parent must offer the same request. Never reopen resolved copies. */
+  private syncRecoveredPermission(item: ConversationItem): void {
     if (item.type !== "permission" || item.status !== "pending" || !item.conversationId) return;
-    const owner = this.projections.get(item.conversationId);
-    const current = owner?.get(item.id);
-    if (owner && (!current || !sameConversationItems([current], [item]))) owner.upsert(item);
+    const parentId = this.sessionParents.get(item.conversationId);
+    for (const [id, projection] of this.projections) {
+      // An existing mirrored request also proves the destination if the
+      // parent lookup is temporarily unavailable. It does not create a view.
+      if (id !== item.conversationId && id !== parentId
+        && !projection.find(candidate => candidate.type === "permission" && candidate.conversationId === item.conversationId)) continue;
+      const current = projection.get(item.id);
+      if (current?.type === "permission" && current.status === "resolved") continue;
+      if (!current || !sameConversationItems([current], [item])) projection.upsert(item);
+    }
   }
 
   /** An accepted pending-list absence retires every retained copy of the same
@@ -4532,6 +4542,7 @@ export class ChatAdapter {
       const projection = this.projection(conversationId);
       for (const item of await this.pendingPermissions(conversationId)) {
         if (!projection.has(item.id)) projection.apply({ kind: "upsert", item });
+        this.syncRecoveredPermission(item);
       }
     } catch { /* unknown, not empty — requirePending still decides */ }
   }
