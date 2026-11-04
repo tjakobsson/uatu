@@ -34,6 +34,7 @@ import {
 } from "./layout";
 import { renderImagePreview } from "./image";
 import { imageSources, refreshImageRevisions } from "./image-revision";
+import { observePreviewSvgImages, preparePreviewHtml } from "./svg-images";
 import { canEmbedImages, createEmbeddedImagesLearner, recordEmbeddedImages, type EmbeddedImagesLookup } from "./embedded-images";
 import { fetchWithinBudget } from "../shell/bounded-fetch";
 import { isViewableImageName } from "../shared/viewable-image";
@@ -271,8 +272,9 @@ export async function renderSinglePayload(
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
-  previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
+  previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
   refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
+  observePreviewSvgImages(previewElement);
   // For markdown / asciidoc, mount the inline layout chooser above the
   // preview body so users can switch between Single / Side by side /
   // Stacked from beside the content — same pattern as the diff view's
@@ -401,11 +403,12 @@ export async function renderSplitPayloads(
   const renderedPane = document.createElement("div");
   renderedPane.className = "preview-pane preview-pane-rendered markdown-body";
   renderedPane.setAttribute("data-split-side", "rendered");
-  renderedPane.innerHTML = cardHtml + replaceMermaidCodeBlocks(renderedPayload.html);
+  renderedPane.append(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(renderedPayload.html)));
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
   refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
+  observePreviewSvgImages(previewElement);
 
   attachMetadataCardToggleListener(renderedPane);
   // Lazy install (resolves on setup, diagrams stream in) — see the
