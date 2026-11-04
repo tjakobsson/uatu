@@ -57,9 +57,9 @@ type StopValidation = {
 type OwnershipCheck = { child: string; parent: string; changed: boolean; contradicted?: (actualParent?: string) => void };
 type ControlBasis = { basis: WorkerOccurrenceEvidence; revision: number };
 type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis> };
-type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; source?: WorkerRecoverySource; observers: Set<(source: WorkerRecoverySource) => void> };
+type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, string> };
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, string>; pendingFingerprint?: string; pendingIds?: readonly string[] };
 
 export function createOpenCodeV2Provider(options: {
   endpoint: string;
@@ -698,8 +698,8 @@ export class OpenCodeV2Provider implements ChatProvider {
     const pending = this.backgroundReads.get(sessionId);
     if (pending) {
       if (options?.onSource) {
-        if (pending.source) options.onSource(pending.source);
-        else pending.observers.add(options.onSource);
+        for (const source of pending.sources) options.onSource(source);
+        pending.observers.add(options.onSource);
       }
       return pending;
     }
@@ -711,8 +711,9 @@ export class OpenCodeV2Provider implements ChatProvider {
     let completeRead = false;
     const observers = new Set(options?.onSource ? [options.onSource] : []);
     const read: BackgroundRead = Object.assign(this.coveredRead(signal, () => this.readBackgroundTasks(sessionId, signal, controlRead, source => {
-      read.source = { ...source, workerSource: source.workerSource.retain(signal) };
-      for (const observe of observers) observe(read.source);
+      const retained = { ...source, workerSource: source.workerSource.retain(signal) };
+      read.sources.push(retained);
+      for (const observe of observers) observe(retained);
     }, () => !read.invalidated)).then(snapshot => {
       // A commit can return the boundary to null while this inventory still
       // holds the old stored suffix. It is not fresh inbox/live evidence.
@@ -725,31 +726,40 @@ export class OpenCodeV2Provider implements ChatProvider {
       lifetime.abort();
       observers.clear();
       if (this.backgroundReads.get(sessionId) === read) this.backgroundReads.delete(sessionId);
-    }), { invalidated: false, observers });
+    }), { invalidated: false, sources: [], observers });
     this.backgroundReads.set(sessionId, read);
     return read;
   }
 
   private async readBackgroundTasks(sessionId: string, signal: AbortSignal, controlRead: ControlRead, observe: (source: WorkerRecoverySource) => void, isCurrent: () => boolean): Promise<BackgroundSnapshot> {
     const source = this.beginWorkerSourceRead(sessionId, signal, isCurrent);
+    let pendingSource: ReturnType<OpenCodeV2Provider["beginWorkerSourceRead"]> | undefined;
     let pendingFallbacks: WorkerResultFallback[] | undefined;
     let observed = false;
     const publishSource = () => {
       source.capture();
       observed = true;
-      observe({ workerSource: source.guard, workerAssociationContradictions: source.contradictions(), workerResultFallbacks: pendingFallbacks ?? [] });
+      observe({ workerSource: source.guard, workerAssociationContradictions: source.contradictions(), workerResultFallbacks: [] });
     };
     try {
     if (!await this.lookupWorkerParent(sessionId, signal)) throw new Error("Background parent is unavailable");
-    const [history, pending, active] = await Promise.all([
+    const generation = this.streamGeneration;
+    pendingSource = this.beginWorkerSourceRead(sessionId, signal, () => isCurrent() && generation === this.streamGeneration, true);
+    // Text has its own source, not ownership/inventory authority. Publish it
+    // before optional activity or child enrichment can exhaust recovery.
+    const activeRead = this.client.session.active({ signal }).catch(() => undefined);
+    const [history, pending] = await Promise.all([
       this.allMessages(sessionId, signal),
       this.client.session.inbox.list({ sessionID: sessionId }, { signal }),
-      this.client.session.active({ signal }).catch(() => undefined),
     ]);
     const stored = new Set(history.map(message => message.id));
     const notifications = (pending as unknown as StoredMessage[]).filter(entry => entry.type === "synthetic" && !stored.has(entry.id))
       .map(entry => ({ ...asRecord(entry.payload), id: entry.id, type: "synthetic", time: entry.time }));
     pendingFallbacks = notifications.flatMap(message => this.workerResultFallbacks(message));
+    signal.throwIfAborted();
+    pendingSource.capturePending(pendingFallbacks);
+    if (pendingFallbacks.length) observe({ workerSource: pendingSource.guard, workerAssociationContradictions: [], workerResultFallbacks: pendingFallbacks });
+    const active = await this.coveredRead(signal, () => activeRead);
     const folded = await this.backgroundHistory(sessionId, [...history, ...notifications], signal, controlRead, false);
     const retainedRequests = [...folded.occurrences.keys()].flatMap(id => {
       const request = this.eventMemory?.workers.linkedRequest(id, folded.occurrences.get(id));
@@ -860,11 +870,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       return proof ? [[item.taskId, proof] as const] : [];
     })) };
     } finally {
-      // A successful confined inbox read vouches for its pending report text,
-      // even if strict ownership enrichment later fails. It grants no worker
-      // inspection, inventory completeness, activity or control authority.
+      // Scoped denial can still survive failed ownership enrichment. Pending
+      // text was already transferred under its separate lease above.
       try { if (!observed && pendingFallbacks && !signal.aborted) publishSource(); }
-      finally { source.release(); }
+      finally { pendingSource?.release(); source.release(); }
     }
   }
 
@@ -1229,8 +1238,8 @@ export class OpenCodeV2Provider implements ChatProvider {
     return { include, snapshot: read.snapshot };
   }
 
-  private beginWorkerSourceRead(parent: string, caller?: AbortSignal, isCurrent: () => boolean = () => true) {
-    const source: HistoryWorkerSource = { parent, phase: "collecting", revision: 0, states: new Map<string, string>() };
+  private beginWorkerSourceRead(parent: string, caller?: AbortSignal, isCurrent: () => boolean = () => true, pendingText = false) {
+    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, string>(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
     const deadline = AbortSignal.any([this.readLifetime.signal, AbortSignal.timeout(25_000)]);
     const initialOwner = new AbortController();
     const initialSignal = AbortSignal.any([deadline, initialOwner.signal, ...(caller ? [caller] : [])]);
@@ -1260,6 +1269,14 @@ export class OpenCodeV2Provider implements ChatProvider {
         return added;
       },
       observe: (child: string, state: string) => { if (source.states.has(child)) this.observeHistoryWorkerSource(source, child, state); },
+      capturePending: (fallbacks: WorkerResultFallback[]) => {
+        const fingerprint = createHash("sha256").update(JSON.stringify(fallbacks)).digest("hex");
+        if (source.revision === 0) for (const other of this.historyWorkerSources) {
+          if (other !== source && other.parent === parent && other.pendingFingerprint && other.pendingFingerprint !== fingerprint) other.revision++;
+        }
+        source.pendingFingerprint = fingerprint;
+        source.pendingIds = fallbacks.map(fallback => fallback.resultId);
+      },
       capture: () => { source.phase = "captured"; }, release: () => { initialOwner.abort(); } };
   }
 
@@ -1500,7 +1517,8 @@ export class OpenCodeV2Provider implements ChatProvider {
           // turn sparse or replayed event metadata into fresh ownership. The
           // bounded reader must obtain a new authoritative scoped record.
           if ((!evidence.directory || path.resolve(evidence.directory) === this.workspace) && (evidence.shutdown || evidence.lifecycle)) for (const source of this.historyWorkerSources) {
-            if (evidence.shutdown || evidence.lifecycle?.id && source.states.has(evidence.lifecycle.id)) source.revision++;
+            if (evidence.shutdown || evidence.lifecycle?.id && (source.states.has(evidence.lifecycle.id)
+              || source.pendingFingerprint !== undefined && evidence.lifecycle.id === source.parent)) source.revision++;
           }
           controlUpdates = this.controls.observe(evidence, (!evidence.directory || path.resolve(evidence.directory) === this.workspace)
             && (!evidence.lifecycle?.directory || path.resolve(evidence.lifecycle.directory) === this.workspace),
@@ -1530,6 +1548,13 @@ export class OpenCodeV2Provider implements ChatProvider {
           const location = evidence.directory;
           if (!location || path.resolve(location) === this.workspace) {
             const parent = evidence.session;
+            if (parent && stringValue(asRecord(event).type)?.startsWith("session.inbox.")) {
+              // Retire captured pending text before ownership enrichment can
+              // await. A newer enqueue/delivery is not the old read's payload.
+              const resultId = stringValue(asRecord(asRecord(event).data).inboxID);
+              for (const source of this.historyWorkerSources) if (source.parent === parent && source.pendingFingerprint !== undefined
+                && resultId && (source.pendingIds === undefined || source.pendingIds.includes(resultId))) source.revision++;
+            }
             // Persist negative evidence before any ownership await, including
             // when Stop starts while that read is still pending. This never
             // establishes ownership of a requested/replacement child.
@@ -1545,6 +1570,11 @@ export class OpenCodeV2Provider implements ChatProvider {
           }
           if (streamReadSignal.aborted) break;
           normalized = this.normalize.prepared(prepared, memory);
+          if (normalized.conversationId && (normalized.revertLifecycle || normalized.removedMessageId)) {
+            // Leases survive optional transport retirement. Invalidate pending
+            // text at its source, including delivery/removal and payload changes.
+            for (const source of this.historyWorkerSources) if (source.pendingFingerprint !== undefined && source.parent === normalized.conversationId) source.revision++;
+          }
           if (normalized.conversationId && (normalized.revertLifecycle || normalized.removedMessageId)) {
             const pending = this.backgroundReads.get(normalized.conversationId);
             if (pending) pending.invalidated = true;

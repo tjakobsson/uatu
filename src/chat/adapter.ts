@@ -1513,7 +1513,7 @@ export class ChatAdapter {
       // source revocation must replace it instead of merging hidden fields back.
       if (!replace) for (const itemId of new Set([...resetReports, ...revokedRows])) if (projection.has(itemId)) projection.apply({ kind: "remove", itemId });
       if (page.workerOriginCoverage) projection.rememberWorkerOrigins(items, page.workerOriginCoverage, coverage?.changed);
-      projection.rememberWorkerFallbacks(items, fallbackRelations, coverage?.changed);
+      projection.rememberWorkerFallbacks(items, fallbackRelations, coverage?.changed, page.workerOriginCoverage);
       if (replace) {
         // Worker retention, exact exclusions and result supersession above
         // apply equally to replacement. Ordinary transcript rows get no such
@@ -4309,6 +4309,7 @@ export class ChatAdapter {
     // Metadata follows coalescer-owned item objects, never the wire item.
     // Discarded/unmaterialized updates leave no projection provenance entry.
     const sourceOrigins = new WeakMap<ConversationItem, NonNullable<NormalizedProviderEvent["workerOriginUpdates"]>>();
+    const fallbackDeliveries = new WeakMap<NormalizedProviderUpdate, NonNullable<NormalizedProviderEvent["workerOriginUpdates"]>>();
     const sourceFallbacks = new WeakMap<ConversationItem, WorkerResultFallback[]>();
     const coalescer = new ProviderUpdateCoalescer({
       windowMs: this.coalesceWindowMs,
@@ -4329,6 +4330,13 @@ export class ChatAdapter {
       onFlush: async (conversationId, updates) => {
         // Not gated on the abort signal: a graceful stop still applies
         // whatever the coalescer buffered in its final window.
+        if (updates.every(update => fallbackDeliveries.has(update))) {
+          // Metadata alone cannot recreate an evicted projection or republish
+          // unrelated user delivery/accounting state. Its notice must survive.
+          const projection = this.projections.get(conversationId);
+          for (const update of updates) projection?.rememberFallbackStoredOrigins(fallbackDeliveries.get(update)!);
+          return;
+        }
         const projection = this.projection(conversationId);
         if (this.provider.waitForEventStream && projection.reconciledHistoryVisibility?.state.staged) {
           // Staged native transcript and live inventory have distinct owners.
@@ -4347,6 +4355,7 @@ export class ChatAdapter {
         const workerProgress = this.observeBackgroundSource(conversationId, projection, updates);
         for (const update of updates) {
           projection.apply(update.kind === "upsert" ? { ...update, item: this.correlateSteerMessage(conversationId, update.item) } : update);
+          if (fallbackDeliveries.has(update)) projection.rememberFallbackStoredOrigins(fallbackDeliveries.get(update)!);
           if (update.kind === "upsert" && sourceOrigins.has(update.item)) {
             const current = projection.get(update.item.id);
             if (current) projection.rememberWorkerOrigins([current], sourceOrigins.get(update.item)!, undefined, true);
@@ -4489,7 +4498,13 @@ export class ChatAdapter {
         // coalescer as before.
         const timelineUpdates: NormalizedProviderUpdate[] = [];
         for (const update of normalized.updates) {
-          if (update.kind === "inbox") this.applyInboxDelta(normalized.conversationId, update.delta);
+          if (update.kind === "inbox") {
+            this.applyInboxDelta(normalized.conversationId, update.delta);
+            // The dock settles immediately. Stored-result provenance follows
+            // the same serialized handoff as its possibly buffered notice.
+            if (update.delta.kind === "settled" && update.delta.outcome === "delivered"
+              && normalized.workerOriginUpdates?.some(origin => !origin.toolUseId && origin.messageId === update.delta.id)) timelineUpdates.push(update);
+          }
           else timelineUpdates.push(update);
         }
         // A coalesced add/remove may never reach the timeline. Active reads
@@ -4506,6 +4521,11 @@ export class ChatAdapter {
         if (normalized.workerResultFallbacks?.length) for (const update of timelineUpdates) if (update.kind === "upsert") {
           const relations = normalized.workerResultFallbacks.filter(relation => sameConversationItems([update.item], [relation.fallback]));
           if (relations.length) sourceFallbacks.set(update.item, relations);
+        }
+        if (normalized.workerOriginUpdates?.length) for (const update of timelineUpdates) {
+          if (update.kind === "inbox" && update.delta.kind === "settled" && update.delta.outcome === "delivered") {
+            fallbackDeliveries.set(update, normalized.workerOriginUpdates.filter(origin => !origin.toolUseId && origin.messageId === update.delta.id));
+          }
         }
         if (this.provider.waitForEventStream) this.markNativeHistoryDirty(normalized.conversationId,
           !this.projections.get(normalized.conversationId)?.reconciledHistoryVisibility?.state.staged);
@@ -5400,20 +5420,30 @@ export class ConversationProjection {
   // Only exact, actually materialized fallback relations enter this map. Its
   // lifetime and size are bounded by this projection's notice rows, not ids
   // guessed from notice-shaped strings or arbitrary synthetic messages.
-  private readonly workerFallbacks = new Map<string, WorkerResultFallback>();
+  private readonly workerFallbacks = new Map<string, WorkerResultFallback & { stored: boolean }>();
 
   workerFallbackOriginAbsent(item: ConversationItem, source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): boolean {
     const prior = this.workerFallbacks.get(item.id);
-    return !!prior && sameConversationItems([item], [prior.fallback])
+    return !!prior?.stored && sameConversationItems([item], [prior.fallback])
       && !source.some(origin => !origin.toolUseId && origin.messageId === prior.resultId);
   }
 
-  rememberWorkerFallbacks(items: ConversationItem[], relations: readonly WorkerResultFallback[], changed?: (id: string) => boolean): void {
+  rememberWorkerFallbacks(items: ConversationItem[], relations: readonly WorkerResultFallback[], changed?: (id: string) => boolean, storedOrigins?: ProviderHistoryPage["workerOriginCoverage"]): void {
     const candidates = new Map(items.map(item => [item.id, item]));
     for (const relation of relations) {
       const item = candidates.get(relation.fallback.id);
-      if (item && !changed?.(item.id) && sameConversationItems([item], [relation.fallback])) this.workerFallbacks.set(item.id, relation);
+      if (item && !changed?.(item.id) && sameConversationItems([item], [relation.fallback])) {
+        const prior = this.workerFallbacks.get(item.id);
+        const stored = !!prior?.stored && prior.resultId === relation.resultId && prior.childConversationId === relation.childConversationId
+          && sameConversationItems([prior.fallback], [relation.fallback])
+          || !!storedOrigins?.some(origin => !origin.toolUseId && origin.messageId === relation.resultId);
+        this.workerFallbacks.set(item.id, { ...relation, stored });
+      }
     }
+  }
+
+  rememberFallbackStoredOrigins(origins: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): void {
+    for (const relation of this.workerFallbacks.values()) if (origins.some(origin => !origin.toolUseId && origin.messageId === relation.resultId)) relation.stored = true;
   }
 
   private pruneWorkerFallback(item: ConversationItem): void {

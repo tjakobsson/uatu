@@ -103,6 +103,156 @@ test("fallback relations describe only actual visible native subagent results, w
   } finally { await provider.dispose(); }
 });
 
+for (const outcome of ["pending", "updated", "delivered", "stored-committed", "required-failure", "late-update", "late-commit", "expired-update", "read-update", "cancel", "generation"] as const)
+test(`pending fallback text source survives optional inventory expiry (${outcome})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  let phase = "initial", pending = false, blockMessages = false, records: unknown[] = [], opened = 0, closed = 0;
+  let text = fixture.pending.payload.text, pendingReads = 0, transcriptReads = 0, activeReads = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, releaseMessages!: () => void, releaseActive!: () => void;
+  let materialized!: () => void, delivered!: () => void, activeEntered!: () => void, textCaptured!: () => void, changed!: () => void;
+  let publicationEntered!: () => void, releasePublication!: () => void, heldPublication = false;
+  const messages = new Promise<void>(resolve => { releaseMessages = resolve; });
+  const active = new Promise<void>(resolve => { releaseActive = resolve; });
+  const noticeReady = new Promise<void>(resolve => { materialized = resolve; });
+  const delivery = new Promise<void>(resolve => { delivered = resolve; });
+  const activeReady = new Promise<void>(resolve => { activeEntered = resolve; });
+  const textReady = new Promise<void>(resolve => { textCaptured = resolve; });
+  const changeApplied = new Promise<void>(resolve => { changed = resolve; });
+  const publicationReady = new Promise<void>(resolve => { publicationEntered = resolve; });
+  const publication = new Promise<void>(resolve => { releasePublication = resolve; });
+  const activeSignals: AbortSignal[] = [];
+  const historyOwner = new AsyncLocalStorage<boolean>();
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      const close = () => { closed++; controller.close(); };
+      if (signal.aborted) close(); else signal.addEventListener("abort", close, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_child": () => new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": async () => {
+      if (blockMessages) await messages;
+      if (phase === "refresh") transcriptReads++;
+      return { data: records, cursor: {} };
+    },
+    "GET /api/session/:id/inbox": () => {
+      if (phase === "refresh") {
+        pendingReads++;
+        if (outcome === "required-failure") return new Response(null, { status: 503 });
+      }
+      return { data: pending ? [{ ...fixture.pending, payload: { ...fixture.pending.payload, text } }] : [] };
+    },
+    "GET /api/session/active": async ({ signal }) => {
+      if (phase === "refresh") { activeReads++; activeSignals.push(signal); activeEntered(); await active; }
+      return {};
+    },
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": async () => {
+      if (phase === "refresh" && historyOwner.getStore() && (outcome === "expired-update" || outcome === "read-update") && !heldPublication) {
+        heldPublication = true; publicationEntered(); await publication;
+      }
+      return scoped([]);
+    },
+  });
+  const provider = server.provider(), events = provider.events.bind(provider), recover = provider.reconcileBackgroundTasks.bind(provider);
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    if (event.eventType === "diagnostic.delivery.complete") delivered();
+    if (event.eventType === "diagnostic.change.complete") changed();
+    yield event;
+  } };
+  provider.reconcileBackgroundTasks = (id, options) => recover(id, { ...options, onSource: source => {
+    options?.onSource?.(source);
+    if (phase === "refresh" && source.workerResultFallbacks.some(relation => relation.resultId === fixture.pending.id)) textCaptured();
+  } });
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 10 });
+  const lifetime = new AbortController();
+  let observer: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined, observing: Promise<void> | undefined, reading: ReturnType<ChatAdapter["history"]> | undefined;
+  const publications: import("../../types").ChatEvent[] = [];
+  const send = (event: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event as object, location: { directory: WORKSPACE } })}\n\n`));
+  try {
+    expect((await adapter.history("ses_parent")).items).toEqual([]);
+    observer = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+    observing = (async () => { for await (const event of observer!.events) { publications.push(event); if (event.type === "item.upsert" && event.item.id === "notice:msg_result") materialized(); } })();
+    phase = "enqueue"; pending = true; blockMessages = true;
+    send({ id: "evt_pending", created: 41, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } });
+    await noticeReady;
+    if (outcome === "delivered" || outcome === "stored-committed") {
+      pending = false; send({ ...fixture.delivered, created: 42 });
+      send({ type: "diagnostic.delivery.complete", data: {} }); await delivery;
+    }
+    await adapter.stopEventPump(); blockMessages = false; releaseMessages();
+    if (outcome === "stored-committed") {
+      records = [fixture.stored]; phase = "stored";
+      expect((await adapter.history("ses_parent")).items).toContainEqual(expect.objectContaining({ id: "notice:msg_result" }));
+      records = [];
+      send({ id: "evt_stage", created: 60, type: "session.revert.staged", data: { sessionID: "ses_parent", revert: { messageID: "msg_result" } } });
+      send({ id: "evt_commit", created: 61, type: "session.revert.committed", data: { sessionID: "ses_parent", to: "msg_result" } });
+      send({ type: "diagnostic.change.complete", data: {} }); await changeApplied;
+      await adapter.stopEventPump();
+    }
+    if (outcome === "updated") text = text.replace("Fixture checked.", "Updated pending report.");
+    if (outcome === "cancel" || outcome === "generation") text = text.replace("Fixture checked.", "Cancelled read must not publish this report.");
+    phase = "refresh";
+    // Start the covering pump outside the explicit reader's async scope, so
+    // startup inventory cannot satisfy its final-publication barrier.
+    void adapter.startEventPump(); await provider.waitForEventStream(lifetime.signal);
+    reading = historyOwner.run(true, () => adapter.history("ses_parent", { limit: 97 }));
+    let readSettled = false;
+    void reading.finally(() => { readSettled = true; }).catch(() => undefined);
+    void reading.catch(() => undefined);
+    if (outcome === "required-failure") await expect(reading).rejects.toThrow("Inbox recovery unavailable");
+    else {
+      await activeReady; // Native active GET is in flight; do not release it.
+      if (outcome === "expired-update" || outcome === "read-update") {
+        await publicationReady;
+        expect(readSettled).toBe(false);
+        expect(activeSignals.some(signal => signal.aborted)).toBe(true); // Source lease outlived recovery transport.
+        text = text.replace("Fixture checked.", "New text after optional recovery retired.");
+        if (outcome === "expired-update") {
+          send({ id: "evt_expired_update", created: 50, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: { ...fixture.pending, payload: { ...fixture.pending.payload, text } } } });
+          send({ type: "diagnostic.change.complete", data: {} }); await changeApplied;
+        }
+        releaseActive();
+        if (outcome === "read-update") await expect(provider.reconcileBackgroundTasks("ses_parent", { fresh: true })).rejects.toThrow("OpenCode session lookup failed");
+        releasePublication();
+      }
+      if (outcome === "late-update" || outcome === "late-commit" || outcome === "cancel" || outcome === "generation") {
+        await textReady; // The old pending source reached the enclosing owner.
+        if (outcome === "cancel" || outcome === "generation") {
+          await adapter.stopEventPump();
+          if (outcome === "generation") void adapter.startEventPump();
+          await expect(reading).rejects.toThrow("Inbox recovery unavailable");
+        } else {
+          if (outcome === "late-update") {
+            text = text.replace("Fixture checked.", "Newer live pending report.");
+            send({ id: "evt_new_pending", created: 50, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: { ...fixture.pending, payload: { ...fixture.pending.payload, text } } } });
+          } else {
+            pending = false;
+            send({ ...fixture.delivered, created: 50 });
+            send({ id: "evt_late_stage", created: 60, type: "session.revert.staged", data: { sessionID: "ses_parent", revert: { messageID: "msg_result" } } });
+            send({ id: "evt_late_commit", created: 61, type: "session.revert.committed", data: { sessionID: "ses_parent", to: "msg_result" } });
+          }
+          send({ type: "diagnostic.change.complete", data: {} }); await changeApplied;
+        }
+        releaseActive();
+      }
+      const history = outcome === "cancel" || outcome === "generation" ? undefined : await reading;
+      expect(transcriptReads).toBeGreaterThan(0); expect(pendingReads).toBeGreaterThan(0); expect(activeReads).toBeGreaterThan(0);
+      if (!outcome.startsWith("late-") && outcome !== "cancel" && outcome !== "generation") expect(activeSignals.some(signal => signal.aborted)).toBe(true); // Real five-second recovery expiry.
+      if (history) {
+        expect(history.items.filter(item => item.id === "notice:msg_result")).toEqual(pending ? [expect.objectContaining({ type: "notice", message: text })] : []);
+        expect(history.items.some(item => item.type === "background_task")).toBe(false);
+      }
+    }
+    const next = await adapter.subscribe("ses_parent"); next.events.cancel();
+    const expectedText = outcome === "cancel" || outcome === "generation" ? fixture.pending.payload.text : text;
+    expect(next.snapshot.items.filter(item => item.id === "notice:msg_result")).toEqual(pending ? [expect.objectContaining({ type: "notice", message: expectedText })] : []);
+    expect(next.snapshot.items.some(item => item.type === "background_task")).toBe(false);
+    if (!pending) expect(publications).toContainEqual(expect.objectContaining({ type: "item.remove", itemId: "notice:msg_result" }));
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { releaseMessages(); releaseActive(); releasePublication(); lifetime.abort(); observer?.events.cancel(); await adapter.dispose(); await reading?.catch(() => undefined); await observing; expect(closed).toBe(opened); }
+}, 20_000);
+
 for (const cold of [false, true]) for (const canonical of [false, true]) test(`visible result supersedes its fallback across ${cold ? "cold degradation" : "degraded reconnect"} (${canonical ? "canonical" : "notification"} worker)`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   let unavailable = cold, opened = 0, closed = 0;
@@ -187,7 +337,7 @@ test(`fallback result source authority reconciles ordinary reconnect (${eventOnl
     "GET /api/session/active": () => ({}), "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
   });
   const provider = server.provider(), events = provider.events.bind(provider);
-  provider.events = async function* (signal) { for await (const event of events(signal)) { if (event.eventType === "session.inbox.delivered") delivered(); yield event; } };
+  provider.events = async function* (signal) { for await (const event of events(signal)) { if (event.eventType === "diagnostic.delivery.complete") delivered(); yield event; } };
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: eventOnly ? 10 : 0 });
   const lifetime = new AbortController();
   try {
@@ -202,6 +352,7 @@ test(`fallback result source authority reconciles ordinary reconnect (${eventOnl
         { id: "evt_fallback", created: 41, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } },
         { id: "evt_fallback_repeat", created: 41, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } },
         { ...fixture.delivered, created: 42, data: { sessionID: "ses_parent", inboxID: fixture.pending.id } },
+        { type: "diagnostic.delivery.complete", data: {} },
       ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
       await materialized; await delivery; observer.events.cancel();
     } else expect(initial.items).toContainEqual(expect.objectContaining({ id: "notice:msg_result", message: fixture.stored.text }));

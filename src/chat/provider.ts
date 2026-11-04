@@ -205,9 +205,10 @@ export type WorkerAssociationWatch = {
   snapshot: () => { workerSource: WorkerSourceGuard; contradictedChildren: readonly string[] };
 };
 export type WorkerResultFallback = { resultId: string; childConversationId: string; fallback: Extract<ConversationItem, { type: "notice" }> };
-// Recovery's captured ownership and pending-result evidence, independent of
-// transcript origin coverage. Consumers retain the lease synchronously before
-// the shared recovery transport retires; this never grants Stop authority.
+// Recovery publishes pending text separately, before optional inventory and
+// ownership complete. Each callback has its own source lease, independent of
+// transcript origins. Consumers retain synchronously before transport retires;
+// text callbacks grant no ownership, inventory completeness or Stop authority.
 export type WorkerRecoverySource = { workerSource: WorkerSourceGuard; workerAssociationContradictions: string[]; workerResultFallbacks: WorkerResultFallback[] };
 
 export type ProviderHistoryPage = {

@@ -640,6 +640,10 @@ discarded settled worker results must still disappear rather than return from
 retained state. Separate native-origin evidence preserves visible workers under
 unavailable enrichment without confusing them with committed-away work;
 positively recovered inbox and independently live work keep their own safeguards.
+An enqueued result is not yet a stored result. Successful pending-inbox reads
+preserve its current fallback text even if optional active-worker inventory
+expires; this text grants no inspection or Stop authority. Observed delivery and
+stored-result provenance still govern removal of committed-away results.
 An earlier visible launcher does not preserve a later reverted report. Fresh
 ownership evidence that contradicts the parent or workspace revokes retained
 child inspection and accounting associations; temporary lookup failure alone

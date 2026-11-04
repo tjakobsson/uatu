@@ -73,6 +73,12 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **AND** separate exact raw-native-origin coverage distinguishes committed-away origins from visible workers omitted by optional enrichment; normalized page absence, shared child identity, and projected ordering alone do not authorize deletion or retention
 - **AND** positively recovered inbox work and independently live work retain their existing provenance, uncertainty, and control safeguards
 
+#### Scenario: A pending fallback outlives optional inventory recovery
+- **WHEN** a confined result remains pending in the inbox, required transcript and pending-inbox reads succeed, and optional active-worker recovery expires before delivery
+- **THEN** history and the following subscription retain the current pending fallback text, including authoritative payload updates
+- **AND** enqueue-only materialization does not authorize deletion from stored-history absence; stored/delivered provenance and pending evidence remain distinct
+- **AND** pending text grants no inspection, completeness, activity, or Stop authority, while failed required pending reads still reject recovery without erasing known presentation
+
 #### Scenario: A reverted result was previously a fallback notice
 - **WHEN** unavailable child ownership caused a delivered result to be retained as a fallback notice, and a later native revert hides that result
 - **THEN** authoritative removals include the fallback identity whether ownership remains unavailable or recovers and changes the result's normalized identity

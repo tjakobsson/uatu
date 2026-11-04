@@ -44,6 +44,8 @@ test(`fallback result source authority retires projection provenance on ${action
     projection.rememberWorkerFallbacks([notice], [{ ...relation, fallback: { ...notice, message: "Different report" } }]);
     expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false);
     projection.rememberWorkerFallbacks([notice], [relation]);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false); // Enqueue alone is not a stored origin.
+    projection.rememberFallbackStoredOrigins([{ messageId: relation.resultId }]);
     expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(true);
     expect(projection.workerFallbackOriginAbsent(notice, [{ messageId: relation.resultId }])).toBe(false);
     if (action === "remove") projection.apply({ kind: "remove", itemId: notice.id });
@@ -6365,7 +6367,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     }
   });
 
-  for (const alias of ["call", "result"] as const) for (const coalesceWindowMs of [0, 25]) test(`normalized transient ${alias} alias removal fences older recovery with ${coalesceWindowMs}ms coalescing without discarding independent workers`, async () => {
+  for (const gatedFollowup of [false, true]) for (const alias of ["call", "result"] as const) for (const coalesceWindowMs of [0, 25]) test(`normalized transient ${alias} alias removal fences older recovery with ${coalesceWindowMs}ms coalescing without discarding independent workers${gatedFollowup ? " behind gated follow-up I/O" : ""}`, async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     const occurrence = alias === "call" ? { toolUseId: "same-native-call" } : { resultId: "same-native-result" };
@@ -6376,13 +6378,24 @@ describe("prompt, abort, permission, and question mutations", () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let fresh = false;
+    let holdSession = false, releaseSession!: () => void, sessionEntered!: () => void, followupArmed!: () => void;
+    const sessionGate = new Promise<void>(resolve => { releaseSession = resolve; });
+    const sessionStarted = new Promise<void>(resolve => { sessionEntered = resolve; });
+    const armed = new Promise<void>(resolve => { followupArmed = resolve; });
+    const getSession = provider.getSession.bind(provider);
+    provider.getSession = async id => { if (holdSession) { sessionEntered(); await sessionGate; } return getSession(id); };
     Object.assign(provider, { reconcileBackgroundTasks: async () => { if (++reads !== 1) return fresh ? [canonical, independent] : []; await gate; return [canonical, independent]; } });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs });
     const pump = adapter.startEventPump();
+    let timerSpy: ReturnType<typeof spyOn> | undefined;
+    let listener: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined, publication: Promise<void> | undefined;
     try {
       provider.eventQueue.push({ type: "server.connected", data: {} });
       await waitUntil(() => reads === 1);
       const projection = adapter.projectionForTests("session");
+      listener = await adapter.subscribe("session");
+      publication = (async () => { for await (const event of listener!.events) if (event.type === "item.upsert" && event.item.id === canonical.id) return; throw new Error("Missing fresh canonical recovery"); })();
+      void publication.catch(() => undefined);
       if (coalesceWindowMs) jest.useFakeTimers();
       provider.eventQueue.push({ normalized: { conversationId: "session", eventType: "session.tool.success", outcome: "handled", updates: [{ kind: "upsert", item: placeholder }] } });
       if (!coalesceWindowMs) { await liveEventsApplied(adapter, provider); expect(projection.has(placeholder.id)).toBe(true); }
@@ -6394,17 +6407,38 @@ describe("prompt, abort, permission, and question mutations", () => {
         await flushRecoveryIo();
       } else await liveEventsApplied(adapter, provider);
       expect(projection.has(placeholder.id)).toBe(false);
-      jest.useFakeTimers(); release(); await flushRecoveryIo();
+      jest.useFakeTimers();
+      const schedule = globalThis.setTimeout;
+      timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+        const timer = schedule(callback, ms, ...args);
+        if (ms === 100) followupArmed();
+        return timer;
+      }) as typeof setTimeout);
+      release(); await armed;
       expect(projection.has(canonical.id)).toBe(false);
       expect(projection.get(independent.id)).toMatchObject({ status: "running", toolUseId: "independent-call" });
       // The removal fence belongs only to that read, not a permanent tombstone.
       fresh = true;
-      jest.advanceTimersByTime(100); await flushRecoveryIo();
+      holdSession = gatedFollowup;
+      jest.advanceTimersByTime(99); await flushRecoveryIo();
+      expect(reads).toBe(1); // Fixed deadline, not an eager retry.
+      jest.advanceTimersByTime(1);
+      if (gatedFollowup) {
+        await sessionStarted; await flushRecoveryIo();
+        expect(reads).toBe(1); // Timer fired, but required follow-up I/O has not completed.
+        expect(projection.has(canonical.id)).toBe(false);
+        expect(projection.has(independent.id)).toBe(true);
+        holdSession = false; releaseSession();
+      }
+      await publication; // Observe completion, not a fixed number of filesystem turns.
       expect(reads).toBe(2);
       expect(projection.get(canonical.id)).toMatchObject({ status: "running", ...occurrence });
       expect(provider.prompts).toEqual([]);
       expect(provider.interrupts).toEqual([]);
-    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+    } finally {
+      release(); releaseSession(); listener?.events.cancel(); await adapter.dispose(); await pump;
+      await publication?.catch(() => undefined); timerSpy?.mockRestore(); jest.useRealTimers();
+    }
   });
 
   test("a deleted parent retires its in-flight worker recovery instead of restoring activity", async () => {
