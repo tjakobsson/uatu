@@ -3022,6 +3022,11 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **WHEN** the parent's authoritative transcript or required session read fails, or the caller cancels the read
 - **THEN** Uatu reports a failed or cancelled read rather than presenting a successful empty or incomplete parent transcript
 
+#### Scenario: Saturated ownership capacity cannot make optional accounting progress
+- **WHEN** retained work is reconciled while cancelled but unsettled ownership lookups still occupy every optional lookup slot
+- **THEN** parent history remains readable without repeatedly restarting recovery because its own optional accounting reads confirm an unchanged association
+- **AND** genuine concurrent ownership counterproof still invalidates affected reads, and later reads can recover details after capacity becomes available
+
 #### Scenario: Optional and required readers share a child transcript
 - **WHEN** optional enrichment and a required history reader share a pending child transcript read, and the optional reader's deadline expires first
 - **THEN** the required reader can still receive the healthy transcript within its own read window without a duplicate transport request
@@ -3046,11 +3051,22 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **AND** separate exact raw-native-origin coverage distinguishes committed-away origins from visible workers omitted by optional enrichment; normalized page absence, shared child identity, and projected ordering alone do not authorize deletion or retention
 - **AND** positively recovered inbox work and independently live work retain their existing provenance, uncertainty, and control safeguards
 
+#### Scenario: Foreground metadata survives unavailable child enrichment
+- **WHEN** an exact earlier foreground subagent tool remains visible during undo and its previously verified child enrichment is temporarily unavailable
+- **THEN** replacement and subscription retain the tool's known child inspection identity, model, and accounting rather than treating stripped optional fields as authoritative deletion
+- **AND** hidden origins, changed occurrences, current ownership contradictions, returned-page authority, and newer live metadata keep their existing precedence; retained metadata grants no new Stop authority
+
 #### Scenario: A pending fallback outlives optional inventory recovery
 - **WHEN** a confined result remains pending in the inbox, required transcript and pending-inbox reads succeed, and optional active-worker recovery expires before delivery
 - **THEN** history and the following subscription retain the current pending fallback text, including authoritative payload updates
 - **AND** enqueue-only materialization does not authorize deletion from stored-history absence; stored/delivered provenance and pending evidence remain distinct
 - **AND** pending text grants no inspection, completeness, activity, or Stop authority, while failed required pending reads still reject recovery without erasing known presentation
+
+#### Scenario: Pending delivery changes the fallback presentation clock
+- **WHEN** an exact pending fallback is delivered while disconnected and its stored result has a different timestamp
+- **THEN** a recovered verified worker supersedes the previously recorded exact fallback relation in history and subscription, including removal for existing subscribers
+- **AND** observed stored provenance follows that exact native result so a later committed removal cannot restore the old pending notice
+- **AND** changed or unrelated notice content, result/child mismatches, and concurrent newer changes do not acquire removal authority from timestamp tolerance
 
 #### Scenario: A reverted result was previously a fallback notice
 - **WHEN** unavailable child ownership caused a delivered result to be retained as a fallback notice, and a later native revert hides that result

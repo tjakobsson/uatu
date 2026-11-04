@@ -1040,6 +1040,31 @@ export class ChatAdapter {
       }
       items.splice(0, items.length, ...new Map(retained.map(item => [item.id, item])).values());
     };
+    const nativeToolChildren = new Map<string, string | undefined>();
+    for (const origin of page.workerOriginCoverage ?? []) if (origin.taskType === "agent" && origin.toolUseId) {
+      const key = `tool:${origin.toolUseId}`;
+      // A reused native call across visible origins is not exact association proof.
+      nativeToolChildren.set(key, nativeToolChildren.has(key) ? undefined : origin.childConversationId);
+    }
+    const retainToolAssociation = (item: ToolItem, projection: ConversationProjection): ToolItem => {
+      if (item.childConversationId || !coverage || !this.provider.watchWorkerAssociations || coverage.changed(item.id)) return item;
+      const prior = projection.get(item.id);
+      if (prior?.type !== "tool" || !prior.childConversationId) return item;
+      if (!nativeToolChildren.has(item.id)) return item;
+      if (revokedChildren.has(prior.childConversationId) || nativeToolChildren.get(item.id) !== prior.childConversationId
+        || item.name !== prior.name || item.createdAt !== prior.createdAt || item.input !== prior.input
+        || item.status === "completed" && prior.status === "completed" && item.completedAt !== prior.completedAt) {
+        // Ordinary sparse upserts must not move the old association onto a
+        // changed occurrence that a later replacement could mistake for proof.
+        revokedRows.add(item.id);
+        return item;
+      }
+      if (prior.name !== "subagent" || item.status !== "completed" || prior.status !== item.status) return item;
+      // A current native occurrence plus its previously verified association
+      // preserves inspection identity during optional enrichment loss. Raw
+      // origins alone admit neither a new association nor control authority.
+      return { ...item, childConversationId: prior.childConversationId };
+    };
     const reconcileRetainedAccounting = (projection: ConversationProjection) => {
       const contradicted = new Map((coverage?.cachedAssociations ?? []).map(evidence => [evidence.parentId, new Set(evidence.childIds)]));
       const hasCounterproof = [...contradicted.values()].some(children => children.size);
@@ -1302,7 +1327,12 @@ export class ChatAdapter {
     }
     reconcileWorkerSource();
     for (const child of revokedChildren) this.revokeChildAttribution(id, child);
-    await this.attributeLaunchers(id, items, page.completeItems, coverage?.signal, page.workerSource ? coverage?.workerSources : undefined, coverage?.refreshAttribution);
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index]!;
+      if (item.type === "tool") items[index] = retainToolAssociation(item, sourceProjection);
+    }
+    const accountingItems = page.completeItems?.map(item => item.type === "tool" ? retainToolAssociation(item, sourceProjection) : item);
+    await this.attributeLaunchers(id, items, accountingItems, coverage?.signal, page.workerSource ? coverage?.workerSources : undefined, coverage?.refreshAttribution);
     coverage?.assertCurrent();
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
@@ -1495,10 +1525,11 @@ export class ChatAdapter {
       for (const { resultId, childConversationId, fallback } of fallbackRelations) {
         if (coverage?.changed(fallback.id) || !items.some(item => item.type === "background_task" && item.taskType === "agent"
           && !item.stateUncertain && item.resultId === resultId && item.childConversationId === childConversationId)) continue;
-        const index = items.findIndex(item => item.id === fallback.id && sameConversationItems([item], [fallback]));
+        const relation = { resultId, childConversationId, fallback };
+        const index = items.findIndex(item => item.id === fallback.id && projection.matchesWorkerFallback(item, relation));
         if (index >= 0) items.splice(index, 1);
         const current = projection.get(fallback.id);
-        if (current && sameConversationItems([current], [fallback])) projection.apply({ kind: "remove", itemId: fallback.id });
+        if (current && projection.matchesWorkerFallback(current, relation)) projection.apply({ kind: "remove", itemId: fallback.id });
       }
       const replace = coverage?.replacement && (reversibleHistory && !sameReversibleHistory(previousReversibleHistory, reversibleHistory)
         || !sameConversationItems(projection.items(), items));
@@ -5492,15 +5523,30 @@ export class ConversationProjection {
       && !source.some(origin => !origin.toolUseId && origin.messageId === prior.resultId);
   }
 
+  matchesWorkerFallback(item: ConversationItem, relation: WorkerResultFallback): boolean {
+    if (sameConversationItems([item], [relation.fallback])) return true;
+    const prior = this.workerFallbacks.get(item.id);
+    // Only the exact materialized native relation can bridge enqueue/storage
+    // clocks. Changed content and arbitrary notice-shaped ids cannot borrow it.
+    return !!prior && prior.resultId === relation.resultId && prior.childConversationId === relation.childConversationId
+      && sameConversationItems([item], [prior.fallback])
+      && sameConversationItems([{ ...prior.fallback, createdAt: relation.fallback.createdAt }], [relation.fallback]);
+  }
+
   rememberWorkerFallbacks(items: ConversationItem[], relations: readonly WorkerResultFallback[], changed?: (id: string) => boolean, storedOrigins?: ProviderHistoryPage["workerOriginCoverage"]): void {
     const candidates = new Map(items.map(item => [item.id, item]));
     for (const relation of relations) {
+      const current = this.get(relation.fallback.id), prior = this.workerFallbacks.get(relation.fallback.id);
+      const storedOrigin = storedOrigins?.some(origin => !origin.toolUseId && origin.messageId === relation.resultId
+        && origin.childConversationId === relation.childConversationId);
+      // Delivery can be learned from storage even when its new normalized
+      // presentation is a worker, not the retained enqueue-time notice.
+      if (prior && current && !changed?.(current.id) && storedOrigin && this.matchesWorkerFallback(current, relation)) prior.stored = true;
       const item = candidates.get(relation.fallback.id);
       if (item && !changed?.(item.id) && sameConversationItems([item], [relation.fallback])) {
-        const prior = this.workerFallbacks.get(item.id);
         const stored = !!prior?.stored && prior.resultId === relation.resultId && prior.childConversationId === relation.childConversationId
           && sameConversationItems([prior.fallback], [relation.fallback])
-          || !!storedOrigins?.some(origin => !origin.toolUseId && origin.messageId === relation.resultId);
+          || !!storedOrigin;
         this.workerFallbacks.set(item.id, { ...relation, stored });
       }
     }

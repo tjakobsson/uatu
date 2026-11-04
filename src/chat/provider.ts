@@ -198,6 +198,8 @@ export type WorkerSourceGuard = { isCurrent: () => boolean; retain: (signal: Abo
 // A snapshot contains only scoped counterproof, never ownership admission.
 // Successive snapshots belong to the same bounded owner, so a failed transport
 // cannot erase its already-observed counterproof on the next read attempt.
+// An actual confirmation observed by this owner may seed a later attempt's
+// invalidation baseline at the same revision/generation, never worker admission.
 export type WorkerAssociationWatch = {
   // Extend before publication. Existing candidates and counterproof keep their
   // revisions; adding a retained relation supplies no ownership authority.

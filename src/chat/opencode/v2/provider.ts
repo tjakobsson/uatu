@@ -59,7 +59,8 @@ type ControlBasis = { basis: WorkerOccurrenceEvidence; revision: number };
 type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis> };
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, string>; pendingFingerprint?: string; pendingIds?: readonly string[] };
+type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[] };
 
 export function createOpenCodeV2Provider(options: {
   endpoint: string;
@@ -1239,7 +1240,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private beginWorkerSourceRead(parent: string, caller?: AbortSignal, isCurrent: () => boolean = () => true, pendingText = false) {
-    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, string>(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
+    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
     const deadline = AbortSignal.any([this.readLifetime.signal, AbortSignal.timeout(25_000)]);
     const initialOwner = new AbortController();
     const initialSignal = AbortSignal.any([deadline, initialOwner.signal, ...(caller ? [caller] : [])]);
@@ -1264,11 +1265,12 @@ export class OpenCodeV2Provider implements ChatProvider {
       // consumer allocates a lease; retries do not accumulate owner leases.
       snapshot: () => ({ workerSource: view(initialSignal, source.revision), contradictedChildren: contradictions() }),
       retainAssociations: (children: readonly string[]) => {
+        source.associationObservations ??= new Map();
         const added: string[] = [];
         for (const child of children) if (child.length <= 512 && !source.states.has(child)) { source.states.set(child, "retained"); added.push(child); }
         return added;
       },
-      observe: (child: string, state: string) => { if (source.states.has(child)) this.observeHistoryWorkerSource(source, child, state); },
+      observe: (child: string, state: WorkerAssociationState) => { if (source.states.has(child)) this.observeHistoryWorkerSource(source, child, state); },
       capturePending: (fallbacks: WorkerResultFallback[]) => {
         const fingerprint = createHash("sha256").update(JSON.stringify(fallbacks)).digest("hex");
         if (source.revision === 0) for (const other of this.historyWorkerSources) {
@@ -1289,12 +1291,23 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private trackHistoryWorkerCandidates(parent: string, children: Iterable<string>): void {
+    // A surviving read-owned watch may already have observed authoritative
+    // confirmation during an earlier attempt's accounting. Carry only that
+    // invalidation baseline into the retry, not retained presentation or
+    // ownership/control authority. Repeating the same lookup must not create
+    // a fresh pending -> confirmed change on every capacity-limited attempt.
+    const observed = new Set<string>();
+    for (const source of this.historyWorkerSources) if (source.parent === parent) {
+      for (const [child, observation] of source.associationObservations ?? []) {
+        if (observation.revision === source.revision && observation.generation === this.streamGeneration) observed.add(child);
+      }
+    }
     for (const source of this.historyWorkerSources) if (source.parent === parent && source.phase === "collecting") {
-      for (const child of children) if (child.length <= 512 && !source.states.has(child)) source.states.set(child, "pending");
+      for (const child of children) if (child.length <= 512 && !source.states.has(child)) source.states.set(child, observed.has(child) ? "confirmed" : "pending");
     }
   }
 
-  private observeHistoryWorkerSource(source: HistoryWorkerSource, child: string, state: string): void {
+  private observeHistoryWorkerSource(source: HistoryWorkerSource, child: string, state: WorkerAssociationState): void {
     const previous = source.states.get(child);
     // During collection the first proof fills an unknown slot. After capture,
     // even an unavailable slot is part of the page's frozen assumptions: new
@@ -1302,6 +1315,10 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (previous !== undefined && previous !== state && !(previous === "retained" && state === "confirmed")
       && (source.phase === "captured" || previous !== "pending")) source.revision++;
     source.states.set(child, state);
+    if (source.associationObservations) {
+      if (state === "confirmed") source.associationObservations.set(child, { revision: source.revision, generation: this.streamGeneration });
+      else source.associationObservations.delete(child);
+    }
   }
 
   private async verifiedChild(child: string, parent: string, signal: AbortSignal, contradicted?: (actualParent?: string) => void): Promise<boolean> {

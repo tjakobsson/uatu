@@ -253,6 +253,234 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
   } finally { releaseMessages(); releaseActive(); releasePublication(); lifetime.abort(); observer?.events.cancel(); await adapter.dispose(); await reading?.catch(() => undefined); await observing; expect(closed).toBe(opened); }
 }, 20_000);
 
+for (const scenario of ["timestamp-transition", "same-timestamp", "ownership-unavailable", "paged-stored", "changed-text", "changed-child", "ordinary-notice"] as const)
+test(`pending fallback delivery reconciles exact native provenance (${scenario})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const pending = structuredClone(fixture.pending);
+  if (scenario === "same-timestamp") pending.time.created = fixture.stored.time.created;
+  if (scenario === "changed-text") pending.payload.text = pending.payload.text.replace("Fixture checked.", "A newer pending report.");
+  const otherPending = { ...pending, id: "msg_other_pending", time: { created: 44 } };
+  const stored = structuredClone(fixture.stored);
+  if (scenario === "changed-child") { stored.metadata.childID = "ses_other_child"; stored.text = stored.text.replaceAll("ses_child", "ses_other_child"); }
+  const note = { id: "msg_note", type: "synthetic", text: "Unrelated native note", time: { created: 1 } };
+  const unmatched = { ...fixture.stored, id: "msg_unmatched", metadata: { ...fixture.stored.metadata, childID: "ses_unverified" },
+    text: fixture.stored.text.replaceAll("ses_child", "ses_unverified") };
+  let delivered = false, committed = false, unavailable = true, opened = 0, closed = 0;
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_child": () => unavailable ? new Response(null, { status: 503 }) : session("ses_child", { parentID: "ses_parent" }),
+    "GET /api/session/ses_other_child": () => session("ses_other_child", { parentID: "ses_parent" }),
+    "GET /api/session/ses_unverified": () => new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => ({ data: [note, unmatched, ...(delivered && !committed ? [stored, ...(scenario === "paged-stored" ? [{ id: "msg_later", type: "user", text: "Later turn", time: { created: 70 } }] : [])]
+      : !delivered && scenario === "ordinary-notice" ? [{ id: pending.id, type: "synthetic", text: pending.payload.text, time: pending.time }] : [])], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_other_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: delivered ? [] : [...(scenario === "ordinary-notice" ? [] : [pending]), otherPending] }),
+    "GET /api/session/active": () => scenario === "paged-stored" && delivered ? new Response(null, { status: 503 }) : ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+  });
+  const provider = server.provider(), adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const lifetime = new AbortController();
+  const reports = (items: import("../../types").ConversationItem[]) => items.filter(item => item.id === "notice:msg_result" || item.type === "background_task" && item.resultId === "msg_result");
+  if (scenario === "paged-stored") {
+    const list = provider.listMessages.bind(provider);
+    // Reconnect's automatic reader uses the same real one-message pages as
+    // navigation, so it cannot independently materialize the stored notice.
+    provider.listMessages = (id, options) => list(id, { ...options, ...(delivered ? { limit: 1 } : {}) });
+  }
+  try {
+    const initial = await adapter.history("ses_parent");
+    expect(reports(initial.items)).toEqual([expect.objectContaining({ type: "notice", createdAt: pending.time.created, message: pending.payload.text })]);
+    const listener = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
+    await adapter.stopEventPump();
+    // Native delivery occurs while disconnected: enqueue and stored records
+    // deliberately differ by the real fixture's 41 -> 42 creation clock.
+    delivered = true; unavailable = scenario === "ownership-unavailable" || scenario === "paged-stored";
+    const history = await adapter.history("ses_parent", scenario === "paged-stored" ? { limit: 1 } : {});
+    const next = await adapter.subscribe("ses_parent", { signal: lifetime.signal }); next.events.cancel();
+    expect(next.snapshot.items).toContainEqual(expect.objectContaining({ id: "notice:msg_other_pending", message: otherPending.payload.text }));
+    for (const snapshot of [next.snapshot, ...(scenario === "paged-stored" ? [] : [history])]) {
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ id: "notice:msg_note", message: note.text }));
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ id: "notice:msg_unmatched", message: unmatched.text }));
+    }
+    // Observe committed-away raw storage without ever observing its staged
+    // boundary. Stored provenance, not ordinary page absence, must remove it.
+    await adapter.stopEventPump(); committed = true;
+    const removed = await adapter.history("ses_parent");
+    const after = await adapter.subscribe("ses_parent", { signal: lifetime.signal }); after.events.cancel();
+    for (const itemId of ["notice:msg_note", "notice:msg_unmatched", "notice:msg_other_pending"])
+      expect(after.snapshot.items.some(item => item.id === itemId)).toBe(true);
+    listener.events.cancel(); const publications = []; for await (const event of listener.events) publications.push(event);
+    const ids = (items: import("../../types").ConversationItem[]) => reports(items).map(item => item.id);
+    const workerId = "task:v2:ses_parent:notification:msg_result";
+    const changed = scenario === "changed-text" || scenario === "changed-child" || scenario === "ordinary-notice";
+    const visible = unavailable ? ["notice:msg_result"] : changed ? ["notice:msg_result", workerId] : [workerId];
+    // Keep all handoff/removal symptoms in one verdict so an early duplicate
+    // does not hide the later ghost left behind after committed removal.
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    expect({ history: ids(history.items).sort(), subscription: ids(next.snapshot.items).sort(),
+      committedHistory: ids(removed.items), committedSubscription: ids(after.snapshot.items),
+      notifiedRemoval: publications.some(event => event.type === "item.remove" && event.itemId === "notice:msg_result") }).toEqual({
+      history: scenario === "paged-stored" ? [] : unavailable ? ["notice:msg_result"] : [workerId], subscription: [...visible].sort(),
+      committedHistory: [], committedSubscription: changed ? ["notice:msg_result"] : [],
+      notifiedRemoval: !changed,
+    });
+  } finally { lifetime.abort(); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
+for (const cancel of [false, true]) test(`fallback supersession preserves a newer native notice (cancel=${cancel})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const owner = new AsyncLocalStorage<boolean>();
+  let delivered = false, held = false, opened = 0, closed = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, entered!: () => void, release!: () => void, applied!: () => void;
+  const captured = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const eventApplied = new Promise<void>(resolve => { applied = resolve; });
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_child": () => delivered ? session("ses_child", { parentID: "ses_parent" }) : new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => ({ data: delivered ? [fixture.stored] : [], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: delivered ? [] : [fixture.pending] }),
+    "GET /api/session/active": () => ({}), "GET /api/permission/request": () => scoped([]),
+    "GET /api/form": async () => { if (delivered && owner.getStore() && !held) { held = true; entered(); await gate; } return scoped([]); },
+  });
+  const provider = server.provider(), events = provider.events.bind(provider);
+  provider.events = async function* (signal) { for await (const event of events(signal)) { if (event.eventType === "diagnostic.fallback.complete") applied(); yield event; } };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  try {
+    expect((await adapter.history("ses_parent")).items).toContainEqual(expect.objectContaining({ id: "notice:msg_result", createdAt: 41 }));
+    await adapter.stopEventPump(); delivered = true;
+    const listener = await adapter.subscribe("ses_parent");
+    reading = owner.run(true, () => adapter.history("ses_parent")); void reading.catch(() => undefined);
+    await captured;
+    const text = "A newer unrelated native notice";
+    for (const event of [
+      { id: "evt_new_notice", created: 50, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: "msg_result", item: { id: "msg_result", type: "synthetic", time: { created: 50 }, payload: { text } } } },
+      { type: "diagnostic.fallback.complete", data: {} },
+    ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await eventApplied;
+    if (cancel) await adapter.stopEventPump();
+    release();
+    if (cancel) await expect(reading).rejects.toThrow("Inbox recovery unavailable");
+    else expect((await reading).items).toContainEqual(expect.objectContaining({ id: "notice:msg_result", message: text, createdAt: 50 }));
+    const next = await adapter.subscribe("ses_parent"); next.events.cancel();
+    expect(next.snapshot.items).toContainEqual(expect.objectContaining({ id: "notice:msg_result", message: text, createdAt: 50 }));
+    listener.events.cancel(); const publications = []; for await (const event of listener.events) publications.push(event);
+    expect(publications).not.toContainEqual(expect.objectContaining({ type: "item.remove", itemId: "notice:msg_result" }));
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { release(); await reading?.catch(() => undefined); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
+for (const outcome of ["unavailable", "healthy", "foreign-parent", "foreign-workspace", "hidden-origin", "changed-occurrence", "changed-child", "changed-input", "ambiguous-origin", "returned-new", "cancel", "new-live", "late-foreign-parent", "late-foreign-workspace"] as const)
+test(`foreground undo retains only the exact available association (${outcome})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = structuredClone(fixture.launch), tool = launch.content[0];
+  tool.state.input.background = false; tool.state.metadata = { sessionID: "ses_child", status: "completed" };
+  tool.state.content = [{ type: "text", text: "Foreground fixture checked." }];
+  const prompt = (id: string, created: number) => ({ id, type: "user", text: id, time: { created } });
+  let changed = false, boundary: string | undefined, opened = 0, closed = 0, held = false, lateForeign = false;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, entered!: () => void, release!: () => void, applied!: () => void;
+  const owner = new AsyncLocalStorage<boolean>(), captured = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; }), eventApplied = new Promise<void>(resolve => { applied = resolve; });
+  const gated = outcome === "cancel" || outcome === "new-live" || outcome.startsWith("late-");
+  const unavailable = () => changed && (outcome === "unavailable" || outcome.startsWith("changed-") || outcome === "ambiguous-origin" || outcome === "hidden-origin" || gated && !lateForeign);
+  const returned = outcome.startsWith("returned-");
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", boundary ? { revert: { messageID: boundary } } : {}),
+    "GET /api/session/ses_child": () => unavailable() ? new Response(null, { status: 503 }) : session("ses_child", {
+      parentID: changed && (outcome === "foreign-parent" || lateForeign && outcome === "late-foreign-parent") ? "ses_other" : "ses_parent",
+      cost: changed && returned ? 0.25 : 0.125,
+      ...(changed && (outcome === "foreign-workspace" || lateForeign && outcome === "late-foreign-workspace") ? { location: { directory: "/foreign" } } : {}),
+    }),
+    "GET /api/session/ses_other_child": () => new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => {
+      const reused = structuredClone(launch); reused.id = "msg_reused_launch"; reused.content[0].state.metadata.sessionID = "ses_other_child";
+      return { data: [prompt("msg_first", 1), ...(outcome === "hidden-origin" ? [prompt("msg_later", 10), launch] : [launch,
+        ...(changed && outcome === "ambiguous-origin" ? [reused] : []), prompt("msg_later", 70)])], cursor: {} };
+    },
+    "GET /api/session/ses_child/message": () => ({ data: [{ id: "msg_priced", type: "assistant", time: { created: 25 }, model: { id: changed && returned ? "new-model" : "fixture-model" }, cost: changed && returned ? 0.25 : 0.125, content: [] }], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": async () => {
+      if (changed && gated && owner.getStore() && !held) { held = true; entered(); await gate; }
+      return scoped([]);
+    },
+    "POST /api/session/ses_parent/revert/stage": ({ body }) => { boundary = (body as { messageID: string }).messageID; return { messageID: boundary }; },
+  });
+  const provider = server.provider(), events = provider.events.bind(provider);
+  provider.events = async function* (signal) { for await (const event of events(signal)) { if (event.eventType === "diagnostic.foreground.complete") applied(); yield event; } };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const now = Date.now(); let elapsed = 0;
+  const clock = returned ? spyOn(Date, "now").mockImplementation(() => now + elapsed) : undefined;
+  let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
+  try {
+    const first = await adapter.history("ses_parent");
+    const prior = first.items.find(item => item.id === "tool:call_worker");
+    expect(prior).toMatchObject({ type: "tool", status: "completed", childConversationId: "ses_child", workerSession: { costUsd: 0.125 }, model: "fixture-model", usage: { costUsd: 0.125 } });
+    await adapter.stopEventPump(); changed = true;
+    if (returned) elapsed = 31_000; // Expire completeness without changing its budget.
+    if (outcome === "changed-occurrence") { tool.time.created = 21; launch.time.created = 21; }
+    if (outcome === "changed-child") tool.state.metadata.sessionID = "ses_other_child";
+    if (outcome === "changed-input") tool.state.input.prompt = "A distinct foreground invocation";
+    void adapter.startEventPump();
+    if (unavailable() && outcome !== "hidden-origin") {
+      // Observe the real degraded provider page before replacement. No test
+      // fabricates a sparse tool or reaches into provider/adapter caches.
+      const sparse = await provider.listMessages("ses_parent", { limit: 100 });
+      expect(sparse.items.find(item => item.id === "tool:call_worker")).not.toHaveProperty("childConversationId");
+    }
+    const reads = server.requests("GET", "/api/session/ses_child").length;
+    mutation = owner.run(true, () => adapter.undo("ses_parent", "foreground-association"));
+    if (gated) {
+      await captured;
+      if (outcome === "cancel" || outcome === "new-live") {
+        tool.state.content = [{ type: "text", text: "Newer live foreground report." }];
+        for (const event of [
+          { id: "evt_foreground", created: 90, type: "session.message.content.updated", durable: { aggregateID: "ses_parent", seq: 1, version: 1 }, data: { sessionID: "ses_parent", messageID: launch.id, content: launch.content } },
+          { type: "diagnostic.foreground.complete", data: {} },
+        ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+        await eventApplied;
+        if (outcome === "cancel") await adapter.stopEventPump();
+      } else { lateForeign = true; await provider.getSession("ses_child"); }
+      release();
+    }
+    expect(await mutation).toMatchObject({ outcome: "changed", state: { staged: true } });
+    if (outcome !== "changed-child") expect(server.requests("GET", "/api/session/ses_child").length).toBeGreaterThan(reads);
+    const next = await adapter.subscribe("ses_parent"); next.events.cancel();
+    expect(next.snapshot.items.some(item => item.id === "message:msg_later")).toBe(outcome === "cancel");
+    expect(next.snapshot.items.some(item => item.type === "background_task")).toBe(false);
+    expect(server.calls.filter(call => call.method !== "GET").map(call => [call.method, call.path, call.body])).toEqual([
+      ["POST", "/api/session/ses_parent/revert/stage", { messageID: "msg_later" }],
+    ]);
+    const row = next.snapshot.items.find(item => item.id === "tool:call_worker");
+    if (outcome === "changed-occurrence") expect(row).toMatchObject({ createdAt: 21 });
+    if (outcome === "hidden-origin") expect(row).toBeUndefined();
+    else {
+      expect(row).toMatchObject({ type: "tool", status: "completed", output: outcome === "new-live" || outcome === "cancel" ? "Newer live foreground report." : "Foreground fixture checked." });
+      if (outcome === "unavailable" || outcome === "healthy") expect(row).toMatchObject({ childConversationId: "ses_child", workerSession: { costUsd: 0.125 }, model: "fixture-model", usage: { costUsd: 0.125 } });
+      else if (outcome === "returned-new") expect(row).toMatchObject({ childConversationId: "ses_child", workerSession: { costUsd: 0.25 }, model: "new-model", usage: { costUsd: 0.25 } });
+      else if (outcome !== "new-live" && outcome !== "cancel") {
+        expect(row).not.toHaveProperty("childConversationId"); expect(row).not.toHaveProperty("workerSession"); expect(row).not.toHaveProperty("model"); expect(row).not.toHaveProperty("usage");
+      }
+    }
+  } finally { release(); await mutation?.catch(() => undefined); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
 for (const cold of [false, true]) for (const canonical of [false, true]) test(`visible result supersedes its fallback across ${cold ? "cold degradation" : "degraded reconnect"} (${canonical ? "canonical" : "notification"} worker)`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   let unavailable = cold, opened = 0, closed = 0;

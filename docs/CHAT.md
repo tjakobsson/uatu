@@ -635,6 +635,9 @@ Undo's replacement snapshot follows the same rule: temporary child enrichment
 failure alone does not discard an earlier visible settled worker, its known
 accounting, or inspection identity. Explicitly hidden native origins still remove
 reverted work, and retained presentation never renews Stop authority.
+The same protection applies to an exact visible foreground subagent tool's
+known inspection, model, and accounting when optional child fields disappear.
+Changed occurrences and current ownership contradictions still revoke them.
 If another client commits the revert before Uatu sees its staged boundary,
 discarded settled worker results must still disappear rather than return from
 retained state. Separate native-origin evidence preserves visible workers under
@@ -655,9 +658,14 @@ For a visible result, a retained or recovered verified worker also supersedes
 the same native result's fallback notice in history and subscription snapshots;
 existing subscribers receive the notice removal. Without a matching verified
 worker, the fallback remains readable. Unrelated notices and results are retained.
+Disconnected delivery can change the stored timestamp without creating a new
+native result. Supersession follows the recorded exact fallback relation, while
+changed content, mismatched result/child identities, and newer updates stay protected.
 Child cost/model reconstruction also has a bounded optional-read window.
 Unavailable accounting keeps its known values without inventing zero or
 completeness, and a later read can retry rather than blocking parent history.
+Saturated ownership lookups must not let optional accounting repeatedly restart
+its own parent recovery; genuine ownership counterproof still invalidates stale reads.
 Shared transcript reads keep each caller's cancellation window separate: an
 optional enrichment deadline cannot cancel a required reader still waiting on
 the same transport. The transport is cancelled when no reader remains.
