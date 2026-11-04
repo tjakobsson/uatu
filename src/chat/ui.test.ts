@@ -16,20 +16,16 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       const child = Bun.spawn({
         cmd: [process.execPath, "test", import.meta.path],
         env: { ...process.env, [CHILD_PROCESS_FLAG]: "1" },
-        stdout: "pipe",
-        stderr: "pipe",
+        // Keep child progress visible if its aggregate deadline expires on a
+        // contended runner; buffered output hid which inner test was running.
+        stdout: "inherit",
+        stderr: "inherit",
       });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
-      // The child runs this whole file, including a case that waits on the
-      // surface's one-second clock and two that wait out the output view's
-      // four-second retry; the default five seconds leaves it no room, and a
-      // timeout here reports as the wrong test failing.
-    }, 60_000);
+      expect(await child.exited).toBe(0);
+      // This deadline covers all 186 inner tests, including real one-second
+      // clocks and four-second retries. Main already takes 46 s on CI; four
+      // concurrent unit workers can exceed 60 s. Inner deadlines stay intact.
+    }, 120_000);
   });
 } else {
 describe("chat reversible-history composer", () => {

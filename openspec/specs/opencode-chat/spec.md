@@ -687,6 +687,8 @@ When a subagent-owned request appears outside its owning transcript, the request
 
 Only the active unresolved request of a given conversation MAY accept a response. Where requests from more than one conversation are shown together, they SHALL each be governed by the conversation that owns them, so a request awaiting a user in one conversation does not block answering a request owned by another.
 
+Pending permissions of the same owning conversation SHALL be answered in FIFO order, matching OpenCode's pending queue. A new permission SHALL NOT displace the permission already awaiting an answer. Recovery SHALL preserve OpenCode's pending-list order, including when timestamps are equal or a missed request precedes an already observed one. Request ids and transcript timestamps MUST NOT override this queue order. The surface, request shortcut, and server response validation SHALL agree on the answerable permission. Pending permissions SHALL take precedence over structured questions of the same owner, as in OpenCode; questions retain their existing ordering when no permission is pending.
+
 A request's state SHALL be distinguishable without reading its body — whether it awaits the user now, awaits its turn behind another request of the same conversation, or is resolved. That distinction MUST NOT rely on colour alone. A request awaiting its turn MUST NOT be presented as obsolete, superseded, or otherwise not needing an answer, because it will require one.
 
 The surface SHALL report how many requests are outstanding across everything it is showing, and SHALL offer a way to reach an outstanding request without hunting for it. That report, and any other control the surface floats over the conversation, MUST NOT cover a request's own answer field or its submit and cancel controls; the conversation SHALL reserve room for them so an outstanding request shown at the end of the transcript stays fully operable. The report SHALL NOT be shown while a request it would lead to is already on screen; when it is shown, its count remains that of every outstanding request.
@@ -703,6 +705,19 @@ A pending request SHALL remain discoverable and answerable even when the server 
 - **WHEN** OpenCode requests permission for a command and the user chooses one-time approval
 - **THEN** the response is sent once to the matching pending request
 - **AND** the card records that the request was approved for that occurrence
+
+#### Scenario: New permissions wait behind the current permission
+- **WHEN** multiple permissions are pending in one owning conversation
+- **THEN** the first permission in OpenCode's queue is answerable and later permissions await their turn
+- **AND** new arrivals do not displace it
+- **AND** answering it makes the next pending permission answerable
+- **AND** each reply retains the matching request id and owning conversation
+
+#### Scenario: Permission recovery preserves queue order
+- **WHEN** Uatu recovers pending permissions after missing live announcements
+- **THEN** their answerable order matches OpenCode's pending list, even with equal timestamps or ids sorting differently
+- **AND** a recovered earlier request precedes a later request already observed live
+- **AND** the owning transcript, mirrored parent card, request shortcut, and server validation agree on which request can be answered
 
 #### Scenario: An edit permission shows its diff before approval
 - **WHEN** a pending permission would change a file

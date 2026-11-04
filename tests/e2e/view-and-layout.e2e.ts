@@ -208,7 +208,10 @@ test("A document the server cannot read shows the permission notice once and loa
     await expect.poll(async () => {
       const state: StatePayload = await page.request.get("/api/state").then(response => response.json());
       const indexedDocument = state.roots.flatMap(root => root.docs).find(doc => doc.id === filePath);
-      if (indexedDocument?.mtimeMs !== setupMtime.getTime()) return false;
+      // Filesystems can round utimes' millisecond target slightly. A 2 ms
+      // tolerance still distinguishes this update from the prior time, 1 s
+      // earlier, without waiting forever on a fractional timestamp mismatch.
+      if (!indexedDocument || Math.abs(indexedDocument.mtimeMs - setupMtime.getTime()) >= 2) return false;
       return page.evaluate(
         generatedAt => Number(document.body.dataset.stateGeneratedAt ?? 0) >= generatedAt,
         state.generatedAt,

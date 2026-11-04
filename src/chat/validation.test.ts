@@ -155,6 +155,14 @@ describe("chat domain validation", () => {
     expect(parseQueuedMessages([entry])).toEqual([entry]);
     for (const unconfirmed of [false, "true", null]) expect(() => parseQueuedMessages([{ ...entry, unconfirmed }])).toThrow();
   });
+  test("permission queue positions accept finite nonnegative numbers", () => {
+    const permission = items[6];
+    expect(parseConversationItem({ ...permission, queueOrder: 1.5 })).toBeDefined();
+    for (const queueOrder of [-1, NaN, Infinity, "1", null]) {
+      expect(() => parseConversationItem({ ...permission, queueOrder })).toThrow(/queue order/);
+    }
+  });
+
   test("a permission's future-approval patterns are optional strings", () => {
     const permission = items[6];
     // Present: the agent's own pattern beside the request's resource.

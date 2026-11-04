@@ -445,6 +445,9 @@ export type PermissionChoice = {
 export type PermissionRequest = TimelineItemBase & {
   type: "permission";
   requestId: string;
+  // Adapter-generation queue position, independent of transcript timestamps.
+  // Smaller positions are answered first within the owning conversation.
+  queueOrder?: number;
   // The conversation that owns this request — its own, except when a subagent's
   // request is shown in the conversation that launched it. Answers are always
   // addressed here, so one `requirePending` guard and one receipt key govern

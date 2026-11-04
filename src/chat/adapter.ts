@@ -11,6 +11,7 @@ import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHisto
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
+import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
 import { isLiveConversationStatus } from "./types";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
@@ -509,6 +510,7 @@ export class ChatAdapter {
   private readonly replayBytes: number;
   private readonly id: () => string;
   private readonly projections = new Map<string, ConversationProjection>();
+  private readonly permissionQueueOrder = new PermissionQueueOrder();
   private readonly receipts: IdempotencyReceipts;
   // Question item ids currently published per conversation, so a question that
   // stops being pending can be withdrawn from the timeline.
@@ -1382,8 +1384,7 @@ export class ChatAdapter {
           if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id) || coverage?.changed(existing.id)) continue;
           if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
           projection.apply({ kind: "remove", itemId: existing.id });
-          this.permissionCreatedAt.delete(existing.id);
-          this.resolveAnnounced(existing.id);
+          this.retireRecoveredPermission(existing, id);
         }
       }
     } catch {
@@ -1534,6 +1535,13 @@ export class ChatAdapter {
       }
       if (!replace && (removed || visibilityChanged)) projection.replay.publish({ type: "resync", reason: "conversation-rewritten" });
     } else projection.seed(items);
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index]!;
+      this.syncRecoveredPermission(item);
+      // Another read may have corrected the shared order while this read
+      // awaited parentage. Return the same canonical metadata as the guard.
+      if (item.type === "permission") items[index] = projection.get(item.id) ?? item;
+    }
     if (this.provider.reconcileBackgroundTasks) this.syncBackgroundState(id);
     // A reopened conversation whose agent still holds live work is in the
     // background state, not idle: the list and the status must agree.
@@ -4831,7 +4839,8 @@ export class ChatAdapter {
               || fence.changed(known.id)
               || (this.announced.get(known.id)?.tick ?? 0) > interactionTick) continue;
             projection.apply({ kind: "remove", itemId: known.id });
-            this.resolveAnnounced(known.id);
+            if (known.type === "permission") this.retireRecoveredPermission(known, id);
+            else this.resolveAnnounced(known.id);
           }
           for (const item of result.value) {
             if (fence.changed(item.id)) continue;
@@ -4839,6 +4848,7 @@ export class ChatAdapter {
               this.announced.set(item.id, { owner: item.conversationId ?? id, destination: id, tick: ++this.interactionClock });
             }
             projection.apply({ kind: "upsert", item });
+            this.syncRecoveredPermission(item);
           }
         }
         this.syncBackgroundState(id);
@@ -4897,7 +4907,23 @@ export class ChatAdapter {
   /** Throws on provider failure — an errored list is unknown, not empty. */
   private async pendingPermissions(id: string): Promise<ConversationItem[]> {
     if (!this.provider.listPermissions) return [];
+    const startedAt = this.permissionQueueOrder.beginRead();
     const pending = await this.provider.listPermissions();
+    // A child-only refresh also needs its verified parent destination. Cache
+    // that metadata before the accepted recovery is published synchronously.
+    if (pending.some(request => request.conversationId === id)) await this.parentOf(id).catch(() => null);
+    const ids = pending.map(request => `permission:${request.requestId}`);
+    this.permissionQueueOrder.reconcile(ids, startedAt);
+    const listed = new Set(ids);
+    // The same request can be held by its owner and its parent. Publish order
+    // corrections to both before either surface can offer a different head.
+    for (const projection of this.projections.values()) {
+      for (const item of projection.filter(item => item.type === "permission" && item.status === "pending" && listed.has(item.id))) {
+        if (item.type !== "permission") continue;
+        const ordered = this.permissionQueueOrder.observe(item);
+        if (ordered.queueOrder !== item.queueOrder) projection.upsert(ordered);
+      }
+    }
     const items: ConversationItem[] = [];
     for (const request of pending) {
       // This conversation's own request, or one owned by a subagent it
@@ -4910,7 +4936,7 @@ export class ChatAdapter {
       // Date.now() on every reconciliation would keep moving the card.
       const createdAt = this.permissionCreatedAt.get(itemId) ?? Date.now();
       this.permissionCreatedAt.set(itemId, createdAt);
-      items.push({
+      const item = this.permissionQueueOrder.observe({
         id: itemId,
         type: "permission" as const,
         createdAt,
@@ -4930,8 +4956,40 @@ export class ChatAdapter {
         ...(request.sourceToolId === undefined ? {} : { sourceToolId: request.sourceToolId }),
         ...(request.mcp === undefined ? {} : { mcp: request.mcp }),
       });
+      items.push(item);
     }
     return items;
+  }
+
+  /** Called only after the read's resolution/history fences have accepted it.
+   * Whichever transcript recovered a queue head, its retained owner and
+   * mirrored parent must offer the same request. Never reopen resolved copies. */
+  private syncRecoveredPermission(item: ConversationItem): void {
+    if (item.type !== "permission" || item.status !== "pending" || !item.conversationId) return;
+    const parentId = this.sessionParents.get(item.conversationId);
+    for (const [id, projection] of this.projections) {
+      // An existing mirrored request also proves the destination if the
+      // parent lookup is temporarily unavailable. It does not create a view.
+      if (id !== item.conversationId && id !== parentId
+        && !projection.find(candidate => candidate.type === "permission" && candidate.conversationId === item.conversationId)) continue;
+      const current = projection.get(item.id);
+      if (current?.type === "permission" && current.status === "resolved") continue;
+      if (!current || !sameConversationItems([current], [item])) projection.upsert(item);
+    }
+  }
+
+  /** An accepted pending-list absence retires every retained copy of the same
+   * owning request. Either the owner or its parent may be refreshed first. */
+  private retireRecoveredPermission(item: PermissionRequest, conversationId: string): void {
+    const owner = item.conversationId ?? conversationId;
+    for (const [id, projection] of this.projections) {
+      const current = projection.get(item.id);
+      if (current?.type === "permission" && current.status === "pending" && (current.conversationId ?? id) === owner) {
+        projection.apply({ kind: "remove", itemId: item.id });
+      }
+    }
+    this.permissionCreatedAt.delete(item.id);
+    this.resolveAnnounced(item.id);
   }
 
   /** The provider's live background tasks for this conversation, as running rows. */
@@ -5033,6 +5091,7 @@ export class ChatAdapter {
       const projection = this.projection(conversationId);
       for (const item of await this.pendingPermissions(conversationId)) {
         if (!projection.has(item.id)) projection.apply({ kind: "upsert", item });
+        this.syncRecoveredPermission(item);
       }
     } catch { /* unknown, not empty — requirePending still decides */ }
   }
@@ -5318,8 +5377,12 @@ export class ChatAdapter {
       this.activityMayHaveChanged();
     }, {
       pending: itemId => this.trackInteraction(id, itemId, true),
-      settled: itemId => this.trackInteraction(id, itemId, false),
+      settled: itemId => {
+        this.trackInteraction(id, itemId, false);
+        this.permissionQueueOrder.forget(itemId);
+      },
       cleared: () => this.forgetInteractions(id),
+      permission: item => this.permissionQueueOrder.observe(item),
     }, item => this.watchProjectionAssociations(id, item));
     // Seed existing event truth without firing a new transition: recreating a
     // view is not evidence of another execution and must not fence a Stop.
@@ -5411,6 +5474,7 @@ export type ProjectionInteractionHooks = {
   pending(itemId: string): void;
   settled(itemId: string): void;
   cleared(): void;
+  permission?(item: PermissionRequest): PermissionRequest;
 };
 
 export class ConversationProjection {
@@ -5611,7 +5675,8 @@ export class ConversationProjection {
 
   seed(items: ConversationItem[]): void {
     for (const item of items) {
-      const merged = mergeInteraction(this.timeline.get(item.id), item);
+      const interaction = mergeInteraction(this.timeline.get(item.id), item);
+      const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       this.pruneWorkerFallback(merged);
       this.beforePublish?.(merged);
       this.timeline.set(item.id, merged);
@@ -5700,7 +5765,8 @@ export class ConversationProjection {
 
   upsert(item: ConversationItem): ChatEvent | undefined {
     const current = this.timeline.get(item.id);
-    const merged = mergeInteraction(current, item);
+    const interaction = mergeInteraction(current, item);
+    const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
     this.pruneWorkerFallback(merged);
     this.touchWorker(current);
     this.touchWorker(merged);
@@ -5745,18 +5811,10 @@ export class ConversationProjection {
     if (!item || (item.type !== "permission" && item.type !== "question") || item.type !== type || item.status !== "pending") {
       throw new InteractionConflictError();
     }
-    // Answerable is decided per owning conversation, matching the renderer: a
-    // parent shows its own requests next to mirrored subagent ones, and a
-    // newer mirrored request must not make the parent's own request refuse
-    // the answer its enabled buttons just offered.
     const own = this.replay.conversationId;
     const owner = item.conversationId ?? own;
-    const pending = [...this.timeline.values()]
-      .filter((candidate): candidate is PermissionRequest | QuestionRequest =>
-        (candidate.type === "permission" || candidate.type === "question") && candidate.status === "pending")
-      .filter(candidate => (candidate.conversationId ?? own) === owner)
-      .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
-    if (pending[0]?.id !== item.id) throw new InteractionConflictError();
+    const active = activeInteractionRequests(this.items(), own).find(candidate => (candidate.conversationId ?? own) === owner);
+    if (active?.id !== item.id) throw new InteractionConflictError();
   }
 
   validateQuestionOutcome(requestId: string, outcome: QuestionOutcome): void {

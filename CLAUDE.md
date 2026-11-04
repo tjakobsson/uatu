@@ -79,6 +79,7 @@ src/
 │                   the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
 │                   chooser, layout (split/stacked), diff view,
+│                   svg-images (visibility-bound image loading and suspension),
 │                   mermaid trigger, anchors, image/binary fallbacks,
 │                   metadata card, code-block decorations
 ├── sidebar/        the left pane — tree-view, panes
