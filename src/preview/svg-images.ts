@@ -100,7 +100,9 @@ export function observePreviewSvgImages(container: HTMLElement): void {
     for (const entry of entries) {
       const image = entry.target as HTMLImageElement;
       if (!tracked.has(image)) continue;
-      images.get(image)!.intersecting = entry.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0;
+      // At threshold zero, an edge-touching image is already intersecting.
+      // Moving farther inside need not notify again, so accept that first hit.
+      images.get(image)!.intersecting = entry.isIntersecting;
       sync(image);
     }
   });

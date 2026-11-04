@@ -102,6 +102,40 @@ for (const browserName of ["chromium", "webkit"] as const) test.describe(browser
     expect(requests).toEqual([]);
   });
 
+  test("an SVG at the clipping boundary loads when it enters the viewport", async ({ page, request }) => {
+    const padding = Array.from({ length: 80 }, (_, i) => `Paragraph ${i}.`).join("\n\n");
+    await request.post("/__e2e/reset", { data: { extras: {
+      "edge.svg": animatedSvg(),
+      "edge.md": `# Edge\n\n${padding}\n\n![edge](./edge.svg)\n`,
+    } } });
+    await page.goto("/");
+    await openTreeFile(page, "edge.md");
+    const image = page.locator('#preview img[alt="edge"]');
+    const boundary = await image.evaluate(async element => {
+      const image = element as HTMLImageElement;
+      image.style.display = "block";
+      image.style.width = "80px";
+      image.style.height = "80px";
+      const shell = document.querySelector<HTMLElement>(".preview-shell")!;
+      const bottom = shell.getBoundingClientRect().top + shell.clientTop + shell.clientHeight;
+      shell.scrollTop += image.getBoundingClientRect().top - bottom;
+      // Correct fractional scroll rounding so the first intersection has
+      // exactly zero area, rather than a sliver of visible pixels.
+      image.style.transform = `translateY(${bottom - image.getBoundingClientRect().top}px)`;
+      return await new Promise<{ intersecting: boolean; ratio: number }>(resolve => {
+        const observer = new IntersectionObserver(([entry]) => {
+          observer.disconnect();
+          resolve({ intersecting: entry!.isIntersecting, ratio: entry!.intersectionRatio });
+        });
+        observer.observe(image);
+      });
+    });
+    expect(boundary).toEqual({ intersecting: true, ratio: 0 });
+    await page.locator(".preview-shell").evaluate(shell => { shell.scrollTop += 1; });
+    await expect(image).toHaveAttribute("src", /\/edge\.svg\?revision=/);
+    await expect.poll(() => naturalWidth(page, '#preview img[alt="edge"]')).toBe(80);
+  });
+
   test.describe("touch preview", () => {
     test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
