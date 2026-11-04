@@ -640,6 +640,13 @@ known inspection, model, and accounting when optional child fields disappear.
 Changed occurrences and current ownership contradictions still revoke them.
 If that tool is older than the newest history page, its exact accounting carrier
 still appears in the first snapshot without changing the message page or cursor.
+Concurrent foreground updates keep their exact association in attribution order
+without overwriting newer fields or charging their spend again to a sibling call.
+If a changed occurrence or input leaves the shared child's call set unproven,
+history and live updates withhold aggregate redistribution. Exact known values
+remain available; mismatched amounts stay unknown until authoritative recovery.
+A later accounting restatement or ownership lookup alone cannot restore that
+allocation; the current call set must be proven coherent first.
 If another client commits the revert before Uatu sees its staged boundary,
 discarded settled worker results must still disappear rather than return from
 retained state. Separate native-origin evidence preserves visible workers under
@@ -663,6 +670,8 @@ worker, the fallback remains readable. Unrelated notices and results are retaine
 Disconnected delivery can change the stored timestamp without creating a new
 native result. Supersession follows the recorded exact fallback relation, while
 changed content, mismatched result/child identities, and newer updates stay protected.
+A retained worker's old summary cannot suppress newly changed report text merely
+because result and child IDs match. Current parent-owned text remains readable.
 Child cost/model reconstruction also has a bounded optional-read window.
 Unavailable accounting keeps its known values without inventing zero or
 completeness, and a later read can retry rather than blocking parent history.

@@ -206,7 +206,15 @@ export type WorkerAssociationWatch = {
   include: (childIds: readonly string[]) => void;
   snapshot: () => { workerSource: WorkerSourceGuard; contradictedChildren: readonly string[] };
 };
-export type WorkerResultFallback = { resultId: string; childConversationId: string; fallback: Extract<ConversationItem, { type: "notice" }> };
+export type WorkerResultFallback = {
+  resultId: string;
+  childConversationId: string;
+  fallback: Extract<ConversationItem, { type: "notice" }>;
+  // Provider-normalized terminal content, not ownership/control evidence.
+  // Delivery clocks are not content revisions. Without this evidence a
+  // retained worker cannot suppress the current parent-owned fallback.
+  report?: { status: "completed" | "failed" | "stopped"; summary: string };
+};
 // Recovery publishes pending text separately, before optional inventory and
 // ownership complete. Each callback has its own source lease, independent of
 // transcript origins. Consumers retain synchronously before transport retires;

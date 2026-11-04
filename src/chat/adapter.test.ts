@@ -244,8 +244,10 @@ describe("production recovery Checking presentation", () => {
     const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
     let release!: () => void, reads = 0;
     const gate = new Promise<void>(resolve => { release = resolve; });
+    let enterFirstRead!: () => void;
+    const firstReadEntered = new Promise<void>(resolve => { enterFirstRead = resolve; });
     Object.assign(provider, { reconcileBackgroundTasks: async () => {
-      if (++reads === 1) await gate;
+      if (++reads === 1) { enterFirstRead(); await gate; }
       if (result === "failed") throw new Error("Unavailable");
       return [];
     } });
@@ -253,7 +255,8 @@ describe("production recovery Checking presentation", () => {
     const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
     jest.useFakeTimers(); const pump = adapter.startEventPump();
     try {
-      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await firstReadEntered;
+      expect(reads).toBe(1);
       expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
       release(); await flushRecoveryIo();
       expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
@@ -3158,18 +3161,19 @@ class FakeProvider implements ChatProvider {
 type RawPage = { items: ProviderMessage[]; nextCursor?: string; configurationItems?: ProviderMessage[] };
 
 describe("native result fallback supersession", () => {
-  for (const evidence of ["matching", "missing relation", "missing worker", "unverified worker", "different child", "different result", "different kind", "changed notice"] as const) {
+  for (const evidence of ["matching", "missing relation", "missing report", "missing worker", "unverified worker", "different child", "different result", "different kind", "changed notice", "changed summary", "changed status"] as const) {
     test(`fallback retirement requires an exact relation and verified representation (${evidence})`, async () => {
       const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
       provider.sessions = [fixtureSession("parent")];
       const fallback: Extract<ConversationItem, { type: "notice" }> = { id: "notice:result", type: "notice", createdAt: 2, level: "info", message: "Native result" };
       const notice = evidence === "changed notice" ? { ...fallback, message: "An unrelated replacement at the same id" } : fallback;
       const worker: BackgroundTaskItem = { id: "task:worker", type: "background_task", taskId: "worker", taskType: evidence === "different kind" ? "shell" : "agent",
-        description: "Worker", createdAt: 1, status: "completed", resultId: evidence === "different result" ? "other-result" : "result",
+        description: "Worker", createdAt: 1, status: evidence === "changed status" ? "failed" : "completed", summary: evidence === "changed summary" ? "Old result" : "Native result", resultId: evidence === "different result" ? "other-result" : "result",
         childConversationId: evidence === "different child" ? "other-child" : "child", ...(evidence === "unverified worker" ? { stateUncertain: true } : {}) };
       let recovered = false;
       provider.listMessages = async () => ({ items: recovered && evidence !== "missing worker" ? [worker] : [notice], accounting: [],
-        ...(evidence === "missing relation" ? {} : { workerResultFallbacks: [{ resultId: "result", childConversationId: "child", fallback }] }) });
+        ...(evidence === "missing relation" ? {} : { workerResultFallbacks: [{ resultId: "result", childConversationId: "child", fallback,
+          ...(evidence === "missing report" ? {} : { report: { status: "completed" as const, summary: "Native result" } }) }] }) });
       const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
       try {
         expect((await adapter.history("parent")).items).toContainEqual(notice);

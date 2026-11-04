@@ -1285,9 +1285,9 @@ export class OpenCodeV2Provider implements ChatProvider {
   private workerResultFallbacks(message: StoredMessage): WorkerResultFallback[] {
     const notice = prepareStoredMessage(message).notification;
     if (message.type !== "synthetic" || !notice?.valid || !notice.status || notice.source !== "subagent" || !notice.worker) return [];
-    const childConversationId = notice.worker;
+    const { worker: childConversationId, status, summary } = notice;
     return normalizeStoredMessage(message).flatMap(fallback => fallback.type === "notice"
-      ? [{ resultId: messageIdentity(message), childConversationId, fallback }] : []);
+      ? [{ resultId: messageIdentity(message), childConversationId, fallback, report: { status, summary } }] : []);
   }
 
   private trackHistoryWorkerCandidates(parent: string, children: Iterable<string>): void {

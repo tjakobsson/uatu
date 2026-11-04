@@ -88,6 +88,15 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **THEN** the first snapshot includes that exact visible foreground accounting carrier and agrees with the following subscription, while preserving the newest message page and older cursor
 - **AND** cold or unrelated retained rows, changed or ambiguous occurrences, hidden origins, and contradicted associations are not admitted; current accounting and newer live metadata retain precedence
 
+#### Scenario: Concurrent foreground progress preserves complete attribution order
+- **WHEN** two foreground calls share a child and one call receives a newer native update while optional child enrichment is unavailable
+- **THEN** the complete attribution order includes the current exact association so the other call does not absorb the child's entire known usage or double-count spend after the live merge
+- **AND** ordering evidence neither overwrites the newer row nor admits it through fallback carrier restoration; occurrence, visibility, contradiction, cancellation, generation, and control safeguards remain intact
+- **AND** if only one call changes occurrence or input and the child's allocation cohort is no longer proven complete, history and live decoration withhold aggregate redistribution rather than charging it to the surviving sibling; exact current values remain available, mismatched values stay unknown, and fresh authoritative accounting retains precedence
+- **AND** after degraded history withdraws an association, a subsequent usage/model restatement or successful ownership lookup alone does not restore allocation eligibility; only coherent current cohort evidence can do so, within the existing bounded attribution lifetime
+- **AND** recursive ancestor attribution applies the same eligibility checks at each child edge, preserving known own spend and exact current descendant amounts without restoring withdrawn or mismatched attribution
+- **AND** deeper descendants retain only proven current parent-task bindings, including occurrence identity; a blocked or unresolved cohort does not provide positional binding authority at any depth
+
 #### Scenario: A pending fallback outlives optional inventory recovery
 - **WHEN** a confined result remains pending in the inbox, required transcript and pending-inbox reads succeed, and optional active-worker recovery expires before delivery
 - **THEN** history and the following subscription retain the current pending fallback text, including authoritative payload updates
@@ -122,6 +131,11 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **THEN** history and subscription snapshots contain one presentation of that result rather than both rows
 - **AND** the fallback notice is superseded in the retained projection and its removal is delivered to existing subscribers
 - **AND** notices without a corresponding verified worker and unrelated notices/results remain visible, while canonical worker aliases, stream fences, ownership/Stop, and native live/revert safeguards remain intact
+
+#### Scenario: Current report text changes during unavailable child enrichment
+- **WHEN** a retained completed worker's native pending or stored report changes text while child ownership enrichment is unavailable
+- **THEN** current parent-owned report text remains visible in history and subscription; matching result/child identity alone does not let the worker's old summary suppress the fresh fallback
+- **AND** unchanged normalized report content can still be superseded across delivery-clock changes, without granting new activity, inspection, accounting, ownership, or control authority
 
 #### Scenario: Authoritative history is slower than a worker check
 - **WHEN** the parent's authoritative history succeeds within its bounded history-read window but takes longer than the short worker-recovery budget

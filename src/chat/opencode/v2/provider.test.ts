@@ -8,6 +8,7 @@ import type { FormCancelled, FormCreated, FormReplied, PermissionAsked, Permissi
 import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../../provider";
 import { createOpenCodeV2Provider, formAnswerFromChoices, type OpenCodeV2Provider } from "./provider";
 import { ChatAdapter, SteerAlreadyDeliveredError, SteerWithdrawalUnconfirmedError } from "../../adapter";
+import { conversationTotals } from "../../conversation-totals";
 import { compactWorkers, workerSummary } from "../../compact-work";
 import { workerState, workerExecutionClockRuns, workerCanStop, workerStateLabel } from "../../worker-state";
 import { workerDismissalIdentities } from "../../worker-dismissal-identity";
@@ -95,7 +96,7 @@ test("fallback relations describe only actual visible native subagent results, w
   const provider = server.provider();
   try {
     const page = await provider.listMessages("ses_parent", { limit: 100 });
-    expect(page.workerResultFallbacks).toEqual([{ resultId: "msg_result", childConversationId: "ses_child",
+    expect(page.workerResultFallbacks).toEqual([{ resultId: "msg_result", childConversationId: "ses_child", report: { status: "completed", summary: "Fixture checked." },
       fallback: { id: "notice:msg_result", type: "notice", createdAt: 42, level: "info", message: fixture.stored.text } }]);
     expect(page.items.some(item => item.type === "background_task")).toBe(false);
     expect(page.items).toContainEqual(expect.objectContaining({ id: "notice:msg_result", type: "notice" }));
@@ -376,7 +377,68 @@ test(`pending fallback delivery reconciles exact native provenance (${scenario})
   } finally { lifetime.abort(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
-for (const cancel of [false, true]) test(`fallback supersession preserves a newer native notice (cancel=${cancel})`, async () => {
+for (const coalesceWindowMs of [0, 25])
+for (const source of ["pending", "stored"] as const)
+for (const scenario of ["changed-text", "unchanged-later-clock", "changed-child", "changed-result", "no-retained-worker", "ownership-available", ...(source === "stored" ? ["hidden"] as const : [])] as const)
+test(`retained worker supersession requires current report content (${source}/${scenario}/coalesce=${coalesceWindowMs})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const updatedText = (scenario === "unchanged-later-clock" ? fixture.stored.text : fixture.stored.text.replace("Fixture checked.", "UPDATED NATIVE REPORT"))
+    .replaceAll("ses_child", scenario === "changed-child" ? "ses_other_child" : "ses_child");
+  const resultId = scenario === "changed-result" ? "msg_other_result" : fixture.stored.id;
+  const metadata = { ...fixture.stored.metadata, childID: scenario === "changed-child" ? "ses_other_child" : "ses_child" };
+  const stored = { ...fixture.stored, id: resultId, text: updatedText, metadata, time: { created: 52 } };
+  const pending = { ...fixture.pending, id: resultId, time: { created: 51 }, payload: { ...fixture.pending.payload, text: updatedText, metadata } };
+  let refreshed = false, opened = 0, closed = 0;
+  const unavailable = () => refreshed && scenario !== "ownership-available";
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", refreshed && scenario === "hidden" ? { revert: { messageID: resultId } } : {}),
+    "GET /api/session/ses_child": () => unavailable() ? new Response(null, { status: 503 }) : session("ses_child", { parentID: "ses_parent" }),
+    "GET /api/session/ses_other_child": () => new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => ({ data: source !== "stored" ? [] : !refreshed ? scenario === "no-retained-worker" ? [] : [fixture.stored] : [stored], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: source !== "pending" ? [] : refreshed ? [pending] : scenario === "no-retained-worker" ? [] : [fixture.pending] }),
+    "GET /api/session/active": () => ({}), "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+  });
+  const provider = server.provider(), adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs });
+  try {
+    const initial = await adapter.history("ses_parent");
+    if (scenario === "no-retained-worker") expect(initial.items).toEqual([]);
+    else expect(initial.items).toContainEqual(expect.objectContaining({ type: "background_task", resultId: fixture.stored.id, status: "completed", summary: "Fixture checked." }));
+    await adapter.stopEventPump(); refreshed = true;
+    const history = await adapter.history("ses_parent");
+    const next = await adapter.subscribe("ses_parent"); next.events.cancel();
+    const reportText = (items: import("../../types").ConversationItem[]) => items.flatMap(item => item.type === "notice" ? [item.message] : item.type === "background_task" ? [item.summary ?? ""] : []).join("\n");
+    if (unavailable()) {
+      for (const snapshot of [history, next.snapshot]) for (const item of snapshot.items) if (item.type === "background_task") {
+        expect(item.status).toBe("completed");
+        expect(workerCanStop(item)).toBe(false); expect(workerExecutionClockRuns(item)).toBe(false);
+        expect(item.control?.available).not.toBe(true);
+      }
+    }
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    if (scenario === "unchanged-later-clock") {
+      // A delivery/read clock change is not a content revision: keep exactly
+      // one completed worker representation, not a duplicate fallback notice.
+      for (const snapshot of [history, next.snapshot]) {
+        expect(snapshot.items.filter(item => item.id === `notice:${resultId}`)).toEqual([]);
+        expect(snapshot.items.filter(item => item.type === "background_task" && item.resultId === resultId)).toEqual([expect.objectContaining({ summary: "Fixture checked.", status: "completed" })]);
+      }
+    } else {
+      if (scenario === "hidden") for (const snapshot of [history, next.snapshot]) expect(reportText(snapshot.items)).not.toContain("UPDATED NATIVE REPORT");
+      else expect({ history: reportText(history.items), subscription: reportText(next.snapshot.items) }).toEqual({
+        history: expect.stringContaining("UPDATED NATIVE REPORT"), subscription: expect.stringContaining("UPDATED NATIVE REPORT"),
+      });
+    }
+  } finally { await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
+for (const coalesceWindowMs of [0, 25])
+for (const cancel of [false, true]) test(`fallback supersession preserves a newer native notice (cancel=${cancel}/coalesce=${coalesceWindowMs})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   const owner = new AsyncLocalStorage<boolean>();
   let delivered = false, held = false, opened = 0, closed = 0;
@@ -398,8 +460,8 @@ for (const cancel of [false, true]) test(`fallback supersession preserves a newe
     "GET /api/form": async () => { if (delivered && owner.getStore() && !held) { held = true; entered(); await gate; } return scoped([]); },
   });
   const provider = server.provider(), events = provider.events.bind(provider);
-  provider.events = async function* (signal) { for await (const event of events(signal)) { if (event.eventType === "diagnostic.fallback.complete") applied(); yield event; } };
-  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+    provider.events = async function* (signal) { for await (const event of events(signal)) { if (event.eventType === "diagnostic.fallback.complete") applied(); yield event; } };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs });
   let reading: ReturnType<ChatAdapter["history"]> | undefined;
   try {
     expect((await adapter.history("ses_parent")).items).toContainEqual(expect.objectContaining({ id: "notice:msg_result", createdAt: 41 }));
@@ -425,7 +487,7 @@ for (const cancel of [false, true]) test(`fallback supersession preserves a newe
   } finally { release(); await reading?.catch(() => undefined); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
-for (const outcome of ["unavailable", "healthy", "foreign-parent", "foreign-workspace", "hidden-origin", "changed-occurrence", "changed-child", "changed-input", "ambiguous-origin", "returned-new", "cancel", "new-live", "late-foreign-parent", "late-foreign-workspace"] as const)
+for (const outcome of ["unavailable", "healthy", "foreign-parent", "foreign-workspace", "hidden-origin", "changed-occurrence", "changed-child", "changed-input", "ambiguous-origin", "returned-new", "cancel", "cancel-after-auto-stage", "new-live", "late-foreign-parent", "late-foreign-workspace"] as const)
 test(`foreground undo retains only the exact available association (${outcome})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
   const launch = structuredClone(fixture.launch), tool = launch.content[0];
@@ -436,7 +498,11 @@ test(`foreground undo retains only the exact available association (${outcome})`
   let wire!: ReadableStreamDefaultController<Uint8Array>, entered!: () => void, release!: () => void, applied!: () => void;
   const owner = new AsyncLocalStorage<boolean>(), captured = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; }), eventApplied = new Promise<void>(resolve => { applied = resolve; });
-  const gated = outcome === "cancel" || outcome === "new-live" || outcome.startsWith("late-");
+  const cancel = outcome === "cancel" || outcome === "cancel-after-auto-stage";
+  let automaticEntered!: () => void, releaseAutomatic!: () => void;
+  const automaticReady = new Promise<void>(resolve => { automaticEntered = resolve; });
+  const automaticGate = new Promise<void>(resolve => { releaseAutomatic = resolve; });
+  const gated = cancel || outcome === "new-live" || outcome.startsWith("late-");
   const unavailable = () => changed && (outcome === "unavailable" || outcome.startsWith("changed-") || outcome === "ambiguous-origin" || outcome === "hidden-origin" || gated && !lateForeign);
   const returned = outcome.startsWith("returned-");
   const server = fakeOpenCode({
@@ -461,6 +527,9 @@ test(`foreground undo retains only the exact available association (${outcome})`
     "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
     "GET /api/permission/request": () => scoped([]), "GET /api/form": async () => {
       if (changed && gated && owner.getStore() && !held) { held = true; entered(); await gate; }
+      // Reconnect also owns a covering read. Isolate its publication from the
+      // explicit replacement being cancelled, rather than racing two owners.
+      if (changed && cancel && !owner.getStore()) { automaticEntered(); await automaticGate; }
       return scoped([]);
     },
     "POST /api/session/ses_parent/revert/stage": ({ body }) => { boundary = (body as { messageID: string }).messageID; return { messageID: boundary }; },
@@ -468,6 +537,13 @@ test(`foreground undo retains only the exact available association (${outcome})`
   const provider = server.provider(), events = provider.events.bind(provider);
   provider.events = async function* (signal) { for await (const event of events(signal)) { if (event.eventType === "diagnostic.foreground.complete") applied(); yield event; } };
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const history = adapter.history.bind(adapter);
+  let automaticHistory: ReturnType<ChatAdapter["history"]> | undefined;
+  adapter.history = (...args) => {
+    const reading = history(...args);
+    if (changed && cancel && !owner.getStore() && args[0] === "ses_parent") automaticHistory ??= reading;
+    return reading;
+  };
   const now = Date.now(); let elapsed = 0;
   const clock = returned ? spyOn(Date, "now").mockImplementation(() => now + elapsed) : undefined;
   let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
@@ -491,14 +567,30 @@ test(`foreground undo retains only the exact available association (${outcome})`
     mutation = owner.run(true, () => adapter.undo("ses_parent", "foreground-association"));
     if (gated) {
       await captured;
-      if (outcome === "cancel" || outcome === "new-live") {
+      if (cancel) {
+        await automaticReady;
+        expect(automaticHistory).toBeDefined();
+        if (outcome === "cancel-after-auto-stage") {
+          releaseAutomatic();
+          const accepted = await automaticHistory!;
+          expect(accepted.items.some(item => item.id === "message:msg_later")).toBe(false);
+          expect(accepted.reversibleHistory).toMatchObject({ staged: true });
+        }
+      }
+      if (cancel || outcome === "new-live") {
         tool.state.content = [{ type: "text", text: "Newer live foreground report." }];
         for (const event of [
           { id: "evt_foreground", created: 90, type: "session.message.content.updated", durable: { aggregateID: "ses_parent", seq: 1, version: 1 }, data: { sessionID: "ses_parent", messageID: launch.id, content: launch.content } },
           { type: "diagnostic.foreground.complete", data: {} },
         ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
         await eventApplied;
-        if (outcome === "cancel") await adapter.stopEventPump();
+        if (cancel) {
+          // The positive control accepts the live reread too: its authoritative
+          // staged projection must retain the newer report across cancellation.
+          if (outcome === "cancel-after-auto-stage") await adapter.history("ses_parent");
+          await adapter.stopEventPump();
+          if (outcome === "cancel") await expect(automaticHistory!).rejects.toThrow("Inbox recovery unavailable");
+        }
       } else { lateForeign = true; await provider.getSession("ses_child"); }
       release();
     }
@@ -514,14 +606,424 @@ test(`foreground undo retains only the exact available association (${outcome})`
     if (outcome === "changed-occurrence") expect(row).toMatchObject({ createdAt: 21 });
     if (outcome === "hidden-origin") expect(row).toBeUndefined();
     else {
-      expect(row).toMatchObject({ type: "tool", status: "completed", output: outcome === "new-live" || outcome === "cancel" ? "Newer live foreground report." : "Foreground fixture checked." });
+      expect(row).toMatchObject({ type: "tool", status: "completed", output: outcome === "new-live" || cancel ? "Newer live foreground report." : "Foreground fixture checked." });
       if (outcome === "unavailable" || outcome === "healthy") expect(row).toMatchObject({ childConversationId: "ses_child", workerSession: { costUsd: 0.125 }, model: "fixture-model", usage: { costUsd: 0.125 } });
       else if (outcome === "returned-new") expect(row).toMatchObject({ childConversationId: "ses_child", workerSession: { costUsd: 0.25 }, model: "new-model", usage: { costUsd: 0.25 } });
-      else if (outcome !== "new-live" && outcome !== "cancel") {
+      else if (outcome !== "new-live" && !cancel) {
         expect(row).not.toHaveProperty("childConversationId"); expect(row).not.toHaveProperty("workerSession"); expect(row).not.toHaveProperty("model"); expect(row).not.toHaveProperty("usage");
       }
     }
-  } finally { release(); await mutation?.catch(() => undefined); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
+  } finally { release(); releaseAutomatic(); await mutation?.catch(() => undefined); await automaticHistory?.catch(() => undefined); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
+for (const outcome of [
+  "unavailable", "unchanged", "healthy", "current-accounting", "cold", "paged",
+  "changed-occurrence", "changed-input", "changed-child", "foreign-parent", "foreign-workspace", "hidden-origin", "hidden-origin-unchanged", "ambiguous-origin",
+  "newer-occurrences", "newer-inputs", "newer-first-occurrence", "newer-first-input", "newer-second-occurrence", "newer-second-input",
+  "newer-first-occurrence-paged", "newer-first-input-paged", "newer-second-occurrence-paged", "newer-second-input-paged",
+  "newer-first-input-foreign-parent", "newer-first-occurrence-foreign-workspace", "newer-first-input-current-accounting", "newer-first-input-unrelated", "newer-second-input-recovery",
+  "post-history-input", "post-history-occurrence", "post-history-unchanged", "post-history-healthy", "post-history-cold",
+  "post-history-unchanged-unrelated", "post-history-input-unrelated",
+  "post-history-input-recovery", "post-history-input-owner-eviction", "post-history-input-projection-eviction",
+  "post-history-input-recovery-zero",
+  "post-history-input-pending-eviction", "post-history-input-pending-eviction-unpinned",
+  "post-history-input-same-generation",
+] as const)
+test(`concurrent foreground output preserves complete shared-child attribution order (${outcome})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const first = structuredClone(fixture.launch), second = structuredClone(fixture.launch);
+  first.content[0].state.input.background = false;
+  first.content[0].state.metadata = { sessionID: "ses_child", status: "completed" };
+  first.content[0].state.content = [{ type: "text", text: "First foreground result." }];
+  second.id = "msg_second"; second.time.created = 60;
+  second.content[0].id = "call_second"; second.content[0].time = { created: 60, completed: 70 };
+  second.content[0].state.input = { ...first.content[0].state.input, prompt: "Second task", sessionID: "ses_child" };
+  second.content[0].state.metadata = { sessionID: "ses_child", status: "completed" };
+  second.content[0].state.content = [{ type: "text", text: "Second foreground result." }];
+  const cold = outcome === "cold" || outcome === "post-history-cold";
+  let changed = cold, held = false, opened = 0, closed = 0, admitRestatement = false;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, entered!: () => void, release!: () => void, applied!: () => void;
+  const owner = new AsyncLocalStorage<boolean>(), captured = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; }), eventApplied = new Promise<void>(resolve => { applied = resolve; });
+  let warmed!: () => void, restated!: () => void, pressured!: () => void, invalidated!: () => void;
+  const warmApplied = new Promise<void>(resolve => { warmed = resolve; });
+  const restatementApplied = new Promise<void>(resolve => { restated = resolve; });
+  const pressureApplied = new Promise<void>(resolve => { pressured = resolve; });
+  const invalidationApplied = new Promise<void>(resolve => { invalidated = resolve; });
+  const postOutcome = outcome.startsWith("post-history-");
+  const postHistory = postOutcome || outcome === "newer-second-input-recovery";
+  const ownerEviction = outcome.endsWith("-owner-eviction"), projectionEviction = outcome.endsWith("-projection-eviction");
+  const pendingProjection = outcome.includes("-pending-eviction"), unpinned = outcome.endsWith("-unpinned");
+  const sameGeneration = outcome.endsWith("-same-generation");
+  let publicationHeld = false, publicationEntered!: () => void, releasePublication!: () => void;
+  const publicationReady = new Promise<void>(resolve => { publicationEntered = resolve; });
+  const publicationGate = new Promise<void>(resolve => { releasePublication = resolve; });
+  let pressureHeld = false, pressureEntered!: () => void, releasePressure!: () => void;
+  const pressureReady = new Promise<void>(resolve => { pressureEntered = resolve; });
+  const pressureGate = new Promise<void>(resolve => { releasePressure = resolve; });
+  const changedStoredInput = outcome === "changed-input" || postOutcome && outcome.includes("-input");
+  const changedStoredOccurrence = outcome === "changed-occurrence" || postOutcome && outcome.includes("-occurrence");
+  const paged = outcome === "paged" || outcome.endsWith("-paged");
+  const firstOnly = outcome.startsWith("newer-first-"), secondOnly = outcome.startsWith("newer-second-");
+  const secondInput = secondOnly && outcome.includes("-input");
+  const firstOccurrence = outcome === "newer-occurrences" || firstOnly && outcome.includes("-occurrence");
+  const secondOccurrence = outcome === "newer-occurrences" || secondOnly && outcome.includes("-occurrence");
+  const foreignParent = outcome === "foreign-parent" || outcome.endsWith("-foreign-parent");
+  const foreignWorkspace = outcome === "foreign-workspace" || outcome.endsWith("-foreign-workspace");
+  const foreign = foreignParent || foreignWorkspace;
+  const hidden = outcome.startsWith("hidden-origin");
+  let freshAccounting = outcome === "current-accounting" || outcome.endsWith("-current-accounting");
+  const recovering = outcome.includes("-recovery");
+  const zero = outcome.endsWith("-zero");
+  const unrelated = outcome.endsWith("-unrelated");
+  const unrelatedLaunch = structuredClone(second);
+  unrelatedLaunch.id = "msg_unrelated"; unrelatedLaunch.time.created = 80;
+  unrelatedLaunch.content[0].id = "call_unrelated"; unrelatedLaunch.content[0].time = { created: 80, completed: 90 };
+  unrelatedLaunch.content[0].state.input.prompt = "Unrelated task";
+  unrelatedLaunch.content[0].state.input.sessionID = "ses_other_child";
+  unrelatedLaunch.content[0].state.metadata.sessionID = "ses_other_child";
+  const unavailable = () => changed && !foreign && outcome !== "healthy" && outcome !== "post-history-healthy" && !freshAccounting;
+  const later = Array.from({ length: 51 }, (_, index) => ({ id: `msg_between_${index}`, type: "user", text: `Between calls ${index}`, time: { created: 40 + index / 10 } }));
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", changed && hidden ? { revert: { messageID: second.id } } : {}),
+    "GET /api/session/ses_child": () => unavailable() && !admitRestatement ? new Response(null, { status: 503 }) : session("ses_child", {
+      parentID: changed && foreignParent ? "ses_other" : "ses_parent", cost: changed && freshAccounting ? zero ? 0.5 : 0.9 : 0.3,
+      ...(changed && foreignWorkspace ? { location: { directory: "/foreign" } } : {}),
+    }),
+    "GET /api/session/ses_other_child": () => unrelated ? session("ses_other_child", { parentID: "ses_parent", cost: 0.05 }) : new Response(null, { status: 503 }),
+    "GET /api/session/ses_parent/message": () => {
+      const ambiguous = structuredClone(second); ambiguous.id = "msg_ambiguous"; ambiguous.content[0].state.metadata.sessionID = "ses_other_child";
+      return { data: [first, ...(changed && paged ? later : []), second, ...(unrelated ? [unrelatedLaunch] : []), ...(changed && outcome === "ambiguous-origin" ? [ambiguous] : [])], cursor: {} };
+    },
+    "GET /api/session/ses_child/message": () => ({ data: [
+      { id: "msg_prompt_first", type: "user", text: first.content[0].state.input.prompt, time: { created: 21 } },
+      { id: "msg_spend_first", type: "assistant", model: { id: changed && freshAccounting ? "new-model" : "fixture-model" }, cost: changed && freshAccounting ? zero ? 0 : 0.4 : 0.1, time: { created: 25 }, content: [] },
+      { id: "msg_prompt_second", type: "user", text: (recovering || pendingProjection) && freshAccounting ? second.content[0].state.input.prompt : "Second task", time: { created: 61 } },
+      { id: "msg_spend_second", type: "assistant", model: { id: changed && freshAccounting ? "new-model" : "fixture-model" }, cost: changed && freshAccounting ? 0.5 : 0.2, time: { created: 65 }, content: [] },
+    ], cursor: {} }),
+    "GET /api/session/ses_other_child/message": () => ({ data: [
+      { id: "msg_unrelated_prompt", type: "user", text: "Unrelated task", time: { created: 81 } },
+      { id: "msg_unrelated_spend", type: "assistant", model: { id: "unrelated-model" }, cost: 0.05, time: { created: 85 }, content: [] },
+    ], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+    "GET /api/session/:id": call => {
+      const id = call.path.split("/").at(-1)!;
+      return session(id, id.startsWith("ses_cohort_pressure_") ? { parentID: "ses_pressure_parent" } : {});
+    },
+    "GET /api/session/:id/message": () => ({ data: [], cursor: {} }),
+  });
+  const provider = server.provider(), list = provider.listMessages.bind(provider), events = provider.events.bind(provider);
+  let capturedPage: Awaited<ReturnType<OpenCodeV2Provider["listMessages"]>> | undefined;
+  provider.listMessages = async (id, options) => {
+    const page = await list(id, options);
+    if (changed && owner.getStore() && id === "ses_parent" && !held) {
+      // Hold the real native page before adapter attribution, not a private
+      // cache or a fabricated sparse tool. Only the explicit reader is gated.
+      held = true; capturedPage = page;
+      entered(); await gate;
+    }
+    return page;
+  };
+  const boundary = provider.getHistoryRevertBoundary.bind(provider);
+  provider.getHistoryRevertBoundary = async (...args) => {
+    const value = await boundary(...args);
+    if (pendingProjection && changed && owner.getStore() && args[0] === "ses_parent" && !publicationHeld) {
+      publicationHeld = true; publicationEntered(); await publicationGate;
+    }
+    if (unpinned && freshAccounting && args[0] === "ses_projection_pressure_2" && args[1]?.expectedBoundary !== undefined && !pressureHeld) {
+      pressureHeld = true; pressureEntered(); await pressureGate;
+    }
+    return value;
+  };
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    if (event.eventType === "diagnostic.shared.foreground.complete") applied();
+    if (event.eventType === "diagnostic.cohort.warm") warmed();
+    if (event.eventType === "diagnostic.cohort.restated") restated();
+    if (event.eventType === "diagnostic.cohort.pressure") pressured();
+    if (event.eventType === "diagnostic.cohort.invalidated") invalidated();
+    yield event;
+  } };
+  const restate = (phase: "warm" | "restated") => {
+    for (const event of [
+      { id: `evt_cohort_model_${phase}`, type: "session.step.started", created: 25, data: { sessionID: "ses_child", assistantMessageID: "msg_spend_first", started: 25, model: { providerID: "fixture", id: pendingProjection && phase === "restated" ? "restated-model" : freshAccounting ? "new-model" : "fixture-model" } } },
+      { id: `evt_cohort_usage_${phase}`, type: "session.step.ended", created: 25, data: { sessionID: "ses_child", assistantMessageID: "msg_spend_first", cost: freshAccounting ? zero ? 0 : 0.4 : 0.1 } },
+      { type: `diagnostic.cohort.${phase}`, data: {} },
+    ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0, ...(projectionEviction || pendingProjection ? { maxProjections: 2 } : {}) });
+  const history = adapter.history.bind(adapter);
+  const recoveryReads = new Map<string, ReturnType<ChatAdapter["history"]>>();
+  adapter.history = (...args) => {
+    const reading = history(...args);
+    if (unpinned && freshAccounting && !owner.getStore() && args[1]?.limit === undefined) recoveryReads.set(args[0], reading);
+    return reading;
+  };
+  const rows = (items: import("../../types").ConversationItem[]) => items.filter(item => item.type === "tool");
+  const costs = (items: import("../../types").ConversationItem[]) => rows(items).filter(item => item.id !== "tool:call_unrelated").map(item => item.usage?.costUsd);
+  const now = Date.now(); let elapsed = 0;
+  const clock = freshAccounting || recovering || pendingProjection ? spyOn(Date, "now").mockImplementation(() => now + elapsed) : undefined;
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  let observer: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let retained: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let publicationView: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined, nativePublication: Promise<void> | undefined;
+  try {
+    const initial = await adapter.history("ses_parent");
+    expect(costs(initial.items)).toEqual(cold ? [undefined, undefined] : [0.1, 0.2]);
+    const unrelatedRow = initial.items.find(item => item.id === "tool:call_unrelated");
+    if (postHistory && !cold && (!recovering || postOutcome)) {
+      // Establish parent routing through the public native event path while
+      // ownership is healthy; later 503s must not be mistaken for counterproof.
+      restate("warm"); await warmApplied;
+      const warm = await adapter.subscribe("ses_parent"); warm.events.cancel();
+      expect(costs(warm.snapshot.items)).toEqual([0.1, 0.2]);
+    }
+    if (sameGeneration) {
+      second.content[0].state.input.prompt = "A distinct second invocation";
+      for (const info of [session("ses_child", { parentID: "ses_parent", cost: 0.3 }), session("ses_parent")])
+        wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "session.updated", created: 90, location: { directory: WORKSPACE }, data: { info } })}\n\n`));
+      wire.enqueue(new TextEncoder().encode('data: {"type":"diagnostic.cohort.invalidated","data":{}}\n\n'));
+      await invalidationApplied;
+    } else await adapter.stopEventPump();
+    changed = true;
+    if (freshAccounting) elapsed = 31_000;
+    if (changedStoredOccurrence) { second.time.created = 62; second.content[0].time.created = 62; }
+    if (changedStoredInput) second.content[0].state.input.prompt = "A distinct second invocation";
+    if (outcome === "changed-child") second.content[0].state.metadata.sessionID = "ses_other_child";
+    void adapter.startEventPump();
+    reading = owner.run(true, () => adapter.history("ses_parent"));
+    void reading.catch(() => undefined);
+    await captured;
+    const tools = capturedPage!.items.filter(item => item.type === "tool" && item.id !== "tool:call_unrelated");
+    expect(tools).toHaveLength(paged || hidden ? 1 : 2);
+    if (unavailable()) expect(tools.every(item => item.type === "tool" && !item.childConversationId)).toBe(true);
+    const content = structuredClone(first.content);
+    content[0].state.content = [{ type: "text", text: "Newer first foreground output." }];
+    const changedLiveBinding = outcome.startsWith("newer-");
+    const updateFirst = outcome !== "unchanged" && outcome !== "hidden-origin-unchanged" && !secondOnly && !postHistory;
+    const updateSecond = changedLiveBinding && !firstOnly;
+    const secondContent = structuredClone(second.content);
+    secondContent[0].state.content = [{ type: "text", text: "Newer second foreground output." }];
+    if (changedLiveBinding) observer = await adapter.subscribe("ses_parent");
+    if (outcome === "newer-occurrences") {
+      content[0].time = { created: 21, completed: 31 }; secondContent[0].time = { created: 62, completed: 72 };
+    }
+    if (outcome === "newer-inputs") {
+      content[0].state.input.prompt = "New first task"; secondContent[0].state.input.prompt = "New second task";
+    }
+    if (firstOccurrence) content[0].time = { created: 21, completed: 31 };
+    if (secondOccurrence) secondContent[0].time = { created: 62, completed: 72 };
+    if (firstOnly && outcome.includes("-input")) content[0].state.input.prompt = "New first task";
+    if (secondOnly && outcome.includes("-input")) secondContent[0].state.input.prompt = "New second task";
+    const liveAccounting = freshAccounting ? [
+      { type: "session.step.started", created: 25, data: { sessionID: "ses_child", assistantMessageID: "msg_spend_first", started: 25, model: { providerID: "fixture", id: "new-model" } } },
+      { type: "session.step.ended", created: 25, data: { sessionID: "ses_child", assistantMessageID: "msg_spend_first", cost: 0.4 } },
+      { type: "session.step.started", created: 65, data: { sessionID: "ses_child", assistantMessageID: "msg_spend_second", started: 65, model: { providerID: "fixture", id: "new-model" } } },
+      { type: "session.step.ended", created: 65, data: { sessionID: "ses_child", assistantMessageID: "msg_spend_second", cost: 0.5 } },
+    ] : [];
+    // The repro restates the original clock; the newer-binding controls
+    // deliberately mismatch the captured page and must never revoke live rows.
+    for (const event of [...liveAccounting, ...(updateFirst ? [
+      { id: "evt_shared_foreground", created: firstOccurrence ? 21 : 20, type: "session.message.content.updated", durable: { aggregateID: "ses_parent", seq: 1, version: 1 }, data: { sessionID: "ses_parent", messageID: first.id, content } },
+    ] : []), ...(updateSecond ? [
+      { id: "evt_shared_second", created: secondOccurrence ? 62 : 60, type: "session.message.content.updated", durable: { aggregateID: "ses_parent", seq: 2, version: 1 }, data: { sessionID: "ses_parent", messageID: second.id, content: secondContent } },
+    ] : []),
+      { type: "diagnostic.shared.foreground.complete", data: {} },
+    ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await eventApplied;
+    const current = await adapter.subscribe("ses_parent"); current.events.cancel();
+    const newer = rows(current.snapshot.items).find(item => item.id === "tool:call_worker");
+    const newerSecond = rows(current.snapshot.items).find(item => item.id === "tool:call_second");
+    expect(newer).toMatchObject({ output: updateFirst ? "Newer first foreground output." : "First foreground result.",
+      ...(!foreign && !secondOnly && !cold ? { usage: { costUsd: freshAccounting ? 0.4 : 0.1 } } : {}) });
+    // The live snapshot must already respect the cohort before the captured
+    // history page is released; recovery cannot repair a bad live allocation.
+    if (changedLiveBinding && !foreign) expect(costs(current.snapshot.items)).toEqual(freshAccounting ? [0.4, 0.5] : secondInput ? [0.1, undefined] : [0.1, 0.2]);
+    if (firstOnly && firstOccurrence) expect(newer).toMatchObject({ createdAt: 21, completedAt: 31 });
+    if (firstOnly && outcome.includes("-input")) expect(newer?.input).toBe(JSON.stringify(content[0].state.input));
+    if (secondOnly) {
+      expect(newerSecond).toMatchObject({ output: "Newer second foreground output.", ...(!secondInput ? { usage: { costUsd: 0.2 } } : {}) });
+      if (secondInput) expect(newerSecond).not.toHaveProperty("usage");
+    }
+    release();
+    if (pendingProjection) {
+      // The negative cohort decision exists only in a held read. Eviction
+      // retires that owner before a new authoritative cohort publishes.
+      await publicationReady;
+      for (let index = 0; index < 3; index++) await adapter.history(`ses_projection_pressure_${index}`);
+      const reset = await adapter.subscribe("ses_parent");
+      expect(reset.snapshot.items).toEqual([]);
+      // The view under test stays selected after its intentional eviction.
+      // A separate unpinned control exercises legitimate two-view LRU loss.
+      if (unpinned) reset.events.cancel(); else retained = reset;
+      await adapter.stopEventPump();
+      await expect(reading).rejects.toThrow("Inbox recovery unavailable");
+      second.content = secondContent; freshAccounting = true; elapsed = 31_000;
+      const replacement = await owner.run(false, () => adapter.history("ses_parent", { limit: 49 }));
+      expect(costs(replacement.items)).toEqual([0.4, 0.5]);
+      if (unpinned) {
+        await pressureReady;
+        const parentRecovery = recoveryReads.get("ses_parent");
+        expect(parentRecovery).toBeDefined(); await parentRecovery!;
+        // Observe the child's actual usage publication, not a provider-admission
+        // marker or a timer. Selecting it uses the same existing two-view budget.
+        publicationView = await adapter.subscribe("ses_child", { signal: AbortSignal.timeout(3_000) });
+      } else {
+        // Start a fresh replay handoff after the history publication. The
+        // original retained subscription keeps this same parent view pinned.
+        publicationView = await adapter.subscribe("ses_parent", { signal: AbortSignal.timeout(3_000) });
+      }
+      nativePublication = (async () => {
+        const itemId = unpinned ? "usage:msg_spend_first" : "tool:call_worker";
+        for await (const event of publicationView!.events) if (event.type === "item.upsert" && event.item.id === itemId) {
+          expect(event.item).toMatchObject({ type: unpinned ? "assistant_message" : "tool", usage: { costUsd: 0.4 } });
+          if (!unpinned) expect(event.item).toMatchObject({ model: "restated-model" });
+          return;
+        }
+        throw new Error("Missing current native restatement publication");
+      })();
+      void nativePublication.catch(() => undefined);
+      releasePublication();
+      restate("restated"); await restatementApplied;
+      await nativePublication;
+      if (unpinned) {
+        const pressureRecovery = recoveryReads.get("ses_projection_pressure_2");
+        expect(pressureRecovery).toBeDefined();
+        releasePressure(); await pressureRecovery!;
+      }
+      const current = await adapter.subscribe("ses_parent"); current.events.cancel();
+      if (unpinned) {
+        // Fresh accounting succeeded before a legitimate unobserved-view
+        // eviction. An empty recreated view is unknown, never a zero receipt.
+        expect(costs(replacement.items)).toEqual([0.4, 0.5]);
+        expect(conversationTotals(replacement.items)?.costUsd).toBeCloseTo(0.9);
+        expect(current.snapshot.items).toEqual([]);
+        expect(conversationTotals(current.snapshot.items)).toBeUndefined();
+      } else {
+        expect(costs(current.snapshot.items)).toEqual([0.4, 0.5]);
+        expect(conversationTotals(current.snapshot.items)?.costUsd).toBeCloseTo(0.9);
+      }
+      return;
+    }
+    const history = await reading;
+    const next = await adapter.subscribe("ses_parent"); next.events.cancel();
+    let published = next.snapshot;
+    for (const snapshot of [history, next.snapshot]) {
+      if (!foreign) expect(rows(snapshot.items).find(item => item.id === "tool:call_worker")).toMatchObject({ output: updateFirst ? "Newer first foreground output." : "First foreground result." });
+      if (!foreign && !secondOnly) expect(rows(snapshot.items).find(item => item.id === "tool:call_worker")).toEqual(newer);
+      if (foreign) for (const row of rows(snapshot.items)) {
+        expect(row).not.toHaveProperty("childConversationId"); expect(row).not.toHaveProperty("usage"); expect(row).not.toHaveProperty("model"); expect(row).not.toHaveProperty("workerSession");
+      }
+      if (updateSecond) expect(rows(snapshot.items).find(item => item.id === "tool:call_second")).toEqual(newerSecond);
+      if (outcome.startsWith("changed-") || changedStoredInput || changedStoredOccurrence || outcome === "ambiguous-origin") {
+        const secondRow = rows(snapshot.items).find(item => item.id === "tool:call_second");
+        expect(secondRow).toMatchObject({ type: "tool", status: "completed", output: "Second foreground result." });
+        for (const key of ["childConversationId", "usage", "model", "workerSession"]) expect(secondRow).not.toHaveProperty(key);
+      }
+      if (hidden) expect(rows(snapshot.items).some(item => item.id === "tool:call_second")).toBe(false);
+      if (unrelated) {
+        expect(snapshot.items.find(item => item.id === "tool:call_unrelated")).toEqual(unrelatedRow);
+        expect(unrelatedRow).toMatchObject({ childConversationId: "ses_other_child", model: "unrelated-model", usage: { costUsd: 0.05 } });
+      }
+      expect(snapshot.items.some(item => item.type === "background_task")).toBe(false);
+    }
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    if (paged) {
+      expect(history.olderCursor).toBeDefined();
+      expect(history.items.filter(item => item.type === "user_message")).toHaveLength(49);
+    }
+    const expected = freshAccounting ? [0.4, 0.5] : foreign || cold ? [undefined, undefined] : secondInput ? [0.1, undefined]
+      : outcome.startsWith("changed-") || changedStoredInput || changedStoredOccurrence ? [0.1, undefined] : hidden ? [0.1]
+      : outcome === "ambiguous-origin" ? [0.1, undefined] : [0.1, 0.2];
+    const expectedCents = foreign || cold ? undefined : freshAccounting ? 90 : secondInput ? 10
+      : outcome.startsWith("changed-") || changedStoredInput || changedStoredOccurrence || hidden || outcome === "ambiguous-origin" ? 10 : 30;
+    const receipt = (items: import("../../types").ConversationItem[]) => {
+      const total = conversationTotals(items)?.costUsd;
+      return { costs: costs(items), receiptCents: total === undefined ? undefined : Math.round(total * 100) };
+    };
+    expect({ history: receipt(history.items), subscription: receipt(next.snapshot.items) }).toEqual({
+      history: { costs: expected, receiptCents: expectedCents === undefined ? undefined : expectedCents + (unrelated ? 5 : 0) },
+      subscription: { costs: expected, receiptCents: expectedCents === undefined ? undefined : expectedCents + (unrelated ? 5 : 0) },
+    });
+    for (const snapshot of [history, next.snapshot]) {
+      const total = conversationTotals(snapshot.items)?.costUsd;
+      if (foreign || cold) expect(total).toBeUndefined();
+      else expect(total).toBeCloseTo((freshAccounting ? 0.9 : secondInput || outcome.startsWith("changed-") || changedStoredInput || changedStoredOccurrence || hidden || outcome === "ambiguous-origin" ? 0.1 : 0.3) + (unrelated ? 0.05 : 0));
+      if (freshAccounting) expect(rows(snapshot.items).map(item => item.model)).toEqual(["new-model", "new-model"]);
+    }
+    if (observer) {
+      observer.events.cancel(); const publications = []; for await (const event of observer.events) publications.push(event);
+      if (!foreign) {
+        expect(publications).not.toContainEqual(expect.objectContaining({ type: "item.remove", itemId: "tool:call_worker" }));
+        const removal = expect.objectContaining({ type: "item.remove", itemId: "tool:call_second" });
+        if (secondInput) expect(publications).toContainEqual(removal); // Deliberate withdrawal of the changed row's old usage.
+        else expect(publications).not.toContainEqual(removal);
+      }
+    }
+    if (recovering) {
+      // Fresh authoritative parent/child records make the new task provable.
+      // Expire the existing reuse window; do not extend any cache or budget.
+      second.content = secondContent; freshAccounting = true; elapsed = 31_000;
+      await adapter.stopEventPump();
+      const restored = await adapter.history("ses_parent");
+      const following = await adapter.subscribe("ses_parent"); following.events.cancel();
+      published = following.snapshot;
+      for (const snapshot of [restored, following.snapshot]) {
+        expect(costs(snapshot.items)).toEqual([zero ? 0 : 0.4, 0.5]);
+        expect(conversationTotals(snapshot.items)?.costUsd).toBeCloseTo(zero ? 0.5 : 0.9);
+        expect(rows(snapshot.items).map(item => item.model)).toEqual(["new-model", "new-model"]);
+        expect(rows(snapshot.items).find(item => item.id === "tool:call_second")).toMatchObject({ output: "Newer second foreground output.", input: JSON.stringify(secondContent[0].state.input) });
+      }
+    }
+    if (postHistory) {
+      // The read has published and withdrawn the second association. An
+      // unchanged child accounting restatement is not fresh cohort proof.
+      // Session confinement can recover without new child task/accounting proof.
+      if (ownerEviction) {
+        retained = await adapter.subscribe("ses_parent");
+        // Real 512-entry attribution-owner pressure, model-only: the victim's
+        // per-message usage map is not churned along with its owner metadata.
+        for (let index = 0; index < 513; index++) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          type: "session.step.started", created: 1000 + index, location: { directory: WORKSPACE },
+          data: { sessionID: `ses_cohort_pressure_${index}`, assistantMessageID: `pressure_${index}`, model: { providerID: "fixture", id: "pressure-model" } },
+        })}\n\n`));
+        wire.enqueue(new TextEncoder().encode('data: {"type":"diagnostic.cohort.pressure","data":{}}\n\n'));
+        await pressureApplied;
+        const pressured = await adapter.subscribe("ses_parent"); pressured.events.cancel();
+        expect(receipt(pressured.snapshot.items)).toEqual({ costs: [0.1, undefined], receiptCents: 10 });
+      }
+      if (projectionEviction) {
+        for (let index = 0; index < 3; index++) await adapter.history(`ses_projection_pressure_${index}`);
+        const reset = await adapter.subscribe("ses_parent"); reset.events.cancel();
+        expect(reset.snapshot.items).toEqual([]);
+      }
+      const transcriptReads = server.requests("GET", "/api/session/ses_child/message").length;
+      admitRestatement = true;
+      restate("restated"); await restatementApplied;
+      const after = await adapter.subscribe("ses_parent"); after.events.cancel();
+      expect(server.requests("GET", "/api/session/ses_child/message").length).toBe(transcriptReads);
+      if (projectionEviction) {
+        expect(rows(after.snapshot.items).every(item => item.usage === undefined)).toBe(true);
+        expect(conversationTotals(after.snapshot.items)).toBeUndefined();
+        return;
+      }
+      const rejected = after.snapshot.items.find(item => item.id === "tool:call_second");
+      expect(rejected).toEqual(published.items.find(item => item.id === "tool:call_second"));
+      if (!freshAccounting && (changedStoredInput || changedStoredOccurrence || cold))
+        for (const key of ["childConversationId", "usage", "model", "workerSession"]) expect(rejected).not.toHaveProperty(key);
+      if (unrelated) expect(after.snapshot.items.find(item => item.id === "tool:call_unrelated")).toEqual(unrelatedRow);
+      expect(receipt(after.snapshot.items)).toEqual({
+        costs: freshAccounting ? [zero ? 0 : 0.4, 0.5] : expected,
+        receiptCents: freshAccounting ? zero ? 50 : 90 : expectedCents === undefined ? undefined : expectedCents + (unrelated ? 5 : 0),
+      });
+      expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    }
+  } finally { release(); releasePublication(); releasePressure(); observer?.events.cancel(); retained?.events.cancel(); publicationView?.events.cancel(); await nativePublication?.catch(() => undefined); await reading?.catch(() => undefined); await Promise.allSettled([...recoveryReads.values()]); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
 for (const outcome of ["unavailable", "healthy", "cold", "no-prior", "foreign-parent", "foreign-workspace", "hidden-origin", "changed-occurrence", "changed-child", "changed-input", "ambiguous-origin", "returned-new", "new-live"] as const)
@@ -1621,6 +2123,636 @@ test("abandoned public message reads cancel transport and cannot bank over or re
     await Promise.allSettled([abandoned, retry, peer]);
     stream.lifetime.abort(); await stream.pump; await provider.dispose();
   }
+});
+
+for (const outcome of [
+  "second-input", "second-occurrence", "first-input", "first-occurrence", "second-input-deeper", "first-leaf-known",
+  "healthy", "unchanged-unavailable", "fresh-recovery", "zero-recovery", "continuation",
+  "reused-leaf-occurrence", "reused-leaf-input", "reused-leaf-status", "reused-leaf-completion",
+  "reused-leaf-new-id", "reused-leaf-recovery", "reused-leaf-zero-recovery", "retained-leaf-fresh-usage", "retained-leaf-fresh-zero",
+  "reused-leaf-prompt-context", "reused-parent-occurrence", "retained-leaf-prompt-shift", "retained-leaf-coalesced",
+  "retained-leaf-replacement", "retained-leaf-generation", "reused-leaf-generation", "reused-leaf-eviction",
+  "renewed-leaf-history", "renewed-leaf-live", "renewed-leaf-amount", "renewed-leaf-zero", "renewed-leaf-unchanged",
+  "renewed-leaf-no-rebinding", "renewed-leaf-expired", "renewed-leaf-retired-generation",
+  "renewed-leaf-clone",
+  "renewed-leaf-repeat", "renewed-leaf-newer-reference", "renewed-leaf-read-fence",
+] as const)
+for (const surface of ["reused-parent-occurrence", "retained-leaf-prompt-shift", "retained-leaf-coalesced", "retained-leaf-replacement", "retained-leaf-generation", "reused-leaf-generation", "reused-leaf-eviction", "renewed-leaf-expired", "renewed-leaf-retired-generation", "renewed-leaf-clone", "renewed-leaf-newer-reference", "renewed-leaf-read-fence"].includes(outcome)
+  ? ["subscription"] as const : ["live", "subscription", "history"] as const)
+test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = (parent: string, child: string, call: string, prompt: string, created: number) => {
+    const message = structuredClone(fixture.launch); message.sessionID = parent; message.id = `msg_${call}`; message.time.created = created;
+    const tool = message.content[0]; tool.id = call; tool.time = { created, completed: created + 10 };
+    tool.state.input = { ...tool.state.input, prompt, background: false };
+    tool.state.metadata = { sessionID: child, status: "completed" }; tool.state.content = [{ type: "text", text: `${call} result` }];
+    return message;
+  };
+  const root = launch("ses_root", "ses_child", "root", "Root task", 10);
+  const first = launch("ses_child", "ses_grandchild", "first", "First task", 20);
+  const second = launch("ses_child", "ses_grandchild", "second", "Second task", 60);
+  const reusedLeaf = outcome.startsWith("reused-leaf-");
+  const renewedProof = outcome.startsWith("renewed-leaf-");
+  const expiredRenewal = outcome === "renewed-leaf-expired", retiredGeneration = outcome === "renewed-leaf-retired-generation";
+  const newerReference = outcome === "renewed-leaf-newer-reference";
+  const clonedRenewal = outcome === "renewed-leaf-clone";
+  const noRenewal = outcome === "renewed-leaf-no-rebinding" || expiredRenewal || retiredGeneration || clonedRenewal;
+  const initialLeafCost = outcome === "renewed-leaf-zero" ? 0 : 0.07;
+  let renewalCost = initialLeafCost;
+  const reusedParent = outcome === "reused-parent-occurrence";
+  const promptContext = outcome === "reused-leaf-prompt-context";
+  const moveLeaf = reusedLeaf && !promptContext;
+  const generation = outcome === "retained-leaf-generation" || outcome === "reused-leaf-generation", eviction = outcome.endsWith("-eviction");
+  const replacement = outcome === "retained-leaf-replacement", coalesced = outcome === "retained-leaf-coalesced";
+  const refreshLeaf = reusedLeaf || reusedParent || outcome.startsWith("retained-leaf-");
+  const firstLeaf = outcome === "first-leaf-known" || refreshLeaf || renewedProof;
+  const deeper = outcome === "second-input-deeper";
+  const leaf = launch("ses_grandchild", "ses_leaf", "leaf", "Leaf task", firstLeaf ? 28 : 68);
+  const deep = launch("ses_leaf", "ses_deep", "deep", "Deep task", 74);
+  const prompt = (id: string, text: string, created: number) => ({ id, type: "user", text, time: { created } });
+  const spend = (id: string, cost: number, created: number) => ({ id, type: "assistant", model: { id: "fixture-model" }, cost, time: { created }, content: [] });
+  const healthy = outcome === "healthy" || outcome === "continuation";
+  const unchanged = outcome === "unchanged-unavailable";
+  const recovery = outcome.endsWith("-recovery"), zero = outcome === "zero-recovery" || outcome === "reused-leaf-zero-recovery";
+  const leafCost = () => fresh && zero || leafChanged && outcome === "retained-leaf-fresh-zero" ? 0 : leafChanged ? 0.09 : renewalCost;
+  const changedFirst = outcome.startsWith("first-") && !firstLeaf;
+  const occurrence = outcome.endsWith("-occurrence");
+  const changed = changedFirst ? first : second;
+  let degraded = false, fresh = false, leafChanged = false, opened = 0, closed = 0, sequence = 0, boundary: string | undefined;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_root": () => session("ses_root"),
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_root", cost: 0.05, ...(boundary ? { revert: { messageID: boundary } } : {}) }),
+    "GET /api/session/ses_grandchild": () => degraded ? new Response(null, { status: 503 }) : session("ses_grandchild", { parentID: "ses_child", cost: fresh ? zero ? 0.5 : 0.9 : 0.3 }),
+    "GET /api/session/ses_leaf": () => session("ses_leaf", { parentID: "ses_grandchild", cost: leafCost() }),
+    "GET /api/session/ses_deep": () => session("ses_deep", { parentID: "ses_leaf", cost: 0.03 }),
+    "GET /api/session/ses_root/message": () => ({ data: [root], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [prompt("child_prompt", "Root task", 11), spend("child_spend", 0.05, 15), first, second,
+      ...(replacement ? [prompt("later", "Later user message", 120)] : [])], cursor: {} }),
+    "GET /api/session/ses_grandchild/message": () => ({ data: [
+      ...(leafChanged && outcome === "retained-leaf-prompt-shift" ? [prompt("preamble", "Continue", 19)] : []),
+      prompt(leafChanged && promptContext ? "first_prompt_replaced" : "first_prompt", fresh ? first.content[0].state.input.prompt : "First task", 21), spend("first_spend", fresh ? zero ? 0 : 0.4 : 0.1, 25),
+      ...(firstLeaf && !(leafChanged && moveLeaf) ? [leaf] : []),
+      ...(outcome === "continuation" ? [prompt("continue_prompt", "Please continue", 40)] : []),
+      prompt("second_prompt", fresh ? second.content[0].state.input.prompt : "Second task", 61), spend("second_spend", fresh ? 0.5 : 0.2, 65),
+      ...(firstLeaf && !(leafChanged && moveLeaf) ? [] : [leaf]),
+    ], cursor: {} }),
+    "GET /api/session/ses_leaf/message": () => ({ data: [prompt("leaf_prompt", leaf.content[0].state.input.prompt, firstLeaf ? 29 : 69), spend("leaf_spend", leafCost(), firstLeaf ? 32 : 72), ...(deeper ? [deep] : [])], cursor: {} }),
+    "GET /api/session/ses_deep/message": () => ({ data: [prompt("deep_prompt", "Deep task", 75), spend("deep_spend", 0.03, 76)], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+    "POST /api/session/ses_child/revert/stage": ({ body }) => { boundary = (body as { messageID: string }).messageID; return { messageID: boundary }; },
+    "GET /api/session/:id": ({ path }) => { const id = path.split("/").at(-1)!; return session(id, id.startsWith("ses_proof_pressure_") ? { parentID: "ses_proof_pressure" } : {}); },
+    "GET /api/session/:id/message": () => ({ data: [], cursor: {} }),
+  });
+  const provider = server.provider(), events = provider.events.bind(provider), list = provider.listMessages.bind(provider);
+  const renewalOwner = new AsyncLocalStorage<boolean>(), boundaryRead = provider.getHistoryRevertBoundary.bind(provider);
+  let holdRenewal = false, renewalEntered!: () => void, releaseRenewal!: () => void, renewalSignal: AbortSignal | undefined;
+  const renewalReady = new Promise<void>(resolve => { renewalEntered = resolve; });
+  const renewalGate = new Promise<void>(resolve => { releaseRenewal = resolve; });
+  provider.getHistoryRevertBoundary = async (...args) => {
+    const value = await boundaryRead(...args);
+    if (holdRenewal && renewalOwner.getStore() && args[0] === "ses_child" && args[1]?.expectedBoundary === null) {
+      holdRenewal = false; renewalSignal = args[1]?.signal; renewalEntered(); await renewalGate;
+    }
+    return value;
+  };
+  let observedLeaf: import("../../types").ToolItem | undefined;
+  let childHistoryReads = 0;
+  provider.listMessages = async (...args) => {
+    if (args[0] === "ses_child") childHistoryReads++;
+    const page = await list(...args);
+    if ((leafChanged || renewedProof) && args[0] === "ses_grandchild") observedLeaf = page.completeItems?.find((item): item is import("../../types").ToolItem => item.type === "tool" && item.id === `tool:${leaf.content[0].id}`);
+    return page;
+  };
+  let applied!: () => void;
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    yield event;
+    if (event.eventType === "diagnostic.deep.cohort.applied") applied();
+  } };
+  const emit = async (batch: Array<Record<string, unknown>>) => {
+    const ready = new Promise<void>(resolve => { applied = resolve; });
+    for (const event of [...batch, { type: "diagnostic.deep.cohort.applied", data: {} }])
+      wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await ready;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: coalesced ? 25 : 0,
+    ...(eviction ? { maxProjections: 2 } : {}), ...(expiredRenewal ? { historyReadTimeoutMs: 500 } : {}) });
+  const now = Date.now(); let elapsed = 0;
+  const clock = recovery ? spyOn(Date, "now").mockImplementation(() => now + elapsed) : undefined;
+  let observer: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let pinnedRoot: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let pinnedNative: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let priorLine: import("../../types").SubagentLine | undefined, projectedLine: import("../../types").SubagentLine | undefined;
+  let renewing: ReturnType<ChatAdapter["history"]> | undefined;
+  let proofReadFence: ReturnType<ReturnType<ChatAdapter["projectionForTests"]>["beginHistoryRead"]> | undefined;
+  const tools = (items: import("../../types").ConversationItem[]) => items.filter((item): item is import("../../types").ToolItem => item.type === "tool");
+  const rootRow = (items: import("../../types").ConversationItem[]) => tools(items).find(row => row.id === "tool:root")!;
+  const direct = (items: import("../../types").ConversationItem[]) => ["first", "second"].map(id => tools(items).find(row => row.id === `tool:${id}`)?.usage?.costUsd);
+  try {
+    const initial = await adapter.history("ses_root");
+    expect(rootRow(initial.items)).toMatchObject({ usage: { costUsd: 0.05 }, workerSession: { costUsd: 0.05 } });
+    expect(rootRow(initial.items).descendants).toContainEqual(expect.objectContaining({ id: "tool:leaf", parentId: firstLeaf ? "tool:first" : "tool:second", conversationId: "ses_leaf", usage: { costUsd: initialLeafCost } }));
+    if (deeper) expect(rootRow(initial.items).descendants).toContainEqual(expect.objectContaining({ id: "tool:deep", parentId: "tool:leaf", usage: { costUsd: 0.03 } }));
+    const initialChild = await adapter.history("ses_child");
+    expect(direct(initialChild.items)).toEqual([0.1, 0.2]);
+    if (renewedProof) {
+      const beforeChild = await adapter.subscribe("ses_child"), beforeRoot = await adapter.subscribe("ses_root");
+      const firstRow = tools(initialChild.items).find(row => row.id === "tool:first")!;
+      priorLine = firstRow.descendants!.find(line => line.id === "tool:leaf")!;
+      if (outcome === "renewed-leaf-read-fence") proofReadFence = adapter.projectionForTests("ses_child").beginHistoryRead();
+      const reads = ["ses_grandchild", "ses_leaf"].map(id => server.requests("GET", `/api/session/${id}/message`).length);
+      // Both authoritative histories observe the new occurrence. Its parent,
+      // public description and known amount are unchanged, so no wire frame
+      // is needed, but the projected private binding must become current.
+      if (outcome !== "renewed-leaf-unchanged" && !clonedRenewal) { leaf.time.created++; leaf.content[0].time.created++; leaf.content[0].time.completed++; }
+      if (clonedRenewal) {
+        // The public projection test seam simulates a genuine in-memory line
+        // clone; IDs and wire equality alone must not recreate private proof.
+        adapter.projectionForTests("ses_child").upsert({ ...firstRow, descendants: structuredClone(firstRow.descendants) });
+      }
+      if (outcome === "renewed-leaf-amount") renewalCost = 0.09;
+      await emit(["ses_grandchild", "ses_leaf"].map(id => ({ type: "session.updated", created: 90, data: { info: session(id, { parentID: id === "ses_leaf" ? "ses_grandchild" : "ses_child", cost: id === "ses_leaf" ? renewalCost : 0.3 }) } })));
+      if (outcome === "renewed-leaf-live") {
+        await emit([{ id: "evt_healthy_leaf", type: "session.message.content.updated", created: leaf.time.created,
+          durable: { aggregateID: "ses_grandchild", seq: ++sequence, version: 1 }, data: { sessionID: "ses_grandchild", messageID: leaf.id, content: leaf.content } }]);
+        expect(["ses_grandchild", "ses_leaf"].map(id => server.requests("GET", `/api/session/${id}/message`).length)).toEqual(reads);
+        const nativeView = await adapter.subscribe("ses_grandchild"); nativeView.events.cancel();
+        expect(tools(nativeView.snapshot.items).find(row => row.id === "tool:leaf")).toMatchObject({ createdAt: leaf.time.created, completedAt: leaf.content[0].time.completed, childConversationId: "ses_leaf" });
+      } else if (expiredRenewal || retiredGeneration || newerReference) {
+        holdRenewal = true; renewing = renewalOwner.run(true, () => adapter.history("ses_child"));
+        void renewing.catch(() => undefined); await renewalReady;
+        if (newerReference) {
+          leaf.time.created++; leaf.content[0].time.created++; leaf.content[0].time.completed++;
+          await emit([{ id: "evt_newer_leaf", type: "session.message.content.updated", created: leaf.time.created,
+            durable: { aggregateID: "ses_grandchild", seq: ++sequence, version: 1 }, data: { sessionID: "ses_grandchild", messageID: leaf.id, content: leaf.content } }]);
+          const current = await adapter.subscribe("ses_child"); current.events.cancel();
+          const newerLine = tools(current.snapshot.items).find(row => row.id === "tool:first")!.descendants!.find(line => line.id === "tool:leaf");
+          pinnedNative = await adapter.subscribe("ses_grandchild");
+          // Retire the old read's cached attribution owner without evicting
+          // either pinned projection. Its captured private references are
+          // now protected by the read-change fence, not a late cache reprice.
+          await emit(Array.from({ length: 512 }, (_, index) => {
+            const sessionID = `ses_proof_pressure_${index}`, inboxID = `proof_prompt_${index}`;
+            return [
+              { id: `proof_enqueued_${index}`, type: "session.inbox.enqueued", created: 1000 + index * 2, data: { sessionID, inboxID, item: { id: inboxID, type: "user", payload: { text: "Native proof pressure" } } } },
+              { id: `proof_delivered_${index}`, type: "session.inbox.delivered", created: 1001 + index * 2, data: { sessionID, inboxID } },
+            ];
+          }).flat());
+          const last = await adapter.subscribe("ses_proof_pressure_511"); last.events.cancel();
+          expect(last.snapshot.items).toContainEqual(expect.objectContaining({ id: "message:proof_prompt_511", type: "user_message" }));
+          const nativePrompt = (sessionID: string, inboxID: string, text: string, created: number) => [
+            { id: `restore_${inboxID}`, type: "session.inbox.enqueued", created, data: { sessionID, inboxID, item: { id: inboxID, type: "user", payload: { text } } } },
+            { id: `deliver_${inboxID}`, type: "session.inbox.delivered", created, data: { sessionID, inboxID } },
+          ];
+          // Restore current prompt topology and exact direct-row amounts via
+          // native restatements, not a successful history/cohort publication.
+          // The retired read still cannot reprice from its old cached owner.
+          await emit([
+            ...nativePrompt("ses_grandchild", "first_prompt", "First task", 21),
+            { id: "evt_restore_newer_leaf", type: "session.message.content.updated", created: leaf.time.created,
+              durable: { aggregateID: "ses_grandchild", seq: ++sequence, version: 1 }, data: { sessionID: "ses_grandchild", messageID: leaf.id, content: leaf.content } },
+            ...nativePrompt("ses_grandchild", "second_prompt", "Second task", 61),
+            ...nativePrompt("ses_leaf", "leaf_prompt", "Leaf task", 29),
+          ]);
+          const beforeOlder = await adapter.subscribe("ses_child"); beforeOlder.events.cancel();
+          expect(tools(beforeOlder.snapshot.items).find(row => row.id === "tool:first")!.descendants!.find(line => line.id === "tool:leaf")).toBe(newerLine);
+          releaseRenewal(); await renewing;
+          const afterOlder = await adapter.subscribe("ses_child"); afterOlder.events.cancel();
+          expect(tools(afterOlder.snapshot.items).find(row => row.id === "tool:first")!.descendants!.find(line => line.id === "tool:leaf")).toBe(newerLine);
+        } else if (expiredRenewal) {
+          await new Promise<void>(resolve => { if (renewalSignal!.aborted) resolve(); else renewalSignal!.addEventListener("abort", () => resolve(), { once: true }); });
+        } else await adapter.stopEventPump();
+        if (!newerReference) { releaseRenewal(); await expect(renewing).rejects.toThrow(); }
+        if (retiredGeneration) {
+          second.content[0].state.input.prompt = "Changed second task"; degraded = true;
+          void adapter.startEventPump(); await provider.waitForEventStream(AbortSignal.timeout(3_000));
+        }
+      } else if (!noRenewal) {
+        const healthyChild = await adapter.history("ses_child"), healthyRoot = await adapter.history("ses_root");
+        if (outcome === "renewed-leaf-amount") {
+          expect(tools(healthyChild.items).find(row => row.id === "tool:first")?.descendants).toContainEqual(expect.objectContaining({ id: "tool:leaf", usage: { costUsd: 0.09 } }));
+        } else {
+          expect(JSON.stringify(tools(healthyChild.items).find(row => row.id === "tool:first"))).toBe(JSON.stringify(firstRow));
+          expect(JSON.stringify(rootRow(healthyRoot.items))).toBe(JSON.stringify(rootRow(initial.items)));
+        }
+        for (const [index, id] of ["ses_grandchild", "ses_leaf"].entries()) expect(server.requests("GET", `/api/session/${id}/message`).length).toBeGreaterThan(reads[index]!);
+      }
+      if (((!noRenewal && outcome !== "renewed-leaf-live") || expiredRenewal || retiredGeneration) && !newerReference) expect(observedLeaf).toMatchObject({ createdAt: leaf.time.created, completedAt: leaf.content[0].time.completed, childConversationId: "ses_leaf" });
+      const after = await adapter.subscribe("ses_child"); after.events.cancel();
+      projectedLine = tools(after.snapshot.items).find(row => row.id === "tool:first")!.descendants!.find(line => line.id === "tool:leaf");
+      if (proofReadFence) {
+        expect(proofReadFence.changed("tool:first")).toBe(true);
+        expect(proofReadFence.merge([firstRow])).toEqual([tools(after.snapshot.items).find(row => row.id === "tool:first")!]);
+        expect(proofReadFence.merge([firstRow])[0]).toBe(tools(after.snapshot.items).find(row => row.id === "tool:first")!);
+      }
+      if (outcome === "renewed-leaf-repeat") for (let index = 0; index < 3; index++) {
+        const before = childHistoryReads;
+        await adapter.history("ses_child", { limit: 51 + index });
+        expect(childHistoryReads - before).toBe(1);
+        const repeated = await adapter.subscribe("ses_child"); repeated.events.cancel();
+        expect(tools(repeated.snapshot.items).find(row => row.id === "tool:first")!.descendants!.find(line => line.id === "tool:leaf")).toBe(projectedLine);
+      }
+      if (outcome !== "renewed-leaf-amount" && !retiredGeneration && !clonedRenewal) expect(after.snapshot.cursor).toBe(beforeChild.snapshot.cursor);
+      beforeChild.events.cancel(); beforeRoot.events.cancel();
+      for (const subscription of [beforeChild, beforeRoot]) {
+        const events = []; for await (const event of subscription.events) events.push(event);
+        const items = events.filter(event => event.type === "item.upsert" || event.type === "item.remove");
+        if (outcome === "renewed-leaf-amount") expect(items.some(event => event.type === "item.upsert")).toBe(true);
+        else if (!retiredGeneration && !clonedRenewal) expect(items).toEqual([]);
+      }
+    }
+    if (generation) {
+      await adapter.stopEventPump(); void adapter.startEventPump();
+      await provider.waitForEventStream(AbortSignal.timeout(3_000));
+      await adapter.history("ses_root"); await adapter.history("ses_child");
+    }
+    if (coalesced) {
+      const subscription = await adapter.subscribe("ses_child");
+      const applied = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "tool"
+        && event.item.id === "tool:first" && event.item.output === "Coalesced current first output") return; })();
+      const running = structuredClone(first.content); running[0].state.status = "running";
+      first.content[0].state.content = [{ type: "text", text: "Coalesced current first output" }];
+      try {
+        await emit([running, first.content].map(content => ({ id: `evt_coalesced_${++sequence}`, type: "session.message.content.updated", created: first.time.created,
+          durable: { aggregateID: "ses_child", seq: sequence, version: 1 }, data: { sessionID: "ses_child", messageID: first.id, content } })));
+        await applied;
+      } finally { subscription.events.cancel(); await applied; }
+      const current = await adapter.subscribe("ses_child"); current.events.cancel();
+      expect(tools(current.snapshot.items).find(row => row.id === "tool:first")?.descendants).toContainEqual(expect.objectContaining({ id: "tool:leaf", usage: { costUsd: 0.07 } }));
+    }
+    if (replacement) {
+      expect(await adapter.undo("ses_child", "binding-replacement")).toMatchObject({ outcome: "changed", state: { staged: true } });
+      const current = await adapter.subscribe("ses_child"); current.events.cancel();
+      expect(current.snapshot.items.some(item => item.id === "message:later")).toBe(false);
+      expect(tools(current.snapshot.items).find(row => row.id === "tool:first")?.descendants).toContainEqual(expect.objectContaining({ id: "tool:leaf", usage: { costUsd: 0.07 } }));
+    }
+    await emit(["ses_grandchild", "ses_child"].map(id => ({ type: "session.updated", created: 90, data: { info: session(id, { parentID: id === "ses_child" ? "ses_root" : "ses_child" }) } })));
+    if (!healthy && !unchanged) {
+      if (occurrence) { changed.time.created++; changed.content[0].time.created++; changed.content[0].time.completed++; }
+      else changed.content[0].state.input.prompt = `Changed ${changedFirst ? "first" : "second"} task`;
+    }
+    degraded = !healthy;
+    const withdrawn = await adapter.history("ses_child");
+    const retained = healthy || unchanged ? [0.1, 0.2] : changedFirst ? [undefined, 0.2] : [0.1, undefined];
+    expect(direct(withdrawn.items)).toEqual(retained);
+    if (!healthy && !unchanged) {
+      const rejected = tools(withdrawn.items).find(row => row.id === `tool:${changedFirst ? "first" : "second"}`)!;
+      expect(rejected).toMatchObject({ input: JSON.stringify(changed.content[0].state.input), createdAt: changed.content[0].time.created });
+      for (const key of ["childConversationId", "usage", "model", "workerSession", "descendants"]) expect(rejected).not.toHaveProperty(key);
+    }
+    const reads = ["ses_grandchild", "ses_leaf"].map(id => server.requests("GET", `/api/session/${id}/message`).length);
+    degraded = false;
+    if (surface === "live" && !recovery) observer = await adapter.subscribe("ses_root");
+    await emit(replacement ? [] : [{ id: "evt_deep_restatement", type: "session.message.content.updated", created: changed.time.created,
+      durable: { aggregateID: "ses_child", seq: ++sequence, version: 1 }, data: { sessionID: "ses_child", messageID: changed.id, content: changed.content } }]);
+    expect(["ses_grandchild", "ses_leaf"].map(id => server.requests("GET", `/api/session/${id}/message`).length)).toEqual(reads);
+    const currentChild = await adapter.subscribe("ses_child"); currentChild.events.cancel();
+    expect(direct(currentChild.snapshot.items)).toEqual(retained);
+    if (noRenewal) await emit([{ id: "evt_unproven_leaf", type: "session.message.content.updated", created: leaf.time.created,
+      durable: { aggregateID: "ses_grandchild", seq: ++sequence, version: 1 }, data: { sessionID: "ses_grandchild", messageID: leaf.id, content: leaf.content } }]);
+    let reusedHistory: Awaited<ReturnType<ChatAdapter["history"]>> | undefined;
+    if (noRenewal) reusedHistory = await adapter.history("ses_root");
+    if (refreshLeaf) {
+      const firstRow = tools(currentChild.snapshot.items).find(row => row.id === "tool:first")!;
+      expect(firstRow.descendants).toContainEqual(expect.objectContaining({ id: "tool:leaf", parentId: firstRow.id, usage: { costUsd: 0.07 } }));
+      // Reused native occurrences follow the sibling task; unchanged-signature
+      // controls stay under the first. Its enclosing call never changes.
+      leafChanged = true;
+      if (moveLeaf) { leaf.id = "msg_leaf_reused"; leaf.time.created = 68; }
+      if (outcome === "reused-leaf-input") leaf.content[0].state.input.prompt = "Changed leaf task";
+      else if (outcome === "reused-leaf-status") { leaf.content[0].state.status = "error"; leaf.content[0].state.error = { message: "Reused leaf failed" }; }
+      else if (outcome === "reused-leaf-completion") leaf.content[0].time.completed++;
+      else if (outcome === "reused-leaf-new-id") leaf.content[0].id = "leaf_new";
+      else if (moveLeaf) leaf.content[0].time = { created: 68, completed: 78 };
+      if (reusedParent) {
+        first.time.created++; first.content[0].time.created++; first.content[0].time.completed++;
+        await emit([{ id: "evt_parent_occurrence", type: "session.message.content.updated", created: first.time.created,
+          durable: { aggregateID: "ses_child", seq: ++sequence, version: 1 }, data: { sessionID: "ses_child", messageID: first.id, content: first.content } }]);
+      }
+      if (eviction) {
+        pinnedRoot = await adapter.subscribe("ses_root");
+        await adapter.history("ses_binding_pressure");
+        const reset = await adapter.subscribe("ses_child"); reset.events.cancel();
+        expect(reset.snapshot.items).toEqual([]);
+      }
+      await emit(["ses_grandchild", "ses_leaf"].map(id => ({ type: "session.updated", created: 100, data: { info: session(id, { parentID: id === "ses_leaf" ? "ses_grandchild" : "ses_child" }) } })));
+      reusedHistory = await adapter.history("ses_root");
+      expect(observedLeaf).toMatchObject({ createdAt: leaf.time.created, completedAt: leaf.content[0].time.completed,
+        input: JSON.stringify(leaf.content[0].state.input), status: leaf.content[0].state.status === "error" ? "failed" : leaf.content[0].state.status, childConversationId: "ses_leaf" });
+      for (const [index, id] of ["ses_grandchild", "ses_leaf"].entries()) expect(server.requests("GET", `/api/session/${id}/message`).length).toBeGreaterThan(reads[index]!);
+      const current = await adapter.subscribe("ses_child"); current.events.cancel();
+      const exactFirst = tools(current.snapshot.items).find(row => row.id === "tool:first")!;
+      if (eviction) expect(current.snapshot.items).toEqual([]);
+      else {
+        expect(exactFirst).toMatchObject({ createdAt: reusedParent ? first.time.created : firstRow.createdAt, input: firstRow.input, usage: { costUsd: 0.1 } });
+        expect(direct(current.snapshot.items)).toEqual(retained);
+      }
+    }
+    let expected = eviction ? [undefined, undefined] : retained;
+    if (recovery) {
+      fresh = true; elapsed = 31_000;
+      await emit(["ses_grandchild", "ses_child", "ses_leaf"].map(id => ({ type: "session.updated", created: 100, data: { info: session(id, { parentID: id === "ses_child" ? "ses_root" : id === "ses_leaf" ? "ses_grandchild" : "ses_child" }) } })));
+      expected = [zero ? 0 : 0.4, 0.5];
+      expect(direct((await adapter.history("ses_child")).items)).toEqual(expected);
+      expect(server.requests("GET", "/api/session/ses_grandchild/message").length).toBeGreaterThan(reads[0]!);
+      if (surface === "live") observer = await adapter.subscribe("ses_root");
+      await emit([{ type: "session.step.ended", created: 25, data: { sessionID: "ses_grandchild", assistantMessageID: "first_spend", cost: zero ? 0 : 0.4 } }]);
+    }
+    let ancestorItems: import("../../types").ConversationItem[];
+    if (surface === "history") ancestorItems = (!recovery && reusedHistory ? reusedHistory : await adapter.history("ses_root")).items;
+    else if (surface === "subscription") { const next = await adapter.subscribe("ses_root"); next.events.cancel(); ancestorItems = next.snapshot.items; }
+    else {
+      observer!.events.cancel();
+      const projected = new Map(observer!.snapshot.items.map(item => [item.id, item]));
+      for await (const event of observer!.events) {
+        if (event.type === "item.upsert") projected.set(event.item.id, event.item);
+        if (event.type === "item.remove") projected.delete(event.itemId);
+      }
+      ancestorItems = [...projected.values()];
+    }
+    const row = rootRow(ancestorItems);
+    expect(row).toMatchObject({ usage: { costUsd: 0.05 }, workerSession: { costUsd: 0.05 } });
+    for (const [index, id] of ["first", "second"].entries()) {
+      const line = row.descendants?.find(line => line.id === `tool:${id}`);
+      if (expected[index] === undefined) expect(line).not.toHaveProperty("usage");
+      else expect(line).toMatchObject({ usage: { costUsd: expected[index] } });
+    }
+    expect(server.calls.filter(call => call.method !== "GET").map(call => [call.method, call.path])).toEqual(replacement ? [["POST", "/api/session/ses_child/revert/stage"]] : []);
+    if (((reusedLeaf || reusedParent) && !recovery) || noRenewal) {
+      expect(row.descendants?.filter(line => line.conversationId === "ses_leaf" && line.usage !== undefined) ?? []).toEqual([]);
+    } else if (refreshLeaf) {
+      expect(row.descendants).toContainEqual(expect.objectContaining({ id: `tool:${leaf.content[0].id}`, parentId: recovery ? "tool:second" : "tool:first", usage: { costUsd: leafCost() } }));
+    } else if (healthy || unchanged || recovery || firstLeaf || changedFirst) {
+      expect(row.descendants).toContainEqual(expect.objectContaining({ id: "tool:leaf", parentId: firstLeaf ? "tool:first" : "tool:second", usage: { costUsd: fresh && zero ? 0 : renewalCost } }));
+    } else {
+      expect(row.descendants?.filter(line => (line.conversationId === "ses_leaf" || line.conversationId === "ses_deep") && line.usage !== undefined) ?? []).toEqual([]);
+    }
+    expect(opened).toBe(generation || retiredGeneration ? 2 : 1);
+    if (renewedProof && !noRenewal && outcome !== "renewed-leaf-unchanged") expect(projectedLine).not.toBe(priorLine);
+  } finally { releaseRenewal(); await renewing?.catch(() => undefined); proofReadFence?.release(); observer?.events.cancel(); pinnedRoot?.events.cancel(); pinnedNative?.events.cancel(); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
+for (const outcome of ["second-input", "first-input", "second-occurrence", "first-occurrence", "healthy", "fresh-recovery", "zero-recovery", "root-only-recovery", "root-only-zero-recovery", "root-only-held-recovery", "root-only-tied-delivery-recovery",
+  "root-only-unavailable", "root-only-foreign-parent", "root-only-foreign-workspace", "root-only-restatement", "root-only-missing-member",
+  "root-only-retired", "root-only-generation", "root-only-changed-source", "root-only-newer-proof", "root-only-newer-private", "root-only-reused-earlier"] as const)
+for (const surface of outcome.startsWith("root-only-") && !outcome.endsWith("-recovery") ? ["subscription"] as const
+  : outcome.endsWith("-occurrence") ? ["live", "subscription"] as const : ["live", "subscription", "history"] as const)
+test(`recursive allocation eligibility survives degraded nested history (${outcome}/${surface})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = (parent: string, child: string, call: string, prompt: string, created: number) => {
+    const message = structuredClone(fixture.launch); message.sessionID = parent; message.id = `msg_${call}`; message.time.created = created;
+    const tool = message.content[0]; tool.id = call; tool.time = { created, completed: created + 10 };
+    tool.state.input = { ...tool.state.input, prompt, background: false };
+    tool.state.metadata = { sessionID: child, status: "completed" }; tool.state.content = [{ type: "text", text: `${call} result` }];
+    return message;
+  };
+  const root = launch("ses_root", "ses_child", "root", "Root task", 10);
+  const first = launch("ses_child", "ses_grandchild", "first", "First task", 20);
+  const second = launch("ses_child", "ses_grandchild", "second", "Second task", 60);
+  const prompt = (id: string, text: string, created: number) => ({ id, type: "user", text, time: { created } });
+  const spend = (id: string, cost: number, created: number) => ({ id, type: "assistant", model: { id: "fixture-model" }, cost, time: { created }, content: [] });
+  const rootOnly = outcome.startsWith("root-only-");
+  const unavailable = outcome === "root-only-unavailable", foreignParent = outcome === "root-only-foreign-parent", foreignWorkspace = outcome === "root-only-foreign-workspace";
+  const restatement = outcome === "root-only-restatement", missingMember = outcome === "root-only-missing-member";
+  const retired = outcome === "root-only-retired", rootGeneration = outcome === "root-only-generation", changedSource = outcome === "root-only-changed-source", newerProof = outcome === "root-only-newer-proof";
+  const heldRecovery = outcome === "root-only-held-recovery";
+  const newerPrivate = outcome === "root-only-newer-private";
+  const reusedEarlier = outcome === "root-only-reused-earlier", tiedDelivery = outcome === "root-only-tied-delivery-recovery";
+  const rootBlocked = unavailable || restatement || missingMember || retired || rootGeneration || newerProof || newerPrivate || reusedEarlier;
+  const rootDenied = foreignParent || foreignWorkspace || changedSource;
+  const changedFirst = outcome.startsWith("first-"), occurrence = outcome.endsWith("-occurrence"), healthy = outcome === "healthy", recovery = outcome.endsWith("-recovery") || rootOnly, zero = outcome === "zero-recovery" || outcome === "root-only-zero-recovery";
+  const changed = changedFirst ? first : second;
+  let degraded = false, fresh = false, lateForeign = false, freshSecondPrompt = "Second task", opened = 0, closed = 0, sequence = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_root": () => session("ses_root"),
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_root", cost: 0.05 }),
+    "GET /api/session/ses_grandchild": () => degraded ? new Response(null, { status: 503 }) : session("ses_grandchild", {
+      parentID: (rootPhase && foreignParent) || lateForeign ? "ses_other" : "ses_child", cost: fresh ? zero ? 0.5 : 0.9 : 0.3,
+      ...(rootPhase && foreignWorkspace ? { location: { directory: "/foreign" } } : {}),
+    }),
+    "GET /api/session/ses_root/message": () => ({ data: [root], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [prompt("child_prompt", "Root task", 11), spend("child_spend", 0.05, 15), first, ...(rootPhase && missingMember ? [] : [second])], cursor: {} }),
+    "GET /api/session/ses_grandchild/message": () => ({ data: [
+      prompt("first_prompt", fresh ? first.content[0].state.input.prompt : "First task", rootPhase && tiedDelivery ? 20 : 21), spend("first_spend", fresh ? zero ? 0 : 0.4 : 0.1, 25),
+      prompt("second_prompt", fresh ? freshSecondPrompt : "Second task", 61), spend("second_spend", fresh ? 0.5 : 0.2, 65),
+    ], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+  });
+  const provider = server.provider(), events = provider.events.bind(provider), list = provider.listMessages.bind(provider);
+  let rootPhase = false, explicitIntermediateReads = 0, completedIntermediateReads = 0, holdFreshHistory = false;
+  let freshAccounting: Array<number | undefined> = [], freshMembers: Array<{ id: string; child: string | undefined; name: string; status: string; createdAt: number; completedAt: number | undefined; input: string | undefined }> = [];
+  let freshPrompts: string[] = [], contradictions: readonly string[] = [];
+  const completePages = [false, false];
+  const rootOwner = new AsyncLocalStorage<boolean>(), boundaryRead = provider.getHistoryRevertBoundary.bind(provider);
+  let holdRoot = false, rootEntered!: () => void, releaseRoot!: () => void, releaseFreshHistory!: () => void, rootSignal: AbortSignal | undefined;
+  const rootReady = new Promise<void>(resolve => { rootEntered = resolve; }), rootGate = new Promise<void>(resolve => { releaseRoot = resolve; });
+  const freshGate = new Promise<void>(resolve => { releaseFreshHistory = resolve; });
+  provider.getHistoryRevertBoundary = async (...args) => {
+    const value = await boundaryRead(...args);
+    if (holdRoot && rootOwner.getStore() && args[0] === "ses_root" && args[1]?.expectedBoundary === null) {
+      holdRoot = false; rootSignal = args[1]?.signal; rootEntered(); await rootGate;
+    }
+    return value;
+  };
+  provider.listMessages = async (...args) => {
+    if (holdFreshHistory && !rootOwner.getStore() && (args[0] === "ses_root" || args[0] === "ses_child")) await freshGate;
+    const page = await list(...args);
+    if (rootPhase && args[0] === "ses_grandchild") {
+      freshAccounting = page.accounting.filter(row => row.usage).map(row => row.usage?.costUsd);
+      freshPrompts = (page.completeItems ?? page.items).flatMap(item => item.type === "user_message" ? [item.text] : []);
+      completePages[1] = page.visibleDescendantsIncomplete !== true;
+    }
+    if (rootPhase && args[0] === "ses_child") {
+      freshMembers = (page.completeItems ?? page.items).flatMap(item => item.type === "tool"
+        ? [{ id: item.id, child: item.childConversationId, name: item.name, status: item.status, createdAt: item.createdAt, completedAt: item.completedAt, input: item.input }] : []);
+      contradictions = page.workerAssociationContradictions ?? [];
+      completePages[0] = page.visibleDescendantsIncomplete !== true;
+    }
+    return page;
+  };
+  let applied!: () => void;
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    if (!rootOnly && event.eventType === "diagnostic.recursive.applied") applied();
+    yield event;
+    if (rootOnly && event.eventType === "diagnostic.recursive.applied") applied();
+  } };
+  const emit = async (batch: Array<Record<string, unknown>>) => {
+    const ready = new Promise<void>(resolve => { applied = resolve; });
+    for (const event of [...batch, { type: "diagnostic.recursive.applied", data: {} }])
+      wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await ready;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0, ...(retired ? { historyReadTimeoutMs: 500 } : {}) });
+  const history = adapter.history.bind(adapter);
+  adapter.history = (...args) => {
+    const tracked = rootPhase && args[0] === "ses_child";
+    if (tracked) explicitIntermediateReads++;
+    const read = history(...args);
+    return tracked ? read.then(snapshot => { completedIntermediateReads++; return snapshot; }) : read;
+  };
+  const now = Date.now(); let elapsed = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now + elapsed);
+  let observer: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let pendingRoot: ReturnType<ChatAdapter["history"]> | undefined;
+  const tools = (items: import("../../types").ConversationItem[]) => items.filter((item): item is import("../../types").ToolItem => item.type === "tool");
+  const direct = (items: import("../../types").ConversationItem[]) => ["first", "second"].map(id => tools(items).find(row => row.id === `tool:${id}`)?.usage?.costUsd);
+  const nested = (items: import("../../types").ConversationItem[]) => ["first", "second"].map(id => tools(items).find(row => row.id === "tool:root")?.descendants?.find(line => line.id === `tool:${id}`)?.usage?.costUsd);
+  try {
+    expect(nested((await adapter.history("ses_root")).items)).toEqual([0.1, 0.2]);
+    expect(direct((await adapter.history("ses_child")).items)).toEqual([0.1, 0.2]);
+    // Invalidate native lookup/page reuse without retiring the stream generation.
+    await emit(["ses_grandchild", "ses_child"].map(id => ({ type: "session.updated", created: 90, data: { info: session(id, { parentID: id === "ses_child" ? "ses_root" : "ses_child" }) } })));
+    if (!healthy) {
+      if (occurrence) { changed.time.created++; changed.content[0].time.created++; changed.content[0].time.completed++; }
+      else changed.content[0].state.input.prompt = `Changed ${changedFirst ? "first" : "second"} task`;
+      degraded = true;
+    }
+    const withdrawn = await adapter.history("ses_child");
+    const retained = healthy ? [0.1, 0.2] : changedFirst ? [undefined, 0.2] : [0.1, undefined];
+    expect(direct(withdrawn.items)).toEqual(retained);
+    if (!healthy) {
+      const rejected = tools(withdrawn.items).find(row => row.id === `tool:${changedFirst ? "first" : "second"}`);
+      for (const key of ["childConversationId", "usage", "model", "workerSession"]) expect(rejected).not.toHaveProperty(key);
+    }
+    const reads = server.requests("GET", "/api/session/ses_grandchild/message").length;
+    degraded = false;
+    if (surface === "live" && !recovery) observer = await adapter.subscribe("ses_root");
+    // A newly verified launcher restatement is not new grandchild task evidence.
+    await emit([{ id: "evt_recursive_restatement", type: "session.message.content.updated", created: changed.time.created,
+      durable: { aggregateID: "ses_child", seq: ++sequence, version: 1 }, data: { sessionID: "ses_child", messageID: changed.id, content: changed.content } }]);
+    expect(server.requests("GET", "/api/session/ses_grandchild/message").length).toBe(reads);
+    const child = await adapter.subscribe("ses_child"); child.events.cancel();
+    expect(direct(child.snapshot.items)).toEqual(retained);
+    expect(tools(child.snapshot.items).find(row => row.id === `tool:${changedFirst ? "first" : "second"}`)).toMatchObject({
+      input: JSON.stringify(changed.content[0].state.input), output: `${changedFirst ? "first" : "second"} result`,
+    });
+    let expected = retained;
+    let rootHistory: Awaited<ReturnType<ChatAdapter["history"]>> | undefined, rootRepeat: Awaited<ReturnType<ChatAdapter["history"]>> | undefined;
+    if (recovery) {
+      rootPhase = rootOnly; freshSecondPrompt = second.content[0].state.input.prompt; fresh = !restatement; elapsed = rootOnly ? 0 : 31_000;
+      if (reusedEarlier) { second.time.created--; second.content[0].time.created--; second.content[0].time.completed--; }
+      if (unavailable) degraded = true;
+      await emit(["ses_grandchild", "ses_child"].map(id => ({ type: "session.updated", created: 100, data: { info: session(id, { parentID: id === "ses_child" ? "ses_root" : "ses_child" }) } })));
+      expected = rootDenied ? [undefined, undefined] : rootBlocked ? retained : [zero ? 0 : 0.4, 0.5];
+      if (rootOnly) {
+        if (surface === "live") observer = await adapter.subscribe("ses_root");
+        if (retired || rootGeneration || changedSource || newerProof || newerPrivate || heldRecovery) {
+          holdRoot = true; pendingRoot = rootOwner.run(true, () => adapter.history("ses_root"));
+          void pendingRoot.catch(() => undefined); await rootReady;
+          // Both nested inventories have completed, but no root publication
+          // has happened. Reconstruction must not clear the deficit early.
+          const beforePublication = await adapter.subscribe("ses_root"); beforePublication.events.cancel();
+          expect(nested(beforePublication.snapshot.items)).toEqual(retained);
+          const beforeChildPublication = await adapter.subscribe("ses_child"); beforeChildPublication.events.cancel();
+          expect(direct(beforeChildPublication.snapshot.items)).toEqual(retained);
+          if (retired || rootGeneration) {
+            await emit([{ type: "session.step.ended", created: 25, data: { sessionID: "ses_grandchild", assistantMessageID: "first_spend", cost: 0.4 } }]);
+            const restated = await adapter.subscribe("ses_root"); restated.events.cancel();
+            expect(nested(restated.snapshot.items)).toEqual(retained);
+          }
+          if (retired) await new Promise<void>(resolve => { if (rootSignal!.aborted) resolve(); else rootSignal!.addEventListener("abort", () => resolve(), { once: true }); });
+          else if (rootGeneration) { await adapter.stopEventPump(); holdFreshHistory = true; }
+          else if (changedSource) { lateForeign = true; await provider.getSession("ses_grandchild"); }
+          else if (newerPrivate) {
+            const projection = adapter.projectionForTests("ses_root");
+            const previous = tools(projection.items()).find(row => row.id === "tool:root")!;
+            // Wire-equal replacement, but its cloned lines have no private
+            // proof. The held read must not overwrite/retroactively renew it.
+            projection.refreshEquivalentTool(previous, { ...previous, descendants: previous.descendants!.map(line => ({ ...line })) });
+            expect(projection.get(previous.id)).toEqual(previous);
+            expect(projection.get(previous.id)).not.toBe(previous);
+          }
+          else if (newerProof) {
+            second.content[0].state.input.prompt = "A newer unproven second task";
+            await emit([{ id: "evt_newer_nested_member", type: "session.message.content.updated", created: second.time.created,
+              durable: { aggregateID: "ses_child", seq: ++sequence, version: 1 }, data: { sessionID: "ses_child", messageID: second.id, content: second.content } }]);
+          }
+          releaseRoot();
+          if (retired || rootGeneration) await expect(pendingRoot).rejects.toThrow();
+          else rootHistory = await pendingRoot;
+          if (rootGeneration) { void adapter.startEventPump(); await provider.waitForEventStream(AbortSignal.timeout(3_000)); }
+        } else rootHistory = await adapter.history("ses_root");
+        if (!retired && !rootGeneration) rootRepeat = await adapter.history("ses_root", { limit: 49 });
+        if (rootGeneration) expect(completedIntermediateReads).toBe(0); else expect(explicitIntermediateReads).toBe(0);
+        expect(freshAccounting).toEqual(unavailable || foreignParent || foreignWorkspace ? [] : restatement ? [0.1, 0.2] : [zero ? 0 : 0.4, 0.5]);
+        if (rootDenied) expect(contradictions).toContain("ses_grandchild");
+        else if (!unavailable && !missingMember) expect(freshMembers).toEqual([
+          { id: "tool:first", child: "ses_grandchild", name: "subagent", status: "completed", createdAt: 20, completedAt: 30, input: JSON.stringify(first.content[0].state.input) },
+          { id: "tool:second", child: "ses_grandchild", name: "subagent", status: "completed", createdAt: reusedEarlier ? 59 : 60, completedAt: reusedEarlier ? 69 : 70, input: JSON.stringify(second.content[0].state.input) },
+        ]);
+        if (!unavailable && !rootDenied) {
+          expect(completePages).toEqual([true, true]);
+          expect(freshPrompts).toEqual(["First task", restatement ? "Second task" : freshSecondPrompt]);
+        }
+        expect(elapsed).toBe(0);
+      } else expect(direct((await adapter.history("ses_child")).items)).toEqual(expected);
+      if (!unavailable && !foreignParent && !foreignWorkspace) expect(server.requests("GET", "/api/session/ses_grandchild/message").length).toBeGreaterThan(reads);
+      if (surface === "live" && !rootOnly) observer = await adapter.subscribe("ses_root");
+      // Reuse freshly published accounting; the restatement itself is still
+      // not what grants allocation eligibility.
+      await emit(unavailable || rootDenied ? [] : [
+        ...(restatement ? [{ type: "session.step.started", created: 25, data: { sessionID: "ses_grandchild", assistantMessageID: "first_spend", started: 25, model: { providerID: "fixture", id: "restated-model" } } }] : []),
+        { type: "session.step.ended", created: 25, data: { sessionID: "ses_grandchild", assistantMessageID: "first_spend", cost: zero ? 0 : 0.4 } },
+      ]);
+      if (retired || rootGeneration || restatement) {
+        const current = await adapter.subscribe("ses_child"); current.events.cancel();
+        expect(direct(current.snapshot.items)).toEqual(retained);
+      }
+    }
+    let ancestorItems: import("../../types").ConversationItem[];
+    if (surface === "history") ancestorItems = (rootHistory ?? await adapter.history("ses_root")).items;
+    else if (surface === "live") {
+      observer!.events.cancel();
+      const projected = new Map(observer!.snapshot.items.map(item => [item.id, item]));
+      for await (const event of observer!.events) {
+        if (event.type === "item.upsert") projected.set(event.item.id, event.item);
+        if (event.type === "item.remove") projected.delete(event.itemId);
+      }
+      ancestorItems = [...projected.values()];
+    } else { const ancestor = await adapter.subscribe("ses_root"); ancestor.events.cancel(); ancestorItems = ancestor.snapshot.items; }
+    expect(tools(ancestorItems).find(row => row.id === "tool:root")).toMatchObject({ usage: { costUsd: 0.05 }, workerSession: { costUsd: 0.05 } });
+    expect(opened).toBe(rootGeneration ? 2 : 1);
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+    if (rootOnly) {
+      const following = await adapter.subscribe("ses_root"); following.events.cancel();
+      const snapshots = [...(rootHistory ? [rootHistory] : []), ...(rootRepeat ? [rootRepeat] : []), following.snapshot];
+      for (const snapshot of snapshots) {
+        expect(tools(snapshot.items).find(row => row.id === "tool:root")).toMatchObject({ usage: { costUsd: 0.05 }, workerSession: { costUsd: 0.05 } });
+        const ids = tools(snapshot.items).find(row => row.id === "tool:root")?.descendants?.map(line => line.id) ?? [];
+        if (missingMember) expect(ids).toContain("tool:first");
+        else expect(ids).toEqual(rootDenied ? [] : ["tool:first", "tool:second"]);
+      }
+      if (rootGeneration) expect(completedIntermediateReads).toBe(0); else expect(explicitIntermediateReads).toBe(0);
+      expect(snapshots.map(snapshot => nested(snapshot.items))).toEqual(snapshots.map(() => expected));
+      for (const snapshot of snapshots) expect(conversationTotals(snapshot.items)?.costUsd).toBeCloseTo(0.05 + (expected[0] ?? 0) + (expected[1] ?? 0));
+    }
+    if (!recovery && surface !== "history") expect(server.requests("GET", "/api/session/ses_grandchild/message").length).toBe(reads);
+    expect(nested(ancestorItems)).toEqual(expected);
+    const lines = tools(ancestorItems).find(row => row.id === "tool:root")?.descendants;
+    if (!rootDenied && !missingMember) expect(lines).toHaveLength(2);
+    for (const [index, id] of ["first", "second"].entries()) {
+      const line = lines?.find(line => line.id === `tool:${id}`);
+      if (rootDenied || missingMember && line === undefined) { expect(line).toBeUndefined(); continue; }
+      expect(line).toMatchObject({ parentId: "tool:root", conversationId: "ses_grandchild" });
+      if (expected[index] === undefined) {
+        expect(line).not.toHaveProperty("usage");
+        expect(line).not.toHaveProperty("model");
+      }
+    }
+  } finally { releaseRoot(); releaseFreshHistory(); await pendingRoot?.catch(() => undefined); observer?.events.cancel(); clock.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
 for (const outcome of ["foreign-parent", "foreign-workspace", "unavailable", "pending-parent", "pending-workspace"] as const)
@@ -3285,6 +4417,102 @@ function observedNativeStream(provider: OpenCodeV2Provider) {
   return { lifetime, pump, events, seen: (matches: (event: import("../../provider").NormalizedProviderEvent) => boolean) =>
     events.some(matches) ? Promise.resolve() : new Promise<void>(resolve => waiting.add({ matches, resolve })) };
 }
+
+for (const scenario of ["single-known", "browser-two-reports", "known-zero-cost", "known-unpriced", "history-recovery", "no-reported-usage"] as const)
+test(`native browser worker reports retain known own tokens beside current effort and session cost (${scenario})`, async () => {
+  const { fake, provider, adapter } = nativeBackgroundStack();
+  const nativeEvents: import("../../provider").NormalizedProviderEvent[] = [], processed: import("../../provider").NormalizedProviderEvent[] = [], events = provider.events.bind(provider);
+  const nativeWaiters = new Set<{ matches: () => boolean; resolve: () => void }>();
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    nativeEvents.push(event); yield event; processed.push(event);
+    for (const waiter of nativeWaiters) if (waiter.matches()) { nativeWaiters.delete(waiter); waiter.resolve(); }
+  } };
+  const nativeProcessed = (matches: () => boolean) => matches() ? Promise.resolve() : new Promise<void>(resolve => nativeWaiters.add({ matches, resolve }));
+  let observer: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined, observing: Promise<void> | undefined;
+  const rows: import("../../types").BackgroundTaskItem[] = [];
+  const waiters = new Set<{ matches: (item: import("../../types").BackgroundTaskItem) => boolean; resolve: () => void }>();
+  const seen = (matches: (item: import("../../types").BackgroundTaskItem) => boolean) => rows.some(matches) ? Promise.resolve() : new Promise<void>(resolve => waiters.add({ matches, resolve }));
+  try {
+    const parent = (await provider.createSession("Native browser token regression")).id;
+    await adapter.history(parent);
+    observer = await adapter.subscribe(parent);
+    observing = (async () => { for await (const event of observer!.events) if (event.type === "item.upsert" && event.item.type === "background_task") {
+      rows.push(event.item);
+      for (const waiter of waiters) if (waiter.matches(event.item)) { waiters.delete(waiter); waiter.resolve(); }
+    } })();
+    if (scenario === "browser-two-reports") await provider.prompt(parent, { id: "fixture-work", text: "Start fixture work", delivery: "queue" });
+    const worker = fake.launchWorker(parent, true);
+    await seen(item => item.taskId === worker.taskId);
+    if (scenario === "browser-two-reports") {
+      fake.workerReport(worker.childId, "Fixture Model", "high", 0);
+      await seen(item => item.taskId === worker.taskId && item.workerSession?.effort === "high" && item.workerSession.costUsd === 0);
+    }
+    if (scenario !== "no-reported-usage") {
+      const cost = scenario === "known-zero-cost" ? 0 : scenario === "known-unpriced" ? undefined : 0.0012;
+      fake.workerReport(worker.childId, "Fixture Model", "medium", cost);
+      await seen(item => item.taskId === worker.taskId && item.workerSession?.effort === "medium" && item.workerSession.costUsd === (cost ?? null));
+      // Resume past the final native event, not an elapsed-time guess. Both
+      // token-bearing step end and the later session-cost update are handled.
+      const lastType = cost === undefined ? "session.step.ended" : "session.usage.updated";
+      const count = scenario === "browser-two-reports" ? 2 : 1;
+      await nativeProcessed(() => processed.filter(event => event.conversationId === worker.childId && event.eventType === lastType).length >= count);
+      expect(nativeEvents).toContainEqual(expect.objectContaining({ conversationId: worker.childId, assistantUsage: expect.objectContaining({ usage: expect.objectContaining({ input: 1200, output: 100, reasoning: 20 }) }) }));
+      if (scenario === "history-recovery") await adapter.history(parent);
+      const next = await adapter.subscribe(parent); next.events.cancel();
+      // Match the browser's launcher/background fold, including known zero
+      // spend. Each report has 1200 input + 100 output + 20 reasoning tokens.
+      const display = compactWorkers(next.snapshot.items).find(item => item.taskId === worker.taskId)!;
+      expect({ model: display.model, effort: display.effort, costUsd: display.costUsd, tokens: display.tokens }).toEqual({
+        model: "Fixture Model", effort: "medium", costUsd: cost ?? null, tokens: 1320 * count,
+      });
+    } else {
+      const next = await adapter.subscribe(parent); next.events.cancel();
+      expect(compactWorkers(next.snapshot.items).find(item => item.taskId === worker.taskId)?.tokens).toBeUndefined();
+      expect(nativeEvents.some(event => event.conversationId === worker.childId && event.assistantUsage)).toBe(false);
+    }
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { observer?.events.cancel(); await adapter.dispose(); await observing; await fake.stop(); }
+});
+
+for (const evidence of ["model", "usage", "descendants", "session-model", "session-effort", "session-zero", "session-cost"] as const)
+test(`native live tokens cannot reuse retained allocation evidence after owner loss (${evidence})`, async () => {
+  const { fake, provider, adapter } = nativeBackgroundStack();
+  const processed: import("../../provider").NormalizedProviderEvent[] = [], events = provider.events.bind(provider);
+  const waiters = new Set<{ matches: () => boolean; resolve: () => void }>();
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    yield event; processed.push(event);
+    for (const waiter of waiters) if (waiter.matches()) { waiters.delete(waiter); waiter.resolve(); }
+  } };
+  const handled = (matches: (event: import("../../provider").NormalizedProviderEvent) => boolean) => processed.some(matches)
+    ? Promise.resolve() : new Promise<void>(resolve => waiters.add({ matches: () => processed.some(matches), resolve }));
+  try {
+    const parent = (await provider.createSession("Retained allocation evidence")).id;
+    await adapter.history(parent);
+    const worker = fake.launchWorker(parent, true);
+    await handled(event => event.conversationId === parent && event.eventType === "session.message.content.updated");
+    const projection = adapter.projectionForTests(parent), launcher = projection.get(`tool:${worker.callId}`);
+    if (launcher?.type !== "tool") throw new Error("Expected native launcher");
+    const retained: Partial<import("../../types").ToolItem> = evidence === "model" ? { model: "Retained model" }
+      : evidence === "usage" ? { usage: { input: 77, output: 3, costUsd: 0.03 } }
+      : evidence === "descendants" ? { descendants: [{ id: "retained-line", parentId: launcher.id, description: "Retained usage", conversationId: "retained-child", usage: { input: 11 } }] }
+      : { workerSession: { effort: evidence === "session-effort" ? "high" : null,
+        costUsd: evidence === "session-zero" ? 0 : evidence === "session-cost" ? 0.03 : null,
+        ...(evidence === "session-model" ? { model: "Retained session model" } : {}) } };
+    // Simulate the retained projection side of owner/cache loss, not an empty
+    // placeholder. The real eviction/generation matrix exercises its lifecycle.
+    projection.upsert({ ...launcher, ...retained });
+    fake.workerReport(worker.childId, "Fixture Model", "medium", 0.0012);
+    await handled(event => event.conversationId === worker.childId && event.eventType === "session.usage.updated");
+    const next = await adapter.subscribe(parent); next.events.cancel();
+    const current = next.snapshot.items.find(item => item.id === launcher.id);
+    if (current?.type !== "tool") throw new Error("Expected retained launcher");
+    expect({ usage: current.usage, model: current.model, descendants: current.descendants }).toEqual({
+      usage: retained.usage, model: retained.model, descendants: retained.descendants,
+    });
+    expect(current.workerSession).toEqual({ model: "Fixture Model", effort: "medium", costUsd: 0.0012 });
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { await adapter.dispose(); await fake.stop(); }
+});
 
 test("native browser fixture shell completion reaches provider inventory without timestamp repair", async () => {
   let now = 10_000;

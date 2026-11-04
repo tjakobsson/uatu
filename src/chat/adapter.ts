@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { AgentNotificationTracker, type AgentNotificationEvent } from "./notifications";
 
 import { boundedSet } from "../shared/bounded-map";
@@ -132,7 +132,7 @@ type InventorySessionMetadata = {
   deleted: boolean;
 };
 type CachedAssociationCounterproof = { parentId: string; childIds: readonly string[]; transcriptKeys: ReadonlySet<string> };
-type HistoryCoverage = { signal: AbortSignal; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; replacement?: true };
+type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; replacement?: true };
 class HistoryReadChangedError extends Error {}
 
 /** Evidence flows from shared accounting owners to each enclosing read before
@@ -141,6 +141,8 @@ class HistoryReadChangedError extends Error {}
 class WorkerSourceRead {
   private readonly guards: Array<{ guard: WorkerSourceGuard; accountingKey?: string }> = [];
   private readonly followers = new Set<WorkerSourceRead>();
+  private readonly inventories = new Map<string, AccountingInventory>();
+  readonly nestedPublications = new Map<string, NestedAllocationPublication>();
   constructor(private readonly signal: AbortSignal) {}
   observe(source: WorkerSourceGuard, accountingKey?: string): void {
     if (this.signal.aborted) return;
@@ -150,6 +152,7 @@ class WorkerSourceRead {
   }
   follow(read: WorkerSourceRead): () => void {
     for (const { guard, accountingKey } of this.guards) read.observe(guard, accountingKey);
+    for (const [key, inventory] of this.inventories) read.inventory(key, inventory);
     this.followers.add(read);
     return () => { this.followers.delete(read); };
   }
@@ -158,6 +161,13 @@ class WorkerSourceRead {
   }
   hasAccountingPage(key: string): boolean {
     return this.guards.some(({ accountingKey }) => accountingKey === key);
+  }
+  inventory(key: string, incoming?: AccountingInventory): AccountingInventory | undefined {
+    if (incoming && !this.signal.aborted && (this.inventories.has(key) || this.inventories.size < MAX_CHILD_ATTRIBUTIONS)) {
+      this.inventories.set(key, incoming);
+      for (const follower of this.followers) follower.inventory(key, incoming);
+    }
+    return this.inventories.get(key);
   }
 }
 
@@ -655,7 +665,7 @@ export class ChatAdapter {
   // exactly as long as that timeline does. Keyed by the child, eviction would
   // never fire — the LRU evicts conversations, and a child session usually has
   // no projection of its own. A ceiling backstops both maps besides.
-  private readonly childUsage = new Map<string, Map<string, TokenUsage>>();
+  private readonly childUsage = new Map<string, ChildUsage>();
   private readonly childModels = new Map<string, Map<string, MessageModel>>();
   // Which prompt each of the child's messages answers. A subagent handed a
   // further task (OpenCode's `task_id`) is one session with a prompt per task,
@@ -667,6 +677,9 @@ export class ChatAdapter {
   // launcher belongs to the prompt it follows. Same key and lifetime as the
   // tallies, so an eviction re-arms the stored read for all of them together.
   private readonly childTranscripts = new Map<string, ChildTranscript>();
+  // Exact provenance of generated lines, not an ID-based authority cache.
+  // Weak keys follow existing projection/replay references through shallow merges.
+  private readonly descendantBindings = new WeakMap<SubagentLine, DescendantBinding>();
   // Launchers removed before the tally was squared against the store. A
   // stored read in flight would otherwise hand the removed launcher back and
   // bank it — the same race `removedChildAttribution` closes for messages.
@@ -675,7 +688,7 @@ export class ChatAdapter {
   // later live upsert, explicit invalidation or bounded cache retirement.
   private readonly removedChildAttribution = new Map<string, Map<string, number>>();
   private readonly attributionReconstructions = new Map<string, Promise<void>>();
-  private readonly attributionEpochs = new Map<string, number>();
+  private readonly attributionEpochs = new Map<string, AttributionOwner>();
   // When each live-banked figure arrived, as a running sequence, so a
   // reconstruction can tell an update that landed during its read (newer
   // than the store) from one banked before it began (which the store may
@@ -902,14 +915,15 @@ export class ChatAdapter {
         let refreshAttribution = false;
         while (true) {
           recovery.dirty = false;
-          fence = this.projection(id).beginHistoryRead();
+          const readProjection = this.projection(id);
+          fence = readProjection.beginHistoryRead();
           const attempt = new AbortController();
           const attemptSignal = AbortSignal.any([signal, attempt.signal]);
           const workerSources = new WorkerSourceRead(attemptSignal);
           const associations = associationRead?.begin(workerSources);
           const cachedAssociations = associations?.evidence ?? [];
           try {
-            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, ...(replacement ? { replacement: true } : {}) });
+            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, ...(replacement ? { replacement: true } : {}) });
             inboxReconciled = true;
             assertCurrent();
             if (!recovery.dirty) return snapshot;
@@ -978,7 +992,7 @@ export class ChatAdapter {
       for (const itemId of page.revertVisibility.excludedItemIds) if (this.projection(id).has(itemId)) coverage.revertExclusions.add(itemId);
     }
     // An inspection predating parent eviction/revert cannot repopulate its cleared cache.
-    if (parentId && attributionOwner && this.projections.get(parentId) === attributionOwner && this.attributionEpochs.get(inspectionKey!) === inspectionEpoch) {
+    if (parentId && attributionOwner && this.projections.get(parentId) === attributionOwner && this.attributionEpochs.get(inspectionKey!)?.epoch === inspectionEpoch) {
       this.refreshInspectedChildAccounting(id, parentId, page.accounting, page.sessionCostUsd, readStartedAt);
     }
     // Attaching reconciles the pending steers with the agent's own list, so a
@@ -1046,14 +1060,16 @@ export class ChatAdapter {
       // A reused native call across visible origins is not exact association proof.
       nativeToolChildren.set(key, nativeToolChildren.has(key) ? undefined : origin.childConversationId);
     }
+    const sameToolAssociation = (item: ToolItem, prior: ToolItem): boolean => prior.childConversationId !== undefined
+      && !revokedChildren.has(prior.childConversationId) && nativeToolChildren.get(item.id) === prior.childConversationId
+      && item.name === prior.name && item.createdAt === prior.createdAt && item.input === prior.input
+      && !(item.status === "completed" && prior.status === "completed" && item.completedAt !== prior.completedAt);
     const retainToolAssociation = (item: ToolItem, projection: ConversationProjection): ToolItem => {
       if (item.childConversationId || !coverage || !this.provider.watchWorkerAssociations || coverage.changed(item.id)) return item;
       const prior = projection.get(item.id);
       if (prior?.type !== "tool" || !prior.childConversationId) return item;
       if (!nativeToolChildren.has(item.id)) return item;
-      if (revokedChildren.has(prior.childConversationId) || nativeToolChildren.get(item.id) !== prior.childConversationId
-        || item.name !== prior.name || item.createdAt !== prior.createdAt || item.input !== prior.input
-        || item.status === "completed" && prior.status === "completed" && item.completedAt !== prior.completedAt) {
+      if (!sameToolAssociation(item, prior)) {
         // Ordinary sparse upserts must not move the old association onto a
         // changed occurrence that a later replacement could mistake for proof.
         revokedRows.add(item.id);
@@ -1256,8 +1272,8 @@ export class ChatAdapter {
         if (index < 0) items.push(task); else items[index] = task;
       }
       for (const source of recoverySources) for (const relation of source.workerResultFallbacks) {
-        if (!items.some(item => item.id === relation.fallback.id) && !items.some(item => item.type === "background_task" && !item.stateUncertain
-          && item.resultId === relation.resultId && item.childConversationId === relation.childConversationId && !revokedChildren.has(relation.childConversationId))) items.push(relation.fallback);
+        if (!items.some(item => item.id === relation.fallback.id) && !items.some(item => workerRepresentsFallback(item, relation)
+          && !revokedChildren.has(relation.childConversationId))) items.push(relation.fallback);
       }
     }
     const liveTasks = this.provider.reconcileBackgroundTasks ? null : await this.liveBackgroundTasks(id);
@@ -1333,6 +1349,15 @@ export class ChatAdapter {
     }
     const carrierIds = cursor ? undefined : new Set(items.map(item => item.id));
     let restoredCarrier = false;
+    const incompleteToolCohorts = new Set<string>();
+    const cohortMembers = new Map<string, Set<string>>();
+    const rememberCohort = (child: string, row: string) => {
+      const members = cohortMembers.get(child) ?? new Set<string>();
+      members.add(row); cohortMembers.set(child, members);
+    };
+    for (const [row, child] of nativeToolChildren) if (child) rememberCohort(child, row);
+    for (const known of sourceProjection.items()) if (known.type === "tool" && known.childConversationId) rememberCohort(known.childConversationId, known.id);
+    const allocationPublications = new Map<string, AllocationPublication>();
     const accountingItems = page.completeItems?.map(item => {
       const retained = item.type === "tool" ? retainToolAssociation(item, sourceProjection) : item;
       // Optional enrichment stripped this exact launcher's child before the
@@ -1343,10 +1368,48 @@ export class ChatAdapter {
         carrierIds.add(retained.id);
         restoredCarrier = true;
       }
+      if (item.type === "tool" && !item.childConversationId && coverage?.changed(item.id) && this.provider.watchWorkerAssociations) {
+        const current = sourceProjection.get(item.id);
+        // The live row owns its presentation, but its exact association still
+        // occupies a place in complete attribution order. This copy is only
+        // ordering input: never reinsert it or revoke a mismatching live row.
+        if (current?.type === "tool" && current.name === "subagent" && item.status === "completed"
+          && current.status === item.status && sameToolAssociation(item, current)) return { ...item, childConversationId: current.childConversationId };
+      }
+      if (item.type === "tool" && retained.type === "tool" && !retained.childConversationId && this.provider.watchWorkerAssociations) {
+        const current = sourceProjection.get(item.id);
+        // A rejected association is not an ordering member, but its absence
+        // must not redistribute the whole cached child tally onto a sibling.
+        const nativeChild = nativeToolChildren.get(item.id);
+        if (nativeChild) incompleteToolCohorts.add(nativeChild);
+        if (current?.type === "tool" && current.childConversationId) incompleteToolCohorts.add(current.childConversationId);
+      }
       return retained;
     });
+    if (accountingItems && this.provider.watchWorkerAssociations) {
+      for (const known of sourceProjection.items()) if (known.type === "tool" && known.name === "subagent"
+        && known.childConversationId && nativeToolChildren.get(known.id) !== known.childConversationId) incompleteToolCohorts.add(known.childConversationId);
+    }
     if (restoredCarrier) items.sort((left, right) => left.createdAt - right.createdAt);
-    await this.attributeLaunchers(id, items, accountingItems, coverage?.signal, page.workerSource ? coverage?.workerSources : undefined, coverage?.refreshAttribution);
+    await this.attributeLaunchers(id, items, accountingItems, coverage?.signal, page.workerSource ? coverage?.workerSources : undefined, coverage?.refreshAttribution, {
+      incomplete: incompleteToolCohorts,
+      observe: (child, owner, rows, incomplete, proof) => allocationPublications.set(child, { owner, revision: owner.allocationRevision, rows, incomplete, proof }),
+      retain: item => {
+        if (!coverage || coverage.changed(item.id) || !item.childConversationId
+          || coverage.workerSources.hasAccountingPage(attributionKey(id, item.childConversationId))) return item;
+        const prior = sourceProjection.get(item.id);
+        if (prior?.type !== "tool" || item.status !== "completed" || prior.status !== item.status
+          || prior.childConversationId !== item.childConversationId || !sameToolAssociation(item, prior)) return item;
+        // Only this exact surviving row can keep known presentation. A current
+        // accounting page or live update keeps its independent authority.
+        return { ...item,
+          ...(item.workerSession === undefined && prior.workerSession ? { workerSession: prior.workerSession } : {}),
+          ...(item.usage === undefined && prior.usage ? { usage: prior.usage } : {}),
+          ...(item.model === undefined && prior.model ? { model: prior.model } : {}),
+          ...(item.descendants === undefined && prior.descendants ? { descendants: prior.descendants } : {}),
+        };
+      },
+    });
     coverage?.assertCurrent();
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
@@ -1534,19 +1597,80 @@ export class ChatAdapter {
       // A visible native result can change presentation when ownership
       // enrichment recovers. Neither page absence nor a notice-shaped id is
       // removal authority: require the provider's exact fallback relation and
-      // an already verified worker for the same result AND child. Retained
-      // settled workers can supply that representation during a lookup outage.
-      for (const { resultId, childConversationId, fallback } of fallbackRelations) {
-        if (coverage?.changed(fallback.id) || !items.some(item => item.type === "background_task" && item.taskType === "agent"
-          && !item.stateUncertain && item.resultId === resultId && item.childConversationId === childConversationId)) continue;
-        const relation = { resultId, childConversationId, fallback };
+      // an already verified worker for the same result AND child representing
+      // the current report content. Retained settled workers may supply that
+      // representation during a lookup outage, but not suppress a newer report.
+      for (const relation of fallbackRelations) {
+        const { fallback } = relation;
+        if (coverage?.changed(fallback.id) || !items.some(item => workerRepresentsFallback(item, relation))) continue;
         const index = items.findIndex(item => item.id === fallback.id && projection.matchesWorkerFallback(item, relation));
         if (index >= 0) items.splice(index, 1);
         const current = projection.get(fallback.id);
         if (current && projection.matchesWorkerFallback(current, relation)) projection.apply({ kind: "remove", itemId: fallback.id });
       }
+      const allocationCommits: Array<{ owner: AttributionOwner; floor: number | undefined; occurrences?: string }> = [];
+      if (coverage && !cursor && accountingItems) for (const [child, publication] of allocationPublications) {
+        const key = attributionKey(id, child);
+        if (this.attributionEpochs.get(key) !== publication.owner || publication.owner.allocationRevision !== publication.revision) continue;
+        const sources = new Map(accountingItems.filter((item): item is ToolItem => item.type === "tool" && item.childConversationId === child).map(item => [item.id, item]));
+        const current = items.filter((item): item is ToolItem => item.type === "tool" && item.childConversationId === child);
+        const matches = (item: ToolItem) => {
+          const source = sources.get(item.id);
+          return source !== undefined && item.status === source.status && sameToolAssociation(item, source);
+        };
+        const proof = publication.proof && !revokedChildren.has(child) && current.length === publication.rows.length
+          && current.every(matches) && projection.filter(item => item.type === "tool" && item.childConversationId === child && !excluded.has(item.id)).every(item => item.type === "tool" && matches(item));
+        const floor = Math.max(publication.owner.allocationFloor ?? 0, publication.rows.length, cohortMembers.get(child)?.size ?? 0, current.length);
+        if (publication.incomplete || publication.proof && !proof) {
+          const known = sourceProjection.filter(item => item.type === "tool" && item.childConversationId === child)
+            .flatMap(item => item.type === "tool" ? [taskRow(item)] : []);
+          // Negative occurrence evidence has exactly the existing marker's
+          // bounded ownership/lifetime. Never replace it with a restatement.
+          const occurrences = publication.owner.allocationOccurrences ?? (publication.owner.allocationFloor === undefined && known.length === floor
+            ? occurrenceSignature(known) : undefined);
+          allocationCommits.push({ owner: publication.owner, floor, occurrences });
+        }
+        else if (proof) {
+          // Reconstruction can decorate the old projection before this parent
+          // cohort publishes. Reapply current accounting only to exact rows;
+          // never replace newer native presentation or an unmatched occurrence.
+          const values = this.rowAttributions(id, child, publication.rows, coverage.workerSources);
+          const byId = new Map(publication.rows.map((row, index) => [row.id, values[index]!]));
+          for (let index = 0; index < items.length; index++) {
+            const item = items[index]!;
+            if (item.type === "tool" && item.childConversationId === child && matches(item)) {
+              const { usage: _usage, model: _model, descendants: _descendants, ...presentation } = item;
+              const repriced = { ...presentation, ...byId.get(item.id) };
+              const prior = projection.get(item.id);
+              if (prior?.type === "tool" && withdraws(prior, repriced)) revokedRows.add(item.id);
+              items[index] = repriced;
+            }
+          }
+          allocationCommits.push({ owner: publication.owner, floor: undefined });
+        }
+      }
       const replace = coverage?.replacement && (reversibleHistory && !sameReversibleHistory(previousReversibleHistory, reversibleHistory)
         || !sameConversationItems(projection.items(), items));
+      // Nested candidates are permissions of this read, not successful child
+      // publications. Check the final materialized graph before changing any
+      // projection references; commit only with the enclosing publication.
+      if (coverage && !cursor) for (const publication of coverage.workerSources.nestedPublications.values()) {
+        if (!publication.proven || !this.nestedAllocationCurrent(publication, coverage.workerSources)) continue;
+        const lines = items.flatMap(item => item.type === "tool" ? item.descendants ?? [] : []).filter(line => {
+          const proof = this.descendantBindings.get(line);
+          return proof?.sessionId === publication.sessionId && line.conversationId === publication.childId;
+        });
+        const launchers = this.childTranscripts.get(publication.parentKey)!.launchers.filter(launcher => launcher.conversationId === publication.childId);
+        if (lines.length !== launchers.length || !launchers.every(launcher => lines.filter(line => {
+          const proof = this.descendantBindings.get(line);
+          const parent = publication.parents.find(parent => parent.id === line.parentId);
+          return line.id === launcher.id && proof !== undefined && proof.parentSessionId === publication.parentId
+            && proof.promptId === this.childTranscripts.get(publication.parentKey)!.prompts[launcher.promptIndex]?.id
+            && parent?.binding !== undefined && sameLauncherBinding(proof.parent, parent.binding)
+            && sameLauncherBinding(proof.launcher, launcher.binding);
+        }).length === 1)) continue;
+        allocationCommits.push({ owner: publication.owner, floor: undefined });
+      }
       // Fresh nested reconciliation can withdraw attribution without changing
       // the parent launcher itself. Use the same replacement semantics as live
       // attribution updates; an ordinary sparse upsert would resurrect it.
@@ -1572,7 +1696,18 @@ export class ChatAdapter {
         for (const item of items) {
           const current = projection.get(item.id);
           if (!current || !sameConversationItems([current], [item])) projection.apply({ kind: "upsert", item });
+          else if (current.type === "tool" && item.type === "tool" && coverage?.projection === projection && !coverage.changed(item.id)) {
+            this.refreshEquivalentDescendantBindings(projection, current, item);
+          }
         }
+      }
+      // Publication and eligibility share the covering read's final fence.
+      // Session lookups and child usage/model frames never clear this marker.
+      for (const commit of allocationCommits) {
+        commit.owner.allocationFloor = commit.floor;
+        commit.owner.allocationOccurrences = commit.floor === undefined ? undefined : commit.occurrences;
+        commit.owner.generationOnly = false;
+        commit.owner.allocationRevision++;
       }
       if (reversibleHistory) {
         projection.reconciledHistoryVisibility = { state: reversibleHistory, ...(visibility ? { boundaryId: visibility.boundaryId } : {}) };
@@ -3792,7 +3927,13 @@ export class ChatAdapter {
     // reconstruction) cannot stand in for the child's current stored history.
     this.completeAttributions.clear();
     this.attributionReconstructions.clear();
-    for (const key of this.attributionEpochs.keys()) this.attributionEpochs.set(key, ++this.attributionSequence);
+    for (const [key, owner] of this.attributionEpochs) this.attributionEpochs.set(key, {
+      epoch: ++this.attributionSequence,
+      allocationRevision: 0,
+      allocationOccurrences: owner.allocationOccurrences,
+      ...(this.provider.watchWorkerAssociations ? { allocationFloor: owner.allocationFloor ?? 0,
+        generationOnly: owner.allocationFloor === undefined || owner.generationOnly === true } : {}),
+    });
   }
 
   private revokeChildAttribution(parentId: string, childId: string): void {
@@ -3881,6 +4022,7 @@ export class ChatAdapter {
     const readStartedAt = this.attributionSequence;
     const revokedDescendants = new Set<string>();
     const sourceGuards: Array<() => boolean> = [];
+    let inventorySignature: string | undefined;
     try {
       // Every message, in one read: banking a partial tally would permanently
       // underreport the child, because a banked key is never re-read. The
@@ -3918,6 +4060,12 @@ export class ChatAdapter {
       // each under the prompt it followed. A launcher that leads back into
       // the chain being read (a loop in the data) is not listed.
       transcript = readChildTranscript(complete ?? paged, ancestry);
+      // Fingerprint ONLY the provider inventory, before filtering or merging
+      // cached/live prompts and launchers. Oversized proof fails closed while
+      // ordinary reconstruction keeps its existing behavior and budgets.
+      if (!descendantsIncomplete && !revokedDescendants.size && transcript.prompts.length + transcript.launchers.length <= MAX_CHILD_ATTRIBUTIONS) {
+        inventorySignature = transcriptSignature(transcript);
+      }
       transcript.launchers = transcript.launchers.filter(launcher => !revokedDescendants.has(launcher.conversationId));
       for (const promptId of byPrompt.values()) if (!transcript.prompts.some(prompt => prompt.id === promptId)) transcript.prompts.push({ id: promptId });
       // The child's own subagents are squared against their stores the same
@@ -3938,7 +4086,7 @@ export class ChatAdapter {
     // Eviction clears every live value this read would merge. A completion
     // from before that boundary must not repopulate the cleared maps and mark
     // a potentially incomplete answer authoritative.
-    if (signal?.aborted || this.attributionEpochs.get(key) !== epoch) return;
+    if (signal?.aborted || this.attributionEpochs.get(key)?.epoch !== epoch) return;
     if (sourceGuards.some(current => !current())) throw new HistoryReadChangedError();
     sources?.assertCurrent();
     // Commit negative association evidence only with this reconstruction's
@@ -3988,7 +4136,7 @@ export class ChatAdapter {
       byModel.delete(messageId);
       byPrompt.delete(messageId);
     }
-    this.bankAttribution(this.childUsage, key, byMessage);
+    this.bankChildUsage(key, byMessage);
     this.bankAttribution(this.childModels, key, byModel);
     this.bankAttribution(this.childPrompts, key, byPrompt);
     this.bankChildTranscript(key, transcript);
@@ -3996,6 +4144,9 @@ export class ChatAdapter {
     if (descendantsIncomplete) return;
     // Squared against the store until eviction or the bounded refresh age.
     this.completeAttributions.set(key, Date.now());
+    if (inventorySignature !== undefined && sources?.hasAccountingPage(key)) sources.inventory(key, {
+      signature: inventorySignature, owner: this.attributionEpochs.get(key)!, revision: this.attributionEpochs.get(key)!.allocationRevision,
+    });
     this.removedLaunchers.delete(key);
     if (this.completeAttributions.size > MAX_CHILD_ATTRIBUTIONS) {
       this.completeAttributions.delete(this.completeAttributions.keys().next().value!);
@@ -4009,6 +4160,7 @@ export class ChatAdapter {
    * rebuild afterwards.
    */
   private bankAttribution<T>(map: Map<string, T>, key: string, value: T): void {
+    if (this.provider.watchWorkerAssociations) this.attributionReadEpoch(key);
     const evicted = boundedSet(map, key, value, MAX_CHILD_ATTRIBUTIONS);
     if (evicted !== undefined) {
       this.completeAttributions.delete(evicted);
@@ -4016,14 +4168,48 @@ export class ChatAdapter {
     }
   }
 
+  private bankChildUsage(key: string, usage: Map<string, TokenUsage>): void {
+    const owned = usage as ChildUsage;
+    if (this.provider.watchWorkerAssociations) {
+      this.attributionReadEpoch(key);
+      // The aggregate keeps its negative eligibility even if the epoch index
+      // evicts first. Reuse copies only invalidation, never a retired epoch.
+      owned.allocationOwner = this.attributionEpochs.get(key);
+    }
+    this.bankAttribution(this.childUsage, key, owned);
+  }
+
   private attributionReadEpoch(key: string, renew = false): number {
     const known = this.attributionEpochs.get(key);
-    if (known !== undefined && !renew) return known;
+    if (known !== undefined && !renew) return known.epoch;
     // Never reuse an epoch after eviction: an absent entry cannot validate an
     // older read, nor can a later read accidentally restore its authority.
-    const epoch = ++this.attributionSequence;
-    this.bankAttribution(this.attributionEpochs, key, epoch);
-    return epoch;
+    const owner: AttributionOwner = { epoch: ++this.attributionSequence, allocationRevision: 0 };
+    const retainedFloor = known?.allocationFloor ?? this.childUsage.get(key)?.allocationOwner?.allocationFloor;
+    owner.allocationOccurrences = known?.allocationOccurrences ?? this.childUsage.get(key)?.allocationOwner?.allocationOccurrences;
+    if (this.provider.watchWorkerAssociations && (renew || retainedFloor !== undefined || this.hasRetainedAttribution(key)))
+      owner.allocationFloor = retainedFloor ?? 0;
+    const evicted = boundedSet(this.attributionEpochs, key, owner, MAX_CHILD_ATTRIBUTIONS);
+    if (evicted !== undefined) this.completeAttributions.delete(evicted);
+    return owner.epoch;
+  }
+
+  private hasRetainedAttribution(key: string): boolean {
+    if (this.childUsage.has(key) || this.childModels.has(key) || this.childPrompts.has(key)
+      || this.childTranscripts.has(key) || this.childSessionCosts.has(key)) return true;
+    const separator = key.indexOf(ATTRIBUTION_SEPARATOR);
+    const parent = this.projections.get(key.slice(0, separator)), child = key.slice(separator + 1);
+    // An all-unknown session report is only a presentation placeholder, not
+    // retained accounting. Known zero spend still fences a lost owner.
+    return Boolean(parent?.filter(item => item.type === "tool" && item.childConversationId === child
+      && (item.usage !== undefined || item.model !== undefined || Boolean(item.descendants?.length)
+        || item.workerSession?.model !== undefined || item.workerSession?.effort != null || item.workerSession?.costUsd != null)).length);
+  }
+
+  private allocationBlocked(key: string): boolean {
+    if (!this.provider.watchWorkerAssociations) return false;
+    const owner = this.attributionEpochs.get(key);
+    return owner ? owner.allocationFloor !== undefined : this.hasRetainedAttribution(key);
   }
 
   /**
@@ -4081,7 +4267,7 @@ export class ChatAdapter {
       // message's spend once for every part it emitted.
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
       byMessage.set(reported.messageId, reported.usage);
-      this.bankAttribution(this.childUsage, key, byMessage);
+      this.bankChildUsage(key, byMessage);
       this.stampArrival(key, reported.messageId);
       this.removedChildAttribution.get(key)?.delete(reported.messageId);
     }
@@ -4110,7 +4296,7 @@ export class ChatAdapter {
     if (removedMessageId !== undefined) {
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
       byMessage.delete(removedMessageId);
-      this.bankAttribution(this.childUsage, key, byMessage);
+      this.bankChildUsage(key, byMessage);
       this.childModels.get(key)?.delete(removedMessageId);
       this.childPrompts.get(key)?.delete(removedMessageId);
       const removed = this.removedChildAttribution.get(key) ?? new Map<string, number>();
@@ -4213,8 +4399,10 @@ export class ChatAdapter {
       else launchers[known] = next;
       changed = true;
     }
-    if (!changed) return;
-    this.bankChildTranscript(key, { prompts, launchers });
+    // An occurrence restatement can leave launcher text unchanged while a
+    // published cohort invalidation still needs to reach the ancestor lines.
+    if (!changed && !rows.some(row => this.allocationBlocked(attributionKey(conversationId, row.childConversationId!)))) return;
+    if (changed) this.bankChildTranscript(key, { prompts, launchers });
     this.decorateLauncherRows(parentId, conversationId, coalescer);
     await this.refreshAncestors(parentId, coalescer);
   }
@@ -4239,7 +4427,7 @@ export class ChatAdapter {
       if (reported.usage) usage.set(reported.messageId, reported.usage);
       if (reported.model) models.set(reported.messageId, { model: reported.model, createdAt: reported.createdAt, effort: reported.effort });
     }
-    this.bankAttribution(this.childUsage, key, usage);
+    this.bankChildUsage(key, usage);
     this.bankAttribution(this.childModels, key, models);
     if (this.eventCoalescer) this.decorateLauncherRows(parentId, childId, this.eventCoalescer);
   }
@@ -4257,11 +4445,11 @@ export class ChatAdapter {
    * the spend of the k-th task the child was given, and beneath it the lines
    * of every subagent launched while answering that task, at any depth.
    */
-  private rowAttributions(parentId: string, childId: string, rows: readonly TaskRow[]): RowAttribution[] {
+  private rowAttributions(parentId: string, childId: string, rows: readonly TaskRow[], sources?: WorkerSourceRead): RowAttribution[] {
     const key = attributionKey(parentId, childId);
     const folds = foldByTask(rows, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
     const beneath = new Map<string, SubagentLine[]>();
-    for (const line of this.descendantLines(parentId, childId, rows, new Set([parentId, childId]))) {
+    for (const line of this.descendantLines(parentId, childId, rows, new Set([parentId, childId]), sources)) {
       beneath.set(line.parentId, [...(beneath.get(line.parentId) ?? []), line]);
     }
     const branch = (id: string): SubagentLine[] => (beneath.get(id) ?? []).flatMap(line => [line, ...branch(line.id)]);
@@ -4271,6 +4459,81 @@ export class ChatAdapter {
     });
   }
 
+  private unresolvedTaskRows(parentId: string, childId: string, rows: readonly TaskRow[]): ReadonlySet<string> | undefined {
+    if (!this.provider.watchWorkerAssociations || rows.length < 2) return;
+    const prompts = this.childTranscripts.get(attributionKey(parentId, childId))?.prompts;
+    if (!prompts || prompts.length < rows.length) return;
+    const paired = new Set(pairPrompts(rows, prompts));
+    const unresolved = rows.filter((_, index) => !paired.has(index));
+    // Partial pairing cannot make one task inherit another task's spend.
+    // Keep the generic positional fallback and continuation pairing unchanged.
+    return unresolved.length ? new Set(unresolved.map(row => row.id)) : undefined;
+  }
+
+  private nestedAllocationCurrent(publication: NestedAllocationPublication, sources: WorkerSourceRead): boolean {
+    const { parentKey, key, parentInventory, inventory } = publication;
+    for (const [scope, proof] of [[parentKey, parentInventory], [key, inventory]] as const) {
+      const transcript = this.childTranscripts.get(scope);
+      if (!transcript || sources.inventory(scope) !== proof || !sources.hasAccountingPage(scope)
+        || this.attributionEpochs.get(scope) !== proof.owner || proof.owner.allocationRevision !== proof.revision
+        || !this.completeAttributions.has(scope) || transcriptSignature(transcript) !== proof.signature) return false;
+    }
+    return publication.owner === inventory.owner && publication.owner.epoch === publication.epoch
+      && publication.views.every(view => this.projections.get(view.id) === view.projection
+        && view.rows.length === (view.projection?.filter(item => item.type === "tool" && item.childConversationId === view.childId).length ?? 0)
+        && view.rows.every(row => view.projection?.get(row.id) === row));
+  }
+
+  private nestedAllocationProof(parentId: string, sessionId: string, childId: string, rows: readonly TaskRow[], own: readonly Launcher[], sources?: WorkerSourceRead): boolean {
+    if (!sources) return false;
+    const parentKey = attributionKey(parentId, sessionId), key = attributionKey(sessionId, childId);
+    const parentInventory = sources.inventory(parentKey), inventory = sources.inventory(key);
+    // Zero-floor invalidation includes reused/generation-retired occurrences.
+    // Preserve its existing read-local behavior; this publication closes only
+    // an observed positive membership deficit, never a new ownership claim.
+    if (!parentInventory || !inventory || (inventory.owner.allocationFloor ?? 0) <= 0) return false;
+    let publication = sources.nestedPublications.get(key);
+    if (!publication) {
+      if (sources.nestedPublications.size >= MAX_CHILD_ATTRIBUTIONS) return false;
+      const views = ([[parentId, sessionId], [sessionId, childId]] as const).map(([id, child]) => {
+        const projection = this.projections.get(id);
+        return { id, childId: child, projection, rows: projection?.filter((item): item is ToolItem => item.type === "tool" && item.childConversationId === child) ?? [] };
+      });
+      if (rows.length > MAX_CHILD_ATTRIBUTIONS || views.some(view => view.rows.length > MAX_CHILD_ATTRIBUTIONS)) return false;
+      // An existing line stripped of its private provenance is unknown. Fresh
+      // native inventories do not retroactively validate that retained object.
+      if (views[0]!.rows.some(row => row.type === "tool" && row.descendants?.some(line =>
+        line.conversationId === childId && !this.descendantBindings.has(line)))) return false;
+      publication = { parentKey, key, parentId, sessionId, childId, parentInventory, inventory, owner: inventory.owner, epoch: inventory.owner.epoch,
+        parents: rows.map(row => ({ id: row.id, binding: row.binding })), views, proven: false };
+      sources.nestedPublications.set(key, publication);
+    }
+    if (!this.nestedAllocationCurrent(publication, sources) || own.length < (inventory.owner.allocationFloor ?? 0)
+      || rows.length !== publication.parents.length || rows.some((row, index) => row.id !== publication.parents[index]!.id
+        || !row.binding || !sameLauncherBinding(row.binding, publication.parents[index]!.binding))) return false;
+    const parentTranscript = this.childTranscripts.get(parentKey)!, transcript = this.childTranscripts.get(key)!;
+    const tasks = own.map(launcher => ({ id: launcher.id, prompt: launcher.prompt, binding: launcher.binding }));
+    if (inventory.owner.allocationOccurrences === undefined || occurrenceSignature(tasks) !== inventory.owner.allocationOccurrences) return false;
+    // Native prompt pairing must actually open every task; positional fallback,
+    // unknown text and duplicate occurrences cannot prove cohort membership.
+    const paired = (tasks: readonly TaskRow[], prompts: readonly Prompt[]) => {
+      let next = 0;
+      const ids = new Set<string>();
+      for (const prompt of prompts) {
+        if (ids.has(prompt.id) || prompt.text === undefined) return false;
+        ids.add(prompt.id);
+        const task = tasks[next];
+        if (task?.prompt !== undefined && deliversPrompt(prompt.text, task.prompt, next === 0)) {
+          next++;
+        }
+      }
+      return next === tasks.length && new Set(tasks.map(task => task.id)).size === tasks.length
+        && tasks.every(task => task.binding?.inputHash !== undefined);
+    };
+    publication.proven = paired(rows, parentTranscript.prompts) && paired(tasks, transcript.prompts);
+    return publication.proven;
+  }
+
   /**
    * The lines beneath the rows that launched `sessionId`: one per task the
    * session gave a subagent of its own, stating that task's own spend, then
@@ -4278,7 +4541,7 @@ export class ChatAdapter {
    * the task during which it was launched — the prompt it follows, paired the
    * way the spend is. `ancestry` stops a loop in the data.
    */
-  private descendantLines(parentId: string, sessionId: string, rows: readonly TaskRow[], ancestry: ReadonlySet<string>): SubagentLine[] {
+  private descendantLines(parentId: string, sessionId: string, rows: readonly TaskRow[], ancestry: ReadonlySet<string>, sources?: WorkerSourceRead): SubagentLine[] {
     const transcript = this.childTranscripts.get(attributionKey(parentId, sessionId));
     const launchers = transcript?.launchers ?? [];
     if (launchers.length === 0 || rows.length === 0) return [];
@@ -4291,17 +4554,66 @@ export class ChatAdapter {
     const lines: SubagentLine[] = [];
     for (const [childId, own] of byChild) {
       const key = attributionKey(sessionId, childId);
-      const tasks: TaskRow[] = own.map(launcher => ({ id: launcher.id, ...(launcher.prompt === undefined ? {} : { prompt: launcher.prompt }) }));
-      const folds = foldByTask(tasks, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
-      own.forEach((launcher, index) => lines.push({
-        id: launcher.id,
-        parentId: rows[Math.min(pairing[launcher.promptIndex] ?? launcher.promptIndex, rows.length - 1)]!.id,
-        description: launcher.description,
-        ...(launcher.subagent === undefined ? {} : { subagent: launcher.subagent }),
-        conversationId: childId,
-        ...folds[index],
-      }));
-      lines.push(...this.descendantLines(sessionId, childId, tasks, new Set([...ancestry, childId])));
+      const tasks: TaskRow[] = own.map(launcher => ({ id: launcher.id, binding: launcher.binding, ...(launcher.prompt === undefined ? {} : { prompt: launcher.prompt }) }));
+      const unresolved = this.unresolvedTaskRows(sessionId, childId, tasks);
+      // Zero-floor behavior remains read-local. A positive membership deficit
+      // additionally needs authoritative inventories and exact native pairing;
+      // only enclosing history publication changes persistent eligibility.
+      const currentCohort = this.allocationBlocked(key) && this.nestedAllocationProof(parentId, sessionId, childId, rows, own, sources)
+        || sources?.hasAccountingPage(attributionKey(parentId, sessionId)) === true
+        && sources.hasAccountingPage(key) && this.completeAttributions.has(key)
+        && this.completeAttributions.has(attributionKey(parentId, sessionId))
+        && this.attributionEpochs.get(key)?.allocationFloor === 0;
+      const guarded = (this.allocationBlocked(key) && !currentCohort) || unresolved !== undefined;
+      const folds = guarded ? [] : foldByTask(tasks, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
+      own.forEach((launcher, index) => {
+        // A blocked incoming edge cannot use positional pairing to assign a
+        // deeper launch to a task. Only an exact current row's recorded direct
+        // descendant relation can provide that binding. Ambiguity fails closed.
+        const promptId = transcript?.prompts[launcher.promptIndex]?.id;
+        const retainedParents = rows.filter(row => row.descendantBinding?.some(line => {
+          const proof = this.descendantBindings.get(line);
+          return line.id === launcher.id && line.parentId === row.id && line.conversationId === childId
+            && proof !== undefined && proof.parentSessionId === parentId && proof.sessionId === sessionId
+            && proof.parentId === row.id && proof.promptId === promptId
+            && sameLauncherBinding(proof.parent, row.binding) && sameLauncherBinding(proof.launcher, launcher.binding);
+        }));
+        const positional = rows[Math.min(pairing[launcher.promptIndex] ?? launcher.promptIndex, rows.length - 1)]!;
+        const parent = retainedParents.length === 1 ? retainedParents[0]
+          : retainedParents.length === 0 && positional.descendantBinding === undefined ? positional : undefined;
+        // Recursive lines obey the same cohort fence as direct rows. Only a
+        // current matching row can retain its own known attribution; an old
+        // ancestor line cannot prove a changed input or occurrence's spend.
+        const current = guarded ? this.projections.get(sessionId)?.get(launcher.id) : undefined;
+        const exact = current?.type === "tool" && current.childConversationId === childId
+          && sameLauncher(launcher, launcherOf(current, launcher.promptIndex)) && !unresolved?.has(launcher.id);
+        // Keep all tasks in folding order, including denied ones: dropping one
+        // would give its aggregate to a survivor. Denied bindings propagate to
+        // every depth, while an unaffected current subtree retains its proof.
+        if (!parent || guarded) tasks[index] = { ...tasks[index]!, descendantBinding: parent && exact ? current.descendants ?? [] : [] };
+        if (!parent) return;
+        const attribution = guarded ? exact ? {
+          ...(current.usage === undefined ? {} : { usage: current.usage }),
+          ...(current.model === undefined ? {} : { model: current.model }),
+        } : {} : folds[index];
+        const line: SubagentLine = {
+          id: launcher.id,
+          parentId: parent.id,
+          description: launcher.description,
+          ...(launcher.subagent === undefined ? {} : { subagent: launcher.subagent }),
+          conversationId: childId,
+          ...attribution,
+        };
+        // Record only while generating this exact relation. Neither a clone
+        // without metadata nor matching IDs can reconstruct missing proof.
+        // Native prompt identity survives preambles that shift array indices.
+        if (parent.binding?.inputHash !== undefined && launcher.binding.inputHash !== undefined && promptId !== undefined) {
+          this.descendantBindings.set(line, Object.freeze({ parentSessionId: parentId, sessionId, parentId: parent.id,
+            parent: parent.binding, launcher: launcher.binding, promptId }));
+        }
+        lines.push(line);
+      });
+      lines.push(...this.descendantLines(sessionId, childId, tasks, new Set([...ancestry, childId]), sources));
     }
     return lines;
   }
@@ -4326,20 +4638,47 @@ export class ChatAdapter {
     for (const updates of this.launcherRowUpdates(parentId, conversationId, parent)) for (const update of updates) parent.apply(update);
   }
 
+  private refreshEquivalentDescendantBindings(projection: ConversationProjection, current: ToolItem, incoming: ToolItem): void {
+    if (!this.provider.watchWorkerAssociations || !current.descendants || !incoming.descendants
+      || current.descendants.length !== incoming.descendants.length) return;
+    let changed = false;
+    const descendants = current.descendants.map((line, index) => {
+      const next = incoming.descendants![index]!, proof = this.descendantBindings.get(next);
+      // Missing proof cannot replace known provenance. Equal semantic proof
+      // also retains its references, avoiding self-generated read changes.
+      if (!proof || sameDescendantBinding(this.descendantBindings.get(line), proof)) return line;
+      changed = true;
+      return next;
+    });
+    if (changed) projection.refreshEquivalentTool(current, { ...current, descendants });
+  }
+
   private launcherRowUpdates(parentId: string, conversationId: string, parent: ConversationProjection): NormalizedProviderUpdate[][] {
     const rows = launcherRows(parent.filter(item => item.type === "tool" && item.childConversationId === conversationId));
-    const attributions = this.rowAttributions(parentId, conversationId, rows.map(taskRow));
+    const tasks = rows.map(taskRow);
+    const unresolved = this.unresolvedTaskRows(parentId, conversationId, tasks);
     const key = attributionKey(parentId, conversationId);
+    // A generation fence alone still permits current native updates to an
+    // already dense cohort. It does not clear eligibility, and cannot bypass
+    // observed missing membership or a lost cache owner.
+    const denseCurrent = this.attributionEpochs.get(key)?.generationOnly === true && !unresolved && rows.length > 1
+      && this.childTranscripts.get(key)?.prompts.length === rows.length;
+    const blocked = this.allocationBlocked(key) && !denseCurrent;
+    const attributions = unresolved || blocked ? [] : this.rowAttributions(parentId, conversationId, tasks);
     const workerSession = workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key));
     const backgroundUpdates: NormalizedProviderUpdate[][] = parent.filter(item => item.type === "background_task" && item.childConversationId === conversationId).flatMap(row =>
       row.type === "background_task" && (this.childSessionCosts.get(key)?.costUsd != null || this.childUsage.get(key)?.size || this.childModels.get(key)?.size || row.workerSession) && !sameWorkerSession(row.workerSession, workerSession)
         ? [[{ kind: "upsert" as const, item: { ...row, workerSession } }]] : []);
     return [...backgroundUpdates, ...rows.flatMap((row, index) => {
-      const attribution = { ...attributions[index]!, workerSession };
+      const own = unresolved || blocked ? unresolved?.has(row.id) ? {} : { usage: row.usage, model: row.model, descendants: row.descendants } : attributions[index]!;
+      const attribution = { ...own, workerSession };
       // Nothing new to say: most restatements change nothing until the turn's
       // token counts actually move, and an upsert that restates the row
       // verbatim still costs a replay frame for every subscriber.
-      if (sameAttribution(row, attribution)) return [];
+      if (sameAttribution(row, attribution)) {
+        this.refreshEquivalentDescendantBindings(parent, row, { ...row, ...attribution });
+        return [];
+      }
       const { usage: _usage, model: _model, descendants: _descendants, ...withoutAttribution } = row;
       const item = { ...withoutAttribution, ...attribution };
       // Upserts deliberately preserve attribution omitted by ordinary tool
@@ -5046,7 +5385,7 @@ export class ChatAdapter {
    * replacement puts in a projection's place — raw rows from the provider,
    * which carry no attribution of their own.
    */
-  private async attributeLaunchers(id: string, items: ConversationItem[], complete?: readonly ConversationItem[], signal?: AbortSignal, sources?: WorkerSourceRead, refresh = false): Promise<void> {
+  private async attributeLaunchers(id: string, items: ConversationItem[], complete?: readonly ConversationItem[], signal?: AbortSignal, sources?: WorkerSourceRead, refresh = false, cohort?: LauncherCohortRead): Promise<void> {
     const unattributed = [...new Set(items.flatMap(item =>
       // Reconcile on parent refresh, normally at most once per 30 seconds.
       // Nested association proof and changed-source retries bypass that cache;
@@ -5068,8 +5407,23 @@ export class ChatAdapter {
       rowsByChild.set(row.childConversationId, [...(rowsByChild.get(row.childConversationId) ?? []), taskRow(row)]);
     }
     const attributions = new Map<string, RowAttribution>();
-    for (const [childId, rows] of rowsByChild) {
-      this.rowAttributions(id, childId, rows).forEach((attribution, index) => attributions.set(rows[index]!.id, attribution));
+    const incomplete = new Set(cohort?.incomplete);
+    for (const childId of new Set([...rowsByChild.keys(), ...incomplete])) {
+      const rows = rowsByChild.get(childId) ?? [];
+      if (this.unresolvedTaskRows(id, childId, rows)) incomplete.add(childId);
+      if (this.provider.watchWorkerAssociations) {
+        const key = attributionKey(id, childId);
+        if (rows.length || this.attributionEpochs.has(key) || this.hasRetainedAttribution(key)) {
+          this.attributionReadEpoch(key);
+          const owner = this.attributionEpochs.get(key)!;
+          const proof = rows.length > 0 && !incomplete.has(childId) && sources?.hasAccountingPage(key) === true && this.completeAttributions.has(key)
+            && (rows.length >= (owner.allocationFloor ?? 0) || (this.childTranscripts.get(key)?.prompts.length ?? Infinity) <= rows.length);
+          cohort?.observe(childId, owner, rows, incomplete.has(childId), proof);
+          if (owner.allocationFloor !== undefined && !proof) incomplete.add(childId);
+        }
+      }
+      if (incomplete.has(childId)) continue;
+      this.rowAttributions(id, childId, rows, sources).forEach((attribution, index) => attributions.set(rows[index]!.id, attribution));
     }
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index]!;
@@ -5078,6 +5432,10 @@ export class ChatAdapter {
         if (this.childSessionCosts.get(key)?.costUsd != null || this.childUsage.get(key)?.size || this.childModels.get(key)?.size || item.workerSession) items[index] = { ...item, workerSession: workerSessionReport(this.childSessionCosts.get(key)?.costUsd, this.childModels.get(key)) };
       }
       if (item.type !== "tool") continue;
+      if (item.childConversationId && incomplete.has(item.childConversationId)) {
+        items[index] = cohort?.retain(items[index] as ToolItem) ?? items[index]!;
+        continue;
+      }
       const attribution = attributions.get(item.id);
       if (!attribution || Object.keys(attribution).length === 0) continue;
       items[index] = { ...items[index] as ToolItem, ...attribution };
@@ -5513,6 +5871,12 @@ function sameConversationItems(left: ConversationItem[], right: ConversationItem
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function workerRepresentsFallback(item: ConversationItem, { resultId, childConversationId, report }: WorkerResultFallback): boolean {
+  return !!report && item.type === "background_task" && item.taskType === "agent" && !item.stateUncertain
+    && item.resultId === resultId && item.childConversationId === childConversationId
+    && item.status === report.status && item.summary === report.summary;
+}
+
 // How a projection reports its interaction requests (permissions, questions)
 // becoming pending or settling, and its timeline being rebuilt wholesale.
 export type ProjectionInteractionHooks = {
@@ -5855,6 +6219,16 @@ export class ConversationProjection {
     return this.replay.publish({ type: "item.upsert", item: merged });
   }
 
+  /** Commit private provenance only: public equality does not imply equal proof. */
+  refreshEquivalentTool(expected: ToolItem, incoming: ToolItem): void {
+    if (this.timeline.get(expected.id) !== expected || !sameConversationItems([expected], [incoming])) return;
+    this.beforePublish?.(incoming);
+    this.timeline.set(expected.id, incoming);
+    // Older covered reads must merge these newer references, without a replay
+    // frame or mutating the frozen proof held by a historical snapshot.
+    this.historyChanged(expected.id);
+  }
+
   statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true): ChatEvent {
     this.status = status;
     this.onStatus?.(status, sourceTransition);
@@ -5916,16 +6290,58 @@ const ATTRIBUTION_SEPARATOR = "\u0000";
 
 /** Whether any figure in `next` is below the same figure in `previous`. */
 /** A subagent launched by a subagent: a row in the launching subagent's own timeline. */
-type Launcher = { id: string; description: string; subagent?: string; conversationId: string; promptIndex: number; prompt?: string };
+type Launcher = { id: string; description: string; subagent?: string; conversationId: string; promptIndex: number; prompt?: string;
+  binding: LauncherBinding };
+type LauncherBinding = Readonly<{ name: string; status: ToolItem["status"]; createdAt: number; completedAt?: number; inputHash?: string }>;
+type DescendantBinding = Readonly<{ parentSessionId: string; sessionId: string; parentId: string;
+  parent: LauncherBinding; launcher: LauncherBinding; promptId: string }>;
 // A user message in a child session. `text` is what decides whether it is a
 // task's prompt: undefined when never seen, empty for a message that carries
 // none (OpenCode's compaction request, or its synthetic "continue").
 type Prompt = { id: string; text?: string };
 // A row (or nested launcher) that gave a subagent a task, with the prompt it gave.
-type TaskRow = { id: string; prompt?: string };
+type TaskRow = { id: string; prompt?: string; binding?: LauncherBinding;
+  // Read-local references to an exact current row's existing descendants.
+  // Undefined keeps ordinary pairing; an empty list denies deeper bindings.
+  descendantBinding?: readonly SubagentLine[] };
+type AttributionOwner = {
+  epoch: number;
+  allocationRevision: number;
+  // Undefined permits allocation; zero is unproven, positive counts record
+  // observed missing cohort membership. Neither is ownership or Stop proof.
+  allocationFloor?: number;
+  // Counterproof only: the last published cohort's exact occurrences at its
+  // first membership deficit. Input renewal requires separate native proof.
+  allocationOccurrences?: string;
+  generationOnly?: boolean;
+};
+type ChildUsage = Map<string, TokenUsage> & { allocationOwner?: AttributionOwner };
+type AllocationPublication = { owner: AttributionOwner; revision: number; rows: readonly TaskRow[]; incomplete: boolean; proof: boolean };
+type AccountingInventory = Readonly<{ signature: string; owner: AttributionOwner; revision: number }>;
+type NestedAllocationPublication = {
+  parentKey: string; key: string; parentId: string; sessionId: string; childId: string;
+  parentInventory: AccountingInventory; inventory: AccountingInventory; owner: AttributionOwner; epoch: number;
+  proven: boolean;
+  parents: readonly Pick<TaskRow, "id" | "binding">[];
+  views: Array<{ id: string; childId: string; projection: ConversationProjection | undefined; rows: readonly ConversationItem[] }>;
+};
+type LauncherCohortRead = {
+  incomplete: ReadonlySet<string>;
+  retain: (item: ToolItem) => ToolItem;
+  observe: (child: string, owner: AttributionOwner, rows: readonly TaskRow[], incomplete: boolean, proof: boolean) => void;
+};
 type ChildTranscript = { prompts: Prompt[]; launchers: Launcher[] };
 type RowAttribution = { model?: string; usage?: TokenUsage; descendants?: SubagentLine[]; workerSession?: ToolItem["workerSession"] };
 type LauncherRow = ToolItem & { childConversationId: string };
+
+function transcriptSignature(transcript: ChildTranscript): string {
+  return createHash("sha256").update(JSON.stringify(transcript)).digest("hex");
+}
+
+function occurrenceSignature(rows: readonly Pick<TaskRow, "id" | "binding">[]): string {
+  return createHash("sha256").update(JSON.stringify(rows.map(row => ({ id: row.id, name: row.binding?.name, status: row.binding?.status,
+    createdAt: row.binding?.createdAt, completedAt: row.binding?.completedAt })).sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0))).digest("hex");
+}
 
 /** The rows that launched subagents, oldest first — the order their tasks were given in. */
 function launcherRows(items: ConversationItem[]): LauncherRow[] {
@@ -5942,7 +6358,13 @@ function taskPrompt(row: ToolItem): string | undefined {
 
 function taskRow(row: ToolItem): TaskRow {
   const prompt = taskPrompt(row);
-  return { id: row.id, ...(prompt === undefined ? {} : { prompt }) };
+  return { id: row.id, binding: launcherBinding(row), ...(prompt === undefined ? {} : { prompt }) };
+}
+
+function launcherBinding(row: ToolItem, known?: LauncherBinding): LauncherBinding {
+  const inputHash = row.input === undefined ? known?.inputHash : createHash("sha256").update(row.input).digest("hex");
+  return Object.freeze({ name: row.name === "tool" ? known?.name ?? row.name : row.name, status: row.status, createdAt: row.createdAt,
+    ...(row.completedAt === undefined ? {} : { completedAt: row.completedAt }), ...(inputHash === undefined ? {} : { inputHash }) });
 }
 
 function launcherOf(row: ToolItem & { childConversationId?: string }, promptIndex: number, known?: Launcher): Launcher {
@@ -5951,11 +6373,24 @@ function launcherOf(row: ToolItem & { childConversationId?: string }, promptInde
   const description = detail.kind === "agent" ? detail.description : known?.description ?? row.name;
   const subagent = detail.kind === "agent" ? detail.subagent : known?.subagent;
   const prompt = taskPrompt(row) ?? known?.prompt;
-  return { id: row.id, description, ...(subagent === undefined ? {} : { subagent }), conversationId: row.childConversationId!, promptIndex, ...(prompt === undefined ? {} : { prompt }) };
+  return { id: row.id, description, ...(subagent === undefined ? {} : { subagent }), conversationId: row.childConversationId!, promptIndex, ...(prompt === undefined ? {} : { prompt }),
+    binding: launcherBinding(row, known?.binding) };
 }
 
 function sameLauncher(left: Launcher, right: Launcher): boolean {
-  return left.description === right.description && left.subagent === right.subagent && left.conversationId === right.conversationId && left.promptIndex === right.promptIndex && left.prompt === right.prompt;
+  return left.description === right.description && left.subagent === right.subagent && left.conversationId === right.conversationId && left.promptIndex === right.promptIndex && left.prompt === right.prompt
+    && sameLauncherBinding(left.binding, right.binding);
+}
+
+function sameLauncherBinding(left: LauncherBinding, right: LauncherBinding | undefined): boolean {
+  return right !== undefined && left.name === right.name && left.status === right.status && left.createdAt === right.createdAt
+    && left.completedAt === right.completedAt && left.inputHash === right.inputHash;
+}
+
+function sameDescendantBinding(left: DescendantBinding | undefined, right: DescendantBinding): boolean {
+  return left !== undefined && left.parentSessionId === right.parentSessionId && left.sessionId === right.sessionId
+    && left.parentId === right.parentId && left.promptId === right.promptId
+    && sameLauncherBinding(left.parent, right.parent) && sameLauncherBinding(left.launcher, right.launcher);
 }
 
 /** A child's prompts in order and the subagents it launched, each under the prompt it followed. */
