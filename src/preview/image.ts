@@ -14,6 +14,7 @@ import {
 import { hideViewToggle } from "./view-mode";
 import { documentRevisionKey } from "../shell/document-state";
 import { withImageRevision } from "./image-revision";
+import { observePreviewSvgImages, preparePreviewHtml, setPreviewImageSource } from "./svg-images";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -49,8 +50,9 @@ export function renderImagePreview(doc: DocumentMeta): void {
   const mounted = previewElement.querySelector<HTMLImageElement>(":scope > .image-preview > img");
   if (mounted && mounted.dataset.documentId === doc.id) {
     const next = new URL(src, mounted.baseURI).href;
-    if (mounted.src !== next) mounted.src = next;
+    setPreviewImageSource(mounted, next);
     return;
   }
-  previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" data-document-id="${escapeHtmlAttribute(doc.id)}" src="${escapeHtmlAttribute(src)}"></div>`;
+  previewElement.replaceChildren(preparePreviewHtml(`<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" data-document-id="${escapeHtmlAttribute(doc.id)}" src="${escapeHtmlAttribute(src)}"></div>`));
+  observePreviewSvgImages(previewElement);
 }
