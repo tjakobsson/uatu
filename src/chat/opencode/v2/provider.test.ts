@@ -111,6 +111,7 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
   let wire!: ReadableStreamDefaultController<Uint8Array>, releaseMessages!: () => void, releaseActive!: () => void;
   let materialized!: () => void, delivered!: () => void, activeEntered!: () => void, textCaptured!: () => void, changed!: () => void;
   let publicationEntered!: () => void, releasePublication!: () => void, heldPublication = false;
+  let holdFreshStartup = false, freshStartupEntered!: () => void, releaseFreshStartup!: () => void, freshPublished!: () => void;
   const messages = new Promise<void>(resolve => { releaseMessages = resolve; });
   const active = new Promise<void>(resolve => { releaseActive = resolve; });
   const noticeReady = new Promise<void>(resolve => { materialized = resolve; });
@@ -120,7 +121,14 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
   const changeApplied = new Promise<void>(resolve => { changed = resolve; });
   const publicationReady = new Promise<void>(resolve => { publicationEntered = resolve; });
   const publication = new Promise<void>(resolve => { releasePublication = resolve; });
+  const freshStartupReady = new Promise<void>(resolve => { freshStartupEntered = resolve; });
+  const freshStartup = new Promise<void>(resolve => { releaseFreshStartup = resolve; });
+  const freshReportReady = new Promise<void>(resolve => { freshPublished = resolve; });
+  const freshText = fixture.pending.payload.text.replace("Fixture checked.", "Fresh generation authoritative report.");
   const activeSignals: AbortSignal[] = [];
+  const activeRequests: Promise<unknown>[] = [];
+  let cancelledActiveRequests: Promise<unknown>[] = [], explicitRecovery: ReturnType<OpenCodeV2Provider["reconcileBackgroundTasks"]> | undefined;
+  let oldSourceIsCurrent: (() => boolean) | undefined;
   const historyOwner = new AsyncLocalStorage<boolean>();
   const server = fakeOpenCode({
     "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
@@ -143,8 +151,12 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
       }
       return { data: pending ? [{ ...fixture.pending, payload: { ...fixture.pending.payload, text } }] : [] };
     },
-    "GET /api/session/active": async ({ signal }) => {
-      if (phase === "refresh") { activeReads++; activeSignals.push(signal); activeEntered(); await active; }
+    "GET /api/session/active": ({ signal }) => {
+      if (phase === "refresh") {
+        activeReads++; activeSignals.push(signal);
+        const request = active.then(() => ({})); activeRequests.push(request); activeEntered();
+        return request;
+      }
       return {};
     },
     "GET /api/permission/request": () => scoped([]), "GET /api/form": async () => {
@@ -156,14 +168,25 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
   });
   const provider = server.provider(), events = provider.events.bind(provider), recover = provider.reconcileBackgroundTasks.bind(provider);
   provider.events = async function* (signal) { for await (const event of events(signal)) {
+    // A restarted pump may legitimately publish newly read pending text. Keep
+    // its startup recovery behind the cancelled reader's negative assertions.
+    if (event.eventType === "server.connected" && holdFreshStartup) { freshStartupEntered(); await freshStartup; }
     if (event.eventType === "diagnostic.delivery.complete") delivered();
     if (event.eventType === "diagnostic.change.complete") changed();
     yield event;
   } };
-  provider.reconcileBackgroundTasks = (id, options) => recover(id, { ...options, onSource: source => {
-    options?.onSource?.(source);
-    if (phase === "refresh" && source.workerResultFallbacks.some(relation => relation.resultId === fixture.pending.id)) textCaptured();
-  } });
+  provider.reconcileBackgroundTasks = (id, options) => {
+    // Shared inventory can invoke callbacks in another reader's async scope.
+    const explicitReader = historyOwner.getStore();
+    const recovery = recover(id, { ...options, onSource: source => {
+      options?.onSource?.(source);
+      if (phase === "refresh" && explicitReader && source.workerResultFallbacks.some(relation => relation.resultId === fixture.pending.id)) {
+        oldSourceIsCurrent = source.workerSource.isCurrent.bind(source.workerSource); textCaptured();
+      }
+    } });
+    if (phase === "refresh" && explicitReader) explicitRecovery = recovery;
+    return recovery;
+  };
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 10 });
   const lifetime = new AbortController();
   let observer: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined, observing: Promise<void> | undefined, reading: ReturnType<ChatAdapter["history"]> | undefined;
@@ -172,7 +195,13 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
   try {
     expect((await adapter.history("ses_parent")).items).toEqual([]);
     observer = await adapter.subscribe("ses_parent", { signal: lifetime.signal });
-    observing = (async () => { for await (const event of observer!.events) { publications.push(event); if (event.type === "item.upsert" && event.item.id === "notice:msg_result") materialized(); } })();
+    observing = (async () => { for await (const event of observer!.events) {
+      publications.push(event);
+      if (event.type === "item.upsert" && event.item.id === "notice:msg_result") {
+        materialized();
+        if (event.item.type === "notice" && event.item.message === freshText) freshPublished();
+      }
+    } })();
     phase = "enqueue"; pending = true; blockMessages = true;
     send({ id: "evt_pending", created: 41, type: "session.inbox.enqueued", data: { sessionID: "ses_parent", inboxID: fixture.pending.id, item: fixture.pending } });
     await noticeReady;
@@ -219,9 +248,12 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
       if (outcome === "late-update" || outcome === "late-commit" || outcome === "cancel" || outcome === "generation") {
         await textReady; // The old pending source reached the enclosing owner.
         if (outcome === "cancel" || outcome === "generation") {
+          expect(oldSourceIsCurrent?.()).toBe(true);
+          cancelledActiveRequests = activeRequests.slice();
           await adapter.stopEventPump();
-          if (outcome === "generation") void adapter.startEventPump();
+          if (outcome === "generation") { holdFreshStartup = true; void adapter.startEventPump(); }
           await expect(reading).rejects.toThrow("Inbox recovery unavailable");
+          if (outcome === "generation") await freshStartupReady;
         } else {
           if (outcome === "late-update") {
             text = text.replace("Fixture checked.", "Newer live pending report.");
@@ -235,6 +267,10 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
           send({ type: "diagnostic.change.complete", data: {} }); await changeApplied;
         }
         releaseActive();
+        if (outcome === "cancel" || outcome === "generation") {
+          await Promise.all(cancelledActiveRequests); await explicitRecovery?.catch(() => undefined);
+          expect(oldSourceIsCurrent?.()).toBe(false);
+        }
       }
       const history = outcome === "cancel" || outcome === "generation" ? undefined : await reading;
       expect(transcriptReads).toBeGreaterThan(0); expect(pendingReads).toBeGreaterThan(0); expect(activeReads).toBeGreaterThan(0);
@@ -249,8 +285,15 @@ test(`pending fallback text source survives optional inventory expiry (${outcome
     expect(next.snapshot.items.filter(item => item.id === "notice:msg_result")).toEqual(pending ? [expect.objectContaining({ type: "notice", message: expectedText })] : []);
     expect(next.snapshot.items.some(item => item.type === "background_task")).toBe(false);
     if (!pending) expect(publications).toContainEqual(expect.objectContaining({ type: "item.remove", itemId: "notice:msg_result" }));
+    if (outcome === "cancel" || outcome === "generation") expect(publications).not.toContainEqual(expect.objectContaining({ type: "item.upsert", item: expect.objectContaining({ type: "notice", message: text }) }));
+    if (outcome === "generation") {
+      // Distinct from the cancelled source: only fresh authority can supply it.
+      text = freshText; holdFreshStartup = false; releaseFreshStartup(); await freshReportReady;
+      const fresh = await adapter.subscribe("ses_parent"); fresh.events.cancel();
+      expect(fresh.snapshot.items.filter(item => item.id === "notice:msg_result")).toEqual([expect.objectContaining({ type: "notice", message: freshText })]);
+    }
     expect(server.calls.every(call => call.method === "GET")).toBe(true);
-  } finally { releaseMessages(); releaseActive(); releasePublication(); lifetime.abort(); observer?.events.cancel(); await adapter.dispose(); await reading?.catch(() => undefined); await observing; expect(closed).toBe(opened); }
+  } finally { releaseFreshStartup(); releaseMessages(); releaseActive(); releasePublication(); lifetime.abort(); observer?.events.cancel(); await adapter.dispose(); await reading?.catch(() => undefined); await observing; expect(closed).toBe(opened); }
 }, 20_000);
 
 for (const scenario of ["timestamp-transition", "same-timestamp", "ownership-unavailable", "paged-stored", "changed-text", "changed-child", "ordinary-notice"] as const)

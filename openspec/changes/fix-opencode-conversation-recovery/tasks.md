@@ -86,6 +86,14 @@ Normal merge `fa613b75` published the integrated upstream and three verified cor
 
 CI run `41816187228` subsequently passed on published correction `fa613b75`: unit/typecheck/audit/licenses/build/smoke, both E2E legs, all 27 performance cases, API contracts including Swift generation and Pages validation, strict specs, and the required `validate` gate. CodeQL also passed. The post-CI audit found all ten review threads answered and resolved, no additional discussion requiring an answer, and the completed Codex review reported no findings on this exact head. GitHub reported the PR open, ready, and clean against `eb8884a0`. This final tracking-only update changes no product, test, dependency, or acceptance semantics; authenticated iPhone/live-SSE behavior and the deferred performance work remain outside the verified claim. Archiving and the PR's final merge remain separate lifecycle actions.
 
+The tracking-only head `ddd99060` then failed CI run `41818419160`: 8,716 unit tests passed, 16 skipped, and one failed. The sole assertion was the pending-fallback generation case expecting old text after restarting the pump while the snapshot contained the updated pending text. Both E2E legs, performance, contracts, and specs passed; `validate` failed because unit failed. The earlier green run remains valid history, not final-head acceptance. Section 13 separates a possible cancelled-reader defect from legitimate new-generation recovery before choosing a correction. Tasks 4.1–4.3 and 8.4 are reopened; the ten addressed review threads remain answered/resolved.
+
+Two deterministic native-client witnesses reproduced the same generation assertion after the old explicit reader rejected and fresh automatic history completed. Gating the replacement handshake preserved the old-text assertion, invalid source lease, and absence of changed-text publication while retired I/O drained. Releasing fresh startup published a different sentinel, excluding the cancelled reader as its source. The original text-ready callback could also observe an automatic recovery source, so ownership must be captured at registration. The correction is being confined to test isolation; no product fence failure was demonstrated, and CI's exact scheduling sequence remains unproven.
+
+The test-only correction passed 100 generation/cancel repetitions, all eleven pending-fallback cases, and thirty-one nearby regressions. Fresh independent parallel Sol High Standards and Spec reviews found no actionable findings: original rejection/old-text/no-background assertions remain intact, retired I/O is drained before the negative assertions, and a distinct fresh-authority publication is required after startup release. Runtime product source is unchanged from green CI `fa613b75`; prior build, API, and browser evidence is therefore retained. Typecheck and the full unit/spec chain are being rerun before publication; fresh final-head CI remains separate under 8.4.
+
+Final section 13 local verification passed typecheck, 8,717 full-suite tests with 16 skipped and zero failures, and all 58 strict OpenSpec items on the reviewed source fingerprint. The corrected generation case passes without altering product code, deadlines, or the original cancellation assertions. The existing build/API/browser evidence remains applicable to the unchanged runtime source. Both affected review axes are clean; publication and actual fresh CI remain pending, and the ten review threads remain answered/resolved.
+
 ## 1. Preserve the verified recovery baseline
 
 - [x] 1.1 Separate optional provider child enrichment from required parent reads, with regression coverage for lookup saturation, hung ownership/execution history, required parent failures, and later retry; verified by the completed provider/adapter run of 2,115 passing tests.
@@ -135,7 +143,7 @@ CI run `41816187228` subsequently passed on published correction `fa613b75`: uni
 - [x] 8.1 Establish and minimize a deterministic public-seam reproduction of the CI retention-gap failure by gating native step/usage events around history/subscription handoff; witness the exact assertion fail and identify whether a redundant publication or legitimate pending progress invalidates the cursor.
 - [x] 8.2 Correct the confirmed cause with regression coverage, preserving the replay byte budget, no-resync assertion for unchanged snapshots, meaningful event/progress assertions, and all stream, accounting, ownership/Stop, and live/revert safeguards; remove temporary diagnostics and rerun the original scenario.
 - [x] 8.3 Align design, affected capability acceptance, and chat guidance with the proven correction; preserve existing scenarios and distinguish a test synchronization correction from a production behavior change.
-- [x] 8.4 Verify the published correction's fresh CI results, including the unit/validate gates; report any actual remaining failure or access/runtime blocker rather than treating local success or a rerun as proof of its cause.
+- [ ] 8.4 Verify the published correction's fresh CI results, including the unit/validate gates; report any actual remaining failure or access/runtime blocker rather than treating local success or a rerun as proof of its cause.
 
 ## 9. Preserve visible workers during degraded reversible replacement
 
@@ -162,5 +170,9 @@ CI run `41816187228` subsequently passed on published correction `fa613b75`: uni
 - [x] 12.3 Reproduce and correct loss of an exact foreground subagent's known association/accounting during unavailable-enrichment undo, preserving current contradictions, hidden-origin removal, returned-page authority, and newer live metadata.
 - [x] 12.4 Reproduce and correct self-invalidating accounting retries while ownership slots remain saturated, keeping parent history readable with bounded optional work and preserving genuine concurrent counterproof and later recovery.
 - [x] 12.5 Audit all review threads and general comments, prepare evidence-backed replies for newly addressed findings, obtain text approval, publish each answer, and resolve addressed threads after verified acceptance; report any remaining blocker explicitly.
+
+## 13. Reconcile the final-head generation assertion
+
+- [x] 13.1 Reproduce the pending-fallback generation failure with controlled native read/publication ordering; distinguish forbidden old-reader publication from legitimate restarted-generation recovery, correct the confirmed cause without weakening either assertion or budget, and renew affected verification/review before publication.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.

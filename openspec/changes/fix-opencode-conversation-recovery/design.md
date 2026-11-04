@@ -112,6 +112,8 @@ Controlled delivery reproduced the exact failing assertion eight times: the mode
 
 The later result-alias CI assertion similarly needs a completion boundary: a follow-up timer can fire at its fixed 100 ms deadline while required session I/O is still pending. Test-only barriers observe timer admission and actual canonical publication; controlled cases gate that I/O while preserving the 99 ms no-retry check, independent-worker retention, stale-occurrence fence, and exact second-read assertion. This does not change product scheduling or claim CI's precise triggering schedule was reproduced.
 
+The pending-text generation test must likewise distinguish its cancelled explicit reader from legitimate recovery started by the replacement pump. Controlled ordering reproduced the old-text assertion after the old reader had rejected and fresh automatic history had published changed pending text. The negative control gates fresh startup, drains the retired read, and preserves the original rejection/unchanged-text assertions; releasing startup must then publish a distinct fresh-authority sentinel. The text-ready callback captures explicit-reader ownership when registered, rather than inferring it from the later callback execution context. This isolates the cancellation fence without forbidding a new authorized read or changing production behavior, deadlines, or assertions. The controlled witness explains the failure shape without claiming CI's exact scheduling sequence was captured.
+
 ## Risks / Trade-offs
 
 - [Accounting is temporarily unavailable] → Preserve available values without inventing zero or completeness; retry on later reads.
