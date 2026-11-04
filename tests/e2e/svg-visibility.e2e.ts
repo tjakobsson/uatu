@@ -136,6 +136,38 @@ for (const browserName of ["chromium", "webkit"] as const) test.describe(browser
     await expect.poll(() => naturalWidth(page, '#preview img[alt="edge"]')).toBe(80);
   });
 
+  test("refreshing a document preserves known SVG sizes and the reader's scroll position", async ({ page, request }) => {
+    const tallSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="2500"><rect width="80" height="2500" fill="red"/></svg>`;
+    const content = (marker: string) => `# Tall images\n\n![first](./first.svg)\n\n![second](./second.svg)\n\n## Reading\n\nReading ${marker}.\n\n`;
+    await request.post("/__e2e/reset", { data: { extras: {
+      "first.svg": tallSvg,
+      "second.svg": tallSvg,
+      "tall.md": content("before"),
+    } } });
+    await page.goto("/");
+    await openTreeFile(page, "tall.md");
+    const first = page.locator('#preview img[alt="first"]');
+    const second = page.locator('#preview img[alt="second"]');
+    await first.scrollIntoViewIfNeeded();
+    await expect(first).toHaveAttribute("src", /\/first\.svg\?revision=/);
+    await expect.poll(() => naturalWidth(page, '#preview img[alt="first"]')).toBe(80);
+    await second.scrollIntoViewIfNeeded();
+    await expect(second).toHaveAttribute("src", /\/second\.svg\?revision=/);
+    await expect.poll(() => naturalWidth(page, '#preview img[alt="second"]')).toBe(80);
+    await page.getByText("Reading before.", { exact: true }).scrollIntoViewIfNeeded();
+    await afterAnimationFrames(page);
+    const shell = page.locator(".preview-shell");
+    const before = await shell.evaluate(element => element.scrollTop);
+    expect(before).toBeGreaterThan(4000);
+
+    await fs.writeFile(workspacePath("tall.md"), content("after"));
+    await expect(page.getByText("Reading after.", { exact: true })).toBeVisible();
+    await afterAnimationFrames(page);
+    expect(await shell.evaluate(element => element.scrollTop)).toBeCloseTo(before, 0);
+    expect((await first.boundingBox())?.height).toBe(2500);
+    expect((await second.boundingBox())?.height).toBe(2500);
+  });
+
   test.describe("touch preview", () => {
     test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 

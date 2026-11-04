@@ -3,12 +3,18 @@
 // source only while it intersects the viewport and the page is visible.
 type SvgImage = {
   source: string;
+  dimensionsKey: string;
   placeholder: string;
   intersecting: boolean;
   active: boolean;
 };
 
 const images = new WeakMap<HTMLImageElement, SvgImage>();
+// Dimensions outlive individual elements so a live document remount does not
+// collapse off-screen SVGs and clamp the reader's scroll position. Revisions
+// share the previous size until the replacement loads its own dimensions.
+const knownDimensions = new Map<string, { width: number; height: number }>();
+const MAX_KNOWN_DIMENSIONS = 256;
 let stopObserving: (() => void) | null = null;
 
 function placeholder(width: number, height: number): string {
@@ -24,6 +30,12 @@ function isSvgSource(source: string): boolean {
   }
 }
 
+function dimensionsKey(source: string): string {
+  const url = new URL(source, document.baseURI);
+  url.searchParams.delete("revision");
+  return url.href;
+}
+
 // Parse before mounting. Even a detached div with innerHTML fetches images;
 // a template is inert, so off-screen SVGs never acquire a live source first.
 export function preparePreviewHtml(html: string): DocumentFragment {
@@ -33,8 +45,13 @@ export function preparePreviewHtml(html: string): DocumentFragment {
     for (const image of template.content.querySelectorAll<HTMLImageElement>("img[src]")) {
       const source = image.getAttribute("src")!;
       if (!isSvgSource(source)) continue;
-      const state: SvgImage = { source, placeholder: placeholder(300, 150), intersecting: false, active: false };
+      const key = dimensionsKey(source);
+      const size = knownDimensions.get(key) ?? { width: 300, height: 150 };
+      const state: SvgImage = { source, dimensionsKey: key, placeholder: placeholder(size.width, size.height), intersecting: false, active: false };
       images.set(image, state);
+      image.addEventListener("load", () => {
+        if (state.active) rememberDimensions(image, state);
+      });
       image.src = state.placeholder;
     }
   }
@@ -67,6 +84,11 @@ function rememberDimensions(image: HTMLImageElement, state: SvgImage): void {
   // styles. A static, empty SVG has no animation work and keeps scroll stable.
   if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
     state.placeholder = placeholder(image.naturalWidth, image.naturalHeight);
+    knownDimensions.delete(state.dimensionsKey);
+    knownDimensions.set(state.dimensionsKey, { width: image.naturalWidth, height: image.naturalHeight });
+    if (knownDimensions.size > MAX_KNOWN_DIMENSIONS) {
+      knownDimensions.delete(knownDimensions.keys().next().value!);
+    }
   }
 }
 
