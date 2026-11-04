@@ -14,6 +14,7 @@
 
 import { stripBasePath } from "../shared/base-path";
 import type { RootGroup } from "../shared/types";
+import { previewImageSource, setPreviewImageSource } from "./svg-images";
 
 const REVISION_PARAM = "revision";
 
@@ -106,7 +107,7 @@ export function refreshImageRevisions(
   revisionOf: (id: string) => string,
 ): void {
   for (const image of container.querySelectorAll<HTMLImageElement>("img[src]")) {
-    const next = revisionedImageUrl(image.getAttribute("src") ?? "", image.baseURI, basePath, roots, revisionOf);
-    if (next && next !== image.src) image.src = next;
+    const next = revisionedImageUrl(previewImageSource(image), image.baseURI, basePath, roots, revisionOf);
+    if (next) setPreviewImageSource(image, next);
   }
 }
