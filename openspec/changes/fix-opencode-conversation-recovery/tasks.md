@@ -82,6 +82,10 @@ Final section 12 checks passed 8,717 unit tests with 16 skipped and zero failure
 
 The fresh affected Standards/evidence review confirmed the closed state type resolves its recommendation with no actionable findings. The unchanged full Spec and runtime evidence remains valid. Final pre-publication audit found ten review threads: five already resolved, two previously answered, and three new verified corrections with approved replies. No additional finding was present in that audit; replies and resolutions remain pending under 12.5 until the published state is verified.
 
+Normal merge `fa613b75` published the integrated upstream and three verified corrections. All three approved new replies and the PR evidence update were published. A final paginated audit confirmed all ten review threads have answers and are resolved, including the two earlier answered threads; a partial GraphQL gateway failure was reconciled from actual thread state before completing the sole remaining resolution. Fresh CI run `41816187228` is registered and running; contracts/specs have begun passing, while unit, browser, and integration acceptance remain pending under 8.4. This records observed publication and resolution, not a claim of green CI.
+
+CI run `41816187228` subsequently passed on published correction `fa613b75`: unit/typecheck/audit/licenses/build/smoke, both E2E legs, all 27 performance cases, API contracts including Swift generation and Pages validation, strict specs, and the required `validate` gate. CodeQL also passed. The post-CI audit found all ten review threads answered and resolved, no additional discussion requiring an answer, and the completed Codex review reported no findings on this exact head. GitHub reported the PR open, ready, and clean against `eb8884a0`. This final tracking-only update changes no product, test, dependency, or acceptance semantics; authenticated iPhone/live-SSE behavior and the deferred performance work remain outside the verified claim. Archiving and the PR's final merge remain separate lifecycle actions.
+
 ## 1. Preserve the verified recovery baseline
 
 - [x] 1.1 Separate optional provider child enrichment from required parent reads, with regression coverage for lookup saturation, hung ownership/execution history, required parent failures, and later retry; verified by the completed provider/adapter run of 2,115 passing tests.
@@ -131,7 +135,7 @@ The fresh affected Standards/evidence review confirmed the closed state type res
 - [x] 8.1 Establish and minimize a deterministic public-seam reproduction of the CI retention-gap failure by gating native step/usage events around history/subscription handoff; witness the exact assertion fail and identify whether a redundant publication or legitimate pending progress invalidates the cursor.
 - [x] 8.2 Correct the confirmed cause with regression coverage, preserving the replay byte budget, no-resync assertion for unchanged snapshots, meaningful event/progress assertions, and all stream, accounting, ownership/Stop, and live/revert safeguards; remove temporary diagnostics and rerun the original scenario.
 - [x] 8.3 Align design, affected capability acceptance, and chat guidance with the proven correction; preserve existing scenarios and distinguish a test synchronization correction from a production behavior change.
-- [ ] 8.4 Verify the published correction's fresh CI results, including the unit/validate gates; report any actual remaining failure or access/runtime blocker rather than treating local success or a rerun as proof of its cause.
+- [x] 8.4 Verify the published correction's fresh CI results, including the unit/validate gates; report any actual remaining failure or access/runtime blocker rather than treating local success or a rerun as proof of its cause.
 
 ## 9. Preserve visible workers during degraded reversible replacement
 
@@ -157,6 +161,6 @@ The fresh affected Standards/evidence review confirmed the closed state type res
 - [x] 12.2 Correct the confirmed pending-to-stored relation transition without granting deletion authority to arbitrary notices, renewing control authority, or weakening concurrent-change, payload, cancellation, and generation fences; align affected guidance and regression coverage.
 - [x] 12.3 Reproduce and correct loss of an exact foreground subagent's known association/accounting during unavailable-enrichment undo, preserving current contradictions, hidden-origin removal, returned-page authority, and newer live metadata.
 - [x] 12.4 Reproduce and correct self-invalidating accounting retries while ownership slots remain saturated, keeping parent history readable with bounded optional work and preserving genuine concurrent counterproof and later recovery.
-- [ ] 12.5 Audit all review threads and general comments, prepare evidence-backed replies for newly addressed findings, obtain text approval, publish each answer, and resolve addressed threads after verified acceptance; report any remaining blocker explicitly.
+- [x] 12.5 Audit all review threads and general comments, prepare evidence-backed replies for newly addressed findings, obtain text approval, publish each answer, and resolve addressed threads after verified acceptance; report any remaining blocker explicitly.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.
