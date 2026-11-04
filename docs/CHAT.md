@@ -638,6 +638,8 @@ reverted work, and retained presentation never renews Stop authority.
 The same protection applies to an exact visible foreground subagent tool's
 known inspection, model, and accounting when optional child fields disappear.
 Changed occurrences and current ownership contradictions still revoke them.
+If that tool is older than the newest history page, its exact accounting carrier
+still appears in the first snapshot without changing the message page or cursor.
 If another client commits the revert before Uatu sees its staged boundary,
 discarded settled worker results must still disappear rather than return from
 retained state. Separate native-origin evidence preserves visible workers under

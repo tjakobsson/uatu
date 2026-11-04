@@ -1331,7 +1331,21 @@ export class ChatAdapter {
       const item = items[index]!;
       if (item.type === "tool") items[index] = retainToolAssociation(item, sourceProjection);
     }
-    const accountingItems = page.completeItems?.map(item => item.type === "tool" ? retainToolAssociation(item, sourceProjection) : item);
+    const carrierIds = cursor ? undefined : new Set(items.map(item => item.id));
+    let restoredCarrier = false;
+    const accountingItems = page.completeItems?.map(item => {
+      const retained = item.type === "tool" ? retainToolAssociation(item, sourceProjection) : item;
+      // Optional enrichment stripped this exact launcher's child before the
+      // first-page carrier pass. Admit its restored current-history copy, not
+      // an arbitrary retained row, after source and contradiction validation.
+      if (carrierIds && retained !== item && !carrierIds.has(retained.id)) {
+        items.push(retained);
+        carrierIds.add(retained.id);
+        restoredCarrier = true;
+      }
+      return retained;
+    });
+    if (restoredCarrier) items.sort((left, right) => left.createdAt - right.createdAt);
     await this.attributeLaunchers(id, items, accountingItems, coverage?.signal, page.workerSource ? coverage?.workerSources : undefined, coverage?.refreshAttribution);
     coverage?.assertCurrent();
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is

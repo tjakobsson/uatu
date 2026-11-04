@@ -94,6 +94,14 @@ The test-only correction passed 100 generation/cancel repetitions, all eleven pe
 
 Final section 13 local verification passed typecheck, 8,717 full-suite tests with 16 skipped and zero failures, and all 58 strict OpenSpec items on the reviewed source fingerprint. The corrected generation case passes without altering product code, deadlines, or the original cancellation assertions. The existing build/API/browser evidence remains applicable to the unchanged runtime source. Both affected review axes are clean; publication and actual fresh CI remain pending, and the ten review threads remain answered/resolved.
 
+Published `d9e9cacc` contains the verified test-only generation correction; fresh CI run `41822510156` is running. The publication audit discovered an eleventh P2: a known completed foreground subagent older than the newest history page can lose its first-page accounting carrier during unavailable ownership enrichment, while subscription still retains it. Section 14 tracks that ordinary paged-history path separately from the corrected undo path. Tasks 4.1–4.3 are reopened for any confirmed correction; the prior ten threads stay answered/resolved and the new finding remains open until verified and answered.
+
+The eleventh finding reproduced repeatedly through the native client/adapter with a known `$0.125` foreground tool omitted from history but present in subscription. Twelve controls passed, covering healthy/cold reads, foreign ownership, hidden/changed/ambiguous occurrences, current accounting, and newer native output. The newest fifty user rows and older cursor remain meaningful assertions. The correction is being confined to first-page presentation reconciliation of an exact restored complete-history launcher, before normal attribution; provider verification and control authority remain unchanged.
+
+The first-page correction now admits only missing complete-history launchers actually restored by the existing exact-association helper, deduplicates them by ID, and restores chronological order before attribution. The foreground matrix passed all 27 cases; expanded provider controls passed 86 and adapter carrier/pagination controls passed six. Thirty foreground repetitions passed all 810 cases. Typecheck and whitespace checks passed; main and delta match with 25 scenarios. Full combined verification and fresh independent review remain pending, as do the approved-text/publication gates for the eleventh reply.
+
+Final section 14 verification passed 8,730 unit tests with 16 skipped and zero failures, typecheck, build/version/smoke, the 593-package license check, audit, all 58 strict OpenSpec items, 213 API tests, and 89 affected browser cases. Fresh independent parallel Sol High Standards and Spec reviews were clean on the exact source; main and delta match with 25 scenarios. The user approved the eleventh-thread reply and matching evidence update after verification. Meanwhile, preceding head `d9e9cacc` failed CI run `41822510156` only in the unchanged initial Checking assertion of the inconclusive-recovery test (8,716 passed / 16 skipped / one failed); the generation correction passed and both E2E legs, performance, contracts, and specs passed. Section 15 tracks that distinct unit assertion; local success is not presented as green CI.
+
 ## 1. Preserve the verified recovery baseline
 
 - [x] 1.1 Separate optional provider child enrichment from required parent reads, with regression coverage for lookup saturation, hung ownership/execution history, required parent failures, and later retry; verified by the completed provider/adapter run of 2,115 passing tests.
@@ -174,5 +182,14 @@ Final section 13 local verification passed typecheck, 8,717 full-suite tests wit
 ## 13. Reconcile the final-head generation assertion
 
 - [x] 13.1 Reproduce the pending-fallback generation failure with controlled native read/publication ordering; distinguish forbidden old-reader publication from legitimate restarted-generation recovery, correct the confirmed cause without weakening either assertion or budget, and renew affected verification/review before publication.
+
+## 14. Preserve older foreground accounting carriers on the first page
+
+- [x] 14.1 Reproduce and correct a known foreground subagent falling outside the newest history page during unavailable child enrichment, preserving its exact association/accounting carrier and history/subscription agreement without admitting cold, contradicted, hidden, changed, or ambiguous occurrences.
+- [ ] 14.2 Prepare an evidence-backed reply for the new paged-foreground finding, obtain text approval, publish the verified correction and answer, resolve the addressed thread, and audit for any additional comments.
+
+## 15. Diagnose the distinct Checking-presentation CI assertion
+
+- [ ] 15.1 Reproduce the inconclusive recovery test's initial Checking assertion with controlled event/read ordering, distinguish a production presentation defect from missing test admission/completion barriers, and correct only the confirmed cause while preserving deadlines, retry counts, activity/control assertions, and independent review.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.

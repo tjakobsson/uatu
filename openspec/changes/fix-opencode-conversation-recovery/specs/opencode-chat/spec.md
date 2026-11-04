@@ -83,6 +83,11 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **THEN** replacement and subscription retain the tool's known child inspection identity, model, and accounting rather than treating stripped optional fields as authoritative deletion
 - **AND** hidden origins, changed occurrences, current ownership contradictions, returned-page authority, and newer live metadata keep their existing precedence; retained metadata grants no new Stop authority
 
+#### Scenario: Older foreground accounting remains on the first page
+- **WHEN** a previously verified foreground subagent is older than the newest history page and child enrichment is temporarily unavailable during reconnect
+- **THEN** the first snapshot includes that exact visible foreground accounting carrier and agrees with the following subscription, while preserving the newest message page and older cursor
+- **AND** cold or unrelated retained rows, changed or ambiguous occurrences, hidden origins, and contradicted associations are not admitted; current accounting and newer live metadata retain precedence
+
 #### Scenario: A pending fallback outlives optional inventory recovery
 - **WHEN** a confined result remains pending in the inbox, required transcript and pending-inbox reads succeed, and optional active-worker recovery expires before delivery
 - **THEN** history and the following subscription retain the current pending fallback text, including authoritative payload updates
