@@ -2243,6 +2243,13 @@ test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async ()
   };
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: coalesced ? 25 : 0,
     ...(eviction ? { maxProjections: 2 } : {}), ...(expiredRenewal ? { historyReadTimeoutMs: 500 } : {}) });
+  const history = adapter.history.bind(adapter);
+  let reconnectReads: Array<ReturnType<ChatAdapter["history"]>> | undefined;
+  if (retiredGeneration) adapter.history = (...args) => {
+    const pending = history(...args);
+    reconnectReads?.push(pending);
+    return pending;
+  };
   const now = Date.now(); let elapsed = 0;
   const clock = recovery ? spyOn(Date, "now").mockImplementation(() => now + elapsed) : undefined;
   let observer: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
@@ -2331,7 +2338,15 @@ test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async ()
         if (!newerReference) { releaseRenewal(); await expect(renewing).rejects.toThrow(); }
         if (retiredGeneration) {
           second.content[0].state.input.prompt = "Changed second task"; degraded = true;
+          reconnectReads = [];
           void adapter.startEventPump(); await provider.waitForEventStream(AbortSignal.timeout(3_000));
+          // Readiness only covers the stream. The connected event also starts
+          // independent history recoveries; finish those while still degraded,
+          // before the later restatement's exact no-extra-read baseline.
+          await emit([]);
+          const recovering = reconnectReads; reconnectReads = undefined;
+          expect(recovering).toHaveLength(2);
+          await Promise.all(recovering);
         }
       } else if (!noRenewal) {
         const healthyChild = await adapter.history("ses_child"), healthyRoot = await adapter.history("ses_root");

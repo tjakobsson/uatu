@@ -166,6 +166,16 @@ Fresh independent parallel Sol High Standards and Spec reviews are now clean on 
 
 Final combined verification passed 8,956 full-suite tests with 16 skipped and zero failures, typecheck, build/version/smoke, the 593-package license check, audit, all 58 strict OpenSpec items, API validation/structure, 213 API tests, and all 89 affected browser cases. The reviewed source fingerprint remained unchanged throughout. Both independent review axes are clean; publication and the two approved replies/resolutions are now the remaining local handoff actions, followed by actual fresh CI under 8.4. No authenticated iPhone/live-SSE, deployment, final PR merge, or archive claim is made.
 
+Published `f7821d26` contains the verified cohort, recursive binding/renewal/root recovery, current report-content, token, and test-isolation corrections. Immediately after the push, the PR description was updated and read back against that exact head, recording 8,956 local passes and explicitly pending fresh CI. Both approved replies were published and their threads resolved. A paginated readback confirmed all thirteen threads answered and resolved with no unanswered thread; current CI run `41895639549` is running. This records observed publication and resolution, not green-CI acceptance.
+
+That run completed with one unit failure: the renewed-leaf generation-retirement subscription case observed leaf reads increase from two to three after its baseline (8,955 passed, 16 skipped). Unit and aggregate validation failed; both E2E legs, all 27 performance cases, contracts including Swift generation, specs, and CodeQL passed. A fresh audit found all thirteen review threads still answered and resolved, with no new general request. The approved failed-CI caveat replaced the pending line in the PR description and was read back at `f7821d26`.
+
+Controlled reproduction attributed the extra read to the restarted generation's independent root recovery, not the retired renewal: stream readiness did not await the connected event's histories. The test-only correction captures both reconnect histories, crosses the processed-event barrier, and awaits their completion while enrichment remains degraded, before the unchanged exact no-extra-read baseline. Original focused execution reproduced the failure; deterministic scheduling and late-barrier sensitivity each failed ten of ten runs, while the correct barrier passed ten of ten. Corrected focused execution passed thirty runs; thirty 96-case matrices (including twenty under four-process contention), 172 provider controls, three explicit cancellation/readiness controls, full provider (2,701), full adapter (641), typecheck, and diff checks passed. Product code and budgets are unchanged. Fresh review and final-head CI remain pending; task 8.4 stays open.
+
+Fresh independent Sol High Standards and Spec reviews of the 15-line test-only correction are clean on scoped fingerprint `b5967cef2608db672bab13f99a28379afab74acf20c7bbccdee119b68ba013d6`, reusing adequate unchanged whole-PR evidence. Both checked reconnect ownership, the processed barrier, rejection handling, and preservation of the original stale-renewal and exact no-extra-read assertions. Main/delta still match across 27 scenarios. Lead independently passed all 96 deep-cohort cases; renewed full unit verification is running. The user approved the next factual PR evidence update after verified publication and subsequent actual-result updates; no final-head CI acceptance is claimed.
+
+Renewed lead verification completed: typecheck, all 8,956 full-suite tests (16 skipped, zero failures), strict change validation, diff checks, and stable reviewed scoped fingerprint all passed. The only source change since `f7821d26` remains the 15-line test synchronization correction; prior unchanged build/smoke, browser, API, license/audit, and spec evidence remains applicable. Task 20.1 is verified complete; publication and fresh final-head CI under 8.4 remain separate acceptance gates.
+
 ## 1. Preserve the verified recovery baseline
 
 - [x] 1.1 Separate optional provider child enrichment from required parent reads, with regression coverage for lookup saturation, hung ownership/execution history, required parent failures, and later retry; verified by the completed provider/adapter run of 2,115 passing tests.
@@ -259,12 +269,12 @@ Final combined verification passed 8,956 full-suite tests with 16 skipped and ze
 ## 16. Preserve complete attribution ordering across concurrent foreground updates
 
 - [x] 16.1 Reproduce and correct two foreground calls sharing a child when concurrent publication touches one call during unavailable ownership enrichment; include the current exact association in attribution ordering without overwriting the newer row, double-counting spend, or weakening occurrence/source/contradiction fences.
-- [ ] 16.2 Prepare an evidence-backed reply for the concurrent-attribution finding, obtain text approval, publish the verified correction and answer, resolve the addressed thread, and audit all current comments.
+- [x] 16.2 Prepare an evidence-backed reply for the concurrent-attribution finding, obtain text approval, publish the verified correction and answer, resolve the addressed thread, and audit all current comments.
 
 ## 17. Preserve changed current report content during degraded recovery
 
 - [x] 17.1 Reproduce and correct retained-worker suppression of changed pending or stored fallback report content; require matching current report content/version before supersession, preserving exact provenance, concurrent updates, native visibility, and ownership/control separation.
-- [ ] 17.2 Obtain approval for an evidence-backed response, publish the verified correction and reply, resolve the addressed report-content thread, and audit current comments.
+- [x] 17.2 Obtain approval for an evidence-backed response, publish the verified correction and reply, resolve the addressed report-content thread, and audit current comments.
 
 ## 18. Preserve existing worker tokens through cohort fencing
 
@@ -273,5 +283,9 @@ Final combined verification passed 8,956 full-suite tests with 16 skipped and ze
 ## 19. Isolate independent recovery owners in regression tests
 
 - [x] 19.1 Synchronize undo-cancellation and pending-eviction tests on their intended publication owners without weakening original assertions, cache budgets, or stale-read fences; preserve separate controls for legitimate automatic stage publication and unpinned LRU eviction, and renew affected review.
+
+## 20. Isolate generation-retirement read-count ownership
+
+- [x] 20.1 Reproduce the final-head renewed-leaf generation-retirement failure, distinguish retired-reader work from independent restarted-generation recovery, and correct only the proven cause while preserving exact no-extra-read and stale-renewal assertions; renew independent review and integrated verification before publication.
 
 Archiving and publication remain later lifecycle actions, not claims of completion here. Do not commit, push, publish, deploy, restart agents, or change authentication as part of these tasks without the required separate authorization.
