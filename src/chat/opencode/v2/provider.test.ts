@@ -1026,6 +1026,170 @@ test(`concurrent foreground output preserves complete shared-child attribution o
   } finally { release(); releasePublication(); releasePressure(); observer?.events.cancel(); retained?.events.cancel(); publicationView?.events.cancel(); await nativePublication?.catch(() => undefined); await reading?.catch(() => undefined); await Promise.allSettled([...recoveryReads.values()]); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
+for (const size of [1, 2]) for (const change of size === 1 ? ["input", "occurrence", "unchanged"] as const : ["input", "occurrence", "second-input", "second-occurrence", "unchanged"] as const)
+for (const liveBeforeHistory of [false, true])
+for (const ancestorFirst of [false, true])
+for (const pressureCount of ancestorFirst ? [0] : size === 1 && !liveBeforeHistory && (change === "input" || change === "unchanged") ? [0, 511, 512] : [0, 512])
+test(`expired foreground accounting does not price a changed launcher from its old tally (${size}/${change}${liveBeforeHistory ? "/live-before-history" : ""}${ancestorFirst ? "/ancestor-first" : ""}${pressureCount ? `/cache-pressure=${pressureCount}` : ""})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = structuredClone(fixture.launch), tool = launch.content[0];
+  tool.state.input.background = false; tool.state.metadata = { sessionID: "ses_child", status: "completed" };
+  tool.state.content = [{ type: "text", text: "Foreground fixture checked." }];
+  const sibling = structuredClone(launch); sibling.id = "msg_sibling"; sibling.time.created = 60;
+  sibling.content[0].id = "call_sibling"; sibling.content[0].time = { created: 60, completed: 70 };
+  sibling.content[0].state.input.prompt = "A second task";
+  const root = structuredClone(launch); root.id = "msg_root"; root.time.created = 10;
+  root.content[0].id = "call_root"; root.content[0].time = { created: 10, completed: 15 };
+  root.content[0].state.metadata.sessionID = "ses_parent"; root.content[0].state.input.prompt = "Root task";
+  const changedLaunch = change.startsWith("second-") ? sibling : launch, changedTool = changedLaunch.content[0];
+  let changed = false, fresh = false, zero = false, opened = 0, closed = 0, slowReads = 0, abortedReads = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
+  const nativeReads: Promise<unknown>[] = [];
+  const pressureParents = new Set<string>();
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_root": () => session("ses_root"),
+    "GET /api/session/ses_root/message": () => ({ data: [root], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", ancestorFirst ? { parentID: "ses_root" } : {}),
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_parent", cost: zero ? 0 : (changed ? 0.25 : 0.125) + (size === 2 ? 0.2 : 0) }),
+    "GET /api/session/ses_parent/message": () => ({ data: size === 2 ? [launch, sibling] : [launch], cursor: {} }),
+    "GET /api/session/ses_child/message": ({ signal }) => {
+      const page = () => ({ data: [
+        { id: "prompt_first", type: "user", text: fresh ? tool.state.input.prompt : "Inspect the safe fixture", time: { created: 22 } },
+        { id: "msg_priced", type: "assistant", time: { created: 25 }, model: { id: changed ? "new-model" : "old-model" }, cost: zero ? 0 : changed ? 0.25 : 0.125, content: [] },
+        ...(size === 2 ? [{ id: "prompt_second", type: "user", text: fresh ? sibling.content[0].state.input.prompt : "A second task", time: { created: 62 } },
+          { id: "msg_sibling_priced", type: "assistant", time: { created: 65 }, model: { id: "old-model" }, cost: zero ? 0 : 0.2, content: [] }] : []),
+      ], cursor: {} });
+      if (!changed || fresh || size === 2) return page();
+      slowReads++;
+      const reading = Bun.sleep(1_500).then(page); nativeReads.push(reading);
+      // The native transport respects fetch cancellation, even if the healthy
+      // server finishes producing its response after the optional deadline.
+      return Promise.race([reading, new Promise<never>((_resolve, reject) => {
+        const abort = () => { abortedReads++; reject(new DOMException("Aborted", "AbortError")); };
+        if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+      })]);
+    },
+    "GET /api/session/:id": ({ path: route }) => {
+      const id = route.split("/").at(-1)!;
+      if (id.startsWith("ses_pressure_child_")) pressureParents.add(id);
+      return session(id, id.startsWith("ses_pressure_child_") ? { parentID: "ses_pressure" } : {});
+    },
+    "GET /api/session/:id/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+  });
+  const provider = server.provider(), events = provider.events.bind(provider), list = provider.listMessages.bind(provider);
+  provider.listMessages = async (...args) => {
+    if (changed && !fresh && size === 2 && args[0] === "ses_child") {
+      // Shared-child execution enrichment also reads this native transcript.
+      // Delay only the public accounting page so that earlier enrichment does
+      // not satisfy this test's optional accounting window via byte-cache reuse.
+      slowReads++; args[1].signal?.addEventListener("abort", () => { abortedReads++; }, { once: true });
+      const reading = Bun.sleep(1_500); nativeReads.push(reading); await reading;
+    }
+    const page = await list(...args);
+    if (args[0] === "ses_parent") for (const row of page.items.filter(item => item.type === "tool")) {
+      expect(row).not.toHaveProperty("usage"); expect(row).not.toHaveProperty("model");
+    }
+    return page;
+  };
+  provider.events = async function* (signal) { for await (const event of events(signal)) { yield event; if (event.eventType === "diagnostic.changed-launcher.applied") applied(); } };
+  const emit = async (batch: Array<Record<string, unknown>>) => {
+    const ready = new Promise<void>(resolve => { applied = resolve; });
+    for (const event of [...batch, { type: "diagnostic.changed-launcher.applied", data: {} }])
+      wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await ready;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const now = Date.now(); let elapsed = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now + elapsed);
+  const carrier = (items: import("../../types").ConversationItem[]) => items.find(item => item.id === "tool:call_worker");
+  const costs = (items: import("../../types").ConversationItem[]) => ["tool:call_worker", ...(size === 2 ? ["tool:call_sibling"] : [])].map(id => {
+    const item = items.find(item => item.id === id); return item?.type === "tool" ? item.usage?.costUsd : undefined;
+  });
+  const expected = change === "unchanged" ? size === 2 ? [0.125, 0.2] : [0.125]
+    : size === 1 ? [undefined] : change.startsWith("second-") ? [0.125, undefined] : [undefined, 0.2];
+  let pinned: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined, pressureView: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  try {
+    if (ancestorFirst) {
+      const initial = await adapter.history("ses_root");
+      const branch = initial.items.find(item => item.id === "tool:call_root");
+      expect(branch?.type === "tool" ? branch.descendants?.find(line => line.id === "tool:call_worker") : undefined).toMatchObject({ model: "old-model", usage: { costUsd: 0.125 } });
+    } else expect(carrier((await adapter.history("ses_parent")).items)).toMatchObject({ model: "old-model", usage: { costUsd: 0.125 } });
+    if (pressureCount) {
+      pinned = await adapter.subscribe("ses_parent"); pressureView = await adapter.subscribe("ses_pressure");
+      // Real native prompt deliveries bank distinct child transcripts. The
+      // existing 512-entry budget evicts accounting, not the pinned parent view.
+      await emit(Array.from({ length: pressureCount }, (_, index) => {
+        const sessionID = `ses_pressure_child_${index}`, inboxID = `pressure_prompt_${index}`;
+        return [
+          { id: `pressure_enqueued_${index}`, type: "session.inbox.enqueued", created: 1000 + index * 2, data: { sessionID, inboxID, item: { id: inboxID, type: "user", payload: { text: "Native pressure prompt" } } } },
+          { id: `pressure_delivered_${index}`, type: "session.inbox.delivered", created: 1001 + index * 2, data: { sessionID, inboxID } },
+        ];
+      }).flat());
+      expect(pressureParents.size).toBe(pressureCount);
+      const last = await adapter.subscribe(`ses_pressure_child_${pressureCount - 1}`); last.events.cancel();
+      expect(last.snapshot.items).toContainEqual(expect.objectContaining({ id: `message:pressure_prompt_${pressureCount - 1}`, type: "user_message" }));
+      const retained = await adapter.subscribe("ses_parent"); retained.events.cancel();
+      expect(costs(retained.snapshot.items)).toEqual(size === 2 ? [0.125, 0.2] : [0.125]);
+      expect(opened).toBe(1); expect(closed).toBe(0);
+    }
+    changed = true; elapsed = 31_000;
+    if (change.endsWith("input")) changedTool.state.input.prompt = "A distinct foreground invocation";
+    if (change.endsWith("occurrence")) { changedLaunch.time.created++; changedTool.time.created++; changedTool.time.completed++; }
+    await emit(["ses_parent", "ses_child"].map(id => ({ type: "session.updated", created: 90, data: { info: session(id, id === "ses_child" ? { parentID: "ses_parent" } : ancestorFirst ? { parentID: "ses_root" } : {}) } })));
+    if (liveBeforeHistory) await emit([{ id: "evt_changed_launcher", type: "session.message.content.updated", created: changedLaunch.time.created,
+      durable: { aggregateID: "ses_parent", seq: 1, version: 1 }, data: { sessionID: "ses_parent", messageID: changedLaunch.id, content: changedLaunch.content } }]);
+    const refreshed = await adapter.history("ses_parent");
+    const next = await adapter.subscribe("ses_parent"); next.events.cancel();
+    expect(slowReads).toBeGreaterThan(0); expect(abortedReads).toBeGreaterThan(0);
+    if (pressureCount) expect({ history: costs(refreshed.items), subscription: costs(next.snapshot.items) }).toEqual({ history: expected, subscription: expected });
+    for (const items of [refreshed.items, next.snapshot.items]) {
+      expect(costs(items)).toEqual(expected);
+      expect(carrier(items)).toMatchObject({ input: JSON.stringify(tool.state.input), childConversationId: "ses_child", workerSession: { costUsd: size === 2 ? 0.325 : 0.125 } });
+      for (const row of items.filter(item => item.type === "tool")) {
+        if (row.id === `tool:${changedTool.id}` && change !== "unchanged") {
+          expect(row).toMatchObject({ input: JSON.stringify(changedTool.state.input), createdAt: changedTool.time.created,
+            completedAt: changedTool.time.completed, output: "Foreground fixture checked.", status: "completed", childConversationId: "ses_child" });
+          expect(row).not.toHaveProperty("usage"); expect(row.model).toBeUndefined();
+        } else expect(row).toMatchObject({ model: "old-model" });
+      }
+    }
+    // Neither the retired transport's eventual response nor a native usage/
+    // model restatement is current task accounting or occurrence proof.
+    await Promise.allSettled(nativeReads);
+    const late = await adapter.subscribe("ses_parent"); late.events.cancel(); expect(costs(late.snapshot.items)).toEqual(expected);
+    if (change !== "unchanged") {
+      await emit([
+        { type: "session.step.started", created: 25, data: { sessionID: "ses_child", assistantMessageID: "msg_priced", started: 25, model: { providerID: "fixture", id: "restated-model" } } },
+        { type: "session.step.ended", created: 25, data: { sessionID: "ses_child", assistantMessageID: "msg_priced", cost: 0.125 } },
+      ]);
+      const restated = await adapter.subscribe("ses_parent"); restated.events.cancel(); expect(costs(restated.snapshot.items)).toEqual(expected);
+    }
+    // Completed native accounting can recover the changed task, including an
+    // explicit authoritative zero. Its lifetime session high-water is separate.
+    fresh = true;
+    for (const free of [false, true]) {
+      zero = free; elapsed += 31_000;
+      await emit(["ses_parent", "ses_child"].map(id => ({ type: "session.updated", created: free ? 110 : 100, data: { info: session(id, id === "ses_child" ? { parentID: "ses_parent" } : ancestorFirst ? { parentID: "ses_root" } : {}) } })));
+      const recovered = await adapter.history("ses_parent");
+      const subscription = await adapter.subscribe("ses_parent"); subscription.events.cancel();
+      for (const items of [recovered.items, subscription.snapshot.items]) {
+        expect(costs(items)).toEqual(size === 2 ? [zero ? 0 : 0.25, zero ? 0 : 0.2] : [zero ? 0 : 0.25]);
+        expect(carrier(items)).toMatchObject({ model: "new-model", workerSession: { costUsd: size === 2 ? 0.45 : 0.25 } });
+        if (zero) expect(conversationTotals(items)).toBeUndefined();
+        else expect(conversationTotals(items)?.costUsd).toBeCloseTo(size === 2 ? 0.45 : 0.25);
+      }
+    }
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { pinned?.events.cancel(); pressureView?.events.cancel(); clock.mockRestore(); await adapter.dispose(); await Promise.allSettled(nativeReads); expect(closed).toBe(opened); }
+}, pressureCount ? 20_000 : 5_000);
+
 for (const outcome of ["unavailable", "healthy", "cold", "no-prior", "foreign-parent", "foreign-workspace", "hidden-origin", "changed-occurrence", "changed-child", "changed-input", "ambiguous-origin", "returned-new", "new-live"] as const)
 test(`paged foreground reconnect retains only its exact known accounting carrier (${outcome})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));

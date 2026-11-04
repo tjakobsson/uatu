@@ -647,6 +647,17 @@ history and live updates withhold aggregate redistribution. Exact known values
 remain available; mismatched amounts stay unknown until authoritative recovery.
 A later accounting restatement or ownership lookup alone cannot restore that
 allocation; the current call set must be proven coherent first.
+This also applies to a single foreground launcher after cached completeness
+expires: successful child ownership does not attach an old invocation's cost or
+model to changed input or occurrence clocks. Without current accounting, only
+the exact retained call set may reuse task receipts. Last-known session totals
+remain separate; a completed accounting read can restore current task values,
+including an authoritative zero.
+That binding must belong to the retained accounting, not merely the latest
+native presentation: a live tool update before history begins cannot carry an
+earlier invocation's receipt onto changed input or occurrence clocks.
+Evicting an accounting transcript does not permit subscription merging to restore
+pricing that current history withdrew from a changed invocation.
 If another client commits the revert before Uatu sees its staged boundary,
 discarded settled worker results must still disappear rather than return from
 retained state. Separate native-origin evidence preserves visible workers under

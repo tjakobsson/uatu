@@ -88,6 +88,14 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **THEN** the first snapshot includes that exact visible foreground accounting carrier and agrees with the following subscription, while preserving the newest message page and older cursor
 - **AND** cold or unrelated retained rows, changed or ambiguous occurrences, hidden origins, and contradicted associations are not admitted; current accounting and newer live metadata retain precedence
 
+#### Scenario: Expired accounting does not price a changed foreground invocation
+- **WHEN** completeness expires for a previously priced foreground launcher, its input or occurrence changes, child ownership succeeds, and current optional accounting expires
+- **THEN** history and the following subscription do not assign the earlier invocation's cached task usage or model to the changed launcher, including for a single-row cohort
+- **AND** exact retained membership and launcher bindings may preserve unchanged task receipts, including siblings and bindings reconstructed before opening the child timeline; last-known worker-session aggregates remain separate
+- **AND** a native tool update processed before history begins does not make its changed binding provenance for older retained accounting, while its newer presentation remains visible
+- **AND** accounting-transcript eviction does not allow retained projection merging to restore a withdrawn stale task receipt in the following subscription
+- **AND** late responses and usage/model restatements do not reauthorize changed task accounting; completed current accounting restores verified task values, including authoritative zero, under the existing source and publication fences
+
 #### Scenario: Concurrent foreground progress preserves complete attribution order
 - **WHEN** two foreground calls share a child and one call receives a newer native update while optional child enrichment is unavailable
 - **THEN** the complete attribution order includes the current exact association so the other call does not absorb the child's entire known usage or double-count spend after the live merge
