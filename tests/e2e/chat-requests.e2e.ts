@@ -99,23 +99,98 @@ test("outstanding requests are counted, reachable, and clear at zero", async ({ 
   await expect(page.locator('[data-chat-item-id="permission:z"]')).toHaveAttribute("data-request-state", "queued");
 });
 
+async function visitVariantWorkspace(page: Page, token: string, onNavigated?: () => void): Promise<void> {
+  // Navigation does not await the URL token's fire-and-forget promotion.
+  // page.request needs the shared cookie, not just the loaded document.
+  const promoted = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/auth" && response.request().method() === "POST");
+  await page.goto(`/?t=${encodeURIComponent(token)}`);
+  onNavigated?.();
+  const response = await promoted;
+  expect(response.status()).toBe(200);
+  expect(await response.finished()).toBeNull();
+}
+
+async function postBareVariant(page: Page, conversationId: string) {
+  return page.request.post(`/api/chat/conversations/${conversationId}/prompts`, {
+    // The browser sends these itself; the request context must state them.
+    headers: { origin: new URL(page.url()).origin },
+    data: { requestId: "r-variant-alone", text: "think hard", variant: "high" },
+  });
+}
+
 test("a variant without a model is refused at the boundary", async ({ page, request }) => {
   await request.post("/__e2e/reset");
   const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
   const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "Variant pairing", items: [] } })
     .then(r => r.json()) as { conversation: { id: string } };
   // The browser context carries the workspace session; page.request shares it.
-  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await visitVariantWorkspace(page, token.token);
   // A variant names an effort OF a model; accepting a bare one would tie its
   // validity to server-side memory of the conversation's current model, which
   // an adapter restart empties while the session keeps its model.
-  const response = await page.request.post(`/api/chat/conversations/${seeded.conversation.id}/prompts`, {
-    // The browser sends these itself; the request context must state them.
-    headers: { origin: new URL(page.url()).origin },
-    data: { requestId: "r-variant-alone", text: "think hard", variant: "high" },
-  });
+  const response = await postBareVariant(page, seeded.conversation.id);
   expect(response.status()).toBe(400);
   expect(await response.json()).toMatchObject({ error: "variant requires a model selection" });
+});
+
+test("a variant boundary check waits for delayed workspace cookie promotion", async ({ page, request }) => {
+  await request.post("/__e2e/reset");
+  const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
+  const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "Delayed variant pairing", items: [] } })
+    .then(r => r.json()) as { conversation: { id: string } };
+  let releasePromotion!: () => void;
+  const released = new Promise<void>(resolve => { releasePromotion = resolve; });
+  let markPromotionHeld!: () => void;
+  const promotionHeld = new Promise<void>(resolve => { markPromotionHeld = resolve; });
+  await page.route("**/api/auth", async route => {
+    if (route.request().method() !== "POST") return route.continue();
+    markPromotionHeld();
+    await released;
+    await route.continue();
+  });
+  const promoted = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/auth" && response.request().method() === "POST");
+  let markNavigated!: () => void;
+  const navigated = new Promise<void>(resolve => { markNavigated = resolve; });
+  let setupComplete = false;
+  // Run the same setup and boundary request as the original case. Capture
+  // rejection immediately so an early 401 cannot become an unhandled promise.
+  const boundaryCheck = (async () => {
+    await visitVariantWorkspace(page, token.token, markNavigated);
+    setupComplete = true;
+    const response = await postBareVariant(page, seeded.conversation.id);
+    expect(response.status()).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "variant requires a model selection" });
+  })().then(() => null, error => error);
+  let heldCheckFailure: unknown;
+  try {
+    await promotionHeld;
+    await navigated;
+    // Navigation alone cannot authenticate page.request. While the actual
+    // promotion is held, the unchanged prompt must still hit the auth gate.
+    const beforePromotion = await postBareVariant(page, seeded.conversation.id);
+    expect(beforePromotion.status()).toBe(401);
+    expect(await beforePromotion.json()).toMatchObject({ error: "authentication required" });
+    // The real goto has returned and a round trip has completed, but setup
+    // must still be waiting for the shared cookie, not merely navigation.
+    expect(setupComplete, "workspace setup must wait for cookie promotion after navigation").toBe(false);
+  } catch (error) {
+    // Finish the released request before surfacing an assertion failure, so
+    // its pending response waiter cannot obscure the original failure.
+    heldCheckFailure = error;
+  } finally {
+    releasePromotion();
+  }
+  const promotion = await promoted;
+  expect(promotion.status()).toBe(200);
+  expect(await promotion.finished()).toBeNull();
+  const afterPromotion = await postBareVariant(page, seeded.conversation.id);
+  expect(afterPromotion.status()).toBe(400);
+  expect(await afterPromotion.json()).toMatchObject({ error: "variant requires a model selection" });
+  const failure = await boundaryCheck;
+  if (heldCheckFailure) throw heldCheckFailure;
+  if (failure) throw failure;
 });
 
 test("a pending edit permission shows its diff, and a resolved one recedes", async ({ page, request }) => {

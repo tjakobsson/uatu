@@ -16,15 +16,21 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       const child = Bun.spawn({
         cmd: [process.execPath, "test", import.meta.path],
         env: { ...process.env, [CHILD_PROCESS_FLAG]: "1" },
-        // Keep child progress visible if its aggregate deadline expires on a
-        // contended runner; buffered output hid which inner test was running.
+        // Keep child output visible even if this wrapper's aggregate deadline
+        // expires on a contended runner; buffered output hid which inner test
+        // was running when the wrapper timed out.
         stdout: "inherit",
         stderr: "inherit",
       });
-      expect(await child.exited).toBe(0);
-      // This deadline covers all 186 inner tests, including real one-second
-      // clocks and four-second retries. Main already takes 46 s on CI; four
-      // concurrent unit workers can exceed 60 s. Inner deadlines stay intact.
+      const exitCode = await child.exited;
+      expect(exitCode).toBe(0);
+      // This cap covers the whole isolated suite — all 186 inner tests,
+      // including real one-second clocks and four-second retries — not one
+      // child test, and it still has a finite deadline. Main already takes
+      // 46 s on CI; Linux CI meanwhile reached 59.76s of passing cases with
+      // 17 still to run, and four concurrent unit workers can exceed 60 s,
+      // so allow room for the remaining work and scheduling variation.
+      // Child test budgets and inner deadlines remain independent and intact.
     }, 120_000);
   });
 } else {

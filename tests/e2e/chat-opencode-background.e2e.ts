@@ -540,15 +540,24 @@ for (const theme of ["light", "dark"] as const) test(`background audit desktop $
   await captureScreenshot(page, testInfo, `audit-background-desktop-${theme}-settled`);
 });
 
-test("manual background API is parent-wide, keeps the draft, and inspection survives worker failure", async ({ page, request }) => {
-  const conversationId = await boot(page, request);
-  const worker = await control(request, { op: "launchWorker", conversationId, background: false });
-  await page.locator("#chat-input").fill("Keep this draft");
+async function uploadPreservedAttachment(page: Page, observe: { uploaded?: () => void; snapshotting?: () => void } = {}) {
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jB1sAAAAASUVORK5CYII=", "base64");
   const upload = page.waitForResponse(response => response.url().includes("/attachments") && response.request().method() === "POST");
   await page.locator("#chat-attach-input").setInputFiles({ name: "preserved.png", mimeType: "image/png", buffer: png });
   expect((await upload).status()).toBe(201);
-  const attachments = await page.locator("#chat-attachments").textContent();
+  observe.uploaded?.();
+  // Response headers acknowledge storage, not publication to the composer.
+  // Preserve an attachment that actually exists before the background action.
+  await expect(page.locator("#chat-attachments .chat-attachment-name")).toHaveText("preserved.png");
+  observe.snapshotting?.();
+  return page.locator("#chat-attachments").textContent();
+}
+
+test("manual background API is parent-wide, keeps the draft, and inspection survives worker failure", async ({ page, request }) => {
+  const conversationId = await boot(page, request);
+  const worker = await control(request, { op: "launchWorker", conversationId, background: false });
+  await page.locator("#chat-input").fill("Keep this draft");
+  const attachments = await uploadPreservedAttachment(page);
   const configuration = await page.locator("#chat-configuration-summary").textContent();
   const delivery = await page.locator("#chat-send-help").textContent();
   const proceed = page.getByRole("button", { name: "Continue while workers run", exact: true });
@@ -577,6 +586,74 @@ test("manual background API is parent-wide, keeps the draft, and inspection surv
   await expect(page.locator(liveWorkerInspections)).toHaveCount(0);
   const report = page.locator(`[data-chat-item-id="task:${worker.taskId}"]`);
   await expect(report).toContainText("failed");
+});
+
+test("manual background preservation baseline waits for attachment publication after upload", async ({ page, request }) => {
+  const conversationId = await boot(page, request);
+  await control(request, { op: "launchWorker", conversationId, background: false });
+  await page.locator("#chat-input").fill("Keep this draft");
+  type PublicationGate = { held: boolean; release: () => void; restore: () => void };
+  await page.evaluate(({ conversationId }) => {
+    const original = window.fetch.bind(window);
+    let release!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const gate = { held: false, release, restore: () => { window.fetch = original; } };
+    Object.assign(window, { __attachmentPublicationGate: gate });
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const response = await original(...args);
+      const input = args[0];
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.href);
+      const method = args[1]?.method ?? (input instanceof Request ? input.method : "GET");
+      if (method === "POST" && url.pathname === `/api/chat/conversations/${encodeURIComponent(conversationId)}/attachments`) {
+        const json = response.json.bind(response);
+        response.json = async () => {
+          const value = await json();
+          gate.held = true;
+          await released;
+          return value;
+        };
+      }
+      return response;
+    };
+  }, { conversationId });
+  let markUploaded!: () => void;
+  const uploaded = new Promise<void>(resolve => { markUploaded = resolve; });
+  let snapshotting = false;
+  // The callbacks observe the actual 201 receipt and exact pre-snapshot point
+  // in the same helper used by the original preservation case.
+  const preparation = uploadPreservedAttachment(page, {
+    uploaded: markUploaded,
+    snapshotting: () => { snapshotting = true; },
+  }).then(attachments => ({ attachments, error: null }), error => ({ attachments: null, error }));
+  let heldCheckFailure: unknown;
+  try {
+    await page.waitForFunction(() => (window as unknown as { __attachmentPublicationGate: PublicationGate }).__attachmentPublicationGate.held);
+    await uploaded;
+    await expect(page.locator("#chat-attachments")).toHaveText("");
+    expect(snapshotting, "preservation baseline must wait for the uploaded attachment to be published").toBe(false);
+  } catch (error) {
+    heldCheckFailure = error;
+  } finally {
+    await page.evaluate(() => {
+      const gate = (window as unknown as { __attachmentPublicationGate: PublicationGate }).__attachmentPublicationGate;
+      gate.release();
+      gate.restore();
+    });
+  }
+  const prepared = await preparation;
+  if (prepared.error) throw prepared.error;
+  // No background operation has happened yet. Releasing the real JSON must
+  // publish the named attachment before the preservation action can begin.
+  await expect(page.locator("#chat-attachments .chat-attachment-name")).toHaveText("preserved.png");
+  const before = await control(request, { op: "state" });
+  expect(before.calls.filter((call: string) => call.startsWith("POST ") && call.includes("/background"))).toHaveLength(0);
+  if (heldCheckFailure) throw heldCheckFailure;
+  expect(prepared.attachments).toContain("preserved.png");
+  expect((await backgroundViaAPI(page, conversationId)).status).toBe(200);
+  await expect(page.locator("#chat-input")).toHaveValue("Keep this draft");
+  await expect(page.locator("#chat-attachments")).toHaveText(prepared.attachments!);
+  const after = await control(request, { op: "state" });
+  expect(after.calls.filter((call: string) => call.startsWith("POST ") && call.includes("/background"))).toHaveLength(1);
 });
 
 for (const [workerState, outcome] of [["completed", "finished"], ["error", "failed"], ["cancelled", "stopped"]] as const) {

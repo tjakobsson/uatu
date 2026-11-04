@@ -1,0 +1,103 @@
+# Failure-only script fingerprints
+
+## Purpose and scope
+
+The startup investigation reproduced pre-bootstrap JavaScript errors, but did
+not obtain the bytes of an actual failing response. Ordinary Playwright traces
+omit script bodies. Independent syntax-valid downloads and a passing HAR probe
+do not establish corruption or explain the failures.
+
+This diagnostic records only a canonical hashed-static-script path, error
+category/location, received byte count and SHA-256, or a sanitized unavailable
+reason. It does not emit script text, full URLs, query values, raw exceptions or
+mounted workspace names in the new fingerprint record. Existing page logging is
+otherwise unchanged. Successful responses do not trigger body reads.
+
+Responses are owned by their page and navigation from request start. Retired
+collectors ignore late responses; errors during a navigation transition are not
+attributed. Unavailable request frames are guarded. Known Hub mounts are reduced
+to canonical asset paths, and redirects cannot occupy the final response's slot.
+These safeguards correct findings from independent review before publication.
+
+## Bounds and limitations
+
+- Per-navigation limits: four scripts, two captures, 20 MiB declared and actual
+  body size, and a one-second capture deadline. Retired unused responses are
+  released. This is not a total-per-test byte or capture cap.
+- Playwright's `body()` cannot be cancelled or strictly memory-bounded. The size
+  gate and deadline limit diagnostic work and waiting, not all underlying memory.
+- No usable script URL in the error stack means no fingerprint. This includes
+  the observed Chromium parser errors. Known WebKit failures identified a script
+  but exhausted the capture deadline; unavailable is not a corruption diagnosis.
+- Playwright does not expose document identity for unusually late errors after
+  a new navigation commits. Those errors remain an attribution limit.
+- Known `/s/<workspace>/` Hub mounts are supported; arbitrary custom base-path
+  configurations have not been validated.
+
+This is a diagnostic milestone, not a startup-error fix or grounds to close
+#438 or #579. It does not change product behavior, test deadlines or retries.
+
+## Verification
+
+macOS, approved task-local Bun 1.4.4, existing locked dependencies and browsers.
+Prepend that runtime directory to `PATH` and verify `bun --version` is `1.4.4`.
+
+```sh
+bun test tests/e2e/page-diagnostics.test.ts \
+  tests/e2e/script-diagnostics.test.ts --rerun-each=3
+```
+
+Result: **54 passes, 129 assertions, zero failures** (18 cases repeated three
+times). Listener tests cover distinct bodies at the same URL across reloads and
+concurrent pages, late old responses, unavailable frames, mounted URLs, retirement
+and redirects. The earlier context-wide ownership implementation failed all six
+initial listener cases. Removing only the final redirect guard also failed its
+new regression by selecting the wrong body hash; restoring it passed.
+
+A private real-browser probe exercised reloads, concurrent pages with reverse
+error order, and a mounted asset in Chromium 156.0.8078.4 and WebKit 27.2:
+**6/6 scenarios, 10/10 expected body hashes**, all `PageError` / `received`, without
+retries. Both engines delivered navigation, commit, script request, response and
+error in the expected order. Tiny deliberate runtime errors supplied stack URLs;
+this was not a parser-SyntaxError reproduction. Server/browser cleanup passed.
+
+The standalone helper/test supplemental typecheck passed. Checking the full
+listener integration additionally reports nine fixture typing errors; the same
+nine diagnostics occur on the earlier `6005f000` fixture, after normalizing line
+numbers. The repository typecheck passed but excludes E2E infrastructure. These
+limits are retained rather than claiming a fully typechecked E2E harness.
+
+Fresh independent Sol review, including renewed review of the redirect correction,
+found no remaining actionable findings. Private probes and raw failure artifacts
+are debugging material, not publication attachments. Repeated first-attempt
+GitHub CI acceptance of the final candidate remains outstanding.
+
+## Correction — 2026-11-03: earlier mounted coverage was synthetic
+
+The PR #587 review
+([r4458704622](https://github.com/tjakobsson/uatu/pull/587#discussion_r4458704622))
+identified that the mounted tests and the browser probe above exercised a synthetic
+`/s/<id>/__uatu/asset/chunk-….js` URL. `relocateShellHtml` under a Hub mount
+(`src/server/navigation.ts`) never emits that shape: mounted bundle refs carry the
+mount itself, so pages actually load `/s/<id>/chunk-<hash>.js`. The results above —
+including the 6-scenario probe — are preserved as historical synthetic coverage, not
+validation of the actual mounted emitted shape.
+
+Test-first correction confined to the diagnostic harness
+(`tests/e2e/script-diagnostics.ts`, `tests/e2e/script-diagnostics.test.ts`; no
+product change): a regression keyed to a URL generated by the actual
+`relocateShellHtml` failed before the fix (`bun test
+tests/e2e/script-diagnostics.test.ts` → **10 pass, 2 fail**), then the collector
+normalizes the actual mounted shape to the same canonical `/__uatu/asset/<file>`
+metadata behind unchanged origin, credential, session-prefix and filename checks.
+After the fix, `tests/e2e/script-diagnostics.test.ts`,
+`tests/e2e/page-diagnostics.test.ts` and `src/server/navigation.test.ts` pass:
+**47 passes, 117 assertions, zero failures**, and the main typecheck
+(`tsc --noEmit`) passes. Fingerprint records are unchanged — canonical hashed path,
+category, location, byte count and SHA-256, with no workspace names, query values
+or private prefixes.
+
+The actual-shape fixture was not exercised in a browser, so no new browser evidence
+supersedes the probe above. This remains a diagnostic milestone, not a startup-error
+fix or grounds to close #438 or #579. CI run 41707029758 validates the pre-fix
+commit, not this correction.
