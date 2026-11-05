@@ -86,7 +86,7 @@ beforeAll(async () => {
   const inner = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, routes,
     fetch(request) { boundary.normalizeRequest(request); return new Response(null, { status: 404 }); },
   });
-  const boundary = startMediaHttpBoundary({ server: inner, hostname: "127.0.0.1", port: 0,
+  const boundary = startMediaHttpBoundary({ server: inner, hostname: "127.0.0.1", port: 0, metrics,
     isMediaRequest: request => new URL(request.url).pathname === `${basePath}api/media`,
     fetch: request => request.method === "HEAD" ? mediaRoute.HEAD(request) : mediaRoute.GET(request),
   });
@@ -247,32 +247,54 @@ describe("authenticated Hub media delivery", () => {
           get reads() { return metrics.get("media.read_calls_total") - callsBefore; },
           get active() { return metrics.get("media.transfers_active") > 0; },
         };
-        let last = -1, unchanged = 0;
-        await waitFor(() => {
-          unchanged = last === transfer.bytes ? unchanged + 1 : 0; last = transfer.bytes;
-          return unchanged >= 10;
-        }, "backpressure to stop child reads");
         // Same budget for files eight times apart in size, including both
-        // HTTP stacks' socket queues. No export-sized accumulation is allowed.
-        expect(transfer.active).toBe(true);
-        expect(transfer.bytes).toBeLessThan(32 * MiB);
-        expect(transfer.reads).toBeLessThan(1024);
-        expect(metrics.get("media.open_handles")).toBe(1);
-        const readsBeforeControl = transfer.reads;
-        const fileReadsBeforeControl = metrics.get("media.read_calls_total");
+        // HTTP stacks' socket queues. A paused application reader does not
+        // freeze those queues: TCP can resume finite read-ahead after an idle
+        // interval. Check the total budget throughout independent progress,
+        // rather than treating a short quiet interval as a transport barrier.
+        const bounded = () => {
+          expect(transfer.active).toBe(true);
+          expect(transfer.bytes).toBeLessThan(32 * MiB);
+          expect(transfer.reads).toBeLessThan(1024);
+          expect(metrics.get("media.open_handles")).toBe(1);
+        };
+        bounded();
+        await waitFor(() => {
+          bounded();
+          return metrics.get("media.http_backpressure_active") > 0;
+        }, "child HTTP writer to wait for transport drain");
         const marker = `live-during-${departure}.md`;
-        await writeFile(path.join(first, marker), "# independent live progress\n");
+        const framesBefore = frames.length;
+        // Drive a real file patch with controlled notifications, as in the
+        // delivery invalidation tests. Native event coalescing must not pace
+        // this transport test. The first observer can belong to either root.
+        for (const root of [first, second]) {
+          const file = path.join(root, marker);
+          await writeFile(file, "# independent live progress\n");
+          watch._internalWatcher()!.emit("all", "change", file);
+        }
         const control = await get(new URL(`${basePath}api/state`, origin));
         expect(control.status).toBe(200); expect((await control.json()).epoch).toBe(watch.getStatePayload().epoch);
-        await waitFor(() => frames.some(frame => frame.includes(marker)), "live patch while media is stalled");
-        expect(transfer.reads).toBe(readsBeforeControl);
-        expect(metrics.get("media.read_calls_total")).toBe(fileReadsBeforeControl);
+        await waitFor(() => {
+          bounded();
+          return frames.slice(framesBefore).some(frame => {
+            const update = JSON.parse(frame).event?.data;
+            return update?.kind === "patch" && update.upserts.some((doc: RevisionedDocument) => doc.relativePath === marker);
+          });
+        }, "live patch while media is stalled");
         // Source replacement and Close release the body's reader. Leaving the
         // page instead aborts its outstanding HTTP request.
         if (departure === "leave workspace") abort.abort();
         else await reader.cancel(departure);
         await waitFor(() => !transfer.active, "abandoned child delivery release");
         await waitFor(() => metrics.get("media.open_handles") === 0 && metrics.get("media.transfers_active") === 0, "child media handle release");
+        await waitFor(() => metrics.get("media.http_backpressure_active") === 0, "child HTTP drain waiter release");
+        expect(transfer.bytes).toBeLessThan(32 * MiB);
+        expect(transfer.reads).toBeLessThan(1024);
+        const releasedReads = metrics.get("media.read_calls_total");
+        const releasedControl = await get(new URL(`${basePath}api/state`, origin));
+        expect(releasedControl.status).toBe(200); await releasedControl.json();
+        expect(metrics.get("media.read_calls_total")).toBe(releasedReads);
         if (departure === "replace clip") {
           const replacement = await get(mediaUrl(doc(second)), { headers: { range: "bytes=0-1" } });
           expect(replacement.status).toBe(206); expect([...new Uint8Array(await replacement.arrayBuffer())]).toEqual([21, 22]);

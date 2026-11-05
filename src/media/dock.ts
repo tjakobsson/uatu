@@ -18,6 +18,18 @@ export function initMediaDock(player = mediaPlayer): () => void {
   dock.className = "media-dock";
   dock.setAttribute("aria-label", "Media player");
   dock.hidden = true;
+  // Blurring a touch Chat editor restores the tab bar and moves this dock
+  // between press and release. Preserve its position until button activation.
+  // Cancel mousedown's focus default, not touch pointerdown, which would
+  // suppress WebKit's compatibility click. Sliders keep native focus behavior.
+  dock.addEventListener("mousedown", event => {
+    if (root.dataset.uiMode === "touch" && root.hasAttribute("data-chat-editing")
+      && (event.target as Element).closest("button")) event.preventDefault();
+  });
+  dock.addEventListener("click", event => {
+    if (root.dataset.uiMode === "touch" && root.hasAttribute("data-chat-editing")
+      && (event.target as Element).closest("button")) (document.activeElement as HTMLElement | null)?.blur();
+  });
   const host = document.createElement("div");
   host.className = "media-dock-element";
   const identity = document.createElement("div");

@@ -74,4 +74,33 @@ describe("persistent media dock", () => {
       expect(f.document.querySelector(".media-dock-status button")!.hasAttribute("hidden")).toBe(false);
     } finally { f.restore(); }
   });
+  test("button presses preserve touch Chat editing focus without cancelling touch activation or slider focus", () => {
+    const f = harness();
+    try {
+      const root = f.document.documentElement;
+      root.setAttribute("data-chat-editing", "");
+      let blurred = false;
+      Object.defineProperty(f.document, "activeElement", { configurable: true, value: {
+        blur() { expect(f.player.snapshot().playing).toBe(true); blurred = true; },
+      } });
+      f.player.present(f.source);
+      const button = f.document.querySelector('[aria-label="Play"]')!;
+      const press = (target: Element, type = "mousedown") => {
+        const event = new f.window.Event(type, { bubbles: true, cancelable: true });
+        target.dispatchEvent(event);
+        return event.defaultPrevented;
+      };
+      expect(press(button)).toBe(true);
+      expect(press(button, "pointerdown")).toBe(false);
+      expect(press(f.document.querySelector('input[type="range"]')!)).toBe(false);
+      expect(blurred).toBe(false);
+      f.click("Play");
+      expect(f.player.snapshot().playing).toBe(true);
+      expect(blurred).toBe(true);
+      root.dataset.uiMode = "desktop";
+      expect(press(button)).toBe(false);
+      root.dataset.uiMode = "touch"; root.removeAttribute("data-chat-editing");
+      expect(press(button)).toBe(false);
+    } finally { f.restore(); }
+  });
 });

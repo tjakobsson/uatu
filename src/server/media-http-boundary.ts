@@ -3,6 +3,7 @@ import { createServer as createSecureServer } from "node:https";
 import { connect, type AddressInfo, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import type { Server, SocketAddress } from "bun";
+import type { MetricsRegistry } from "../debug/metrics";
 
 /** The existing Bun listener must be private HTTP on a loopback ephemeral port.
  * Keep its literal HTMLBundle routes and WebSocket handlers at their callsite.
@@ -14,6 +15,7 @@ export type MediaHttpBoundaryOptions<S extends Server<any>> = {
   port: number;
   tls?: { cert: string | Buffer; key: string | Buffer };
   isMediaRequest: (request: Request) => boolean;
+  metrics?: MetricsRegistry;
   /** The SAME authenticated route/Hub dispatch used by the Bun assembly. */
   fetch: (request: Request, server: S) => Response | undefined | Promise<Response | undefined>;
 };
@@ -109,13 +111,18 @@ export function startMediaHttpBoundary<S extends Server<any>>(options: MediaHttp
           const value = await reader.read();
           if (value.done) break;
           if (cancellation.signal.aborted) return;
-          if (!response.write(value.value)) await new Promise<void>((resolve, reject) => {
-            const cleanup = () => { response.off("drain", drained); cancellation.signal.removeEventListener("abort", aborted); };
-            const drained = () => { cleanup(); resolve(); };
-            const aborted = () => { cleanup(); reject(new Error("Media consumer disconnected")); };
-            response.once("drain", drained); cancellation.signal.addEventListener("abort", aborted, { once: true });
-            if (cancellation.signal.aborted) aborted();
-          });
+          if (!response.write(value.value)) {
+            options.metrics?.inc("media.http_backpressure_active");
+            try {
+              await new Promise<void>((resolve, reject) => {
+                const cleanup = () => { response.off("drain", drained); cancellation.signal.removeEventListener("abort", aborted); };
+                const drained = () => { cleanup(); resolve(); };
+                const aborted = () => { cleanup(); reject(new Error("Media consumer disconnected")); };
+                response.once("drain", drained); cancellation.signal.addEventListener("abort", aborted, { once: true });
+                if (cancellation.signal.aborted) aborted();
+              });
+            } finally { options.metrics?.inc("media.http_backpressure_active", -1); }
+          }
         }
       }
       if (!cancellation.signal.aborted) response.end();

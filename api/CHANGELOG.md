@@ -13,7 +13,11 @@ Compatibility: breaking (Hub and workspace)
 
 ### Migration
 
-Regenerate strict personal-state and document-topic readers for the expanded enum and closed-object fields. Existing All/Changed records retain their meaning and an absent Files view defaults to All. Files presentation does not override explicit preview URLs. Saved ignored visibility wins; otherwise --no-gitignore shows, otherwise any watched root explicitly requesting respectGitignore=true initially hides, otherwise ignored files show. This aggregation is root-order independent and never rejects conflicting legacy defaults. Git-ignore rules are browsing visibility, not an exposure boundary: use explicit Uatu excludes to prevent delivery. Unknown classification stays visible without an ignored/clean assertion.
+Hub revision 13 consumers must regenerate strict personal-state readers for the `filesFilter` value `recent` and the closed-object `showIgnored` field. Existing All/Changed records retain their meaning and an absent Files view defaults to All. Partial updates retain unrelated preferences.
+
+Workspace revision 35 consumers must regenerate document and live-topic readers for `gitIgnoreStatus`, optional `ignoreVisibilityException`, and the `showIgnored` and `initialShowIgnored` snapshot/patch fields. Preserve these fields through document updates and keep ignored classification separate from exposure policy. Unknown classification stays visible without an ignored/clean assertion.
+
+Files presentation does not override explicit preview URLs. Saved ignored visibility wins; otherwise --no-gitignore shows, otherwise any watched root explicitly requesting respectGitignore=true initially hides, otherwise ignored files show. This aggregation is root-order independent and never rejects conflicting legacy defaults. Git-ignore rules are browsing visibility, not an exposure boundary: use explicit Uatu excludes to prevent delivery.
 
 ## Hub 12 / Workspace 34 - Unreleased (permission queue order)
 

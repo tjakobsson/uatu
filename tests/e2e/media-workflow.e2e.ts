@@ -5,6 +5,7 @@ import { withEngineBrowsers, attachPageDiagnosticsOnFailure } from "./page-diagn
 import { workspacePath } from "./config";
 import { wavFixture, mp4Fixture } from "./media-fixtures";
 import { captureScreenshot, saveEvidence } from "./evidence";
+import { afterAnimationFrames } from "./sync-helpers";
 
 const test = withEngineBrowsers(base);
 attachPageDiagnosticsOnFailure(test);
@@ -56,6 +57,7 @@ for (const engine of ["chromium", "webkit"] as const) {
             const update = frame.event.data;
             for (const doc of [...(update.upserts ?? []), ...(update.roots ?? []).flatMap((root: any) => root.docs ?? [])]) {
               (window as any).__workflowWrites[doc.relativePath] = doc.mtimeMs;
+              if (doc.relativePath.endsWith("render-b.wav")) console.debug(`[media-workflow] document revision=${doc.revision} mtime=${doc.mtimeMs}`);
             }
           });
         }
@@ -143,14 +145,35 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect.poll(() => page.evaluate(path => (window as any).__workflowWrites[path], files.b)).toBeCloseTo(newer.getTime(), 0);
       await expect(dock(page)).toContainText("New render available");
       await expect(dock(page).getByRole("button", { name: "Loop current clip" })).toHaveAttribute("aria-pressed", "false");
-      await dock(page).getByRole("button", { name: "Reload", exact: true }).click();
+      await page.evaluate(() => {
+        for (const type of ["mousedown", "mouseup", "click", "focusout"]) document.addEventListener(type, event => {
+          const button = document.querySelector<HTMLButtonElement>("#media-dock .media-dock-status button");
+          const src = document.querySelector<HTMLMediaElement>("audio[src], video[src]")?.src;
+          console.debug(`[media-workflow] ${type} target=${(event.target as HTMLElement).tagName} active=${document.activeElement?.id} reloadTop=${button?.getBoundingClientRect().top} sourceRevision=${src ? new URL(src).searchParams.get("revision") : "none"}`);
+        }, true);
+      });
+      // Keep the press held across layout frames. A blur on mousedown used to
+      // restore the tab bar, move Reload by its height and lose the click.
+      const composer = page.locator("#chat-input");
+      await composer.focus();
+      await expect(composer).toBeFocused();
+      const reload = dock(page).getByRole("button", { name: "Reload", exact: true });
+      const bounds = (await reload.boundingBox())!;
+      await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      await page.mouse.down();
+      try {
+        await afterAnimationFrames(page, 2);
+        await expect(composer).toBeFocused();
+        expect((await reload.boundingBox())!.y).toBe(bounds.y);
+      } finally { await page.mouse.up(); }
+      await expect(composer).not.toBeFocused();
       await expect(native(page)).toHaveCount(1);
       await expect.poll(() => native(page).evaluate((element: HTMLMediaElement) => element.duration)).toBeGreaterThan(9);
       expect(await native(page).evaluate((element: HTMLMediaElement) => element.paused && element.currentTime === 0)).toBe(true);
       expect(await native(page).getAttribute("src")).not.toBe(oldSource);
       await expect(page.locator("html")).toHaveAttribute("data-active-tab", "chat");
       expect(page.url()).toBe(comparisonUrl);
-      await dock(page).getByRole("button", { name: "Play", exact: true }).click(); await playingPath(page, files.b);
+      await dock(page).getByRole("button", { name: "Play", exact: true }).tap(); await playingPath(page, files.b);
       await page.locator('[data-tab="files"]').click();
       await expect(page.locator("#document-count")).toHaveText("2");
       await captureScreenshot(page, info, `${engine}-generated-media-reloaded`);

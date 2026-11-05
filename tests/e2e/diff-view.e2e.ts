@@ -369,6 +369,7 @@ test.describe("repository updates while Diff is open", () => {
     // Another file changes: the repository update reaches the page (README
     // gains its Git status) without touching feature.md's diff.
     await fs.appendFile(workspacePath("README.md"), "\nAn unrelated edit.\n", "utf8");
+    await revealTreeRow(page, "README.md");
     await expect(treeRow(page, "README.md")).toHaveAttribute("data-item-git-status", /.+/);
     expect(diffRequests).toEqual([]);
     expect(await busyCount()).toBe(0);
