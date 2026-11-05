@@ -1026,6 +1026,207 @@ test(`concurrent foreground output preserves complete shared-child attribution o
   } finally { release(); releasePublication(); releasePressure(); observer?.events.cancel(); retained?.events.cancel(); publicationView?.events.cancel(); await nativePublication?.catch(() => undefined); await reading?.catch(() => undefined); await Promise.allSettled([...recoveryReads.values()]); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
+for (const depth of ["direct", "root"] as const) for (const remaining of [0.5, 0])
+for (const change of remaining === 0 && depth === "root" ? ["unchanged"] as const : depth === "direct" && remaining === 0.5
+  ? ["unchanged", "input", "clock", "output", "held-output", "held-input", "held-clock", "held-cancel", "held-generation", "held-foreign-parent", "held-foreign-workspace"] as const
+  : ["unchanged", "input", "clock", "output"] as const)
+test(`source-current child undo reprices its exact retained foreground launcher (${depth}/${remaining}/${change})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = structuredClone(fixture.launch), tool = launch.content[0];
+  tool.state.input.background = false; tool.state.metadata = { sessionID: "ses_child", status: "completed" };
+  tool.state.content = [{ type: "text", text: "Foreground fixture checked." }];
+  const root = structuredClone(launch); root.id = "msg_root"; root.time.created = 10;
+  root.content[0].id = "call_root"; root.content[0].time = { created: 10, completed: 15 };
+  root.content[0].state.metadata.sessionID = "ses_parent";
+  let boundary: string | undefined, opened = 0, closed = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
+  const held = change.startsWith("held-"), fieldChange = change.replace("held-", "");
+  let entered!: () => void, release!: () => void, releaseStartup!: () => void, startupEntered!: () => void;
+  const captured = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const freshStartup = new Promise<void>(resolve => { releaseStartup = resolve; }), startupReady = new Promise<void>(resolve => { startupEntered = resolve; });
+  let rewrittenReads = 0, lateForeign = false, holdStartup = false;
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_root": () => session("ses_root"),
+    "GET /api/session/ses_root/message": () => ({ data: [root], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", depth === "root" ? { parentID: "ses_root" } : {}),
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: lateForeign && fieldChange === "foreign-parent" ? "ses_other" : "ses_parent", cost: boundary ? remaining : remaining + 0.25,
+      ...(boundary ? { revert: { messageID: boundary } } : {}), ...(lateForeign && fieldChange === "foreign-workspace" ? { location: { directory: "/foreign" } } : {}) }),
+    "GET /api/session/ses_parent/message": () => ({ data: [launch], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [
+      { id: "prompt_first", type: "user", text: tool.state.input.prompt, time: { created: 22 } },
+      { id: "spend_first", type: "assistant", model: { id: "fixture-model" }, cost: remaining, content: [], time: { created: 25 } },
+      { id: "prompt_later", type: "user", text: "Later work", time: { created: 60 } },
+      { id: "spend_later", type: "assistant", model: { id: "fixture-model" }, cost: 0.25, content: [], time: { created: 65 } },
+    ], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+    "POST /api/session/ses_child/revert/stage": ({ body }) => { boundary = (body as { messageID: string }).messageID; return { messageID: boundary }; },
+  });
+  const provider = server.provider(), events = provider.events.bind(provider), list = provider.listMessages.bind(provider);
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    if (holdStartup && event.eventType === "server.connected") { startupEntered(); await freshStartup; }
+    yield event; if (event.eventType === "diagnostic.rewrite.applied") applied();
+  } };
+  provider.listMessages = async (...args) => {
+    const page = await list(...args);
+    if (held && boundary && args[0] === "ses_child" && ++rewrittenReads === 2) { entered(); await gate; }
+    return page;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const carrier = (items: import("../../types").ConversationItem[]) => items.find(item => item.id === "tool:call_worker");
+  let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
+  const updateLauncher = async () => {
+    if (fieldChange === "input") tool.state.input.prompt = "Different invocation";
+    if (fieldChange === "clock") { launch.time.created++; tool.time.created++; tool.time.completed++; }
+    if (fieldChange === "output") tool.state.content = [{ type: "text", text: "Newer live output." }];
+    const ready = new Promise<void>(resolve => { applied = resolve; });
+    for (const event of [
+      { id: "evt_rewrite", type: "session.message.content.updated", created: launch.time.created, durable: { aggregateID: "ses_parent", seq: 1, version: 1 }, data: { sessionID: "ses_parent", messageID: launch.id, content: launch.content } },
+      { type: "diagnostic.rewrite.applied", data: {} },
+    ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await ready;
+  };
+  try {
+    if (depth === "root") {
+      const initial = await adapter.history("ses_root");
+      const row = initial.items.find(item => item.id === "tool:call_root");
+      expect(row?.type === "tool" ? row.descendants : undefined).toContainEqual(expect.objectContaining({ id: "tool:call_worker", usage: { costUsd: remaining + 0.25 } }));
+    }
+    expect(carrier((await adapter.history("ses_parent")).items)).toMatchObject({ usage: { costUsd: remaining + 0.25 } });
+    expect(conversationTotals((await adapter.history("ses_child")).items)?.costUsd).toBeCloseTo(remaining + 0.25);
+    if (change !== "unchanged" && !held) await updateLauncher();
+    mutation = adapter.undo("ses_child", "child-undo-accounting");
+    void mutation.catch(() => undefined);
+    if (held) {
+      await captured;
+      if (fieldChange === "cancel" || fieldChange === "generation") {
+        await adapter.stopEventPump();
+        if (fieldChange === "generation") { holdStartup = true; void adapter.startEventPump(); await startupReady; }
+      } else if (fieldChange.startsWith("foreign-")) { lateForeign = true; await provider.getSession("ses_child"); }
+      else await updateLauncher();
+      release();
+    }
+    expect(await mutation).toMatchObject({ outcome: "changed" });
+    if (lateForeign && fieldChange === "foreign-workspace") await expect(adapter.subscribe("ses_child")).rejects.toThrow("conversation not found");
+    else {
+      const child = await adapter.subscribe("ses_child"); child.events.cancel();
+      if (remaining) expect(conversationTotals(child.snapshot.items)?.costUsd).toBeCloseTo(remaining);
+      else expect(conversationTotals(child.snapshot.items)).toBeUndefined();
+    }
+    const parent = await adapter.subscribe("ses_parent"); parent.events.cancel();
+    const blocked = fieldChange === "input" || fieldChange === "clock" || fieldChange === "cancel" || fieldChange === "generation" || lateForeign;
+    expect(carrier(parent.snapshot.items)).toMatchObject({ usage: { costUsd: blocked ? remaining + 0.25 : remaining }, output: fieldChange === "output" ? "Newer live output." : "Foreground fixture checked." });
+    releaseStartup();
+    const refreshed = carrier((await adapter.history("ses_parent")).items);
+    if (fieldChange === "input" || fieldChange === "clock" || lateForeign) {
+      expect(refreshed).not.toHaveProperty("usage"); expect(refreshed).not.toHaveProperty("model");
+    } else expect(refreshed).toMatchObject({ usage: { costUsd: remaining } });
+    if (depth === "root" && fieldChange !== "input" && fieldChange !== "clock") {
+      const current = await adapter.subscribe("ses_root"); current.events.cancel();
+      const row = current.snapshot.items.find(item => item.id === "tool:call_root");
+      expect(row?.type === "tool" ? row.descendants : undefined).toContainEqual(expect.objectContaining({ id: "tool:call_worker", usage: { costUsd: remaining } }));
+    }
+    expect(server.calls.filter(call => call.method !== "GET").map(call => call.path)).toEqual(["/api/session/ses_child/revert/stage"]);
+  } finally { release(); releaseStartup(); await mutation?.catch(() => undefined); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
+for (const depth of ["direct", "root"] as const) for (const initial of ["warm", "cold"] as const) for (const own of [0.5, 0])
+for (const delayed of depth === "direct" ? ["grandchild", "own"] as const : ["grandchild"] as const)
+test(`prompt own child accounting survives a slow grandchild accounting page (${depth}/${initial}/${own}/delay=${delayed})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = structuredClone(fixture.launch), tool = launch.content[0];
+  tool.state.input.background = false; tool.state.metadata = { sessionID: "ses_child", status: "completed" };
+  tool.state.content = [{ type: "text", text: "Foreground fixture checked." }];
+  const nested = structuredClone(launch); nested.id = "msg_nested"; nested.time.created = 30;
+  nested.content[0].id = "call_nested"; nested.content[0].time = { created: 30, completed: 35 };
+  nested.content[0].state.metadata.sessionID = "ses_grandchild";
+  const root = structuredClone(launch); root.id = "msg_root"; root.time.created = 10;
+  root.content[0].id = "call_root"; root.content[0].time = { created: 10, completed: 15 };
+  root.content[0].state.metadata.sessionID = "ses_parent";
+  let slow = initial === "cold", opened = 0, closed = 0, slowReads = 0, abortedReads = 0;
+  let ownCost = initial === "cold" ? own : 0.5;
+  const nativeReads: Promise<unknown>[] = [];
+  const slowPage = (signal: AbortSignal, page: () => unknown) => {
+    slowReads++;
+    const reading = Bun.sleep(1_500).then(page); nativeReads.push(reading);
+    return Promise.race([reading, new Promise<never>((_resolve, reject) => {
+      const abort = () => { abortedReads++; reject(new DOMException("Aborted", "AbortError")); };
+      if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+    })]);
+  };
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_root": () => session("ses_root"),
+    "GET /api/session/ses_root/message": () => ({ data: [root], cursor: {} }),
+    "GET /api/session/ses_parent": () => session("ses_parent", depth === "root" ? { parentID: "ses_root" } : {}),
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_parent", cost: 0.5 }),
+    "GET /api/session/ses_grandchild": () => session("ses_grandchild", { parentID: "ses_child", cost: 0.25 }),
+    "GET /api/session/ses_parent/message": () => ({ data: [launch], cursor: {} }),
+    "GET /api/session/ses_child/message": ({ signal }) => {
+      const page = () => ({ data: [
+        { id: "prompt_first", type: "user", text: tool.state.input.prompt, time: { created: 22 } },
+        { id: "spend_first", type: "assistant", model: { id: "child-model" }, cost: ownCost, content: [], time: { created: 25 } }, nested,
+      ], cursor: {} });
+      return slow && delayed === "own" ? slowPage(signal, page) : page();
+    },
+    "GET /api/session/ses_grandchild/message": ({ signal }) => {
+      const page = () => ({ data: [{ id: "spend_nested", type: "assistant", model: { id: "grandchild-model" }, cost: 0.25, content: [], time: { created: 40 } }], cursor: {} });
+      return slow && delayed === "grandchild" ? slowPage(signal, page) : page();
+    },
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+  });
+  const adapter = new ChatAdapter({ provider: server.provider(), workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const now = Date.now(); let elapsed = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now + elapsed);
+  const carrier = (items: import("../../types").ConversationItem[]) => items.find(item => item.id === "tool:call_worker");
+  try {
+    if (initial === "warm") {
+      if (depth === "root") {
+        const page = await adapter.history("ses_root"), row = page.items.find(item => item.id === "tool:call_root");
+        expect(row?.type === "tool" ? row.descendants : undefined).toContainEqual(expect.objectContaining({ id: "tool:call_worker", usage: { costUsd: 0.5 }, model: "child-model" }));
+      } else expect(carrier((await adapter.history("ses_parent")).items)).toMatchObject({ usage: { costUsd: 0.5 }, model: "child-model" });
+      await adapter.stopEventPump(); slow = true; ownCost = own; elapsed = 31_000;
+    }
+    if (depth === "root") {
+      const rootPage = await adapter.history("ses_root");
+      const row = rootPage.items.find(item => item.id === "tool:call_root");
+      expect(row?.type === "tool" ? row.descendants : undefined).toContainEqual(expect.objectContaining({ id: "tool:call_worker", model: "child-model", usage: { costUsd: own } }));
+    }
+    const current = await adapter.history("ses_parent");
+    const next = await adapter.subscribe("ses_parent"); next.events.cancel();
+    expect(slowReads).toBeGreaterThan(0); expect(abortedReads).toBeGreaterThan(0);
+    const expectOwn = (items: import("../../types").ConversationItem[]) => {
+      const row = carrier(items);
+      if (delayed === "own" && initial === "cold") { expect(row).not.toHaveProperty("usage"); expect(row).not.toHaveProperty("model"); }
+      else expect(row).toMatchObject({ usage: { costUsd: delayed === "own" ? 0.5 : own }, model: "child-model", workerSession: { costUsd: 0.5 } });
+    };
+    for (const items of [current.items, next.snapshot.items]) expectOwn(items);
+    await Promise.allSettled(nativeReads);
+    const late = await adapter.subscribe("ses_parent"); late.events.cancel();
+    expectOwn(late.snapshot.items);
+    // An incomplete descendant must retry immediately, not acquire the own
+    // tally's completeness stamp or wait for the 30-second refresh age.
+    slow = false;
+    const reads = server.requests("GET", "/api/session/ses_grandchild/message").length;
+    const recovered = await adapter.history("ses_parent");
+    expect(server.requests("GET", "/api/session/ses_grandchild/message").length).toBeGreaterThan(reads);
+    const row = carrier(recovered.items);
+    expect(row).toMatchObject({ usage: { costUsd: own }, model: "child-model" });
+    expect(row?.type === "tool" ? row.descendants : undefined).toContainEqual(expect.objectContaining({ id: "tool:call_nested", usage: { costUsd: 0.25 } }));
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { clock.mockRestore(); await adapter.dispose(); await Promise.allSettled(nativeReads); expect(closed).toBe(opened); }
+});
+
 for (const size of [1, 2]) for (const change of size === 1 ? ["input", "occurrence", "unchanged"] as const : ["input", "occurrence", "second-input", "second-occurrence", "unchanged"] as const)
 for (const liveBeforeHistory of [false, true])
 for (const ancestorFirst of [false, true])
@@ -3142,6 +3343,9 @@ test(`cached nested source authority survives expiry before page transfer (${rea
   const owners: Record<string, string> = { ses_child: "ses_parent", ses_grandchild: "ses_child", ses_leaf: "ses_grandchild" };
   const prices: Record<string, number> = { ses_child: 0.5, ses_grandchild: 0.25, ses_leaf: 0.125 };
   let mode = "healthy", boundary: string | undefined, holdChild = false, opened = 0, closed = 0, heldReads = 0, expiredReads = 0, childPages = 0, expiredPages = 0, foreignReads = 0;
+  let freshOwn = 0.5, releaseAutomatic!: () => void;
+  const isolateAutomatic = read === "undo" && target === "ses_leaf" && outcome === "unavailable";
+  const automaticGate = new Promise<void>(resolve => { releaseAutomatic = resolve; });
   let releaseChild!: () => void;
   const childGate = new Promise<void>(resolve => { releaseChild = resolve; });
   const nativeBodies: Promise<unknown>[] = [], reads: Promise<unknown>[] = [];
@@ -3162,7 +3366,7 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     "GET /api/session/ses_parent/message": () => ({ data: [prompt("first"), launch("ses_parent", "ses_child", "root", 20), prompt("later", 70)], cursor: {} }),
     "GET /api/session/ses_other/message": () => ({ data: [prompt("other"), launch("ses_other", target, "other", 20)], cursor: {} }),
     "GET /api/session/ses_child/message": ({ signal }) => {
-      if (!holdChild) return { data: [prompt("child"), priced(0.5), launch("ses_child", "ses_grandchild", "nested", 30)], cursor: {} };
+      if (!holdChild) return { data: [prompt("child"), priced(freshOwn), launch("ses_child", "ses_grandchild", "nested", 30)], cursor: {} };
       heldReads++; signal.addEventListener("abort", () => { expiredReads++; }, { once: true });
       // Deliberately uncooperative native transport. No source page can be
       // transferred before the unchanged one-second accounting deadline.
@@ -3178,7 +3382,10 @@ test(`cached nested source authority survives expiry before page transfer (${rea
   const provider = server.provider(), recover = provider.reconcileBackgroundTasks.bind(provider);
   provider.reconcileBackgroundTasks = (...args) => owner.run(false, () => recover(...args));
   const list = provider.listMessages.bind(provider);
-  provider.listMessages = (...args) => {
+  provider.listMessages = async (...args) => {
+    // A reconnect retry can legitimately start a new owner after the first
+    // expires. Keep its current page out of the expired-owner assertions.
+    if (isolateAutomatic && holdChild && args[0] === "ses_child" && !owner.getStore() && expiredReads > 0) await automaticGate;
     const pending = list(...args).then(page => {
       if (holdChild && args[0] === "ses_child") { childPages++; if (args[1].signal?.aborted) expiredPages++; }
       return page;
@@ -3252,7 +3459,16 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     const afterLate = await adapter.subscribe("ses_parent"); afterLate.events.cancel();
     assert(afterLate.snapshot.items, foreign);
     expect(foreignReads).toBe(0); expect(expiredPages).toBe(0);
-  } finally { releaseChild(); releaseBoundary(); await pending?.catch(() => undefined); await Promise.allSettled(nativeBodies); await Promise.allSettled(reads); await adapter.dispose(); expect(closed).toBe(opened); }
+    if (isolateAutomatic) {
+      // New authority remains able to publish, independently of the retired
+      // $99 response and without inheriting a permanent retry barrier.
+      holdChild = false; mode = "healthy"; freshOwn = 0.625; prices.ses_child = 0.625;
+      releaseAutomatic(); await adapter.stopEventPump();
+      const fresh = await adapter.history("ses_parent", { limit: 98 });
+      expect(row(fresh.items)).toMatchObject({ usage: { costUsd: 0.625 }, workerSession: { costUsd: 0.625 } });
+      expect(row(fresh.items).descendants).toContainEqual(expect.objectContaining({ conversationId: "ses_leaf", usage: { costUsd: 0.125 } }));
+    }
+  } finally { releaseAutomatic(); releaseChild(); releaseBoundary(); await pending?.catch(() => undefined); await Promise.allSettled(nativeBodies); await Promise.allSettled(reads); await adapter.dispose(); expect(closed).toBe(opened); }
 }, 10_000);
 
 for (const read of ["history", "undo"] as const) for (const target of ["ses_grandchild", "ses_leaf"] as const)

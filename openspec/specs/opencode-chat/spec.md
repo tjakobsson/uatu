@@ -3069,6 +3069,16 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **AND** accounting-transcript eviction does not allow retained projection merging to restore a withdrawn stale task receipt in the following subscription
 - **AND** late responses and usage/model restatements do not reauthorize changed task accounting; completed current accounting restores verified task values, including authoritative zero, under the existing source and publication fences
 
+#### Scenario: A source-current child rewrite reprices an exact launcher
+- **WHEN** a successful child undo reconstructs reduced task accounting for an already-priced exact foreground launcher
+- **THEN** the parent projection, history, and following subscription reflect the current verified task amount, including authoritative zero, without clearing negative cohort restrictions
+- **AND** changed or unresolved launcher bindings, positive membership deficits, incoming ownership counterproof, cancellation, superseded generations, and newer live presentation keep their existing safeguards
+
+#### Scenario: Descendant expiry preserves promptly verified own accounting
+- **WHEN** a native child's own accounting returns under current source and owner evidence but optional descendant reconstruction exceeds its bounded window
+- **THEN** direct and ancestor-first recovery retain usable own task cost/model while leaving descendant completeness unset and unavailable descendant amounts unknown
+- **AND** later recovery retries incomplete descendants, while expired or changed owners, source leases, incoming associations, and generations do not authorize stale publication or control authority
+
 #### Scenario: Concurrent foreground progress preserves complete attribution order
 - **WHEN** two foreground calls share a child and one call receives a newer native update while optional child enrichment is unavailable
 - **THEN** the complete attribution order includes the current exact association so the other call does not absorb the child's entire known usage or double-count spend after the live merge

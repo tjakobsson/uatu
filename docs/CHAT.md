@@ -658,6 +658,13 @@ native presentation: a live tool update before history begins cannot carry an
 earlier invocation's receipt onto changed input or occurrence clocks.
 Evicting an accounting transcript does not permit subscription merging to restore
 pricing that current history withdrew from a changed invocation.
+After a successful source-current child undo, an exact retained launcher can
+show the child's reduced task cost without clearing cohort restrictions.
+Promptly verified own accounting is also independent of descendant completion:
+if a grandchild read expires, available own cost/model remain usable while
+descendant completeness stays unset. Source, ownership, cancellation, and
+generation changes still fence those amounts; session lifetime totals remain
+separate from task receipts.
 If another client commits the revert before Uatu sees its staged boundary,
 discarded settled worker results must still disappear rather than return from
 retained state. Separate native-origin evidence preserves visible workers under
