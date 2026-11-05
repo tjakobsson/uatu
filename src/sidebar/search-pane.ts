@@ -23,6 +23,7 @@ import { renderSidebar, setSidebarCollapsed } from "./shell";
 import { revealFilesSurface } from "../shell/tab-bar";
 import { persistPaneState } from "./panes";
 import { openSearchResult } from "./search-open";
+import { isDocumentVisible } from "../shared/file-visibility";
 
 const queryInputMaybe = document.querySelector<HTMLInputElement>("#search-query");
 const summaryElementMaybe = document.querySelector<HTMLElement>("#search-summary");
@@ -101,12 +102,37 @@ let debounceHandle: number | null = null;
 // Abandons an in-flight sweep when the query changes under it — without this a
 // slow search would keep streaming rows for a query the user has moved on from.
 let inFlight: AbortController | null = null;
+// The index revision includes metadata-only classification changes, even when
+// no file write or content revision changed. Capturing it also protects streamed
+// files that have not emitted a result yet. Older/unversioned snapshots use
+// their roots identity instead. None of this reads or fingerprints file contents.
+function currentOwnership() {
+  return { showIgnored: appState.showIgnored, epoch: documentIndex.epoch,
+    revision: documentIndex.revision, roots: appState.roots, unscopedFingerprint: appState.unscopedFingerprint };
+}
+let resultsOwnership: ReturnType<typeof currentOwnership> | null = null;
+let observedShowIgnored = appState.showIgnored;
+
+function ownsCurrentCorpus(): boolean {
+  return resultsOwnership !== null && resultsOwnership.showIgnored === appState.showIgnored
+    && resultsOwnership.epoch === documentIndex.epoch
+    && (!resultsFromAllRoots || resultsOwnership.unscopedFingerprint === appState.unscopedFingerprint)
+    && (documentIndex.epoch ? resultsOwnership.revision === documentIndex.revision : resultsOwnership.roots === appState.roots);
+}
+
+function resultIsVisible(result: SearchFileResult, discardUnverified = false): boolean {
+  const doc = documentIndex.epoch ? documentIndex.find(result.documentId, result.rootId)
+    : appState.roots.find(root => root.id === result.rootId)?.docs.find(doc => doc.id === result.documentId);
+  // Widened results can be outside the scoped inventory. Their server-side
+  // visibility is valid only until that sweep's corpus/context changes.
+  return doc ? isDocumentVisible(doc, appState.showIgnored) : !discardUnverified;
+}
 
 // Whether `controller` still owns the pane. Every write to shared state is
 // gated on this — a superseded sweep is not merely uninteresting, it is
 // actively harmful, because its rows would be attributed to the new query.
 function isCurrent(controller: AbortController): boolean {
-  return inFlight === controller && !controller.signal.aborted;
+  return inFlight === controller && !controller.signal.aborted && ownsCurrentCorpus();
 }
 
 function buildUrl(query: string): string {
@@ -135,6 +161,8 @@ async function runSearch(): Promise<void> {
   resultsFromAllRoots = searchAllRoots;
   resultsScope = appState.scope.kind === "file" ? "file" : "folder";
   resultsUnscopedFingerprint = appState.unscopedFingerprint;
+  resultsOwnership = currentOwnership();
+  observedShowIgnored = appState.showIgnored;
 
   if (!shouldDispatch(query)) {
     running = false;
@@ -169,6 +197,7 @@ async function runSearch(): Promise<void> {
 
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    if (!isCurrent(controller)) return;
     patternError = body?.error ?? "search failed";
     running = false;
     render();
@@ -207,6 +236,9 @@ async function runSearch(): Promise<void> {
     // Stream died or was aborted; keep whatever arrived. Whether that is a
     // problem is decided below — an abort belongs to a superseding query and
     // is not ours to report, while a still-current stream failure is.
+  } finally {
+    if (!isCurrent(controller)) void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 
   if (!isCurrent(controller)) return;
@@ -218,7 +250,7 @@ async function runSearch(): Promise<void> {
 function consume(event: SearchEvent): void {
   switch (event.kind) {
     case "file":
-      results = mergeResult(results, event.result);
+      if (resultIsVisible(event.result)) results = mergeResult(results, event.result);
       return;
     case "expensive":
       expensive.push(event.relativePath);
@@ -346,6 +378,7 @@ function renderResults(): void {
           return (
             `<button class="search-hit" type="button" role="treeitem"` +
             ` data-document-id="${escapeHtml(result.documentId)}"` +
+            ` data-root-id="${escapeHtml(result.rootId)}"` +
             ` data-line="${match.line}" data-start="${match.start}" data-end="${match.end}"` +
             // The literal slice that matched — for a regex this differs per
             // hit, so it cannot be re-derived from the query alone — plus which
@@ -429,6 +462,43 @@ export function syncSearchScope(): void {
   renderScope();
 }
 
+// Synchronous reconciliation for preference changes and accepted index updates.
+// Cancel old owners and remove hidden rows without starting another disk sweep.
+// The sidebar calls this during presentation changes; the shell can also call
+// it immediately after assigning showIgnored, before any asynchronous refresh.
+export function reconcileSearchVisibility(): void {
+  const preferenceChanged = observedShowIgnored !== appState.showIgnored;
+  observedShowIgnored = appState.showIgnored;
+  const corpusChanged = resultsOwnership !== null && !ownsCurrentCorpus();
+  if (!preferenceChanged && !corpusChanged) return;
+  const hadWork = hasVerdict() || stale || debounceHandle !== null;
+  if (preferenceChanged && debounceHandle !== null) {
+    window.clearTimeout(debounceHandle);
+    debounceHandle = null;
+  }
+  inFlight?.abort();
+  inFlight = null;
+  running = false;
+  incomplete = false;
+  // A visibility switch changes the entire eligible set, including widened
+  // results for which the browser has no ignore metadata. Discard that verdict.
+  // Ordinary metadata changes can retain still-visible rows with a stale notice.
+  results = preferenceChanged ? [] : results.filter(result => resultIsVisible(result, !appState.showIgnored));
+  if (preferenceChanged) {
+    truncated = false;
+    expensive = [];
+    oversized = [];
+    abandoned = false;
+    patternError = null;
+    requestFailed = false;
+    sawDone = false;
+    staleDocuments.clear();
+  }
+  resultsOwnership = currentOwnership();
+  if (hadWork) stale = true;
+  render();
+}
+
 // Whether the pane is presenting a verdict a corpus change could falsify.
 // "No results" is a verdict too — an edit can introduce the query into a file
 // that had no hits — and so is an in-flight sweep that has not emitted its
@@ -470,6 +540,7 @@ export function markSearchResultsStale(changedId: string): void {
 // never fires. Rows for a deleted file would otherwise sit there looking
 // current, and activating one navigates to a document that no longer exists.
 export function noteSearchCorpusChange(): void {
+  reconcileSearchVisibility();
   if (stale || !hasVerdict()) {
     return;
   }
@@ -578,6 +649,7 @@ export function initSearchPane(): void {
 }
 
 function activate(hit: HTMLElement): void {
+  reconcileSearchVisibility();
   const documentId = hit.dataset.documentId;
   const line = Number(hit.dataset.line);
   const start = Number(hit.dataset.start);
@@ -585,6 +657,7 @@ function activate(hit: HTMLElement): void {
   if (!documentId || !Number.isFinite(line)) {
     return;
   }
+  if (!results.some(result => result.documentId === documentId && result.rootId === hit.dataset.rootId && resultIsVisible(result))) return;
   // A row whose file changed since the sweep carries an ordinal captured
   // from the old content. The same literal may still occur the same number
   // of times with everything moved, so the reveal's count check cannot tell

@@ -113,17 +113,18 @@ test("native rename reconciliation removes a target replaced with a symlink", as
 
 test("native discovery prunes denied directories and supplies file stats", async () => {
   const root = await fixture();
-  for (const name of ["generated", "node_modules", "docs"]) await mkdir(path.join(root, name));
+  for (const name of ["generated", "private", "node_modules", "docs"]) await mkdir(path.join(root, name));
   await writeFile(path.join(root, ".gitignore"), "generated/\n");
-  await Promise.all(["generated/skip.md", "node_modules/skip.md", "docs/keep.md", ".env"].map(file => writeFile(path.join(root, file), "# File\n")));
+  await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["private/"] } }));
+  await Promise.all(["generated/skip.md", "private/skip.md", "node_modules/skip.md", "docs/keep.md", ".env"].map(file => writeFile(path.join(root, file), "# File\n")));
   await symlink(path.join(root, "docs"), path.join(root, "linked"));
   const work: string[] = [];
   const { events, policy } = await observed({ kind: "dir", absolutePath: root }, false, kind => work.push(kind));
   const files = events.filter(event => event.event === "add");
-  expect(files.map(event => path.relative(root, event.file)).sort()).toEqual([".gitignore", "docs/keep.md"]);
+  expect(files.map(event => path.relative(root, event.file)).sort()).toEqual([".gitignore", ".uatu.json", "docs/keep.md", "generated/skip.md"]);
   expect(files.every(event => event.stats?.isFile())).toBe(true);
   expect(work.filter(kind => kind === "watch")).toHaveLength(1);
-  expect(work.filter(kind => kind === "directory")).toHaveLength(2);
+  expect(work.filter(kind => kind === "directory")).toHaveLength(3);
   expect(policy.hidden.size).toBe(1);
 });
 

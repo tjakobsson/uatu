@@ -460,6 +460,7 @@ const startServer = () => startHubServer({ config, registry, sessions, sessionSt
   ...(credentialApi ? { credentialApi } : {}),
 });
 let server = startServer();
+await server.ready;
 const origin = `http://127.0.0.1:${server.port}`;
 for (const workspace of workspaces) {
   workspace.sessionUrl = `${origin}/s/${encodeURIComponent(workspace.id)}/`;
@@ -522,6 +523,7 @@ async function restartWorkerDismissals(): Promise<void> {
   workerDismissals = new WorkerDismissalsStore(workerDismissalsPath);
   await workerDismissals.load();
   server = startServer();
+  await server.ready;
 }
 
 let controlBuffer = "";

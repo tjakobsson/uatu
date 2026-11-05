@@ -1,124 +1,56 @@
-import { promises as fs } from "node:fs";
 import path from "node:path";
-
-import ignore, { type Ignore } from "ignore";
-
+import ignore from "ignore";
 import { loadIgnoreConfig } from "./config";
+import { shouldDenyPath } from "./exposure";
 
 export type IgnoreMatcherOptions = {
   rootPath: string;
-  // Session-level CLI decision. When false (user passed --no-gitignore),
-  // `.gitignore` is NOT honored regardless of `.uatu.json`. When true (the default),
-  // `.uatu.json ignore.respectGitignore: false` can still disable `.gitignore` for this root.
   respectGitignore: boolean;
   isSingleFileRoot?: boolean;
 };
 
 export type IgnoreMatcher = {
   shouldIgnore(relativePath: string, isDirectory?: boolean): boolean;
+  isVisibilityException?(relativePath: string): boolean;
+  initialShowIgnored?: boolean;
+  explicitInitialShowIgnored?: boolean;
   toChokidarIgnored(): (testPath: string, stats?: { isDirectory(): boolean }) => boolean;
 };
 
-// Always-on built-in defaults — applied even when `.uatu.json` is absent and
-// even when `.gitignore` is disabled. Mirrors (and is additional to) the
-// server.ts directory-walker `ignoredNames` short-circuit — having these as
-// patterns lets `.uatu.json ignore.exclude` `!negation` rules interact predictably
-// with them, and ensures static-fallback serving honors them too.
-const BUILT_IN_DEFAULTS: readonly string[] = Object.freeze([
-  // Node / JS output
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  // Version control
-  ".git",
-  ".svn",
-  ".hg",
-  // OS metadata
-  ".DS_Store",
-  "Thumbs.db",
-  // Build / framework caches
-  ".cache",
-  ".parcel-cache",
-  ".turbo",
-  ".next",
-  ".nuxt",
-  ".vercel",
-  ".output",
-  ".nitro",
-  ".svelte-kit",
-  ".astro",
-  // Python
-  ".venv",
-  ".tox",
-  ".mypy_cache",
-  ".pytest_cache",
-  ".ruff_cache",
-  "__pycache__",
-  // JVM
-  ".gradle",
-  ".m2",
-  // Package managers
-  ".npm",
-  ".yarn",
-  ".pnpm-store",
-  // Infra
-  ".terraform",
-  ".serverless",
-]) as readonly string[];
-
-// Build an ignore matcher for one watched root. Pattern application order:
-//   1. Built-in defaults (always)
-//   2. `.gitignore` (when honored: CLI didn't pass --no-gitignore AND .uatu.json doesn't disable)
-//   3. `.uatu.json ignore.exclude` (user-controlled; goes LAST so `!negation` overrides .gitignore)
+// build/dist are soft exclusions. Every other built-in remains mandatory in
+// exposure.shouldDenyPath, including inside an admitted output directory.
 export async function loadIgnoreMatcher(options: IgnoreMatcherOptions): Promise<IgnoreMatcher> {
-  const { rootPath, respectGitignore: cliRespectGitignore, isSingleFileRoot = false } = options;
-  const ig = ignore();
-
-  ig.add([...BUILT_IN_DEFAULTS]);
-
-  if (!isSingleFileRoot) {
-    const { config } = await loadIgnoreConfig(rootPath);
-
-    const respectGitignore = cliRespectGitignore && config.respectGitignore;
-    if (respectGitignore) {
-      await loadPatternFile(ig, path.join(rootPath, ".gitignore"));
-    }
-
-    if (config.exclude.length > 0) {
-      ig.add(config.exclude);
-    }
-  }
-
+  const { rootPath, respectGitignore, isSingleFileRoot = false } = options;
+  const config = isSingleFileRoot ? null : (await loadIgnoreConfig(rootPath)).config;
+  const positive = ignore().add(config?.exclude.filter(pattern => !pattern.startsWith("!")) ?? []);
+  const exceptions = ignore().add(config?.exclude ?? []);
+  const includes = config?.include ?? [];
   const shouldIgnore = (relativePath: string, isDirectory = false): boolean => {
-    if (!relativePath || relativePath === ".") {
-      return false;
+    if (!relativePath || relativePath === ".") return false;
+    if (shouldDenyPath(relativePath)) return true;
+    const test = isDirectory && !relativePath.endsWith("/") ? `${relativePath}/` : relativePath;
+    if (positive.ignores(test)) return true;
+    const parts = relativePath.replace(/\/$/, "").split("/");
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i]!.toLowerCase() !== "build" && parts[i]!.toLowerCase() !== "dist") continue;
+      const prefix = parts.slice(0, i + 1).join("/");
+      const admitted = includes.some(include => include.startsWith(`${prefix}/`) && (
+        isDirectory && relativePath === include || relativePath.startsWith(`${include}/`)
+        || isDirectory && include.startsWith(`${relativePath.replace(/\/$/, "")}/`)));
+      if (!admitted) return true;
     }
-    return ig.ignores(isDirectory && !relativePath.endsWith("/") ? `${relativePath}/` : relativePath);
+    return false;
   };
-
+  const explicit = !respectGitignore ? true : config?.explicitRespectGitignore === undefined ? undefined : !config.explicitRespectGitignore;
   return {
     shouldIgnore,
-    toChokidarIgnored() {
-      return (testPath: string, stats?: { isDirectory(): boolean }) => {
-        if (testPath === rootPath) {
-          return false;
-        }
-        const rel = path.relative(rootPath, testPath);
-        if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-          return false;
-        }
-        return shouldIgnore(rel.split(path.sep).join("/"), stats?.isDirectory());
-      };
+    initialShowIgnored: explicit ?? true,
+    explicitInitialShowIgnored: explicit,
+    isVisibilityException: relative => exceptions.test(relative).unignored,
+    toChokidarIgnored: () => (testPath, stats) => {
+      const relative = path.relative(rootPath, testPath);
+      if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+      return shouldIgnore(relative.split(path.sep).join("/"), stats?.isDirectory() ?? true);
     },
   };
-}
-
-async function loadPatternFile(ig: Ignore, filePath: string): Promise<void> {
-  try {
-    const contents = await fs.readFile(filePath, "utf8");
-    ig.add(contents);
-  } catch {
-    // Missing or unreadable — skip silently.
-  }
 }

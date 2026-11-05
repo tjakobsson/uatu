@@ -9,11 +9,15 @@
 // model). Selection events are translated from the prefixed canonical path
 // back to the document ID expected by the existing routing flow.
 
-import { FileTree, themeToTreeStyles, type FileTreeDirectoryHandle, type FileTreeItemHandle, type GitStatusEntry, type TreeThemeStyles } from "@pierre/trees";
+import { FileTree, themeToTreeStyles, type FileTreeCompositionOptions, type ContextMenuItem, type ContextMenuOpenContext, type FileTreeDirectoryHandle, type FileTreeItemHandle, type GitStatusEntry, type TreeThemeStyles } from "@pierre/trees";
 
 import type { DocumentMeta, RepositorySnapshot, RootGroup } from "../shared/types";
 import type { DocumentPatch } from "../shared/document-updates";
 import { activeColorScheme, onColorSchemeChange, type ColorScheme } from "../shell/theme";
+import { fileKey, RecentModel, relativeWriteAge, matchesFileQuery, normalizeFileQuery } from "./recent-model";
+import { isDocumentVisible } from "../shared/file-visibility";
+import { mediaKind } from "../shared/media";
+import { compareTreePaths, matchesMediaType, type FilesMediaType } from "./media-browsing-model";
 
 // The library's palette is handed over as inline styles generated for the
 // active scheme; the shell/theme tracker re-applies them on OS scheme
@@ -29,6 +33,7 @@ export type TreeViewOptions = {
   container: HTMLElement;
   onSelectDocument: TreeViewSelectionHandler;
   onDeselectDocument?: () => void;
+  onPlayDocument?: (doc: DocumentMeta) => void;
 };
 
 export type GitStatusForView = {
@@ -49,6 +54,8 @@ export type FilesPaneFilterMembership = {
 
 export type TreeViewUpdateOptions = {
   incremental?: boolean;
+  showIgnored?: boolean;
+  mediaType?: FilesMediaType;
   // When present, restricts the rendered path set to docs whose
   // watch-root-relative path is in the allow-list for their root (plus the
   // ancestor directories of those docs, auto-expanded). When null/undefined,
@@ -63,6 +70,20 @@ function isDirectoryHandle(handle: FileTreeItemHandle): handle is FileTreeDirect
 }
 
 export class TreeView {
+  private readonly recency = new RecentModel();
+  private recencyRoots: readonly RootGroup[] | null = null;
+  private query = "";
+  private ageTimer: ReturnType<typeof setInterval> | null = null;
+  private latestPath: string | null = null;
+  private showIgnored = true;
+  private mediaType: FilesMediaType = "all";
+  private playingKey: string | null = null;
+  private readonly onPlayDocument: ((doc: DocumentMeta) => void) | undefined;
+  private readonly composition: FileTreeCompositionOptions = { contextMenu: {
+    enabled: true, triggerMode: "both", buttonVisibility: "when-needed",
+    render: (item, context) => this.renderContextMenu(item, context),
+  } };
+  private readonly repositoryStatusByPath = new Map<string, GitStatusEntry["status"]>();
   private readonly container: HTMLElement;
   private readonly onSelectDocument: TreeViewSelectionHandler;
   private readonly onDeselectDocument: (() => void) | undefined;
@@ -133,6 +154,7 @@ export class TreeView {
     this.container = options.container;
     this.onSelectDocument = options.onSelectDocument;
     this.onDeselectDocument = options.onDeselectDocument;
+    this.onPlayDocument = options.onPlayDocument;
     this.unsubscribeColorScheme = onColorSchemeChange(scheme => {
       this.applyTreeTheme(scheme);
     });
@@ -143,6 +165,7 @@ export class TreeView {
   // overwrites every prior declaration — no removal pass needed.
   private applyTreeTheme(scheme: ColorScheme): void {
     Object.assign(this.container.style, TREE_THEMES[scheme]);
+    this.container.style.setProperty("--trees-git-ignored-color-override", "var(--trees-fg-muted)");
   }
 
   // Replace the visible tree with the given roots. Safe to call repeatedly;
@@ -152,6 +175,13 @@ export class TreeView {
     selectedDocumentId: string | null,
     options?: TreeViewUpdateOptions,
   ): void {
+    const visibilityChanged = this.showIgnored !== (options?.showIgnored ?? true) || this.mediaType !== (options?.mediaType ?? "all");
+    this.showIgnored = options?.showIgnored ?? true;
+    this.mediaType = options?.mediaType ?? "all";
+    if (this.recencyRoots !== roots) {
+      this.recency.reset(roots);
+      this.recencyRoots = roots;
+    }
     const { paths: fullPaths, mapping, rootPrefix } = buildPathInputs(roots);
     this.pathToDocumentId.clear();
     this.documentPaths.clear();
@@ -207,7 +237,7 @@ export class TreeView {
     let followOverridePath: string | null = null;
 
     if (filter !== null) {
-      const reduced = computeFilteredPaths(roots, rootPrefix, filter);
+      const reduced = computeFilteredPaths(roots, rootPrefix, filter, this.showIgnored, this.mediaType);
       let leaves = new Set(reduced.paths);
       let ancestors = new Set(reduced.ancestors);
 
@@ -238,10 +268,10 @@ export class TreeView {
         if (doc.kind === "binary") renderedBinaryLeafCount += 1;
       }
     } else {
-      renderedPaths = fullPaths;
+      renderedPaths = fullPaths.filter(path => this.eligible(this.documentsByPath.get(path)!));
       autoExpanded = initialReveal;
-      renderedLeafCount = fullPaths.length;
-      renderedBinaryLeafCount = countBinaryLeaves(roots);
+      renderedLeafCount = renderedPaths.length;
+      renderedBinaryLeafCount = renderedPaths.filter(path => this.documentsByPath.get(path)?.kind === "binary").length;
     }
 
     // Filter-state transition: snapshot expanded paths on All→Changed,
@@ -279,6 +309,20 @@ export class TreeView {
           initialExpandedPaths: autoExpanded,
           initialSelectedPaths: initialSelectedPath ? [initialSelectedPath] : [],
           icons: { set: "standard", colored: true },
+          search: false,
+          composition: this.onPlayDocument ? this.composition : undefined,
+          fileTreeSearchMode: "hide-non-matches",
+          renderRowDecoration: ({ row }) => {
+            const doc = this.documentsByPath.get(row.path);
+            if (!doc) return null;
+            const playing = fileKey(doc) === this.playingKey;
+            const latest = row.path === this.latestPath;
+            const age = Date.now() - doc.mtimeMs < 86_400_000 ? relativeWriteAge(doc.mtimeMs) : "";
+            if (!playing && !latest && !age) return null;
+            const text = `${playing ? "▶ " : ""}${latest ? "◷ " : ""}${age}`.trim();
+            return { text, parts: [{ text: playing ? "▶ " : "", color: "var(--trees-accent)" }, { text: `${latest ? "◷ " : ""}${age}`.trim() }],
+              title: `${playing ? "Playing. " : ""}${latest ? "Latest write. " : ""}Last written ${new Date(doc.mtimeMs).toISOString()}` };
+          },
           onSelectionChange: selected => this.handleSelectionChange(selected),
         });
         // Pass our container AS the file-tree host (not as a wrapper around a
@@ -299,6 +343,10 @@ export class TreeView {
         this.syncFollowOverrideObserver();
         this.applyFollowOverrideAttribute();
         this.syncDocumentSelection(selectedDocumentId, initialSelectedPath, revealSelection);
+        this.refreshRecency();
+        this.ageTimer = setInterval(() => {
+          if (!this.container.hidden && document.visibilityState !== "hidden") this.refreshRecency();
+        }, 30_000);
       });
       // Backstop the synchronous attribute stamp — the library may render
       // the override row on the next frame after first mount.
@@ -326,7 +374,7 @@ export class TreeView {
         // All) with the new reveal set before resetting.
         const preserved = nextFilterKind === "all" ? this.readExpandedPaths() : [];
         const mergedReveal = mergeUnique(autoExpanded, preserved);
-        if (options?.incremental && previousFilterKind === nextFilterKind) {
+        if ((options?.incremental || visibilityChanged) && previousFilterKind === nextFilterKind) {
           const next = new Set(renderedPaths);
           tree.batch([
             ...[...this.renderedPaths].filter(path => !next.has(path)).map(path => ({ type: "remove" as const, path })),
@@ -352,6 +400,7 @@ export class TreeView {
       this.applyFollowOverrideAttribute();
 
       this.syncDocumentSelection(selectedDocumentId, initialSelectedPath, revealSelection);
+      this.refreshRecency();
     });
 
     // syncDocumentSelection and resetPaths drive library re-renders that may not
@@ -367,7 +416,8 @@ export class TreeView {
   // Push the latest changed-files list into the library's git-status API.
   applyPatch(patch: DocumentPatch, selectedId: string | null): boolean {
     if (!this.tree) return false;
-    if (patch.roots?.some(root => !this.rootPrefixById.has(root.id))) return false;
+    if (patch.roots && (patch.roots.length !== this.rootPrefixById.size || patch.roots.some(root => !this.rootPrefixById.has(root.id)))) return false;
+    this.recency.applyPatch(patch);
     const tree = this.tree;
     const previousId = this.requestedDocumentId;
     const operations: { type: "add" | "remove"; path: string }[] = [];
@@ -377,12 +427,16 @@ export class TreeView {
       this.renderedLeafCount--;
       if (this.documentsByPath.get(path)?.kind === "binary") this.renderedBinaryLeafCount--;
     };
-    const allowed = (doc: DocumentMeta) => !this.filter || this.filter.allowedByRoot.get(doc.rootId)?.has(doc.relativePath) || doc.id === selectedId;
+    const allowed = (doc: DocumentMeta) => this.eligible(doc)
+      && (!this.filter || this.filter.allowedByRoot.get(doc.rootId)?.has(doc.relativePath) || doc.id === selectedId);
+    const removedStatusPaths: string[] = [];
+    const updatedStatuses: GitStatusEntry[] = [];
     this.withProgrammaticUpdate(this.currentSelectedPath, () => {
       for (const ref of patch.removals) {
         const path = this.pathsByRoot.get(ref.rootId)?.get(ref.id);
         if (!path) continue;
         removeVisible(path);
+        removedStatusPaths.push(path);
         this.pathToDocumentId.delete(path);
         this.pathsByRoot.get(ref.rootId)?.delete(ref.id);
         this.documentsByPath.delete(path);
@@ -410,17 +464,21 @@ export class TreeView {
           if (doc.kind === "binary") this.renderedBinaryLeafCount++;
         }
         this.documentsByPath.set(path, doc);
+        removedStatusPaths.push(path);
+        const status = resolveFileGitStatus(doc, this.repositoryStatusByPath.get(path));
+        if (status) updatedStatuses.push({ path, status });
       }
       const old = this.currentSelectedPath ? this.documentsByPath.get(this.currentSelectedPath) : undefined;
       if (old && !allowed(old)) removeVisible(this.currentSelectedPath!);
       const nextPath = selectedId ? this.pathForDocumentId(selectedId) : null;
       const nextDoc = nextPath ? this.documentsByPath.get(nextPath) : undefined;
-      if (nextPath && nextDoc && !this.renderedPaths.has(nextPath)) {
+      if (nextPath && nextDoc && allowed(nextDoc) && !this.renderedPaths.has(nextPath)) {
         this.renderedPaths.add(nextPath); operations.push({ type: "add", path: nextPath });
         this.renderedLeafCount++;
         if (nextDoc.kind === "binary") this.renderedBinaryLeafCount++;
       }
       if (operations.length) tree.batch(operations);
+      if (removedStatusPaths.length) tree.applyGitStatusPatch({ remove: removedStatusPaths, set: updatedStatuses });
       this.requestedDocumentId = selectedId;
       this.currentSelectedPath = selectedId ? this.pathForDocumentId(selectedId) : null;
       this.followOverridePath = this.filter && this.currentSelectedPath
@@ -433,6 +491,7 @@ export class TreeView {
     // A later explicit full update recomputes its fingerprint; ordinary live
     // patches do not sort/join the complete path list to maintain a hash.
     if (operations.length) this.lastPathsKey = "";
+    this.refreshRecency();
     return true;
   }
 
@@ -447,7 +506,8 @@ export class TreeView {
       if (prefix === undefined) continue;
       for (const relative of paths) {
         const path = `${prefix}${relative}`;
-        if (this.documentsByPath.has(path)) wanted.add(path);
+        const doc = this.documentsByPath.get(path);
+        if (doc && this.eligible(doc)) wanted.add(path);
       }
     }
     this.followOverridePath = this.currentSelectedPath && !wanted.has(this.currentSelectedPath) ? this.currentSelectedPath : null;
@@ -475,7 +535,10 @@ export class TreeView {
 
   hasFilterMembers(): boolean {
     if (!this.filter) return true;
-    for (const paths of this.filter.allowedByRoot.values()) if (paths.size) return true;
+    for (const path of this.renderedPaths) {
+      const doc = this.documentsByPath.get(path);
+      if (doc && this.filter.allowedByRoot.get(doc.rootId)?.has(doc.relativePath)) return true;
+    }
     return false;
   }
 
@@ -484,14 +547,23 @@ export class TreeView {
     if (this.tree === null) {
       return;
     }
-    const out: GitStatusEntry[] = [];
+    this.repositoryStatusByPath.clear();
     for (const entry of entries) {
       const prefix = this.rootPrefixById.get(entry.rootId);
       if (prefix === undefined) {
         continue;
       }
       const path = `${prefix}${entry.relativePath.replace(/^\/+/, "")}`;
-      out.push({ path, status: entry.status });
+      // Ignore classification is supplied per indexed file, independently of
+      // repository refresh. Do not inherit an older ignored-directory result
+      // onto tracked exceptions or files whose current classification is unknown.
+      if (entry.status !== "ignored") this.repositoryStatusByPath.set(path, entry.status);
+    }
+    const out: GitStatusEntry[] = [];
+    const paths = new Set([...this.repositoryStatusByPath.keys(), ...this.documentsByPath.keys()]);
+    for (const path of paths) {
+      const status = resolveFileGitStatus(this.documentsByPath.get(path), this.repositoryStatusByPath.get(path));
+      if (status) out.push({ path, status });
     }
     this.tree.setGitStatus(out);
   }
@@ -500,7 +572,73 @@ export class TreeView {
   // sidebar's `N of M files` count under the Changed filter; matches the
   // visible-row total seen by the user (follow-override row included).
   getVisibleLeafCount(): number {
-    return this.renderedLeafCount;
+    if (!this.query) return this.renderedLeafCount;
+    return [...this.renderedPaths].filter(path => matchesFileQuery(path, this.query)).length;
+  }
+
+  setQuery(query: string): void {
+    const next = normalizeFileQuery(query);
+    if (next === this.query) return;
+    this.query = next;
+    this.withProgrammaticUpdate(this.currentSelectedPath, () => this.tree?.setSearch(next || null));
+    this.refreshRecency();
+  }
+
+  private eligible(doc: DocumentMeta): boolean {
+    return isDocumentVisible(doc, this.showIgnored) && matchesMediaType(doc, this.mediaType);
+  }
+
+  getEligibleDocuments(): DocumentMeta[] {
+    return [...this.renderedPaths].filter(path => matchesFileQuery(path, this.query)).sort(compareTreePaths)
+      .map(path => this.documentsByPath.get(path)!).filter(Boolean);
+  }
+
+  setPlayingFile(key: string | null): void {
+    if (key === this.playingKey) return;
+    this.playingKey = key;
+    if (!this.container.hidden) this.tree?.setComposition(this.tree.getComposition());
+  }
+
+  private renderContextMenu(item: ContextMenuItem, context: ContextMenuOpenContext): HTMLElement | null {
+    const doc = this.documentsByPath.get(item.path);
+    if (item.kind !== "file" || !doc || !this.eligible(doc)) return null;
+    const menu = document.createElement("div");
+    menu.className = "file-actions-menu"; menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", `Actions for ${doc.name}`);
+    const addAction = (label: string, action: (doc: DocumentMeta) => void, restoreFocus: boolean) => {
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = label; button.setAttribute("role", "menuitem");
+      button.addEventListener("click", () => {
+        const current = this.documentsByPath.get(item.path);
+        context.close({ restoreFocus });
+        if (current && this.eligible(current) && this.renderedPaths.has(item.path)) action(current);
+      });
+      menu.append(button);
+    };
+    if (mediaKind(doc.name)) addAction("Play", doc => this.onPlayDocument?.(doc), true);
+    addAction("Open preview", doc => this.onSelectDocument(doc.id), false);
+    menu.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.preventDefault(); context.close(); return; }
+      const buttons = [...menu.querySelectorAll<HTMLButtonElement>("button")];
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === "ArrowDown" ? (index + 1) % buttons.length
+        : event.key === "ArrowUp" ? (index + buttons.length - 1) % buttons.length
+        : event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : -1;
+      if (next >= 0) { event.preventDefault(); buttons[next]!.focus(); }
+    });
+    queueMicrotask(() => { if (menu.isConnected) menu.querySelector<HTMLButtonElement>("button")?.focus(); });
+    return menu;
+  }
+
+  private refreshRecency(): void {
+    this.latestPath = null;
+    for (const doc of this.recency.entries()) {
+      const path = `${this.rootPrefixById.get(doc.rootId) ?? ""}${doc.relativePath}`;
+      if (this.renderedPaths.has(path) && matchesFileQuery(path, this.query)) { this.latestPath = path; break; }
+    }
+    // Public presentation refresh. This repaints mounted rows only, leaving
+    // the controller's hierarchy, search, selection, and expansion intact.
+    if (!this.container.hidden) this.tree?.setComposition(this.tree.getComposition());
   }
 
   // Number of currently-rendered leaf paths whose underlying doc is binary.
@@ -511,6 +649,9 @@ export class TreeView {
   }
 
   dispose(): void {
+    this.repositoryStatusByPath.clear();
+    if (this.ageTimer !== null) clearInterval(this.ageTimer);
+    this.ageTimer = null;
     this.removeActivationBridge?.();
     this.removeActivationBridge = null;
     if (this.unsubscribeColorScheme !== null) {
@@ -731,11 +872,26 @@ export class TreeView {
       const documentId = this.pathToDocumentId.get(path);
       if (documentId && this.tree?.getItem(path)?.isSelected()) this.onSelectDocument(documentId);
     };
+    const contextKey = (event: Event) => {
+      const key = event as KeyboardEvent;
+      if (!this.query || !this.onPlayDocument || !(key.key === "ContextMenu" || key.shiftKey && key.key === "F10")) return;
+      const target = event.composedPath()[0];
+      if (!(target instanceof HTMLElement) || !target.matches('button[role="treeitem"][data-item-type="file"]')) return;
+      // Pierre's active-search key handler consumes the context-menu key. Route
+      // that native keyboard intent through the row's standard contextmenu
+      // event instead, retaining the public composition menu and search state.
+      key.preventDefault(); key.stopPropagation();
+      const bounds = target.getBoundingClientRect();
+      target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, composed: true, cancelable: true,
+        clientX: bounds.right, clientY: bounds.top + bounds.height / 2 }));
+    };
+    shadow.addEventListener("keydown", contextKey, true);
     shadow.addEventListener("click", capture, true);
     shadow.addEventListener("click", captureCollapse, true);
     shadow.addEventListener("keydown", captureCollapse, true);
     shadow.addEventListener("click", activate);
     this.removeActivationBridge = () => {
+      shadow.removeEventListener("keydown", contextKey, true);
       shadow.removeEventListener("click", capture, true);
       shadow.removeEventListener("click", captureCollapse, true);
       shadow.removeEventListener("keydown", captureCollapse, true);
@@ -745,7 +901,9 @@ export class TreeView {
   }
 
   private pathForDocumentId(documentId: string): string | null {
-    return this.documentPaths.get(documentId) ?? null;
+    const path = this.documentPaths.get(documentId);
+    const doc = path ? this.documentsByPath.get(path) : undefined;
+    return path && doc && this.eligible(doc) ? path : null;
   }
 
   // Read the library's current expansion state by probing every directory
@@ -822,6 +980,7 @@ export class TreeView {
     // Library styles live in cascade layers; this unlayered rule wins.
     style.textContent = `[data-uatu-filter-reveal="true"] { opacity: 0.55; font-style: italic; }
 [data-type="item"][data-item-focused="true"]:not(:focus-visible)::before { outline: none; }
+[data-item-git-status="ignored"][data-item-selected="true"] > [data-item-section="content"] { color: var(--trees-selected-fg); }
 @media (hover: none) {
   /* Touch browsers (iOS Safari) keep :hover on the last tapped row, which
      paints a tapped folder like a selection. No hover tint without hover. */
@@ -862,6 +1021,14 @@ export class TreeView {
       }
     }
   }
+}
+
+export function resolveFileGitStatus(
+  doc: DocumentMeta | undefined,
+  repositoryStatus: GitStatusEntry["status"] | undefined,
+): GitStatusEntry["status"] | undefined {
+  if (doc?.gitIgnoreStatus === "ignored") return "ignored";
+  return repositoryStatus === "ignored" ? undefined : repositoryStatus;
 }
 
 // Translate one or more `RootGroup`s into the flat path array the library
@@ -952,6 +1119,8 @@ export function computeFilteredPaths(
   roots: readonly RootGroup[],
   rootPrefix: ReadonlyMap<string, string>,
   filter: FilesPaneFilterMembership,
+  showIgnored = true,
+  mediaType: FilesMediaType = "all",
 ): { paths: string[]; ancestors: string[] } {
   const paths: string[] = [];
   const ancestorsSet = new Set<string>();
@@ -962,6 +1131,7 @@ export function computeFilteredPaths(
     }
     const prefix = rootPrefix.get(root.id) ?? "";
     for (const doc of root.docs) {
+      if (!isDocumentVisible(doc, showIgnored) || !matchesMediaType(doc, mediaType)) continue;
       const normalized = doc.relativePath.replace(/^\/+/, "");
       if (!allowed.has(normalized)) {
         continue;

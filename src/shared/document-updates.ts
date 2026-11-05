@@ -32,6 +32,8 @@ export type DocumentSnapshot = Omit<StatePayload, "roots"> & {
 };
 
 export type DocumentPatch = {
+  showIgnored?: boolean;
+  initialShowIgnored?: boolean;
   kind: "patch";
   epoch: string;
   previousRevision: number;
@@ -58,7 +60,7 @@ export type DocumentUpdate = DocumentSnapshot | DocumentPatch;
 export type ApplyDocumentUpdateResult = "applied" | "ignored" | "resync";
 
 export function sameDocumentContext(a: WatchContext, b: WatchContext): boolean {
-  return a.compareTarget === b.compareTarget && a.scope.kind === b.scope.kind
+  return (a.showIgnored !== false) === (b.showIgnored !== false) && a.compareTarget === b.compareTarget && a.scope.kind === b.scope.kind
     && (a.scope.kind === "folder" || (b.scope.kind === "file" && a.scope.documentId === b.scope.documentId));
 }
 
@@ -256,7 +258,7 @@ export function projectDocumentSnapshot(
 export function unseenSnapshotChange(index: DocumentStateIndex, snapshot: DocumentSnapshot): string | null {
   const change = snapshot.latestChange;
   if (!change) return null;
-  return index.epoch !== snapshot.epoch || change.revision > (index.latestChange?.revision ?? -1) ? change.id : null;
+  return index.epoch !== snapshot.epoch || change.revision > (index.revision ?? -1) ? change.id : null;
 }
 
 export function projectDocumentPatch(

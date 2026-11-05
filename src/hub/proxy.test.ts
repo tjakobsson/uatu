@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import {
   classifyProxyTransport,
@@ -242,6 +242,47 @@ describe("chat SSE proxying", () => {
 });
 
 describe("proxied stream cancellation", () => {
+  test("media and no-transform responses bypass buffering and rewriting regardless of MIME", async () => {
+    const session: RunningSession = {
+      workspaceId: "project", instanceId: crypto.randomUUID(), policyTrust: "unavailable",
+      basePath: "/s/project/", endpoint: { hostname: "127.0.0.1", port: 1 }, token: "private-child-token",
+      exited: new Promise(() => {}), async stop() {},
+    };
+    for (const [route, contentType, cacheControl] of [
+      ["api/media", "text/html", "no-store"],
+      ["api/media", "application/json", "no-store"],
+      ["asset", "text/html", "private, NO-TRANSFORM"],
+      ["asset", "application/json", "no-store, no-transform"],
+    ]) {
+      let reads = 0, cancelled = false;
+      let upstreamSignal: AbortSignal | undefined;
+      const mocked = spyOn(globalThis, "fetch").mockImplementation((async (_url, init) => {
+        expect(new Headers(init?.headers).get("accept-encoding")).toBe("identity");
+        upstreamSignal = init?.signal as AbortSignal;
+        return new Response(new ReadableStream<Uint8Array>({
+          pull(controller) { reads++; controller.enqueue(new Uint8Array(64 * 1024)); },
+          cancel() { cancelled = true; },
+        }, { highWaterMark: 0 }), { headers: {
+          "content-type": contentType!, "cache-control": cacheControl!,
+          "content-length": String(1024 ** 4), "accept-ranges": "bytes", "content-encoding": "identity",
+        } });
+      }) as typeof fetch);
+      try {
+        const response = await proxyHttp(new Request(`http://hub/s/project/${route}`, { headers: { "accept-encoding": "gzip" } }), session);
+        expect(reads).toBe(0);
+        expect(response.headers.get("content-length")).toBe(String(1024 ** 4));
+        expect(response.headers.get("content-encoding")).toBeNull();
+        expect(response.headers.get("accept-ranges")).toBe("bytes");
+        const reader = response.body!.getReader();
+        expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
+        expect(reads).toBe(1);
+        await reader.cancel();
+        expect(cancelled).toBe(true);
+        expect(upstreamSignal!.aborted).toBe(true);
+      } finally { mocked.mockRestore(); }
+    }
+  });
+
   test("a downstream body cancel releases the child's stream", async () => {
     const child = streamingChild();
     try {
@@ -470,7 +511,7 @@ describe("proxied stream diagnostics", () => {
     }
   });
 
-  test("a child that drops mid-stream is recorded as failed and the browser sees a clean end", async () => {
+  test("a child that drops mid-stream is recorded as failed and errors without exposing credentials", async () => {
     const records: ProxyStreamDiagnostic[] = [];
     setProxyStreamDiagnostics(record => records.push(record));
     const child = streamingChild();
@@ -480,12 +521,8 @@ describe("proxied stream diagnostics", () => {
       await reader.read();
       expect(records).toHaveLength(0);
 
-      // The child resets every open connection. The record names the class
-      // and category only; the browser-facing stream ends instead of
-      // erroring, so nothing — no URL, no token — is thrown or printed.
       child.server.stop(true);
-      const ending = await reader.read();
-      expect(ending.done).toBe(true);
+      await expect(reader.read()).rejects.toThrow("session response interrupted");
       await waitFor(() => records.length === 1);
       expect(records).toEqual([{ transport: "search", outcome: "failed", status: "2xx" }]);
     } finally {

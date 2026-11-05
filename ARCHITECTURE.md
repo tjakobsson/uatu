@@ -557,6 +557,80 @@ The clearing signal comes from the page that is looking: `POST /s/<id>/api/activ
 
 ## Request lifecycle
 
+### Media response-writing boundary
+
+`server/media-http-boundary.ts` places a narrow Node HTTP/HTTPS response writer
+at the child and Hub listener boundaries for GET/HEAD media only. It dispatches
+the same product route/authentication code, preserves the advertised byte/range
+headers, awaits write/drain backpressure, and cancels/destroys interrupted bodies.
+This avoids Bun 1.4.4's generic-stream length/error framing behavior without
+buffering clips or introducing another browser-facing origin/port.
+
+Other HTTP requests, early-flushed live streams, and WebSocket upgrades retain
+the private loopback Bun listener and its literal HTMLBundle assembly. Public
+URL/TLS and peer context are restored using private connection correlation;
+untrusted forwarding headers grant no authority. The listener facade retains
+readiness, request-IP, upgrade, and graceful/forced shutdown semantics. Production,
+E2E, and compiled servers use this same boundary. Media remains an internal
+child-proxied protocol classified in `api/exclusions.yaml`, not a public Hub API.
+
+### Files presentation and ignored visibility
+
+`media/controller.ts` owns the page's one native audio/video source, source and
+Play generations, captured audition order, loop choice, and explicit revision
+notice. `media/preview.ts` presents paused destinations without replacing a
+different audition; `media/dock.ts` renders persistent controls using that same
+element. Preview cleanup parks the element before document, commit, or empty
+content replaces its host. Close releases the source and cannot be undone by
+subscriber rendering. The pagehide owner also ends auditions before a cached
+page can return, so foreground/pageshow recovery cannot restore playback.
+New epochs or file revisions release obsolete delivery
+and require explicit Reload at zero, paused. Media remains excluded from startup
+defaults and automatic Follow nomination while being valid manual/direct/saved/
+history preview destinations.
+
+`sidebar/media-browsing.ts` owns runtime-only All types/Audio/Video filtering and
+explicit audition actions. Recent provides separate Play buttons; Pierre's public
+context menu provides Play/Open preview without interactive decorations. A row
+Play captures eligible media identities in view order, disables Follow, and calls
+native Play within the gesture without changing preview history or touch tabs.
+Later filtering and writes do not reorder that session; missing/nonpermitted
+entries are skipped and end-of-clip never advances automatically.
+
+`media/layout.ts` publishes measured dock geometry to existing viewport owners.
+Touch content reserves the player above the tabs, with keyboard and safe-area
+space accounted separately; desktop, Chat, and Terminal retain their own sizing
+and PTY lifetimes. Video expansion reparents one element, preserving position.
+Actual PCM WAV/H.264 playback is automated in Chromium/WebKit; physical Safari
+and installed-PWA acceptance is recorded separately rather than inferred.
+
+`sidebar/recent-model.ts` builds one disk-write-ordered projection from the
+indexed snapshot, then removes/reinserts affected patch entries with stable
+path/root ties. `recent-view.ts` mounts only a viewport-sized window. It defers
+structural changes during pointer/touch activation and restores a surviving
+scroll anchor and file-keyed focus. A visible-row ticker updates ages without
+fetching file or Git data. All/Changed continue to use the one Pierre tree;
+Recent hides that presentation without replacing its instance or expansion.
+The metadata query is shared across views and uses Pierre's public search API
+in the hierarchy. The header counts eligible files, independently of expansion
+or mounted rows.
+
+Exposure policy and browsing visibility are separate. The shared inventory
+retains permitted Gitignored files; `gitIgnoreStatus` is independent metadata,
+and unknown classification stays visible without a clean/ignored assertion.
+Each client holds `showIgnored` in `appState`, owned by
+`shell/ignored-visibility.ts`, and persists it as personal workspace state.
+Boot resolves saved visibility before the server's legacy initial default.
+Changing visibility replaces only the document topic's context and protects
+selection from old Follow nominations in its baseline. Direct authenticated
+delivery still enforces exposure policy regardless of row visibility.
+
+Root `.uatu.json` `ignore.include` names literal output directories beneath
+build/dist, admitting only their subtrees and necessary traversal ancestors.
+Explicit Uatu exclusions, mandatory denied paths, and containment remain
+authoritative. Discovery, observation, index membership, and delivery share
+that policy; a client visibility toggle does not rebuild watchers.
+
 A representative path: the SPA needs the rendered HTML for `guides/setup.md`.
 
 ```mermaid

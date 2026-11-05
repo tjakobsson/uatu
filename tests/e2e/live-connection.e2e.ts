@@ -104,7 +104,7 @@ test.describe("document channel recovery", () => {
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected", { timeout: 15_000 });
     await expect(page.locator("#connection-state")).toHaveClass(/is-live/);
     await expect(treeRow(page, "recovered.md")).toBeVisible();
-    await expect(page.locator("#document-count")).toHaveText("19 files");
+    await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "19 files");
     await expect(page.locator("#preview")).toContainText("Edited while the page was suspended");
   });
 
@@ -132,7 +132,7 @@ test.describe("document channel recovery", () => {
       },
       { timeout: 15_000 },
     ).toBe(19);
-    await expect(observer.locator("#document-count")).toHaveText("19 files");
+    await expect(observer.locator("#document-count")).toHaveAttribute("aria-label", "19 files");
     await expect(treeRow(page, "pocketed.md")).toHaveCount(0);
     await observer.close();
 

@@ -43,6 +43,9 @@ import { setSelectedId, getPendingDocumentPath, getSelectionActivation, getSelec
 import { appState } from "./state";
 import { renderCommitPreview } from "./url";
 import { contextualAppUrl, currentWatchContext, setClientScope } from "./watch-context";
+import { mediaKind } from "../shared/media";
+import { mediaPlayer } from "../media/controller";
+import type { DocumentMeta } from "../shared/types";
 
 // The page's document subscription. Transport recovery belongs to the
 // channel (`shell/live-channel.ts`): it closes each failed stream and reopens
@@ -59,6 +62,34 @@ let subscriptionKey: string | null = null;
 // cursor, owes a snapshot before `ready` can mean anything.
 let documentStateHeld = false;
 let installed = false;
+// Changing browsing visibility is not a fresh edit. The replacement topic
+// may retain an older context-specific Follow nomination in its baseline.
+let visibilityChangeFloor: { epoch: string; revision: number } | null = null;
+
+function reconcileMediaInventory(removals: DocumentPatch["removals"] = []): void {
+  mediaPlayer.reconcile(appState.roots, documentIndex.epoch,
+    appState.scope.kind === "folder" && appState.discovery.status === "ready", removals);
+}
+
+function mediaSelection(id: string | null, previous?: DocumentMeta): boolean {
+  const doc = id ? documentIndex.find(id) ?? previous : undefined;
+  return Boolean(doc && doc.kind === "binary" && mediaKind(doc.name));
+}
+
+// An active source's revision changes through explicit Reload, never a preview
+// remount. Also retain the closed player's preview until another explicit Play.
+function retainMediaPreview(id: string, previous?: DocumentMeta): boolean {
+  if (!mediaSelection(id, previous)) return false;
+  const active = mediaPlayer.snapshot().source;
+  const doc = documentIndex.find(id) ?? previous;
+  return !active || active.id === id && active.rootId === doc?.rootId;
+}
+
+function visibilityBaseline(payload: StatePayload): boolean {
+  const snapshot = payload as DocumentSnapshot;
+  return snapshot.kind === "snapshot" && visibilityChangeFloor?.epoch === snapshot.epoch
+    && (snapshot.latestChange?.revision ?? 0) <= visibilityChangeFloor.revision;
+}
 
 // The document topic's key: the current watch context (compare target and
 // scope) as the canonical query the hub appends to the child's route.
@@ -206,6 +237,7 @@ function applyServerSnapshot(payload: StatePayload): boolean {
   // embedded in the open document or opened as an image itself — even when
   // the document around it did not change and is not reloaded.
   refreshPreviewImages(payload.roots);
+  reconcileMediaInventory();
   return true;
 }
 
@@ -272,6 +304,14 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   const repositoryChanged = hasNewRepositoryState(patch);
   const selected = appState.selectedId;
   const previousDocument = selected ? documentIndex.find(selected) : undefined;
+  const contentUpserts = patch.upserts.filter(doc => documentIndex.find(doc.id, doc.rootId)?.revision !== doc.revision);
+  const removals = [...patch.removals];
+  if (patch.roots) {
+    const remainingRoots = new Set(patch.roots.map(root => root.id));
+    for (const root of appState.roots) if (!remainingRoots.has(root.id)) {
+      for (const { rootId, id } of root.docs) removals.push({ rootId, id });
+    }
+  }
   const result = documentIndex.apply(patch);
   if (result === "resync") { subscribeDocument(); return; }
   if (result === "ignored") { liveChannel().confirm(generation); return; }
@@ -279,17 +319,18 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   appState.roots = payload.roots;
   appState.repositories = payload.repositories;
   if (repositoryChanged) dropStaleDiffs();
-  const attributesChanged = [...patch.upserts, ...patch.removals].some(doc => /(^|\/)\.gitattributes$/.test(doc.id));
+  const attributesChanged = [...contentUpserts, ...patch.removals].some(doc => /(^|\/)\.gitattributes$/.test(doc.id));
   if (attributesChanged) forgetAllDiffs();
   appState.discovery = payload.discovery;
   appState.repositoryFreshness = payload.repositoryState;
   appState.unscopedFingerprint = payload.unscopedFingerprint ?? null;
   refreshPreviewImages(payload.roots);
+  reconcileMediaInventory(removals);
   documentStateHeld = true;
   stateReconciler.recordApplied(payload.generatedAt);
   liveChannel().confirm(generation);
   syncStateGeneration(payload.generatedAt);
-  for (const doc of patch.upserts) { forgetDocumentCache(doc.id); markSearchResultsStale(doc.id); }
+  for (const doc of contentUpserts) { forgetDocumentCache(doc.id); markSearchResultsStale(doc.id); }
   for (const doc of patch.removals) { forgetDocumentCache(doc.id); markSearchResultsStale(doc.id); }
   noteSearchCorpusChange();
   if (mode.kind === "commit") {
@@ -328,10 +369,10 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   const current = next ? documentIndex.find(next) : undefined;
   const reload = next !== selected || previousDocument?.revision !== current?.revision
     || Boolean(previousDocument) !== Boolean(current);
-  if (next && reload) {
+  if (next && reload && !(next === selected && retainMediaPreview(next, previousDocument))) {
     await loadDocument(next);
     if (next === selected && appState.selectedId === next && current) signalActiveDocumentUpdated();
-  } else if (next && appState.viewMode === "diff" && (attributesChanged || repositoryChanged && diffInputsMoved(next))) {
+  } else if (next && !mediaSelection(next) && appState.viewMode === "diff" && (attributesChanged || repositoryChanged && diffInputsMoved(next))) {
     await applyDiffForActiveDocument(next);
   } else if (!next && !renderPendingDocument() && reload) renderEmptyPreview("No document selected", "Waiting for viewable files");
 }
@@ -351,8 +392,10 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
     return;
   }
   const previousSelectedId = appState.selectedId;
+  const previousDocument = previousSelectedId ? documentIndex.find(previousSelectedId) : undefined;
   const repositoryChanged = (payload as DocumentSnapshot).kind === "snapshot" && hasNewRepositoryState(payload as DocumentSnapshot);
-  const changedId = payload.changedId ?? ((payload as DocumentSnapshot).kind === "snapshot" ? unseenSnapshotChange(documentIndex, payload as DocumentSnapshot) : null);
+  const preserveVisibilitySelection = visibilityBaseline(payload);
+  const changedId = preserveVisibilitySelection ? null : payload.changedId ?? ((payload as DocumentSnapshot).kind === "snapshot" ? unseenSnapshotChange(documentIndex, payload as DocumentSnapshot) : null);
   const previousScope = appState.scope;
   const shouldReload = Boolean(documentIndex.epoch && (payload as DocumentSnapshot).epoch
     && documentIndex.epoch !== (payload as DocumentSnapshot).epoch) || shouldRefreshPreview(
@@ -398,12 +441,12 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
   }
 
   // Rule C/D selection decision (see follow-mode capability).
-  const catchUp = finishFollowDiscovery(payload.defaultDocumentId, changedId);
+  const catchUp = preserveVisibilitySelection ? null : finishFollowDiscovery(payload.defaultDocumentId, changedId);
   const pendingPath = getPendingDocumentPath();
   const pendingDocument = pendingPath ? findDocumentByRelativePath(pendingPath) : null;
   const preserveEmpty = !appState.followEnabled && appState.previewMode.kind === "empty" && previousSelectedId === null;
   const discovering = (payload as DocumentSnapshot).discovery?.status !== undefined && (payload as DocumentSnapshot).discovery.status !== "ready";
-  setSelectedId(pendingDocument?.id ?? catchUp ?? (preserveEmpty || discovering && !changedId ? previousSelectedId : chooseSelectionForFileEvent(
+  setSelectedId(pendingDocument?.id ?? catchUp ?? (preserveVisibilitySelection || preserveEmpty || discovering && !changedId ? previousSelectedId : chooseSelectionForFileEvent(
     payload.roots,
     previousSelectedId,
     followableChange(previousSelectedId, changedId),
@@ -429,7 +472,7 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
 
   if (
     appState.selectedId &&
-    (shouldReload || appState.selectedId !== previousSelectedId)
+    (appState.selectedId !== previousSelectedId || shouldReload && !retainMediaPreview(appState.selectedId, previousDocument))
   ) {
     if (shouldReload) {
       // The file changed on disk — any cached payload is now stale.
@@ -445,9 +488,9 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
     return;
   }
 
-  if (appState.selectedId && !hasDocument(payload.roots, appState.selectedId)) {
+  if (appState.selectedId && !hasDocument(payload.roots, appState.selectedId) && !retainMediaPreview(appState.selectedId, previousDocument)) {
     await loadDocument(appState.selectedId);
-  } else if (appState.selectedId && appState.viewMode === "diff" && (takeAttributesRefetch() || repositoryChanged && diffInputsMoved(appState.selectedId))) {
+  } else if (appState.selectedId && !mediaSelection(appState.selectedId, previousDocument) && appState.viewMode === "diff" && (takeAttributesRefetch() || repositoryChanged && diffInputsMoved(appState.selectedId))) {
     await applyDiffForActiveDocument(appState.selectedId);
   } else if (!appState.selectedId) {
     if (!renderPendingDocument()) renderEmptyPreview("No document selected", "Waiting for viewable files");
@@ -499,8 +542,10 @@ const stateReconciler = createStateReconciler<StatePayload>({
     // stream's first frame sees no mtime difference either — so this is the
     // only place the staleness is still visible.
     const selectedId = appState.selectedId;
+    const previousDocument = selectedId ? documentIndex.find(selectedId) : undefined;
     const repositoryChanged = (payload as DocumentSnapshot).kind === "snapshot" && hasNewRepositoryState(payload as DocumentSnapshot);
-    const changedId = (payload as DocumentSnapshot).kind === "snapshot" ? unseenSnapshotChange(documentIndex, payload as DocumentSnapshot) : payload.changedId;
+    const preserveVisibilitySelection = visibilityBaseline(payload);
+    const changedId = preserveVisibilitySelection ? null : (payload as DocumentSnapshot).kind === "snapshot" ? unseenSnapshotChange(documentIndex, payload as DocumentSnapshot) : payload.changedId;
     const staleSelection = Boolean(documentIndex.epoch && (payload as DocumentSnapshot).epoch
       && documentIndex.epoch !== (payload as DocumentSnapshot).epoch) || shouldRefreshPreview(
       selectedId,
@@ -511,10 +556,10 @@ const stateReconciler = createStateReconciler<StatePayload>({
 
     if (!applyServerSnapshot(payload)) return;
     if (installed && subscriptionKey !== documentKey()) subscribeDocument();
-    const catchUp = finishFollowDiscovery(payload.defaultDocumentId, changedId);
+    const catchUp = preserveVisibilitySelection ? null : finishFollowDiscovery(payload.defaultDocumentId, changedId);
     const pendingPath = getPendingDocumentPath();
     const pendingDocument = pendingPath ? findDocumentByRelativePath(pendingPath) : null;
-    const reconcileFollow = appState.followEnabled && appState.discovery.status === "ready" && appState.previewMode.kind !== "commit";
+    const reconcileFollow = !preserveVisibilitySelection && appState.followEnabled && appState.discovery.status === "ready" && appState.previewMode.kind !== "commit";
     const followTarget = pendingDocument?.id ?? catchUp ?? (reconcileFollow ? chooseSelectionForFileEvent(payload.roots, selectedId, followableChange(selectedId, changedId), true) : null);
     if (reconcileFollow || followTarget) {
       setSelectedId(followTarget);
@@ -529,7 +574,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
       return;
     }
     const activeId = appState.selectedId;
-    if (activeId && (staleSelection || activeId !== selectedId)) {
+    if (activeId && (activeId !== selectedId || staleSelection && !retainMediaPreview(activeId, previousDocument))) {
       forgetDocumentCache(activeId);
       void loadDocument(activeId).then(() => {
         // Same signal the in-place reload gives on Rule D: the document the
@@ -537,7 +582,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
         // silent.
         if (appState.selectedId === selectedId && hasDocument(appState.roots, selectedId)) signalActiveDocumentUpdated();
       });
-    } else if (activeId && appState.viewMode === "diff" && (takeAttributesRefetch() || repositoryChanged && diffInputsMoved(activeId))) {
+    } else if (activeId && !mediaSelection(activeId, previousDocument) && appState.viewMode === "diff" && (takeAttributesRefetch() || repositoryChanged && diffInputsMoved(activeId))) {
       void applyDiffForActiveDocument(activeId);
     } else if (!activeId && !renderPendingDocument() && reconcileFollow) renderEmptyPreview("No document selected", "Waiting for viewable files");
   },
@@ -562,4 +607,10 @@ const stateReconciler = createStateReconciler<StatePayload>({
 export async function refreshServerStateForContext(): Promise<void> {
   subscribeDocument();
   await stateReconciler.reconcile();
+}
+
+export async function refreshServerStateForVisibility(): Promise<void> {
+  const current = documentIndex.view();
+  visibilityChangeFloor = current ? { epoch: current.epoch, revision: current.revision } : null;
+  await refreshServerStateForContext();
 }

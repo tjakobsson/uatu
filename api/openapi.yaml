@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 12.34.0-experimental
+  version: 13.35.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 12 and workspace revision 34
+  summary: Hub revision 13 and workspace revision 35
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -21,8 +21,8 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 12
-    workspaceApiRevision: 34
+    hubApiRevision: 13
+    workspaceApiRevision: 35
 servers:
   - url: https://{hubHost}
     variables:
@@ -1682,11 +1682,11 @@ components:
     PersonalState:
       type: object
       required: [version]
-      properties: { version: { const: 1 }, documentPath: { type: string }, follow: { type: boolean }, previewMode: { $ref: '#/components/schemas/ViewMode' }, compareTarget: { enum: [base, last-commit] }, filesFilter: { enum: [all, changed] }, lastPtyId: { type: string, format: uuid } }
+      properties: { version: { const: 1 }, documentPath: { type: string }, follow: { type: boolean }, previewMode: { $ref: '#/components/schemas/ViewMode' }, compareTarget: { enum: [base, last-commit] }, filesFilter: { enum: [all, recent, changed] }, showIgnored: { type: boolean }, lastPtyId: { type: string, format: uuid } }
       additionalProperties: false
     PersonalStatePatch:
       type: object
-      properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, changed, null] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
+      properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, recent, changed, null] }, showIgnored: { type: [boolean, 'null'] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
       additionalProperties: false
     CredentialId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
     CredentialToolName: { enum: [ssh, ssh-agent, ssh-add, ssh-keygen, gpg, gpgconf, git, gh, glab] }
@@ -2613,7 +2613,7 @@ components:
     DocumentMeta:
       type: object
       required: [id, name, relativePath, mtimeMs, rootId, kind, revision]
-      properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] }, revision: { type: integer, minimum: 0 } }
+      properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] }, revision: { type: integer, minimum: 0 }, gitIgnoreStatus: { enum: [ignored, not-ignored, unknown] }, ignoreVisibilityException: { type: boolean } }
       additionalProperties: false
     RootGroup:
       type: object
@@ -2635,6 +2635,8 @@ components:
         repositories: { type: array, items: { $ref: '#/components/schemas/RepositorySnapshot' } }
         compareTarget: { enum: [base, last-commit] }
         initialFollow: { type: boolean }
+        showIgnored: { type: boolean }
+        initialShowIgnored: { type: boolean }
         defaultDocumentId: { type: [string, 'null'] }
         changedId: { type: [string, 'null'] }
         generatedAt: { type: number }
@@ -2667,6 +2669,8 @@ components:
       required: [kind, epoch, previousRevision, revision, generatedAt, scope, compareTarget, unscopedFingerprint, upserts, removals, changedId]
       properties:
         kind: { const: patch }
+        showIgnored: { type: boolean }
+        initialShowIgnored: { type: boolean }
         epoch: { type: string }
         previousRevision: { type: integer, minimum: 0 }
         revision: { type: integer, minimum: 0 }

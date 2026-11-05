@@ -2,6 +2,19 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 13 / Workspace 35 - Unreleased (Recent and ignored Files state)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- Personal workspace state accepts `recent` alongside `all` and `changed` for `filesFilter`. Partial updates retain unrelated preferences; an open client's view remains local.
+- Personal state accepts boolean `showIgnored`. Permitted Gitignored files remain in the shared inventory, with independent `gitIgnoreStatus` and optional Uatu visibility exceptions. Snapshots and patches carry the client's ignored-visibility context; snapshots supply the legacy initial default independently of the saved preference.
+
+### Migration
+
+Regenerate strict personal-state and document-topic readers for the expanded enum and closed-object fields. Existing All/Changed records retain their meaning and an absent Files view defaults to All. Files presentation does not override explicit preview URLs. Saved ignored visibility wins; otherwise --no-gitignore shows, otherwise any watched root explicitly requesting respectGitignore=true initially hides, otherwise ignored files show. This aggregation is root-order independent and never rejects conflicting legacy defaults. Git-ignore rules are browsing visibility, not an exposure boundary: use explicit Uatu excludes to prevent delivery. Unknown classification stays visible without an ignored/clean assertion.
+
 ## Hub 12 / Workspace 34 - Unreleased (permission queue order)
 
 Compatibility: breaking (workspace)

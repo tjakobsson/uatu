@@ -26,7 +26,7 @@ async function bootSession(
   });
   await page.reload();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await expect(page.locator("#document-count")).not.toHaveText("0 files", { timeout: 5_000 });
+  await expect(page.locator("#document-count")).not.toHaveText("0", { timeout: 5_000 });
 }
 
 test("chip defaults to All on first boot", async ({ page, request }) => {
@@ -182,7 +182,7 @@ test("All → Changed → All restores manually-expanded directories", async ({ 
   await expect(treeRow(page, "guides/")).toHaveAttribute("aria-expanded", "true");
 });
 
-test("file count uses `N of M files` form under filter Changed", async ({ page, request }) => {
+test("file count reports only current results under Changed and All", async ({ page, request }) => {
   await bootSession(page, request, {
     git: true,
     dirty: {
@@ -193,11 +193,13 @@ test("file count uses `N of M files` form under filter Changed", async ({ page, 
 
   await page.locator("#files-pane-filter-changed").click();
   const countText = page.locator("#document-count");
-  await expect(countText).toContainText(/^\d+ of \d+ files/);
+  await expect(countText).toHaveText(/^\d+$/);
+  await expect(countText).toHaveAttribute("aria-label", /^\d+ files?$/);
 
-  // Toggle to All — count returns to the bare `N files` form.
+  // All uses the same quiet result-count presentation.
   await page.locator("#files-pane-filter-all").click();
-  await expect(countText).toHaveText(/^\d+ files( · \d+ binary)?$/);
+  await expect(countText).toHaveText(/^\d+$/);
+  await expect(countText).toHaveAttribute("aria-label", /^\d+ files?$/);
 });
 
 test("under Changed filter gitignored files are not rendered", async ({ page, request }) => {

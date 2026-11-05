@@ -29,9 +29,10 @@ const LEG_ONE_FILES = [
   "chat-reversible-history", "chat-shell-output", "chat-shell-scrollback",
   "chat-steering", "chat-touch", "chat-unavailable", "code-blocks",
   "diff-view", "git-log", "identity", "ipad-desktop-viewport", "ipad",
+  "media-browsing", "media-layout", "media-navigation", "media-playback", "media-workflow",
   "metadata-card", "mobile", "notification-layout", "notification-presence",
   "notifications", "outline-presentation", "preview-renderers",
-  "project-search", "pwa", "terminal-clipboard", "terminal-font",
+  "project-search", "pwa", "recent-files", "terminal-clipboard", "terminal-font",
   "terminal-session-manager", "terminal-switcher", "terminal", "theme",
   "touch-scroll", "view-and-layout",
 ].map(name => `**/${name}.e2e.ts`);

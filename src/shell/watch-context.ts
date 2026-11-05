@@ -3,7 +3,7 @@ import type { Scope } from "../shared/types";
 import { appState } from "./state";
 
 export function currentWatchContext(): WatchContext {
-  return { scope: appState.scope, compareTarget: appState.compareTarget };
+  return { scope: appState.scope, compareTarget: appState.compareTarget, showIgnored: appState.showIgnored };
 }
 
 export function contextualAppUrl(appPath: string, context: WatchContext = currentWatchContext()): string {

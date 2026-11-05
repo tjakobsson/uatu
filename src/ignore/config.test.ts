@@ -20,6 +20,21 @@ async function writeConfig(payload: unknown): Promise<void> {
 }
 
 describe("loadIgnoreConfig", () => {
+  it("validates literal nested output directories and retains future locations", async () => {
+    await fs.mkdir(path.join(workspace, "build/renders"), { recursive: true });
+    await fs.writeFile(path.join(workspace, "build/file"), "not a directory");
+    await writeConfig({ ignore: { include: ["build/renders", "packages/app/dist/previews", "dist/future", "build", "dist", "/build/render", "build/../render", "build/*", "build/file", "build//render", "build/./render", "build/render/", "build\\render", "src/plain", "build/\u0000bad"] } });
+    const result = await loadIgnoreConfig(workspace);
+    expect(result.config.include).toEqual(["build/renders", "packages/app/dist/previews", "dist/future"]);
+    expect(result.warnings).toHaveLength(12);
+  });
+
+  it("warns once for a malformed include array", async () => {
+    await writeConfig({ ignore: { include: ["build/renders", false] } });
+    const result = await loadIgnoreConfig(workspace);
+    expect(result.config.include).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+  });
   it("returns the default config when no .uatu.json exists", async () => {
     const result = await loadIgnoreConfig(workspace);
     expect(result.config.exclude).toEqual([]);

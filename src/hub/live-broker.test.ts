@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { encodeReplayCursor } from "../chat/replay";
 import { MetricsRegistry } from "../debug/metrics";
 import { upstreamActiveGauge, upstreamCounter } from "../debug/stream-metrics";
-import type { LiveEnvelope } from "../shared/live-protocol";
+import { documentContextKey, type LiveEnvelope } from "../shared/live-protocol";
 import type { DocumentSnapshot, DocumentPatch } from "../shared/document-updates";
 import { BUILD_SUMMARY, createWatchSession } from "../server/watch-session";
 import {
@@ -153,6 +153,18 @@ afterEach(() => {
 });
 
 describe("refcounted upstreams (2.1)", () => {
+  test("document visibility is part of upstream identity and survives child requests", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const showing = documentContextKey(new URLSearchParams("compareTarget=base&scope=folder&showIgnored=1"));
+    const hiding = documentContextKey(new URLSearchParams("compareTarget=base&scope=folder&showIgnored=0"));
+    const a = live.subscribe(sink(), "ws", { topic: "document", key: showing });
+    const b = live.subscribe(sink(), "ws", { topic: "document", key: hiding });
+    const c = live.subscribe(sink(), "ws", { topic: "document", key: showing });
+    await waitFor(() => child.opened.length === 2, "one upstream per visibility context");
+    expect(child.opened.map(entry => new URL(entry.path, "http://child").searchParams.get("showIgnored")).sort()).toEqual(["0", "1"]);
+    a.detach(); b.detach(); c.detach();
+  });
   test("four subscribers to one conversation share one upstream and each receives every event", async () => {
     const child = fakeSource();
     const live = broker(child.source);

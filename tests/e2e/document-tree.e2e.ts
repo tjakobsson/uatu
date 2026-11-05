@@ -73,7 +73,7 @@ async function bootSession(
   // has been loaded (file count > 0). Both are reliable, library-independent
   // readiness signals.
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await expect(page.locator("#document-count")).not.toHaveText("0 files", { timeout: 5_000 });
+  await expect(page.locator("#document-count")).not.toHaveText("0", { timeout: 5_000 });
   // At least one tree row must be present in the shadow DOM. We don't assert
   // .toBeVisible() because the library virtualizes rows — in git-backed
   // sessions the workspace has 25+ files and the row we care about might
@@ -346,14 +346,21 @@ for (const operation of ["removed", "renamed"] as const) {
     await collapseSelectedAncestorAndExpandMetadata(page);
     await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
     // Establish presence before removal so absence cannot pass before delivery.
+    await revealTreeRow(page, "unrelated.md");
     await expect(treeRow(page, "unrelated.md")).toBeAttached();
     if (operation === "removed") {
       await fs.unlink(workspacePath("unrelated.md"));
     } else {
       await fs.rename(workspacePath("unrelated.md"), workspacePath("renamed.md"));
-      await expect(treeRow(page, "renamed.md")).toBeAttached();
+      await expect(async () => {
+        await revealTreeRow(page, "renamed.md");
+        await expect(treeRow(page, "renamed.md")).toBeAttached();
+      }).toPass();
     }
+    await expect.poll(() => page.evaluate(() => (window as any).__treeDeliveredIndex?.roots.every((root: any) =>
+      root.docs.every((doc: any) => doc.relativePath !== "unrelated.md")))).toBe(true);
     await expect(treeRow(page, "unrelated.md")).not.toBeAttached();
+    await revealTreeRow(page, "guides/");
     await expectPreservedFolderState(page);
   });
 }

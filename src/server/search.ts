@@ -1,8 +1,9 @@
 // Content search across the watched roots.
 //
 // There is no index and no walker here on purpose. The watch session already
-// holds a `RootGroup[]` that is ignore-filtered (`.gitignore` + `.uatu.json`),
-// binary-classified, and kept current by the watcher — so searching is reading
+// holds the permitted superset, binary-classified and kept current by the
+// watcher. The route applies the requesting client's ignored visibility before
+// searching, so searching is reading
 // that list and matching. Building a second corpus would mean a second set of
 // ignore rules to keep in step and an invalidation problem to acquire.
 //

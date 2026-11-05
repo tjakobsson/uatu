@@ -54,6 +54,27 @@ function fakeObserver() {
   return { state, observe };
 }
 
+test("rejoining metadata observation invalidates changed policy but skips identical toggle baselines", async () => {
+  let fingerprint = "original", invalidations = 0, starts = 0;
+  const observe: typeof createGitObserver = options => ({
+    start: async () => { starts++; options.onIgnoreBaseline?.(fingerprint); },
+    directories: () => [], trees: () => [], resolutions: () => 0,
+    noteWorkingTreeChange: () => {}, resync: async () => {}, close: () => {},
+  });
+  const refresh = createRepositoryRefresh({ entries: [], roots: () => [], publish: () => {}, collect: async () => [], observe,
+    onIgnorePolicyChange: () => { invalidations++; },
+  });
+  try {
+    for (let i = 1; i <= 3; i++) {
+      refresh.demand(true); await until(() => starts === i); refresh.demand(false);
+    }
+    expect(invalidations).toBe(1);
+    fingerprint = "edited while no clients were attached";
+    refresh.demand(true); await until(() => starts === 4);
+    expect(invalidations).toBe(2);
+  } finally { refresh.stop(); }
+});
+
 function intervalSpies() {
   const timer = { unref() {} } as ReturnType<typeof setInterval>;
   const set = spyOn(globalThis, "setInterval").mockReturnValue(timer);

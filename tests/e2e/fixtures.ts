@@ -152,7 +152,7 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
   // root automatically when given a CSS selector.
   await expect(treeRow(page, "README.md")).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await expect(page.locator("#document-count")).toHaveText("18 files");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "18 files");
   await waitForPreviewToSettle(page);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await normalizeFollowOff(page);

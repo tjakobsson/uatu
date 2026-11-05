@@ -27,7 +27,7 @@ test("connection indicator exposes live and reconnecting classes", async ({ page
 test("single-file mode shows only the pinned markdown file in the sidebar", async ({ page, request }) => {
   await request.post("/__e2e/reset", { data: { file: "README.md" } });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("1 file");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "1 file");
   await expect(treeRow(page, "README.md")).toBeVisible();
   await expect(treeRow(page, "guides/setup.md")).toHaveCount(0);
 });
@@ -175,7 +175,7 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
     data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("19 files");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "19 files");
 
   const yamlButton = treeRow(page, "config.yaml");
   await expect(yamlButton).toBeVisible();

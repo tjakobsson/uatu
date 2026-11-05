@@ -8,7 +8,8 @@ export type PersonalWorkspaceState = {
   follow?: boolean;
   previewMode?: "rendered" | "source" | "diff";
   compareTarget?: "base" | "last-commit";
-  filesFilter?: "all" | "changed";
+  filesFilter?: "all" | "recent" | "changed";
+  showIgnored?: boolean;
   lastPtyId?: string;
 };
 
@@ -63,6 +64,7 @@ const PATCH_FIELDS = new Set([
   "previewMode",
   "compareTarget",
   "filesFilter",
+  "showIgnored",
   "lastPtyId",
 ]);
 
@@ -115,6 +117,12 @@ export function parsePersonalWorkspaceStatePatch(value: unknown): PersonalWorksp
     }
     patch.follow = record.follow;
   }
+  if (record.showIgnored !== undefined) {
+    if (record.showIgnored !== null && typeof record.showIgnored !== "boolean") {
+      throw new Error("showIgnored must be a boolean or null");
+    }
+    patch.showIgnored = record.showIgnored;
+  }
   if (record.previewMode !== undefined) {
     if (
       record.previewMode !== null
@@ -131,7 +139,7 @@ export function parsePersonalWorkspaceStatePatch(value: unknown): PersonalWorksp
     patch.compareTarget = record.compareTarget as PersonalWorkspaceStatePatch["compareTarget"];
   }
   if (record.filesFilter !== undefined) {
-    if (record.filesFilter !== null && record.filesFilter !== "all" && record.filesFilter !== "changed") {
+    if (record.filesFilter !== null && record.filesFilter !== "all" && record.filesFilter !== "recent" && record.filesFilter !== "changed") {
       throw new Error("invalid filesFilter");
     }
     patch.filesFilter = record.filesFilter as PersonalWorkspaceStatePatch["filesFilter"];

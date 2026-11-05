@@ -34,6 +34,7 @@ import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, openBrowser, spaShel
 import { findNonGitWatchEntries, resolveWatchRoots, type WatchEntry } from "./server/roots";
 import { createWatchSession } from "./server/watch-session";
 import { buildFetchFallback, buildRoutes, SERVE_IDLE_TIMEOUT_SECONDS } from "./server/routes";
+import { startMediaHttpBoundary, type MediaHttpBoundary } from "./server/media-http-boundary";
 import { DEFAULT_PORT_SCAN_LIMIT, findFreePort } from "./server/port-probe";
 import { terminalBackendAvailable } from "./terminal/backend";
 import { createTerminalServer } from "./terminal/server";
@@ -266,9 +267,12 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
       basePath: options.basePath,
     });
 
-    server = Bun.serve({
+    let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
+    let workspaceRoutes!: ReturnType<typeof buildRoutes>;
+    const mediaPath = `${options.basePath}api/media`;
+    const inner = Bun.serve({
       hostname: "127.0.0.1",
-      port: chosenPort,
+      port: 0,
       idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
       routes: {
         // The HTMLBundle MUST appear as a literal at this call site so
@@ -289,7 +293,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
         ...((options.basePath === "/"
           ? { "/": { GET: () => spaShellResponse(server!) } }
           : {}) as { "/": { GET: () => Promise<Response> } }),
-        ...buildRoutes({
+        ...(workspaceRoutes = buildRoutes({
           mode: "prod",
           assets: {
             mermaid: mermaidAsset,
@@ -313,9 +317,9 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
           metrics,
           debug: options.debug,
           getMetricsSnapshot: () => metrics.snapshot(),
-        }),
+        })),
       },
-      fetch: (request, srv) => fetchFallback(request, srv),
+      fetch: (request, srv) => fetchFallback(boundary?.normalizeRequest(request) ?? request, boundary?.server ?? srv),
       // The serve options type is an XOR (websocket required, or absent) and
       // cannot express "present iff the terminal is enabled" — and this call
       // must stay a single object literal so Bun's bundler can analyze the
@@ -336,6 +340,12 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
           }
         : undefined) as WebSocketHandler<Parameters<NonNullable<typeof terminalServer>["open"]>[0]["data"]>,
     });
+    boundary = startMediaHttpBoundary({ server: inner, hostname: "127.0.0.1", port: chosenPort,
+      isMediaRequest: request => new URL(request.url).pathname === mediaPath,
+      fetch: request => (workspaceRoutes[mediaPath] as { GET(request: Request): Response | Promise<Response>; HEAD(request: Request): Response | Promise<Response> })[request.method as "GET" | "HEAD"](request),
+    });
+    server = boundary.server;
+    await boundary.ready;
   } catch (error) {
     clearIndexingStatus();
     stopStartupHeartbeat();
