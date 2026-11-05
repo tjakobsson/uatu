@@ -2980,6 +2980,8 @@ Opening or returning to a conversation, reconnecting after missed provider event
 
 Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, interrupt, relaunch, or background work. After a service/workspace restart, completed provider history SHALL remain inspectable and unresolved work SHALL be revalidated; Uatu MUST NOT promise continued execution solely because a pre-restart launch exists.
 
+Known implementation exception, explicitly deferred from this change: [#608](https://github.com/tjakobsson/uatu/issues/608) tracks a later root-only positive-to-zero descendant refresh after a changed launcher has recovered to a current positive receipt. The zero-accounting requirement remains intended behavior, not a claim that this second-rewrite sequence is implemented here.
+
 #### Scenario: Completion is missed while disconnected
 - **WHEN** a worker completes while the V2 event connection is absent and the provider offers no replay
 - **THEN** reconnect recovers its terminal result from history or pending notification state
@@ -3077,9 +3079,12 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 - **AND** a deeper branch hidden by the same undo is selectively withdrawn only from complete current own topology, preserving visible and temporarily unavailable descendants
 - **AND** changed or unresolved launcher bindings, positive membership deficits, incoming ownership counterproof, cancellation, superseded generations, and newer live presentation keep their existing safeguards
 
-#### Scenario: Descendant expiry preserves promptly verified own accounting
-- **WHEN** a native child's own accounting returns under current source and owner evidence but optional descendant reconstruction exceeds its bounded window
+#### Scenario: Incomplete descendants preserve promptly verified own accounting
+- **WHEN** a native child's own accounting returns under current source and owner evidence but optional descendant reconstruction exceeds its bounded window or descendant ownership is unavailable
 - **THEN** direct and ancestor-first recovery retain usable own task cost/model while leaving descendant completeness unset and unavailable descendant amounts unknown
+- **AND** usable own prompt/accounting proof does not establish complete outgoing topology, clear a positive cohort deficit, authorize deeper parent-task bindings, or permit hidden-branch withdrawal
+- **AND** without current outgoing topology, deeper binding requires an exact immutable retained relation matching both current launcher occurrences, scope and native prompt identity; changed parent occurrences, copied lines or ID/positional matching cannot mint that proof, while unchanged exact receipts remain available
+- **AND** readable current native tool occurrence, prompt-origin and visibility evidence invalidates stale cached launchers even when unavailable ownership strips the normalized child association; this evidence does not admit unverified children or establish topology completeness
 - **AND** later recovery retries incomplete descendants, while expired or changed owners, source leases, incoming associations, and generations do not authorize stale publication or control authority
 
 #### Scenario: Concurrent foreground progress preserves complete attribution order

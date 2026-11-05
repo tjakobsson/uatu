@@ -669,10 +669,22 @@ When several ancestors are open, one accepted update from the same bounded
 rewrite must not block its remaining ancestor updates; independent native
 changes still keep their own precedence and invalidation checks.
 Promptly verified own accounting is also independent of descendant completion:
-if a grandchild read expires, available own cost/model remain usable while
-descendant completeness stays unset. Source, ownership, cancellation, and
-generation changes still fence those amounts; session lifetime totals remain
-separate from task receipts.
+if a grandchild read expires or its ownership lookup is unavailable, available
+own cost/model remain usable while descendant completeness stays unset. Own
+prompt/accounting proof does not establish complete outgoing topology: it cannot
+clear positive cohort deficits, authorize deeper bindings, or withdraw hidden
+branches. Without current outgoing topology, a deeper receipt needs an exact
+immutable retained relation matching both current launcher occurrences; changed
+parent occurrences or copied line objects cannot acquire that binding from IDs
+or positional pairing. Readable current native tool inputs, clocks, prompt origins
+and visibility also invalidate stale cached launchers even when unavailable child
+ownership strips their normalized association; this evidence grants no ownership.
+Source, ownership, cancellation, and generation changes
+still fence those amounts; session lifetime totals remain separate from task receipts.
+Known limitation: after a changed deeper launcher recovers to a positive receipt,
+a later root-only refresh can retain that amount despite current native zero
+accounting. This separate second-rewrite bug is tracked in
+[#608](https://github.com/tjakobsson/uatu/issues/608), not fixed by this recovery change.
 If another client commits the revert before Uatu sees its staged boundary,
 discarded settled worker results must still disappear rather than return from
 retained state. Separate native-origin evidence preserves visible workers under

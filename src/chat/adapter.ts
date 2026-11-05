@@ -4095,7 +4095,9 @@ export class ChatAdapter {
     const revokedDescendants = new Set<string>();
     const sourceGuards: Array<() => boolean> = [];
     let inventorySignature: string | undefined;
+    let ownSignature: string | undefined;
     let progressiveOwn = false;
+    let currentLauncher: ((launcher: Launcher) => boolean) | undefined;
     let descendantIds: string[] = [];
     const reconstructDescendants = async () => {
       for (const grandchildId of descendantIds) {
@@ -4116,6 +4118,7 @@ export class ChatAdapter {
       let cursor: string | undefined;
       let complete: ConversationItem[] | undefined;
       let paged: ConversationItem[] = [];
+      let origins: ProviderHistoryPage["workerOriginCoverage"];
       do {
         signal?.throwIfAborted();
         const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT, ...(signal ? { signal } : {}) });
@@ -4125,6 +4128,7 @@ export class ChatAdapter {
           sourceGuards.push(page.isWorkerSourceCurrent);
         }
         if (page.workerSource) sources?.observe(page.workerSource, key);
+        origins ??= page.workerOriginCoverage;
         for (const child of page.workerAssociationContradictions ?? []) revokedDescendants.add(child);
         if (page.visibleDescendantsIncomplete) descendantsIncomplete = true;
         sessionCostUsd = page.sessionCostUsd;
@@ -4141,11 +4145,37 @@ export class ChatAdapter {
       // each under the prompt it followed. A launcher that leads back into
       // the chain being read (a loop in the data) is not listed.
       transcript = readChildTranscript(complete ?? paged, ancestry);
+      if (this.provider.watchWorkerAssociations && sources?.hasAccountingPage(key) && origins) {
+        const occurrences = new Map<string, { binding: LauncherBinding; promptId: string | undefined } | undefined>();
+        const children = new Map<string, string | undefined>();
+        let promptId: string | undefined;
+        for (const item of complete ?? paged) {
+          if (item.type === "user_message") promptId = item.id.replace(/^message:/, "");
+          else if (item.type === "tool") {
+            if (occurrences.has(item.id)) occurrences.set(item.id, undefined);
+            else if (occurrences.size < MAX_CHILD_ATTRIBUTIONS) occurrences.set(item.id, { binding: launcherBinding(item), promptId });
+          }
+        }
+        for (const origin of origins) if (origin.taskType === "agent" && origin.toolUseId) {
+          const id = `tool:${origin.toolUseId}`;
+          if (children.has(id)) children.set(id, undefined);
+          else if (children.size < MAX_CHILD_ATTRIBUTIONS) children.set(id, origin.childConversationId);
+        }
+        // Unassociated native tools can disprove a retained occurrence, never
+        // admit a child. Hidden, ambiguous and changed prompt origins likewise
+        // cannot reach retained binding proof. Overflow fails closed.
+        currentLauncher = launcher => {
+          const occurrence = occurrences.get(launcher.id);
+          return occurrence !== undefined && sameLauncherBinding(launcher.binding, occurrence.binding)
+            && occurrence.promptId === transcript.prompts[launcher.promptIndex]?.id && children.get(launcher.id) === launcher.conversationId;
+        };
+      }
       // Fingerprint ONLY the provider inventory, before filtering or merging
       // cached/live prompts and launchers. Oversized proof fails closed while
       // ordinary reconstruction keeps its existing behavior and budgets.
-      if (!descendantsIncomplete && !revokedDescendants.size && transcript.prompts.length + transcript.launchers.length <= MAX_CHILD_ATTRIBUTIONS) {
-        inventorySignature = transcriptSignature(transcript);
+      if (transcript.prompts.length + transcript.launchers.length <= MAX_CHILD_ATTRIBUTIONS) {
+        ownSignature = transcriptSignature({ prompts: transcript.prompts, launchers: [] });
+        if (!descendantsIncomplete && !revokedDescendants.size) inventorySignature = transcriptSignature(transcript);
       }
       transcript.launchers = transcript.launchers.filter(launcher => !revokedDescendants.has(launcher.conversationId));
       descendantIds = [...new Set(transcript.launchers.map(launcher => launcher.conversationId))];
@@ -4203,7 +4233,8 @@ export class ChatAdapter {
     }
     if (liveTranscript) {
       for (const prompt of liveTranscript.prompts) if (!transcript.prompts.some(known => known.id === prompt.id)) transcript.prompts.push(prompt);
-      for (const launcher of liveTranscript.launchers) if (!revokedDescendants.has(launcher.conversationId) && !transcript.launchers.some(known => known.id === launcher.id)) transcript.launchers.push(launcher);
+      for (const launcher of liveTranscript.launchers) if (!revokedDescendants.has(launcher.conversationId)
+        && (!currentLauncher || currentLauncher(launcher)) && !transcript.launchers.some(known => known.id === launcher.id)) transcript.launchers.push(launcher);
     }
     // A launcher removed while this read was in flight is newer than the
     // transcript it returned, and must not come back with it.
@@ -4221,10 +4252,11 @@ export class ChatAdapter {
     this.bankChildTranscript(key, transcript);
     if ((this.childSessionCosts.get(key)?.sequence ?? 0) <= readStartedAt) this.bankSessionCost(key, sessionCostUsd);
     // Own accounting is already verified under this owner, before optional
-    // descendants can consume the remaining deadline. Its inventory is not
-    // descendant completeness, and cannot authorize a retired or changed owner.
-    if (inventorySignature !== undefined && sources?.hasAccountingPage(key)) sources.inventory(key, {
-      signature: inventorySignature, owner: this.attributionEpochs.get(key)!, revision: this.attributionEpochs.get(key)!.allocationRevision,
+    // descendants can consume the remaining deadline. Own prompt/accounting
+    // authority does not imply complete outgoing topology: missing optional
+    // ownership cannot withdraw branches or validate descendant bindings.
+    if (ownSignature !== undefined && sources?.hasAccountingPage(key)) sources.inventory(key, {
+      ownSignature, signature: inventorySignature, owner: this.attributionEpochs.get(key)!, revision: this.attributionEpochs.get(key)!.allocationRevision,
     });
     if (progressiveOwn) try {
       await reconstructDescendants();
@@ -4309,15 +4341,18 @@ export class ChatAdapter {
     return owner ? owner.allocationFloor !== undefined : this.hasRetainedAttribution(key);
   }
 
-  private ownAccountingCurrent(key: string, sources?: WorkerSourceRead): boolean {
+  private ownAccountingCurrent(key: string, sources?: WorkerSourceRead, topology = false): boolean {
     if (!sources?.hasAccountingPage(key)) return false;
     // Preserve completed reconstruction authority. A still-incomplete native
-    // read additionally needs its own banked, unchanged inventory and owner.
+    // read additionally needs its own banked, unchanged prompts and owner.
+    // Callers granting outgoing-topology authority still require its complete
+    // raw inventory, not merely successfully returned own accounting.
     if (this.completeAttributions.has(key)) return true;
     const inventory = sources.inventory(key), transcript = this.childTranscripts.get(key);
     return inventory !== undefined && transcript !== undefined
       && this.attributionEpochs.get(key) === inventory.owner && inventory.owner.allocationRevision === inventory.revision
-      && transcriptSignature(transcript) === inventory.signature;
+      && (topology ? inventory.signature !== undefined && transcriptSignature(transcript) === inventory.signature
+        : transcriptSignature({ prompts: transcript.prompts, launchers: [] }) === inventory.ownSignature);
   }
 
   private attributionPublicationGuard(key: string, sources: WorkerSourceRead): () => boolean {
@@ -4471,12 +4506,12 @@ export class ChatAdapter {
    * ancestor pages prove visibility/bindings, not ancestor accounting authority. */
   private async refreshRewrittenAncestors(parentId: string, childId: string, sources: WorkerSourceRead, signal: AbortSignal, coalescer: ProviderUpdateCoalescer): Promise<void> {
     const key = attributionKey(parentId, childId), owner = this.attributionEpochs.get(key);
-    if (owner?.allocationFloor !== 0 || !this.ownAccountingCurrent(key, sources)) return;
+    if (owner?.allocationFloor !== 0 || !this.ownAccountingCurrent(key, sources, true)) return;
     const usage = this.childUsage.get(key), models = this.childModels.get(key), own = this.childTranscripts.get(key);
     const accountingCurrent = this.attributionPublicationGuard(key, sources);
     const inventory = sources.inventory(key);
     const topologyCurrent = inventory !== undefined && own !== undefined && inventory.owner === owner
-      && inventory.revision === owner.allocationRevision && inventory.signature === transcriptSignature(own);
+      && inventory.revision === owner.allocationRevision && inventory.signature !== undefined && inventory.signature === transcriptSignature(own);
     const path: Array<{ upper: string; lower: string; key: string; transcript: ChildTranscript; signature: string; owner: AttributionOwner | undefined; revision: number | undefined }> = [];
     const seen = new Set([childId]);
     let lower = parentId;
@@ -4724,13 +4759,20 @@ export class ChatAdapter {
     const key = attributionKey(parentId, childId);
     const folds = foldByTask(rows, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
     const beneath = new Map<string, SubagentLine[]>();
-    for (const line of this.descendantLines(parentId, childId, rows, new Set([parentId, childId]), sources)) {
+    const retainedRows = rows.map(row => {
+      const current = this.projections.get(parentId)?.get(row.id);
+      return current?.type === "tool" && current.childConversationId === childId && row.binding && sameLauncherBinding(row.binding, launcherBinding(current))
+        ? { ...row, retainedDescendants: current.descendants } : row;
+    });
+    for (const line of this.descendantLines(parentId, childId, retainedRows, new Set([parentId, childId]), sources)) {
       beneath.set(line.parentId, [...(beneath.get(line.parentId) ?? []), line]);
     }
     const branch = (id: string): SubagentLine[] => (beneath.get(id) ?? []).flatMap(line => [line, ...branch(line.id)]);
     return folds.map((fold, index) => {
       const descendants = branch(rows[index]!.id);
-      return { ...fold, ...(descendants.length > 0 ? { descendants } : {}) };
+      // A denied retained relation is an explicit withdrawal, not a sparse
+      // omission that the presentation merge may restore on a direct row.
+      return { ...fold, ...(descendants.length > 0 || this.provider.watchWorkerAssociations && retainedRows[index]?.retainedDescendants?.length ? { descendants } : {}) };
     });
   }
 
@@ -4751,7 +4793,7 @@ export class ChatAdapter {
       const transcript = this.childTranscripts.get(scope);
       if (!transcript || sources.inventory(scope) !== proof || !sources.hasAccountingPage(scope)
         || this.attributionEpochs.get(scope) !== proof.owner || proof.owner.allocationRevision !== proof.revision
-        || !this.completeAttributions.has(scope) || transcriptSignature(transcript) !== proof.signature) return false;
+        || !this.completeAttributions.has(scope) || proof.signature === undefined || transcriptSignature(transcript) !== proof.signature) return false;
     }
     return publication.owner === inventory.owner && publication.owner.epoch === publication.epoch
       && publication.views.every(view => this.projections.get(view.id) === view.projection
@@ -4817,9 +4859,15 @@ export class ChatAdapter {
    * way the spend is. `ancestry` stops a loop in the data.
    */
   private descendantLines(parentId: string, sessionId: string, rows: readonly TaskRow[], ancestry: ReadonlySet<string>, sources?: WorkerSourceRead): SubagentLine[] {
-    const transcript = this.childTranscripts.get(attributionKey(parentId, sessionId));
+    const parentKey = attributionKey(parentId, sessionId);
+    const transcript = this.childTranscripts.get(parentKey);
     const launchers = transcript?.launchers ?? [];
     if (launchers.length === 0 || rows.length === 0) return [];
+    // Own spend does not prove the outgoing launcher inventory. A retired or
+    // own-only read may bind descendants only through immutable retained lines
+    // matching the current parent occurrence, never positional cache pairing.
+    const bindingRestricted = this.provider.watchWorkerAssociations && !this.ownAccountingCurrent(parentKey, sources, true)
+      && (this.allocationBlocked(parentKey) || !this.completeAttributions.has(parentKey) || sources?.hasAccountingPage(parentKey) === true);
     const pairing = pairPrompts(rows, transcript?.prompts ?? []);
     const byChild = new Map<string, Launcher[]>();
     for (const launcher of launchers) {
@@ -4835,7 +4883,7 @@ export class ChatAdapter {
       // additionally needs authoritative inventories and exact native pairing;
       // only enclosing history publication changes persistent eligibility.
       const currentCohort = this.allocationBlocked(key) && this.nestedAllocationProof(parentId, sessionId, childId, rows, own, sources)
-        || this.ownAccountingCurrent(attributionKey(parentId, sessionId), sources)
+        || this.ownAccountingCurrent(attributionKey(parentId, sessionId), sources, true)
         && this.ownAccountingCurrent(key, sources)
         && this.attributionEpochs.get(key)?.allocationFloor === 0;
       const guarded = (this.allocationBlocked(key) && !currentCohort) || unresolved !== undefined;
@@ -4845,16 +4893,22 @@ export class ChatAdapter {
         // deeper launch to a task. Only an exact current row's recorded direct
         // descendant relation can provide that binding. Ambiguity fails closed.
         const promptId = transcript?.prompts[launcher.promptIndex]?.id;
-        const retainedParents = rows.filter(row => row.descendantBinding?.some(line => {
+        const matchesRetained = (row: TaskRow, line: SubagentLine) => {
           const proof = this.descendantBindings.get(line);
           return line.id === launcher.id && line.parentId === row.id && line.conversationId === childId
             && proof !== undefined && proof.parentSessionId === parentId && proof.sessionId === sessionId
             && proof.parentId === row.id && proof.promptId === promptId
             && sameLauncherBinding(proof.parent, row.binding) && sameLauncherBinding(proof.launcher, launcher.binding);
-        }));
+        };
+        const retainedParents = rows.filter(row => (row.descendantBinding ?? (bindingRestricted ? row.retainedDescendants : undefined))?.some(line => matchesRetained(row, line)));
         const positional = rows[Math.min(pairing[launcher.promptIndex] ?? launcher.promptIndex, rows.length - 1)]!;
         const parent = retainedParents.length === 1 ? retainedParents[0]
-          : retainedParents.length === 0 && positional.descendantBinding === undefined ? positional : undefined;
+          : retainedParents.length === 0 && !bindingRestricted && positional.descendantBinding === undefined ? positional : undefined;
+        if (parent) {
+          const projected = this.projections.get(sessionId)?.get(launcher.id);
+          tasks[index] = { ...tasks[index]!, retainedDescendants: projected?.type === "tool" && projected.childConversationId === childId
+            && projected.descendants !== undefined && sameLauncherBinding(launcher.binding, launcherBinding(projected)) ? projected.descendants : parent.retainedDescendants };
+        }
         // Recursive lines obey the same cohort fence as direct rows. Only a
         // current matching row can retain its own known attribution; an old
         // ancestor line cannot prove a changed input or occurrence's spend.
@@ -4863,14 +4917,25 @@ export class ChatAdapter {
           && sameLauncher(launcher, launcherOf(current, launcher.promptIndex)) && !unresolved?.has(launcher.id)
           && (sameLauncherBinding(launcher.binding, this.accountedTask(sessionId, childId, current)?.binding)
             || sources?.hasAccountingPage(key) === true && sameLauncherBinding(launcher.binding, this.accountedTask(sessionId, childId, launcher)?.binding));
+        // A live materialization can lack its own receipt object while an
+        // ancestor still holds the exact immutable line. This is retention
+        // only: current pages, positive deficits and changed/missing current
+        // occurrences cannot borrow that older line's amounts.
+        const retainedRelation = parent && this.attributionEpochs.get(key)?.allocationFloor === 0 && !unresolved?.has(launcher.id)
+          && (!current || current.type === "tool" && current.childConversationId === childId && sameLauncher(launcher, launcherOf(current, launcher.promptIndex)))
+          ? parent.retainedDescendants?.find(line => matchesRetained(parent, line)) : undefined;
+        const retained = !sources && current?.type === "tool"
+          && (!this.accountedTask(sessionId, childId, current) || sameLauncherBinding(launcher.binding, this.accountedTask(sessionId, childId, current)?.binding))
+          ? retainedRelation : undefined;
         // Keep all tasks in folding order, including denied ones: dropping one
         // would give its aggregate to a survivor. Denied bindings propagate to
         // every depth, while an unaffected current subtree retains its proof.
-        if (!parent || guarded) tasks[index] = { ...tasks[index]!, descendantBinding: parent && exact ? current.descendants ?? [] : [] };
+        if (!parent || guarded) tasks[index] = { ...tasks[index]!, descendantBinding: parent && exact ? current.descendants ?? [] : retainedRelation ? parent?.retainedDescendants ?? [] : [] };
         if (!parent) return;
-        const attribution = guarded ? exact ? {
-          ...(current.usage === undefined ? {} : { usage: current.usage }),
-          ...(current.model === undefined ? {} : { model: current.model }),
+        const known = exact ? current : retained;
+        const attribution = guarded ? known ? {
+          ...(known.usage === undefined ? {} : { usage: known.usage }),
+          ...(known.model === undefined ? {} : { model: known.model }),
         } : {} : folds[index];
         const line: SubagentLine = {
           id: launcher.id,
@@ -5768,6 +5833,7 @@ export class ChatAdapter {
           this.attributionReadEpoch(key);
           const owner = this.attributionEpochs.get(key)!;
           const proof = rows.length > 0 && !incomplete.has(childId) && this.ownAccountingCurrent(key, sources)
+            && ((owner.allocationFloor ?? 0) <= 0 || this.ownAccountingCurrent(key, sources, true))
             && (rows.length >= (owner.allocationFloor ?? 0) || (this.childTranscripts.get(key)?.prompts.length ?? Infinity) <= rows.length);
           // A banked session tally is not proof for a changed task occurrence.
           // Without current accounting, only the exact retained cohort may fold
@@ -6661,6 +6727,8 @@ type DescendantBinding = Readonly<{ parentSessionId: string; sessionId: string; 
 type Prompt = { id: string; text?: string };
 // A row (or nested launcher) that gave a subagent a task, with the prompt it gave.
 type TaskRow = { id: string; prompt?: string; binding?: LauncherBinding;
+  // Candidate references only; every relation still needs immutable proof.
+  retainedDescendants?: readonly SubagentLine[];
   // Read-local references to an exact current row's existing descendants.
   // Undefined keeps ordinary pairing; an empty list denies deeper bindings.
   descendantBinding?: readonly SubagentLine[] };
@@ -6677,7 +6745,7 @@ type AttributionOwner = {
 };
 type ChildUsage = Map<string, TokenUsage> & { allocationOwner?: AttributionOwner };
 type AllocationPublication = { owner: AttributionOwner; revision: number; rows: readonly TaskRow[]; incomplete: boolean; proof: boolean };
-type AccountingInventory = Readonly<{ signature: string; owner: AttributionOwner; revision: number }>;
+type AccountingInventory = Readonly<{ ownSignature: string; signature: string | undefined; owner: AttributionOwner; revision: number }>;
 type NestedAllocationPublication = {
   parentKey: string; key: string; parentId: string; sessionId: string; childId: string;
   parentInventory: AccountingInventory; inventory: AccountingInventory; owner: AttributionOwner; epoch: number;
