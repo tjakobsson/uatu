@@ -679,6 +679,9 @@ parent occurrences or copied line objects cannot acquire that binding from IDs
 or positional pairing. Readable current native tool inputs, clocks, prompt origins
 and visibility also invalidate stale cached launchers even when unavailable child
 ownership strips their normalized association; this evidence grants no ownership.
+If a verified live launcher arrives after the accounting snapshot was captured,
+the older reconstruction retries within its existing bounded read rather than
+dropping the newer edge or claiming complete descendant accounting.
 Source, ownership, cancellation, and generation changes
 still fence those amounts; session lifetime totals remain separate from task receipts.
 Known limitation: after a changed deeper launcher recovers to a positive receipt,

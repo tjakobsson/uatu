@@ -4192,6 +4192,150 @@ test(`recursive allocation eligibility survives degraded nested history (${outco
   } finally { releaseRoot(); releaseFreshHistory(); await pendingRoot?.catch(() => undefined); observer?.events.cancel(); clock.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
+for (const depth of [0, 1, 2]) for (const timing of ["before", "captured", "descendants", "publication"] as const)
+for (const coalesceWindowMs of [0, 25])
+for (const outcome of depth > 0 && timing === "captured" && coalesceWindowMs === 0
+  ? ["healthy", "foreign-parent", "foreign-workspace", "generation", "expired"] as const : ["healthy"] as const)
+test(`concurrent native launcher survives an older accounting page (${depth}/${timing}/coalesce=${coalesceWindowMs}/${outcome})`, async () => {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = (parent: string, child: string, call: string, created: number) => {
+    const message = structuredClone(fixture.launch); message.sessionID = parent; message.id = `msg_${call}`; message.time.created = created;
+    const tool = message.content[0]; tool.id = call; tool.time = { created, completed: created + 1 };
+    tool.state.input = { ...tool.state.input, prompt: call, background: false };
+    tool.state.metadata = { sessionID: child, status: "completed" }; tool.state.content = [{ type: "text", text: `${call} result` }]; return message;
+  };
+  const prompt = (id: string, text: string) => ({ id, type: "user", text, time: { created: 1 } });
+  const spend = (cost: number) => ({ id: "priced", type: "assistant", time: { created: 2 }, model: { id: "stored" }, cost, content: [] });
+  const root = launch("ses_root", "ses_child", "root", 10), nested = launch("ses_child", "ses_grandchild", "nested", 30);
+  const ancestor = launch("ses_ancestor", "ses_root", "ancestor", 5), existing = launch("ses_child", "ses_existing", "existing", 20);
+  const readId = depth === 0 ? "ses_child" : depth === 1 ? "ses_root" : "ses_ancestor";
+  const owner = new AsyncLocalStorage<boolean>();
+  let added = false, hold = false, denied = false, opened = 0, closed = 0, pages = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, captured!: () => void, release!: () => void, applied!: () => void;
+  const ready = new Promise<void>(resolve => { captured = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_ancestor": () => session("ses_ancestor"),
+    "GET /api/session/ses_root": () => session("ses_root", { parentID: "ses_ancestor", cost: 0.125 }),
+    "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_root", cost: 0.5 }),
+    "GET /api/session/ses_grandchild": () => session("ses_grandchild", { parentID: denied && outcome === "foreign-parent" ? "ses_other" : "ses_child", cost: 0.25,
+      ...(denied && outcome === "foreign-workspace" ? { location: { directory: "/foreign" } } : {}) }),
+    "GET /api/session/ses_existing": () => session("ses_existing", { parentID: "ses_child", cost: 0.125 }),
+    "GET /api/session/ses_ancestor/message": () => ({ data: [ancestor], cursor: {} }),
+    "GET /api/session/ses_root/message": () => ({ data: [prompt("root_prompt", "ancestor"), spend(0.125), root], cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [prompt("child_prompt", "root"), spend(0.5), existing, ...(added ? [nested] : [])], cursor: {} }),
+    "GET /api/session/ses_grandchild/message": () => ({ data: [prompt("grandchild_prompt", "nested"), spend(0.25)], cursor: {} }),
+    "GET /api/session/ses_existing/message": () => ({ data: [prompt("existing_prompt", "existing"), spend(0.125)], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+  });
+  const provider = server.provider(), list = provider.listMessages.bind(provider), events = provider.events.bind(provider);
+  let sourceCurrent: (() => boolean) | undefined;
+  let pageSignal: AbortSignal | undefined;
+  let holdAutomatic = false, releaseAutomatic!: () => void;
+  const automatic = new Promise<void>(resolve => { releaseAutomatic = resolve; });
+  let admitted!: () => void;
+  const admission = new Promise<void>(resolve => { admitted = resolve; });
+  provider.listMessages = async (...args) => {
+    if (holdAutomatic && !owner.getStore()) await automatic;
+    const page = await list(...args);
+    if (owner.getStore() && args[0] === "ses_child") pages++;
+    if (owner.getStore() && hold && args[0] === (timing === "descendants" && depth > 0 ? "ses_existing" : "ses_child") && timing !== "publication") {
+      hold = false; sourceCurrent = page.isWorkerSourceCurrent; pageSignal = args[1]?.signal;
+      expect((page.completeItems ?? page.items).some(item => item.id === "tool:nested")).toBe(false);
+      captured(); await gate; admitted();
+    }
+    return page;
+  };
+  const boundary = provider.getHistoryRevertBoundary.bind(provider);
+  provider.getHistoryRevertBoundary = async (...args) => {
+    const value = await boundary(...args);
+    if (owner.getStore() && hold && timing === "publication" && args[0] === readId && args[1]?.expectedBoundary === null) {
+      hold = false; captured(); await gate;
+    }
+    return value;
+  };
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    yield event;
+    if (event.eventType === "diagnostic.launcher.applied") applied();
+  } };
+  const emit = async (batch: Array<Record<string, unknown>>) => {
+    const done = new Promise<void>(resolve => { applied = resolve; });
+    for (const event of [...batch, { type: "diagnostic.launcher.applied", data: {} }])
+      wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await done;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs,
+    ...(outcome === "expired" ? { historyReadTimeoutMs: 500 } : {}) });
+  const now = Date.now(); let elapsed = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now + elapsed);
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  const assert = (items: import("../../types").ConversationItem[]) => {
+    const carrier = items.find(item => item.id === (depth === 0 ? "tool:nested" : depth === 1 ? "tool:root" : "tool:ancestor")) as import("../../types").ToolItem;
+    expect(carrier).toBeDefined();
+    if (depth === 0) expect(carrier.usage?.costUsd).toBe(0.25);
+    else {
+      expect(carrier.usage?.costUsd).toBe(depth === 1 ? 0.5 : 0.125);
+      if (denied) expect(carrier.descendants?.some(line => line.conversationId === "ses_grandchild")).toBe(false);
+      else expect(carrier.descendants).toContainEqual(expect.objectContaining({ id: "tool:nested", model: "stored", usage: { costUsd: 0.25 } }));
+      expect(carrier.descendants).toContainEqual(expect.objectContaining({ id: "tool:existing", usage: { costUsd: 0.125 } }));
+    }
+    expect(conversationTotals(items)?.costUsd).toBeCloseTo((depth === 0 ? 0.875 : 1) - (denied ? 0.25 : 0));
+  };
+  try {
+    await adapter.history(readId);
+    elapsed = 31_000; hold = timing !== "before";
+    if (timing !== "before") {
+      reading = owner.run(true, () => adapter.history(readId, { limit: 49 })); void reading.catch(() => undefined);
+      await ready;
+    }
+    added = true;
+    const live = await adapter.subscribe("ses_child");
+    const liveReady = (async () => { for await (const event of live.events) {
+      if (event.type === "item.upsert" && event.item.type === "tool" && event.item.id === "tool:nested") return event.item;
+    } throw new Error("Native launcher publication unavailable"); })();
+    await emit([
+      { id: "evt_new_launcher", type: "session.message.content.updated", created: 30, durable: { aggregateID: "ses_child", seq: 1, version: 1 }, data: { sessionID: "ses_child", messageID: nested.id, content: nested.content } },
+      { type: "session.step.started", created: 2, data: { sessionID: "ses_grandchild", assistantMessageID: "priced", started: 2, model: { providerID: "fixture", id: "live-model" } } },
+      { type: "session.step.ended", created: 2, data: { sessionID: "ses_grandchild", assistantMessageID: "priced", cost: 0.25 } },
+    ]);
+    if (sourceCurrent) expect(sourceCurrent()).toBe(true);
+    expect(await liveReady).toMatchObject({ id: "tool:nested", childConversationId: "ses_grandchild", input: JSON.stringify(nested.content[0].state.input) }); live.events.cancel();
+    if (outcome.startsWith("foreign-")) {
+      denied = true;
+      await provider.getSession("ses_grandchild").catch(error => { if (outcome !== "foreign-workspace") throw error; });
+    }
+    if (outcome === "generation" || outcome === "expired") {
+      if (outcome === "generation") await adapter.stopEventPump();
+      else await new Promise<void>(resolve => { if (pageSignal!.aborted) resolve(); else pageSignal!.addEventListener("abort", () => resolve(), { once: true }); });
+      await expect(reading).rejects.toThrow();
+      expect(sourceCurrent?.()).toBe(false);
+      release(); await admission;
+      const retired = await adapter.subscribe(readId); retired.events.cancel();
+      const carrier = retired.snapshot.items.find(item => item.id === (depth === 1 ? "tool:root" : "tool:ancestor")) as import("../../types").ToolItem;
+      expect(carrier.descendants?.some(line => line.id === "tool:nested" && line.usage?.costUsd === 0.25)).toBe(false);
+      reading = undefined;
+      if (outcome === "generation") {
+        // Keep the replacement pump's independent recovery out of the explicit
+        // fresh-reader assertions, after proving the retired page cannot publish.
+        holdAutomatic = true;
+        void adapter.startEventPump(); await provider.waitForEventStream(AbortSignal.timeout(3_000));
+      }
+    }
+    release();
+    const result = await (reading ?? owner.run(true, () => adapter.history(readId, { limit: 49 })));
+    const following = await adapter.subscribe(readId); following.events.cancel();
+    const fresh = await owner.run(true, () => adapter.history(readId, { limit: 48 }));
+    for (const snapshot of [result, following.snapshot, fresh]) assert(snapshot.items);
+    expect(pages).toBeLessThanOrEqual(3);
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  } finally { release(); releaseAutomatic(); await reading?.catch(() => undefined); clock.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
 for (const outcome of ["foreign-parent", "foreign-workspace", "unavailable", "pending-parent", "pending-workspace"] as const)
 for (const stale of outcome.startsWith("pending-") ? [true] : outcome === "unavailable" ? [false] : [false, true])
 test(`nested accounting reconciles scoped source authority (${outcome}/stale=${stale})`, async () => {

@@ -4169,6 +4169,16 @@ export class ChatAdapter {
           return occurrence !== undefined && sameLauncherBinding(launcher.binding, occurrence.binding)
             && occurrence.promptId === transcript.prompts[launcher.promptIndex]?.id && children.get(launcher.id) === launcher.conversationId;
         };
+        // Native ownership leases can remain current across a newer SSE launch.
+        // Fence that older occurrence inventory through enclosing publication,
+        // rather than dropping the new edge or relaxing stale-cache matching.
+        const liveLaunchersCurrent = currentLauncher;
+        const guard = (lifetime: AbortSignal): WorkerSourceGuard => ({
+          isCurrent: () => !lifetime.aborted && !this.childTranscripts.get(key)?.launchers.some(launcher =>
+            (this.attributionArrivals.get(key)?.get(launcher.id) ?? 0) > readStartedAt && !liveLaunchersCurrent(launcher)),
+          retain: guard,
+        });
+        sources.observe(guard(signal!));
       }
       // Fingerprint ONLY the provider inventory, before filtering or merging
       // cached/live prompts and launchers. Oversized proof fails closed while
@@ -4691,6 +4701,9 @@ export class ChatAdapter {
       else if (sameLauncher(launchers[known]!, next)) continue;
       else launchers[known] = next;
       changed = true;
+      if (this.provider.watchWorkerAssociations) {
+        this.stampArrival(key, row.id);
+      }
     }
     // An occurrence restatement can leave launcher text unchanged while a
     // published cohort invalidation still needs to reach the ancestor lines.

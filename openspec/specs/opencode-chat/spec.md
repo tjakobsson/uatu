@@ -3085,6 +3085,7 @@ Known implementation exception, explicitly deferred from this change: [#608](htt
 - **AND** usable own prompt/accounting proof does not establish complete outgoing topology, clear a positive cohort deficit, authorize deeper parent-task bindings, or permit hidden-branch withdrawal
 - **AND** without current outgoing topology, deeper binding requires an exact immutable retained relation matching both current launcher occurrences, scope and native prompt identity; changed parent occurrences, copied lines or ID/positional matching cannot mint that proof, while unchanged exact receipts remain available
 - **AND** readable current native tool occurrence, prompt-origin and visibility evidence invalidates stale cached launchers even when unavailable ownership strips the normalized child association; this evidence does not admit unverified children or establish topology completeness
+- **AND** a verified live launcher arriving after the accounting snapshot invalidates the older reconstruction through final publication and causes bounded retry rather than losing its edge or falsely stamping descendant completeness; immediate healthy recovery does not wait for the completeness cache to expire
 - **AND** later recovery retries incomplete descendants, while expired or changed owners, source leases, incoming associations, and generations do not authorize stale publication or control authority
 
 #### Scenario: Concurrent foreground progress preserves complete attribution order
