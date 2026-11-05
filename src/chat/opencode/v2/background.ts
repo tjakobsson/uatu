@@ -43,6 +43,16 @@ export function workerExecutionIds(occurrence?: WorkerOccurrenceEvidence): strin
 export type PreparedTool = { fact: LauncherEvidence; update: NormalizedProviderUpdate; name: string; description?: string; prompt?: string; agent?: string };
 export type PreparedNotification = Readonly<{ source: "subagent" | "shell"; worker?: string; status?: "completed" | "failed" | "stopped"; summary: string; description?: string; valid: boolean; userShell?: true }>;
 
+// Native identity recipes only: callers retain validation, alias resolution,
+// ownership checks, and control authorization.
+export function nativeLauncherTaskId(parent: string, call: string): string {
+  return `v2:${parent}:${call}`;
+}
+
+export function nativeNotificationTaskId(parent: string, id: string): string {
+  return `v2:${parent}:notification:${id}`;
+}
+
 export function prepareNotification(payload: unknown): PreparedNotification | undefined {
   const value = record(payload), metadata = record(value.metadata);
   if (metadata.source !== "subagent" && metadata.source !== "shell") return;
@@ -1163,7 +1173,7 @@ export class BackgroundWorkers {
    */
   observeLauncher(parent: string, fact: LauncherEvidence): void {
     if (this.recoveryOnly || !identity(parent) || !identity(fact.call)) return;
-    const callKey = `v2:${parent}:${fact.call}`;
+    const callKey = nativeLauncherTaskId(parent, fact.call);
     const known = this.tasks.get(this.aliases.get(callKey) ?? callKey);
     if (known && launcherChanged(fact, known.evidence)) this.uncertain(known);
     this.bound();
@@ -1385,7 +1395,7 @@ export class BackgroundWorkers {
     const { fact, name } = prepared;
     const call = fact.call, child = fact.child, shell = name === "shell";
     if ((!shell && name !== "subagent") || !identity(call) || !identity(child) || !identity(parent) || (!shell && this.parents.get(child) !== parent) || fact.background !== true) return [];
-    const callKey = `v2:${parent}:${call}`;
+    const callKey = nativeLauncherTaskId(parent, call);
     if (!identity(`task:${callKey}`)) return [];
     const taskId = this.aliases.get(callKey) ?? callKey;
     const known = this.tasks.get(taskId);
@@ -1497,7 +1507,8 @@ export class BackgroundWorkers {
 
   private foldNotification(parent: string, id: string, prepared: PreparedNotification, at: number, terminalReportedAt: number | null, proof?: NativeProof): NormalizedProviderUpdate[] | undefined {
     const shell = prepared.source === "shell", child = prepared.worker;
-    if (!prepared.valid || !identity(child) || !identity(parent) || !identity(id) || !identity(`task:v2:${parent}:notification:${id}`) || (!shell && this.parents.get(child) !== parent)) return;
+    const notificationTaskId = nativeNotificationTaskId(parent, id);
+    if (!prepared.valid || !identity(child) || !identity(parent) || !identity(id) || !identity(`task:${notificationTaskId}`) || (!shell && this.parents.get(child) !== parent)) return;
     // Unclassified shell notes wait silently for a matching background launch.
     // Their presentation has its own bound; negative/replay facts keep the
     // aggregate cap and cannot be evicted to restore control trust.
@@ -1512,7 +1523,7 @@ export class BackgroundWorkers {
     const candidates = occurrences.filter(task => task.item.status === "running" && (undatedReuse || task.item.createdAt <= at));
     const ambiguousAdmission = !shell && candidates.some(task => !this.historicalReportCompatible(child, task.evidence.launches, reportClock.terminalReportedAt));
     if (candidates.length !== 1 || undatedReuse || ambiguousAdmission) {
-      const taskId = `v2:${parent}:notification:${id}`;
+      const taskId = notificationTaskId;
       // This names the admitted native inbox record, not a launch occurrence.
       // UI correlation by child/time must never transfer this alias to a task.
       const executionId = `v1:notification:${digest(JSON.stringify([parent, prepared.source, id, child]))}`;

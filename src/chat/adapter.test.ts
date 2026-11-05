@@ -32,6 +32,36 @@ import { LiveBroker } from "../hub/live-broker";
 import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
 
+for (const action of ["remove", "replace", "upsert", "seed", "evict"] as const)
+test(`fallback result source authority retires projection provenance on ${action}`, async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent"), fixtureSession("other")];
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+  const notice: Extract<ConversationItem, { type: "notice" }> = { id: "notice:native-result", type: "notice", createdAt: 1, level: "info", message: "Actual fallback report" };
+  const relation = { resultId: "native-result", childConversationId: "child", fallback: notice };
+  try {
+    let projection = adapter.projectionForTests("parent");
+    projection.upsert(notice);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false); // Shape/id alone proves nothing.
+    projection.rememberWorkerFallbacks([notice], [{ ...relation, fallback: { ...notice, message: "Different report" } }]);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false);
+    projection.rememberWorkerFallbacks([notice], [relation]);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false); // Enqueue alone is not a stored origin.
+    projection.rememberFallbackStoredOrigins([{ messageId: relation.resultId }]);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(true);
+    expect(projection.workerFallbackOriginAbsent(notice, [{ messageId: relation.resultId }])).toBe(false);
+    if (action === "remove") projection.apply({ kind: "remove", itemId: notice.id });
+    if (action === "replace") projection.replace([]);
+    if (action === "upsert") projection.upsert({ ...notice, message: "Unrelated same-id update" });
+    if (action === "seed") projection.seed([{ ...notice, message: "Unrelated same-id seed" }]);
+    if (action === "evict") { await adapter.history("other"); projection = adapter.projectionForTests("parent"); }
+    projection.upsert(notice);
+    expect(projection.workerFallbackOriginAbsent(notice, [])).toBe(false);
+    const next = await adapter.subscribe("parent"); next.events.cancel();
+    expect(next.snapshot.items).toContainEqual(notice);
+    expect(next.snapshot).not.toHaveProperty("workerResultFallbacks");
+  } finally { await adapter.dispose(); }
+});
+
 describe("independent background workspace activity", () => {
   for (const legacy of [false, true]) test(`stream loss withdraws evicted verified activity while preserving legacy work (${legacy})`, async () => {
     const provider = new FakeProvider();
@@ -214,8 +244,10 @@ describe("production recovery Checking presentation", () => {
     const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
     let release!: () => void, reads = 0;
     const gate = new Promise<void>(resolve => { release = resolve; });
+    let enterFirstRead!: () => void;
+    const firstReadEntered = new Promise<void>(resolve => { enterFirstRead = resolve; });
     Object.assign(provider, { reconcileBackgroundTasks: async () => {
-      if (++reads === 1) await gate;
+      if (++reads === 1) { enterFirstRead(); await gate; }
       if (result === "failed") throw new Error("Unavailable");
       return [];
     } });
@@ -223,7 +255,8 @@ describe("production recovery Checking presentation", () => {
     const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
     jest.useFakeTimers(); const pump = adapter.startEventPump();
     try {
-      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await firstReadEntered;
+      expect(reads).toBe(1);
       expect(projection.get(unavailable.id)).toMatchObject({ activity: { kind: "checking" } });
       release(); await flushRecoveryIo();
       expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
@@ -327,22 +360,41 @@ test("covered V2 snapshot preserves a rename published during its history read",
 for (const large of [false, true]) test(`real V2 unchanged parent and child snapshots do not repeatedly request resync${large ? " with oversized settled worker output" : ""}`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let reportChild: string | undefined, usageEventsApplied = 0;
+  const events = provider.events.bind(provider);
+  provider.events = async function* (signal) {
+    for await (const event of events(signal)) {
+      yield event;
+      if (event.conversationId === reportChild && event.eventType === "session.usage.updated") usageEventsApplied++;
+    }
+  };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
   try {
     const parent = (await provider.createSession("Repeated recovery")).id;
     const worker = fake.launchWorker(parent, true);
+    reportChild = worker.childId;
     if (large) {
       fake.settleWorker(worker.childId, "completed", "Large worker result. ".repeat(14_000));
       fake.launchWorker(parent, true, worker.childId);
     }
     const listMessages = provider.listMessages.bind(provider);
-    let report = 0, reporting = false;
+    let report = 0, reporting = false, cost = 0;
     provider.listMessages = async (id, options) => {
       const page = await listMessages(id, options);
       if (large && reporting && id === parent) {
         const model = `Concurrent report ${++report}`;
+        cost += 0.001;
         fake.workerReport(worker.childId, model, "high", 0.001);
         await waitUntil(() => adapter.projectionForTests(parent).items().some(item => (item.type === "tool" || item.type === "background_task") && item.workerSession?.model === model));
+        // Step-start exposes the model before step-end/usage changes the same
+        // oversized settled row. Complete that real progress inside the read,
+        // so the subsequent cursor handoff actually tests unchanged snapshots.
+        await waitUntil(() => {
+          const rows = adapter.projectionForTests(parent).items()
+            .filter(item => (item.type === "tool" || item.type === "background_task") && item.childConversationId === worker.childId);
+          return usageEventsApplied >= report && rows.length > 0
+            && rows.every(item => (item.type === "tool" || item.type === "background_task") && item.workerSession?.model === model && item.workerSession.costUsd === cost);
+        });
       }
       return page;
     };
@@ -361,6 +413,57 @@ for (const large of [false, true]) test(`real V2 unchanged parent and child snap
       expect(resyncs).toEqual([[], [], []]);
     }
   } finally { await adapter.dispose(); await fake.stop(); }
+});
+
+for (const lateUsage of [false, true]) test(`real V2 oversized settled result handoff ${lateUsage ? "resyncs for intervening usage" : "does not resync after usage is applied"}`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let armed = false, blocked = false, usageApplied = false;
+  const events = provider.events.bind(provider);
+  provider.events = async function* (signal) {
+    for await (const event of events(signal)) {
+      if (armed && event.eventType === "session.step.ended") {
+        armed = false;
+        blocked = true;
+        await gate;
+      }
+      yield event;
+      // Resumption means the adapter has consumed this native update.
+      if (event.eventType === "session.usage.updated") usageApplied = true;
+    }
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Pending worker usage")).id;
+    const worker = fake.launchWorker(parent, true);
+    fake.settleWorker(worker.childId, "completed", "Large worker result. ".repeat(14_000));
+    await adapter.history(parent);
+    armed = true;
+    fake.workerReport(worker.childId, "Concurrent report", "high", 0.001);
+    await waitUntil(() => blocked);
+    if (!lateUsage) { release(); await waitUntil(() => usageApplied); }
+    const snapshot = await adapter.history(parent);
+    expect(snapshot.items.find(item => item.type === "background_task")).toMatchObject({
+      workerSession: { model: "Concurrent report", costUsd: lateUsage ? null : 0.001 },
+    });
+    release();
+    await waitUntil(() => usageApplied);
+    const client = await adapter.subscribe(parent, { cursor: snapshot.cursor });
+    client.events.cancel();
+    const replay: ChatEvent[] = [];
+    for await (const event of client.events) replay.push(event);
+    expect(client.snapshot.items.find(item => item.type === "background_task")).toMatchObject({
+      workerSession: { model: "Concurrent report", costUsd: 0.001 },
+    });
+    expect(client.snapshot.items.find(item => item.type === "tool")).toMatchObject({ usage: { input: 1200, output: 100 } });
+    const resyncs = replay.filter(event => event.type === "resync");
+    // A genuine cost update cannot fit in the ring with this settled output;
+    // only the fully applied, unchanged handoff must remain resync-free.
+    if (lateUsage) expect(resyncs).toMatchObject([{ reason: "retention-gap" }]);
+    else expect(resyncs).toEqual([]);
+  } finally { release(); await adapter.dispose(); await fake.stop(); }
 });
 
 for (const kind of ["agent", "shell"] as const) for (const local of [false, true]) test(`real V2 ${local ? "local" : "external"} revert keeps live ${kind} but removes its hidden settlement`, async () => {
@@ -1041,6 +1144,234 @@ for (const kind of ["worker", "history"] as const) test(`real V2 abort releases 
   } finally { release(); await reading; await adapter.dispose(); await fake.stop(); }
 });
 
+test("real V2 history preserves readable parent history when verified child accounting hangs", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let childId = "", unavailableParent = "", parentReturned = false;
+  let captured!: () => void, release!: () => void;
+  const accountingCaptured = new Promise<void>(resolve => { captured = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let childMessageReads = 0;
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init), path = new URL(request.url).pathname;
+    if (unavailableParent && path === `/api/session/${unavailableParent}/message`) return new Response(null, { status: 500 });
+    if (childId && path === `/api/session/${childId}/message`) childMessageReads++;
+    return fetch(request);
+  }) as typeof fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  // Leave room for the real provider's one-second optional enrichment budget,
+  // while making an unbounded adapter accounting await fail in seconds.
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 2_500 });
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  try {
+    unavailableParent = (await provider.createSession("Required transcript unavailable")).id;
+    const parent = (await provider.createSession("Optional accounting unavailable")).id;
+    await provider.prompt(parent, { id: "initial", text: "Preserved parent instruction", delivery: "queue" });
+    const worker = fake.launchWorker(parent, true);
+    childId = worker.childId;
+    // Seed before subscribing: launch-time invalidations are not the failure
+    // being tested, and must not make ownership enrichment unavailable here.
+    await expect(adapter.history(unavailableParent)).rejects.toThrow();
+    unavailableParent = "";
+    const list = provider.listMessages.bind(provider);
+    provider.listMessages = async (id, options) => {
+      const page = await list(id, options);
+      // Keep strict worker recovery healthy; only the public accounting
+      // reread withholds its otherwise successful child result.
+      if (id === childId) { captured(); await gate; }
+      if (id === parent) {
+        expect(page.items).toContainEqual(expect.objectContaining({ id: `tool:${worker.callId}`, childConversationId: childId }));
+        parentReturned = true;
+      }
+      return page;
+    };
+    reading = adapter.history(parent);
+    void reading.catch(() => undefined);
+    await Promise.race([accountingCaptured, reading.then(() => { throw new Error("History skipped the hanging accounting read"); })]);
+    expect(parentReturned).toBe(true);
+    expect(childMessageReads).toBeGreaterThanOrEqual(1);
+    const snapshot = await reading;
+    expect(snapshot.items).toContainEqual(expect.objectContaining({ type: "user_message", text: "Preserved parent instruction" }));
+    const launcher = snapshot.items.find(item => item.id === `tool:${worker.callId}`) as ToolItem;
+    expect(launcher.childConversationId).toBe(childId);
+    expect(launcher.workerSession?.costUsd ?? null).toBeNull();
+    expect(fake.state().unhandled).toEqual([]);
+  } finally {
+    release();
+    await reading?.catch(() => undefined);
+    await adapter.dispose();
+    await fake.stop();
+  }
+}, 6_000);
+
+test("real V2 degraded execution history still bounds accounting and retries after late expiry", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent = "", child = "", parentReading = false, heldExecution = false, holdAccounting = true;
+  let executionAborted!: () => void, executionReturned!: () => void, accountingCaptured!: () => void, releaseExecution!: () => void, releaseAccounting!: () => void, lateReturned!: () => void;
+  const executionExpired = new Promise<void>(resolve => { executionAborted = resolve; });
+  const executionFinished = new Promise<void>(resolve => { executionReturned = resolve; });
+  const captured = new Promise<void>(resolve => { accountingCaptured = resolve; });
+  const executionGate = new Promise<void>(resolve => { releaseExecution = resolve; });
+  const accountingGate = new Promise<void>(resolve => { releaseAccounting = resolve; });
+  const late = new Promise<void>(resolve => { lateReturned = resolve; });
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init), response = await fetch(request);
+    if (parentReading && !heldExecution && new URL(request.url).pathname === `/api/session/${child}/message`) {
+      heldExecution = true;
+      const body = await response.text();
+      request.signal.addEventListener("abort", executionAborted, { once: true });
+      await executionGate;
+      executionReturned();
+      return new Response(body, { status: response.status, headers: response.headers });
+    }
+    return response;
+  }) as typeof fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  parent = (await provider.createSession("Degraded accounting retry")).id;
+  await provider.prompt(parent, { id: "initial", text: "Parent remains readable", delivery: "queue" });
+  const worker = fake.launchWorker(parent, true); child = worker.childId;
+  fake.workerReport(child, "Stored model", "high", 0.7);
+  const list = provider.listMessages.bind(provider);
+  let accountingSignal: AbortSignal | undefined, childReads = 0;
+  provider.listMessages = async (id, options) => {
+    if (id === parent) parentReading = true;
+    const page = await list(id, options);
+    if (id === parent) parentReading = false;
+    if (id === child) {
+      childReads++;
+      if (holdAccounting) {
+        accountingSignal = options.signal;
+        accountingCaptured();
+        await accountingGate;
+        lateReturned();
+      }
+    }
+    return page;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 8_000, accountingReadTimeoutMs: 100 });
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  try {
+    reading = adapter.history(parent);
+    void reading.catch(() => undefined);
+    await Promise.race([captured, reading.then(() => { throw new Error("Accounting was not attempted"); })]);
+    await executionExpired;
+    const first = await reading;
+    expect(first.items).toContainEqual(expect.objectContaining({ text: "Parent remains readable" }));
+    expect(accountingSignal?.aborted).toBe(true);
+    holdAccounting = false;
+    const retry = await adapter.history(parent);
+    expect(childReads).toBe(2);
+    expect(retry.items).toContainEqual(expect.objectContaining({ id: `tool:${worker.callId}`, workerSession: expect.objectContaining({ costUsd: 0.7 }) }));
+    releaseAccounting(); await late;
+    await adapter.history(parent);
+    expect(childReads).toBe(2);
+  } finally {
+    releaseExecution(); releaseAccounting();
+    if (heldExecution) await executionFinished;
+    await reading?.catch(() => undefined);
+    await adapter.dispose(); await fake.stop();
+  }
+}, 12_000);
+
+test("real V2 history can load a healthy parent transcript beyond the worker recovery deadline", async () => {
+  const directory = process.cwd();
+  const fake = startOpenCodeV2Fake({ directory });
+  let hold = false, captured!: () => void, release!: () => void;
+  const capturedRead = new Promise<void>(resolve => { captured = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const list = provider.listMessages.bind(provider);
+  provider.listMessages = async (...args) => {
+    const page = await list(...args);
+    if (hold) { captured(); await gate; }
+    return page;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const session = await provider.createSession("Slow healthy history");
+    await adapter.prompt(session.id, "initial", "Preserved parent instruction");
+    hold = true;
+    reading = adapter.history(session.id);
+    void reading.catch(() => undefined);
+    await capturedRead;
+    timer = setTimeout(release, 5_200);
+    const snapshot = await reading;
+    expect(snapshot.items).toContainEqual(expect.objectContaining({ type: "user_message", text: "Preserved parent instruction" }));
+    expect(fake.state().eventSubscribers).toBe(1);
+  } finally { clearTimeout(timer); release(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
+for (const ending of ["expired", "cancelled"] as const) test(`real V2 ${ending} history rejects and fences a late transcript from current inbox state`, async () => {
+  const directory = process.cwd();
+  const fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let hold = false, captured!: () => void, release!: () => void, returned!: () => void;
+  const capturedRead = new Promise<void>(resolve => { captured = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const lateReturn = new Promise<void>(resolve => { returned = resolve; });
+  const list = provider.listMessages.bind(provider);
+  provider.listMessages = async (...args) => {
+    const page = await list(...args);
+    if (hold) { hold = false; captured(); await gate; returned(); }
+    return page;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: ending === "expired" ? 100 : 1_000 });
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  let pump: Promise<void> | undefined;
+  try {
+    const session = await provider.createSession("Retired history owner");
+    await adapter.prompt(session.id, "initial", "Initial work");
+    await adapter.prompt(session.id, "old-steer", "Old instruction", undefined, undefined, undefined, undefined, "steer");
+    hold = true;
+    reading = adapter.history(session.id);
+    void reading.catch(() => undefined);
+    await capturedRead;
+    if (ending === "cancelled") await adapter.stopEventPump();
+    await expect(reading).rejects.toThrow("Inbox recovery unavailable");
+    fake.step(session.id);
+    const current = await provider.prompt(session.id, { id: "current-steer", text: "Current instruction", delivery: "steer" });
+    if (ending === "cancelled") pump = adapter.startEventPump();
+    await waitUntil(() => adapter.pendingSteersForTests(session.id).some(entry => entry.id === current.messageId));
+    release(); await lateReturn;
+    const snapshot = await adapter.history(session.id);
+    expect(snapshot.queued?.map(entry => entry.id)).toEqual([current.messageId]);
+    expect(snapshot.items).toContainEqual(expect.objectContaining({ type: "user_message", text: "Old instruction" }));
+    expect(fake.state().eventSubscribers).toBe(1);
+  } finally { release(); await reading?.catch(() => undefined); await adapter.dispose(); await pump; await fake.stop(); }
+});
+
+test("real V2 reverted settled worker cannot merge back after reconnect when child ownership is unavailable", async () => {
+  const directory = process.cwd();
+  const fake = startOpenCodeV2Fake({ directory });
+  let unavailableChild = "";
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (unavailableChild && new URL(request.url).pathname === `/api/session/${unavailableChild}`) return new Response(null, { status: 500 });
+    return fetch(request);
+  }) as typeof fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Hidden settled worker")).id;
+    const branch = await provider.prompt(parent, { id: "hidden-turn", text: "Reverted work", delivery: "queue" });
+    const worker = fake.launchWorker(parent, true);
+    fake.settleWorker(worker.childId, "completed", "Hidden settled result");
+    fake.step(parent);
+    const taskId = `task:${worker.taskId}`;
+    expect((await adapter.history(parent)).items).toContainEqual(expect.objectContaining({ id: taskId, status: "completed" }));
+    await adapter.stopEventPump();
+    fake.externalRevert(parent, branch.messageId);
+    unavailableChild = worker.childId;
+    const hidden = await adapter.history(parent);
+    expect(hidden.items.some(item => item.id === taskId)).toBe(false);
+    expect(hidden.items.some(item => item.type === "background_task" && item.summary === "Hidden settled result")).toBe(false);
+    unavailableChild = "";
+    fake.externalRevert(parent, null);
+    expect((await adapter.history(parent)).items).toContainEqual(expect.objectContaining({ id: taskId, status: "completed" }));
+  } finally { await adapter.dispose(); await fake.stop(); }
+});
+
 test("real V2 covered history preserves cursor validation and missing-session errors", async () => {
   const directory = process.cwd();
   const fake = startOpenCodeV2Fake({ directory });
@@ -1363,7 +1694,7 @@ for (const failure of ["refused", "disposed", "timeout"] as const) test(`real V2
     return fetch(request);
   }) as typeof fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
-  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 100 });
   let reading: Promise<Awaited<ReturnType<ChatAdapter["history"]>> | Error> | undefined;
   try {
     const session = await provider.createSession("Unavailable subscription");
@@ -1436,7 +1767,8 @@ test("real V2 an inbox read from an ended subscription cannot overwrite the next
   } finally { release(); await reading?.catch(() => undefined); await adapter.dispose(); await pump; await fake.stop(); }
 });
 
-for (const origin of ["composer", "held"] as const) for (const delivery of ["stored", "covered", "covered-with-eviction"] as const) test(`real V2 lost steer acknowledgement keeps original ${origin} correlation after ${delivery} delivery recovery`, async () => {
+for (const origin of ["composer", "held"] as const) for (const delivery of ["stored", "covered", "covered-with-eviction"] as const)
+for (const lateRow of delivery === "covered-with-eviction" ? [false, true] : [false]) test(`real V2 lost steer acknowledgement keeps original ${origin} correlation after ${delivery} delivery recovery${lateRow ? " with a newer native row" : ""}`, async () => {
   const directory = process.cwd();
   const fake = startOpenCodeV2Fake({ directory });
   let blockEvents = false, requested!: () => void, release!: () => void;
@@ -1460,7 +1792,34 @@ for (const origin of ["composer", "held"] as const) for (const delivery of ["sto
   const stored = { id: "11111111-2222-4333-8444-555555555555", mimeType: "image/png", absolutePath: "/fixture/11111111-2222-4333-8444-555555555555.png" };
   const attachment = { id: stored.id, name: "original.png", mimeType: stored.mimeType };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, maxProjections: delivery === "covered-with-eviction" ? 1 : undefined, resolveAttachment: async id => id === stored.id ? stored : null });
+  const readOwner = new AsyncLocalStorage<boolean>();
+  let releaseBoundary!: () => void, capturedBoundary!: () => void, boundaryReads = 0;
+  const boundaryCaptured = new Promise<void>(resolve => { capturedBoundary = resolve; });
+  const boundaryGate = new Promise<void>(resolve => { releaseBoundary = resolve; });
+  const injected: NormalizedProviderEvent[] = [];
+  if (lateRow) {
+    const background = provider.reconcileBackgroundTasks!.bind(provider);
+    provider.reconcileBackgroundTasks = (...args) => readOwner.run(false, () => background(...args));
+    const boundary = provider.getHistoryRevertBoundary!.bind(provider);
+    provider.getHistoryRevertBoundary = async (...args) => {
+      const marker = await boundary(...args);
+      // The delivery dirties the captured first read. Pin its second pass
+      // after native IO, before the covered read merges newer projected rows.
+      if (readOwner.getStore() && ++boundaryReads === 2) { capturedBoundary(); await boundaryGate; }
+      return marker;
+    };
+    const events = provider.events.bind(provider);
+    provider.events = async function* (signal) {
+      for await (const event of events(signal)) {
+        while (injected.length) yield injected.shift()!;
+        yield event;
+      }
+    };
+  }
   let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  let lateSubscription: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  let newerCreatedAt: number | undefined;
+  let unrelated: ConversationItem | undefined;
   try {
     const session = await provider.createSession("Recovered original correlation");
     await adapter.prompt(session.id, "initial", "Initial work");
@@ -1486,7 +1845,7 @@ for (const origin of ["composer", "held"] as const) for (const delivery of ["sto
       try {
         captureInbox = true;
         release();
-        reading = adapter.history(session.id);
+        reading = readOwner.run(true, () => adapter.history(session.id));
         void reading.catch(() => undefined);
         await inboxCaptured;
         fake.step(session.id); // This generation never saw the enqueue payload.
@@ -1510,28 +1869,59 @@ for (const origin of ["composer", "held"] as const) for (const delivery of ["sto
           } finally { observer.events.cancel(); await observerPump; }
         }
         releaseInbox();
+        if (lateRow) {
+          await boundaryCaptured;
+          const native = (await provider.listMessages(session.id, { limit: 100 })).items.find(item => item.type === "user_message" && item.text === draft.text);
+          if (native?.type !== "user_message") throw new Error("Expected the delivered native user row");
+          lateSubscription = await adapter.subscribe(session.id);
+          // The real provider's row has no Uatu request nonce. Deliver it at
+          // the public provider-event seam after both bounded cache and old
+          // projection have departed. The same native ID has newer contents;
+          // an unrelated ID with the old text must not borrow its correlation.
+          newerCreatedAt = native.createdAt + 1;
+          const newer = { ...native, text: "Newer native wording", createdAt: newerCreatedAt };
+          unrelated = { ...native, id: "message:unrelated-native-row", createdAt: newerCreatedAt + 1 };
+          injected.push({ conversationId: session.id, eventType: "session.message.content.updated", outcome: "handled", updates: [
+            { kind: "upsert", item: newer }, { kind: "upsert", item: unrelated },
+          ] });
+          const applied = (async () => {
+            const remaining = new Set([native.id, unrelated!.id]);
+            for await (const event of lateSubscription!.events) {
+              if (event.type === "item.upsert") remaining.delete(event.item.id);
+              if (!remaining.size) return;
+            }
+            throw new Error("Expected both newer native rows to reach the subscription");
+          })();
+          fake.finish(session.id); // Wake the real stream to deliver the queued row.
+          await applied;
+          releaseBoundary();
+        }
         snapshot = await reading;
         if (delivery !== "covered-with-eviction") {
           await waitUntil(() => browser.items.some(item => item.type === "user_message" && item.text === draft.text));
           expect(browser.items.find(item => item.type === "user_message" && item.text === draft.text)).toHaveProperty("requestId", draft.requestId);
         } else {
           const replacement = await adapter.subscribe(session.id);
-          expect(replacement.snapshot.items.find(item => item.type === "user_message" && item.text === draft.text)).toHaveProperty("requestId", draft.requestId);
+          expect(replacement.snapshot.items.find(item => item.type === "user_message" && item.text === (lateRow ? "Newer native wording" : draft.text))).toHaveProperty("requestId", draft.requestId);
+          if (lateRow) expect(replacement.snapshot.items.find(item => item.id === unrelated!.id)).toEqual(unrelated!);
           replacement.events.cancel();
         }
       } finally { client.events.cancel(); await clientPump; }
     }
-    const rows = snapshot.items.filter(item => item.type === "user_message" && item.text === draft.text);
+    const rows = snapshot.items.filter(item => item.type === "user_message" && item.text === (lateRow ? "Newer native wording" : draft.text));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveProperty("requestId", draft.requestId);
     const native = (await provider.listMessages(session.id, { limit: 100 })).items.find(item => item.id === rows[0]!.id);
     if (native?.type !== "user_message") throw new Error("Expected the real native stored user row");
-    expect(rows[0]).toEqual({ ...native, requestId: draft.requestId }); // Native text, images and execution timestamp are unchanged.
+    // Native contents remain exact, including a newer row merged by the
+    // covered fence. Only the owned request nonce is restored.
+    expect(rows[0]).toEqual({ ...native, ...(lateRow ? { text: "Newer native wording", createdAt: newerCreatedAt } : {}), requestId: draft.requestId });
+    if (lateRow) expect(snapshot.items.find(item => item.id === unrelated!.id)).toEqual(unrelated!);
     expect(snapshot.configuration).toEqual(initial.configuration);
     expect(snapshot.queued).toEqual([]);
     expect(projectionFromSnapshot(snapshot, [draft]).acceptedDrafts).toEqual([]);
     expect(fake.state().calls.filter(call => call.includes("/prompt"))).toHaveLength(delivery === "covered-with-eviction" ? 68 : 2);
-  } finally { release(); releaseInbox(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+  } finally { release(); releaseInbox(); releaseBoundary(); lateSubscription?.events.cancel(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 });
 
 for (const projected of [false, true]) test(`real V2 bounded correlation expiry ${projected ? "preserves an already projected request" : "does not invent an expired request"}`, async () => {
@@ -2769,6 +3159,230 @@ class FakeProvider implements ChatProvider {
 }
 
 type RawPage = { items: ProviderMessage[]; nextCursor?: string; configurationItems?: ProviderMessage[] };
+
+describe("native result fallback supersession", () => {
+  for (const evidence of ["matching", "missing relation", "missing report", "missing worker", "unverified worker", "different child", "different result", "different kind", "changed notice", "changed summary", "changed status"] as const) {
+    test(`fallback retirement requires an exact relation and verified representation (${evidence})`, async () => {
+      const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+      provider.sessions = [fixtureSession("parent")];
+      const fallback: Extract<ConversationItem, { type: "notice" }> = { id: "notice:result", type: "notice", createdAt: 2, level: "info", message: "Native result" };
+      const notice = evidence === "changed notice" ? { ...fallback, message: "An unrelated replacement at the same id" } : fallback;
+      const worker: BackgroundTaskItem = { id: "task:worker", type: "background_task", taskId: "worker", taskType: evidence === "different kind" ? "shell" : "agent",
+        description: "Worker", createdAt: 1, status: evidence === "changed status" ? "failed" : "completed", summary: evidence === "changed summary" ? "Old result" : "Native result", resultId: evidence === "different result" ? "other-result" : "result",
+        childConversationId: evidence === "different child" ? "other-child" : "child", ...(evidence === "unverified worker" ? { stateUncertain: true } : {}) };
+      let recovered = false;
+      provider.listMessages = async () => ({ items: recovered && evidence !== "missing worker" ? [worker] : [notice], accounting: [],
+        ...(evidence === "missing relation" ? {} : { workerResultFallbacks: [{ resultId: "result", childConversationId: "child", fallback,
+          ...(evidence === "missing report" ? {} : { report: { status: "completed" as const, summary: "Native result" } }) }] }) });
+      const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+      try {
+        expect((await adapter.history("parent")).items).toContainEqual(notice);
+        const existing = await adapter.subscribe("parent");
+        recovered = true;
+        await adapter.history("parent");
+        const next = await adapter.subscribe("parent");
+        expect(next.snapshot.items.some(item => item.id === notice.id)).toBe(evidence !== "matching");
+        existing.events.cancel(); next.events.cancel();
+        const delivered: ChatEvent[] = [];
+        for await (const event of existing.events) delivered.push(event);
+        expect(delivered.some(event => event.type === "item.remove" && event.itemId === notice.id)).toBe(evidence === "matching");
+      } finally { await adapter.dispose(); }
+    });
+  }
+});
+
+describe("native optional accounting ownership", () => {
+  const launcher = (id: string, childConversationId: string): ToolItem => ({
+    id, type: "tool", name: "subagent", status: "completed", createdAt: 1, input: "{}", childConversationId,
+  });
+  const priced = (cost: number): ProviderHistoryPage => ({ items: [], accounting: [{ messageId: "priced", createdAt: 2, model: "Stored", usage: { input: 10, costUsd: cost } }], sessionCostUsd: cost });
+  const row = (snapshot: { items: ConversationItem[] }) => snapshot.items.find(item => item.id === "launch") as ToolItem;
+
+  for (const unavailable of ["incomplete", "failed", "expired"] as const) test(`previously complete nested accounting retries immediately after a ${unavailable} refresh`, async () => {
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }, { ...fixtureSession("leaf"), parentId: "grandchild" }];
+    let phase: "healthy" | "unavailable" | "recovered" = "healthy";
+    const reads = { child: 0, grandchild: 0, leaf: 0 };
+    const held = Promise.withResolvers<void>(), returned = Promise.withResolvers<void>();
+    provider.listMessages = async (id, _options) => {
+      if (id === "parent") return { items: [launcher("launch", "child")], accounting: [] };
+      if (id === "child") { reads.child++; return { ...priced(0.5), items: [launcher("grandchild-launch", "grandchild")] }; }
+      if (id === "leaf") { reads.leaf++; return priced(phase === "healthy" ? 0.125 : 0.75); }
+      reads.grandchild++;
+      if (phase === "unavailable") {
+        if (unavailable === "failed") throw new Error("Temporary grandchild read failure");
+        if (unavailable === "expired") {
+          await held.promise; returned.resolve();
+          return { ...priced(9), items: [] }; // A retired transport deliberately returns late.
+        }
+        return { ...priced(0.25), visibleDescendantsIncomplete: true as const };
+      }
+      return { ...priced(0.25), items: [launcher("leaf-launch", "leaf")] };
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0, accountingReadTimeoutMs: 60 });
+    const clock = spyOn(Date, "now").mockReturnValue(Date.now());
+    try {
+      const first = await adapter.history("parent");
+      expect(row(first).workerSession?.costUsd).toBe(0.5);
+      expect(row(first).descendants).toContainEqual(expect.objectContaining({ conversationId: "leaf", usage: expect.objectContaining({ costUsd: 0.125 }) }));
+      expect(reads).toEqual({ child: 1, grandchild: 1, leaf: 1 });
+      clock.mockReturnValue(Date.now() + 31_000);
+      phase = "unavailable";
+      const partial = await adapter.history("parent");
+      expect(row(partial).workerSession?.costUsd).toBe(0.5);
+      expect(reads).toEqual({ child: 2, grandchild: 2, leaf: 1 });
+      phase = "recovered";
+      const retry = await adapter.history("parent");
+      expect(reads).toEqual({ child: 3, grandchild: 3, leaf: 2 });
+      expect(row(retry).workerSession?.costUsd).toBe(0.5);
+      expect(row(retry).descendants).toContainEqual(expect.objectContaining({ conversationId: "grandchild", usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      expect(row(retry).descendants).toContainEqual(expect.objectContaining({ conversationId: "leaf", usage: expect.objectContaining({ costUsd: 0.75 }) }));
+      if (unavailable === "expired") { held.resolve(); await returned.promise; }
+      const retained = await adapter.history("parent");
+      expect(reads).toEqual({ child: 3, grandchild: 3, leaf: 2 });
+      expect(row(retained).descendants).toContainEqual(expect.objectContaining({ conversationId: "grandchild", usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      expect(row(retained).descendants).toContainEqual(expect.objectContaining({ conversationId: "leaf", usage: expect.objectContaining({ costUsd: 0.75 }) }));
+    } finally { held.resolve(); clock.mockRestore(); await adapter.dispose(); }
+  });
+
+  for (const incompletePage of ["newest", "oldest"] as const) test(`incomplete ${incompletePage} accounting page preserves own cost and retries visible descendants`, async () => {
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("nested"), parentId: "child" }];
+    let incomplete = true, childPages = 0;
+    provider.listMessages = async (id, options: { cursor?: string; limit: number; signal?: AbortSignal }) => {
+      if (id === "parent") return { items: [launcher("launch", "child")], accounting: [] };
+      if (id === "nested") return priced(0.25);
+      childPages++;
+      const oldest = options.cursor !== undefined;
+      return {
+        ...(oldest ? priced(0.5) : { accounting: [] }),
+        items: oldest && !incomplete ? [launcher("nested-launch", "nested")] : [],
+        ...(!oldest ? { nextCursor: "older" } : {}),
+        ...(incomplete && oldest === (incompletePage === "oldest") ? { visibleDescendantsIncomplete: true as const } : {}),
+      };
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    try {
+      const first = await adapter.history("parent");
+      expect(row(first).workerSession?.costUsd).toBe(0.5);
+      expect(row(first).descendants ?? []).toEqual([]);
+      incomplete = false;
+      const retry = await adapter.history("parent");
+      expect(childPages).toBe(4);
+      expect(row(retry).workerSession?.costUsd).toBe(0.5);
+      expect(row(retry).descendants).toContainEqual(expect.objectContaining({ conversationId: "nested", usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      await adapter.history("parent");
+      expect(childPages).toBe(4);
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const ending of ["expired", "cancelled", "replaced"] as const) test(`${ending} nested owner fences late pages and permits current retry`, async () => {
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("nested"), parentId: "child" }];
+    let capture!: () => void, release!: () => void, returned!: () => void;
+    const captured = new Promise<void>(resolve => { capture = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const late = new Promise<void>(resolve => { returned = resolve; });
+    let holding = true, reads = 0, pagedSignal: AbortSignal | undefined, nestedSignal: AbortSignal | undefined;
+    provider.listMessages = async (id, options: { cursor?: string; limit: number; signal?: AbortSignal }) => {
+      if (id === "parent") return { items: [launcher("launch", "child")], accounting: [] };
+      if (id === "child") {
+        pagedSignal = options.signal;
+        return options.cursor ? { ...priced(0.5), items: [launcher("nested-launch", "nested")] } : { items: [], accounting: [], nextCursor: "older" };
+      }
+      reads++;
+      nestedSignal = options.signal;
+      if (holding) { capture(); await gate; returned(); return priced(9); }
+      return priced(0.25);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0, accountingReadTimeoutMs: 60 });
+    let reading: ReturnType<ChatAdapter["history"]> | undefined, pump: Promise<void> | undefined;
+    try {
+      reading = adapter.history("parent"); void reading.catch(() => undefined);
+      await captured;
+      if (ending !== "expired") {
+        await adapter.stopEventPump();
+        await expect(reading).rejects.toThrow("Inbox recovery unavailable");
+        provider.eventQueue = new EventQueue();
+        if (ending === "replaced") pump = adapter.startEventPump();
+      } else {
+        const partial = await reading;
+        expect(row(partial).workerSession?.costUsd ?? null).toBeNull();
+      }
+      expect(pagedSignal?.aborted).toBe(true);
+      expect(nestedSignal?.aborted).toBe(true);
+      holding = false;
+      const retry = await adapter.history("parent");
+      expect(row(retry).workerSession?.costUsd).toBe(0.5);
+      expect(row(retry).descendants).toContainEqual(expect.objectContaining({ conversationId: "nested", usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      release(); await late;
+      const current = await adapter.history("parent");
+      expect(row(current).descendants).toContainEqual(expect.objectContaining({ usage: expect.objectContaining({ costUsd: 0.25 }) }));
+      expect(reads).toBe(2);
+    } finally { release(); await reading?.catch(() => undefined); await adapter.dispose(); await pump; }
+  });
+
+  test("concurrent public history callers share a bounded accounting owner", async () => {
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let capture!: () => void, joined!: () => void, release!: () => void;
+    const captured = new Promise<void>(resolve => { capture = resolve; });
+    const secondParent = new Promise<void>(resolve => { joined = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let parents = 0, children = 0, hold = true, signal: AbortSignal | undefined;
+    provider.listMessages = async (id, options: { cursor?: string; limit: number; signal?: AbortSignal }) => {
+      if (id === "parent") {
+        if (++parents === 2) joined();
+        return { items: [launcher("launch", "child")], accounting: [] };
+      }
+      children++; signal = options.signal; capture(); if (hold) await gate; return priced(0.4);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), accountingReadTimeoutMs: 100 });
+    let first: ReturnType<ChatAdapter["history"]> | undefined, second: ReturnType<ChatAdapter["history"]> | undefined;
+    try {
+      first = adapter.history("parent", { limit: 20 }); await captured;
+      second = adapter.history("parent", { limit: 30 }); await secondParent;
+      expect(row(await first).workerSession?.costUsd ?? null).toBeNull();
+      expect(row(await second).workerSession?.costUsd ?? null).toBeNull();
+      expect(children).toBe(1);
+      expect(signal?.aborted).toBe(true);
+      hold = false;
+      expect(row(await adapter.history("parent")).workerSession?.costUsd).toBe(0.4);
+      expect(children).toBe(2);
+      release();
+    } finally { release(); await Promise.allSettled([first, second]); await adapter.dispose(); }
+  });
+
+  test("one history deadline does not cancel accounting still owned by another caller", async () => {
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let capture!: () => void, release!: () => void;
+    const captured = new Promise<void>(resolve => { capture = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let signal: AbortSignal | undefined, children = 0;
+    provider.listMessages = async (id, options: { cursor?: string; limit: number; signal?: AbortSignal }) => {
+      if (id === "parent") return { items: [launcher("launch", "child")], accounting: [] };
+      children++; signal = options.signal; capture(); await gate; return priced(0.4);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), historyReadTimeoutMs: 300, accountingReadTimeoutMs: 1_000 });
+    let first: ReturnType<ChatAdapter["history"]> | undefined, second: ReturnType<ChatAdapter["history"]> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      first = adapter.history("parent", { limit: 20 }); void first.catch(() => undefined);
+      await captured;
+      // Stagger the two actual history deadlines. The assertions wait for
+      // owner departure, not for a sleep or an assumed completed request.
+      await new Promise<void>(resolve => { timer = setTimeout(() => {
+        second = adapter.history("parent", { limit: 30 }); void second.catch(() => undefined); resolve();
+      }, 150); });
+      await expect(first).rejects.toThrow("Inbox recovery unavailable");
+      expect(signal?.aborted).toBe(false);
+      release();
+      expect(row(await second!).workerSession?.costUsd).toBe(0.4);
+      expect(children).toBe(1);
+    } finally { clearTimeout(timer); release(); await Promise.allSettled([first, second]); await adapter.dispose(); }
+  });
+});
 
 function normalizeRawPage(page: RawPage): ProviderHistoryPage {
   // As the real provider does: a reply that names no prompt answers the
@@ -5758,7 +6372,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     }
   });
 
-  for (const alias of ["call", "result"] as const) for (const coalesceWindowMs of [0, 25]) test(`normalized transient ${alias} alias removal fences older recovery with ${coalesceWindowMs}ms coalescing without discarding independent workers`, async () => {
+  for (const gatedFollowup of [false, true]) for (const alias of ["call", "result"] as const) for (const coalesceWindowMs of [0, 25]) test(`normalized transient ${alias} alias removal fences older recovery with ${coalesceWindowMs}ms coalescing without discarding independent workers${gatedFollowup ? " behind gated follow-up I/O" : ""}`, async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     const occurrence = alias === "call" ? { toolUseId: "same-native-call" } : { resultId: "same-native-result" };
@@ -5769,13 +6383,24 @@ describe("prompt, abort, permission, and question mutations", () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let fresh = false;
+    let holdSession = false, releaseSession!: () => void, sessionEntered!: () => void, followupArmed!: () => void;
+    const sessionGate = new Promise<void>(resolve => { releaseSession = resolve; });
+    const sessionStarted = new Promise<void>(resolve => { sessionEntered = resolve; });
+    const armed = new Promise<void>(resolve => { followupArmed = resolve; });
+    const getSession = provider.getSession.bind(provider);
+    provider.getSession = async id => { if (holdSession) { sessionEntered(); await sessionGate; } return getSession(id); };
     Object.assign(provider, { reconcileBackgroundTasks: async () => { if (++reads !== 1) return fresh ? [canonical, independent] : []; await gate; return [canonical, independent]; } });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs });
     const pump = adapter.startEventPump();
+    let timerSpy: ReturnType<typeof spyOn> | undefined;
+    let listener: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined, publication: Promise<void> | undefined;
     try {
       provider.eventQueue.push({ type: "server.connected", data: {} });
       await waitUntil(() => reads === 1);
       const projection = adapter.projectionForTests("session");
+      listener = await adapter.subscribe("session");
+      publication = (async () => { for await (const event of listener!.events) if (event.type === "item.upsert" && event.item.id === canonical.id) return; throw new Error("Missing fresh canonical recovery"); })();
+      void publication.catch(() => undefined);
       if (coalesceWindowMs) jest.useFakeTimers();
       provider.eventQueue.push({ normalized: { conversationId: "session", eventType: "session.tool.success", outcome: "handled", updates: [{ kind: "upsert", item: placeholder }] } });
       if (!coalesceWindowMs) { await liveEventsApplied(adapter, provider); expect(projection.has(placeholder.id)).toBe(true); }
@@ -5787,17 +6412,38 @@ describe("prompt, abort, permission, and question mutations", () => {
         await flushRecoveryIo();
       } else await liveEventsApplied(adapter, provider);
       expect(projection.has(placeholder.id)).toBe(false);
-      jest.useFakeTimers(); release(); await flushRecoveryIo();
+      jest.useFakeTimers();
+      const schedule = globalThis.setTimeout;
+      timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+        const timer = schedule(callback, ms, ...args);
+        if (ms === 100) followupArmed();
+        return timer;
+      }) as typeof setTimeout);
+      release(); await armed;
       expect(projection.has(canonical.id)).toBe(false);
       expect(projection.get(independent.id)).toMatchObject({ status: "running", toolUseId: "independent-call" });
       // The removal fence belongs only to that read, not a permanent tombstone.
       fresh = true;
-      jest.advanceTimersByTime(100); await flushRecoveryIo();
+      holdSession = gatedFollowup;
+      jest.advanceTimersByTime(99); await flushRecoveryIo();
+      expect(reads).toBe(1); // Fixed deadline, not an eager retry.
+      jest.advanceTimersByTime(1);
+      if (gatedFollowup) {
+        await sessionStarted; await flushRecoveryIo();
+        expect(reads).toBe(1); // Timer fired, but required follow-up I/O has not completed.
+        expect(projection.has(canonical.id)).toBe(false);
+        expect(projection.has(independent.id)).toBe(true);
+        holdSession = false; releaseSession();
+      }
+      await publication; // Observe completion, not a fixed number of filesystem turns.
       expect(reads).toBe(2);
       expect(projection.get(canonical.id)).toMatchObject({ status: "running", ...occurrence });
       expect(provider.prompts).toEqual([]);
       expect(provider.interrupts).toEqual([]);
-    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+    } finally {
+      release(); releaseSession(); listener?.events.cancel(); await adapter.dispose(); await pump;
+      await publication?.catch(() => undefined); timerSpy?.mockRestore(); jest.useRealTimers();
+    }
   });
 
   test("a deleted parent retires its in-flight worker recovery instead of restoring activity", async () => {

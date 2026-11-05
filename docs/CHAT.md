@@ -259,9 +259,11 @@ prices are available. Missing aggregate data remains unknown, not a partial sum.
 OpenCode can itself report zero for unpriced models: this is a reported zero,
 not a promise of free billing. Reused-child occurrences repeat one session snapshot
 without adding it to task/parent receipts or including descendant costs. Recovery
-uses existing child-history accounting; inspection reuses its own bounded read,
-and parent refreshes revalidate cached child history at most every 30 seconds,
-not on every paint. Ordered live removals protect model/effort/token accounting
+uses existing child-history accounting; inspection reuses its own bounded read.
+Parent refreshes normally revalidate cached child history at most every 30 seconds,
+not on every paint. Covered reads also revalidate cached nested associations and
+retry changed source evidence before publication, even within that interval.
+Ordered live removals protect model/effort/token accounting
 from older refresh and inspection reads; a later live upsert may recreate the
 message. Removal fences are bounded: retiring one invalidates older reads first,
 and parent-cache eviction clears its fences. Native lifetime cost remains separate
@@ -616,6 +618,113 @@ inspection action rather than the parent composer.
 Reconnect reads history, pending results and current execution evidence.
 Complete history is reused only within a connected event generation, invalidated
 by session events, and reread after disconnection; execution/inbox evidence stays fresh.
+An unchanged recovered snapshot does not need another resync solely because it
+contains a large settled result. Genuine progress after that snapshot can still
+exceed the bounded replay window and require authoritative recovery.
+A covered read also preserves a recovered message's original request identity
+when a newer native update omits its client nonce, without assigning that identity
+to unrelated messages or enlarging correlation retention.
+Unavailable child-session lookups do not make the parent's own transcript
+unreadable. Child details and controls still require verified ownership; a
+partial worker check is not evidence that omitted workers finished or disappeared.
+Later successful reads can restore those details without restarting the agent.
+The whole V2 history read has a bounded 25-second window, separate from the
+shorter worker checks. Reverted settled results stay hidden even when child
+details are unavailable; missing details alone do not hide a visible worker.
+Undo's replacement snapshot follows the same rule: temporary child enrichment
+failure alone does not discard an earlier visible settled worker, its known
+accounting, or inspection identity. Explicitly hidden native origins still remove
+reverted work, and retained presentation never renews Stop authority.
+The same protection applies to an exact visible foreground subagent tool's
+known inspection, model, and accounting when optional child fields disappear.
+Changed occurrences and current ownership contradictions still revoke them.
+If that tool is older than the newest history page, its exact accounting carrier
+still appears in the first snapshot without changing the message page or cursor.
+Concurrent foreground updates keep their exact association in attribution order
+without overwriting newer fields or charging their spend again to a sibling call.
+If a changed occurrence or input leaves the shared child's call set unproven,
+history and live updates withhold aggregate redistribution. Exact known values
+remain available; mismatched amounts stay unknown until authoritative recovery.
+A later accounting restatement or ownership lookup alone cannot restore that
+allocation; the current call set must be proven coherent first.
+This also applies to a single foreground launcher after cached completeness
+expires: successful child ownership does not attach an old invocation's cost or
+model to changed input or occurrence clocks. Without current accounting, only
+the exact retained call set may reuse task receipts. Last-known session totals
+remain separate; a completed accounting read can restore current task values,
+including an authoritative zero.
+That binding must belong to the retained accounting, not merely the latest
+native presentation: a live tool update before history begins cannot carry an
+earlier invocation's receipt onto changed input or occurrence clocks.
+Evicting an accounting transcript does not permit subscription merging to restore
+pricing that current history withdrew from a changed invocation.
+After a successful source-current child undo, an exact retained launcher can
+show the child's reduced task cost without clearing cohort restrictions.
+This also works in ancestor-only views without opening intermediate
+conversations. Exact immutable path and current native visibility evidence must
+remain valid through queued publication; changed, missing, or expired proof
+cannot reprice the receipt. A branch hidden by that undo is withdrawn only from
+complete current own topology, not missing optional enrichment.
+When several ancestors are open, one accepted update from the same bounded
+rewrite must not block its remaining ancestor updates; independent native
+changes still keep their own precedence and invalidation checks.
+Promptly verified own accounting is also independent of descendant completion:
+if a grandchild read expires or its ownership lookup is unavailable, available
+own cost/model remain usable while descendant completeness stays unset. Own
+prompt/accounting proof does not establish complete outgoing topology: it cannot
+clear positive cohort deficits, authorize deeper bindings, or withdraw hidden
+branches. Without current outgoing topology, a deeper receipt needs an exact
+immutable retained relation matching both current launcher occurrences; changed
+parent occurrences or copied line objects cannot acquire that binding from IDs
+or positional pairing. Readable current native tool inputs, clocks, prompt origins
+and visibility also invalidate stale cached launchers even when unavailable child
+ownership strips their normalized association; this evidence grants no ownership.
+If a verified live launcher arrives after the accounting snapshot was captured,
+the older reconstruction retries within its existing bounded read rather than
+dropping the newer edge or claiming complete descendant accounting.
+Source, ownership, cancellation, and generation changes
+still fence those amounts; session lifetime totals remain separate from task receipts.
+Known limitation: after a changed deeper launcher recovers to a positive receipt,
+a later root-only refresh can retain that amount despite current native zero
+accounting. This separate second-rewrite bug is tracked in
+[#608](https://github.com/tjakobsson/uatu/issues/608), not fixed by this recovery change.
+If another client commits the revert before Uatu sees its staged boundary,
+discarded settled worker results must still disappear rather than return from
+retained state. Separate native-origin evidence preserves visible workers under
+unavailable enrichment without confusing them with committed-away work;
+positively recovered inbox and independently live work keep their own safeguards.
+An enqueued result is not yet a stored result. Successful pending-inbox reads
+preserve its current fallback text even if optional active-worker inventory
+expires; this text grants no inspection or Stop authority. Observed delivery and
+stored-result provenance still govern removal of committed-away results.
+An earlier visible launcher does not preserve a later reverted report. Fresh
+ownership evidence that contradicts the parent or workspace revokes retained
+child inspection and accounting associations; temporary lookup failure alone
+does not establish such a contradiction.
+This also removes a hidden result's earlier fallback notice if ownership later
+recovers and the result's presentation identity changes, so the next subscription
+snapshot cannot restore that reverted notice.
+For a visible result, a retained or recovered verified worker also supersedes
+the same native result's fallback notice in history and subscription snapshots;
+existing subscribers receive the notice removal. Without a matching verified
+worker, the fallback remains readable. Unrelated notices and results are retained.
+Disconnected delivery can change the stored timestamp without creating a new
+native result. Supersession follows the recorded exact fallback relation, while
+changed content, mismatched result/child identities, and newer updates stay protected.
+A retained worker's old summary cannot suppress newly changed report text merely
+because result and child IDs match. Current parent-owned text remains readable.
+Child cost/model reconstruction also has a bounded optional-read window.
+Unavailable accounting keeps its known values without inventing zero or
+completeness, and a later read can retry rather than blocking parent history.
+Saturated ownership lookups must not let optional accounting repeatedly restart
+its own parent recovery; genuine ownership counterproof still invalidates stale reads.
+Shared transcript reads keep each caller's cancellation window separate: an
+optional enrichment deadline cannot cancel a required reader still waiting on
+the same transport. The transport is cancelled when no reader remains.
+Missing visible descendant links also leave accounting incomplete, even when
+the child's own cost is known. A later parent refresh retries those links rather
+than caching the partial tree as complete; unavailable enrichment confined to a
+reverted hidden suffix does not invalidate the visible accounting tree.
 Missing evidence means **Status unavailable**, not finished or cancelled.
 Activity and Stop authorization are independent: an owned task with positively
 verified current activity can show **Working** while Stop is unavailable. Task
@@ -845,6 +954,10 @@ complete trust model and network guidance.
   and requests a fresh view when that boundary changes. Missing rows in a
   history page alone never authorize removal. Recovery does not replay a
   prompt or resume paused work.
+- **History loads but worker details are missing:** unavailable child-session
+  checks do not erase the parent's transcript. Child details still need verified
+  ownership, and missing details do not mean that work finished. A later
+  successful read can restore them.
 - **A scheduled wakeup never fired:** a row that reads as lost means the
   workspace stopped or the process exited before it fired, so ask the
   agent to schedule it again. A row that reads as paused fires again once

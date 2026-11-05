@@ -84,3 +84,53 @@ test("page cursors reject changed versions and legacy offsets explicitly", () =>
   expect(() => historyPageEnd(cursor, "version-b", 20)).toThrow("history changed");
   expect(() => historyPageEnd("10", "version-a", 20)).toThrow("history changed");
 });
+
+test("shared waiters cancel independently; the last departure cancels I/O and permits retry", async () => {
+  const cache = new HistoryReuse<string>();
+  const first = new AbortController(), second = new AbortController();
+  let captured!: () => void, release!: (value: string) => void, transport!: AbortSignal;
+  const started = new Promise<void>(resolve => { captured = resolve; });
+  const load = (signal: AbortSignal) => { transport = signal; captured(); return new Promise<string>(resolve => { release = resolve; }); };
+  const a = cache.readShared("a", "1", load, first.signal); void a.catch(() => undefined);
+  await started;
+  const b = cache.readShared("a", "1", load, second.signal); void b.catch(() => undefined);
+  first.abort(); await expect(a).rejects.toThrow();
+  expect(transport.aborted).toBe(false);
+  second.abort(); await expect(b).rejects.toThrow();
+  expect(transport.aborted).toBe(true);
+  const replacement = cache.readShared("a", "1", async () => "current", new AbortController().signal);
+  release("abandoned");
+  expect(await replacement).toBe("current");
+  expect(cache.peek("a", "1")).toBe("current");
+  cache.dispose();
+});
+
+for (const ending of ["version", "invalidate", "dispose"] as const) test(`shared ${ending} fences late owners without removing a newer pending read`, async () => {
+  const cache = new HistoryReuse<string>();
+  let releaseOld!: (value: string) => void, releaseNew!: (value: string) => void;
+  const old = cache.readShared("a", "1", () => new Promise<string>(resolve => { releaseOld = resolve; }), new AbortController().signal);
+  void old.catch(() => undefined);
+  await Promise.resolve();
+  if (ending === "dispose") {
+    cache.dispose();
+    await expect(old).rejects.toThrow();
+    releaseOld("late");
+    expect(cache.peek("a", "1")).toBeUndefined();
+    expect(cache.size).toBe(0);
+    return;
+  }
+  if (ending === "invalidate") cache.invalidate("a");
+  const version = ending === "version" ? "2" : "1";
+  let loads = 0;
+  const currentLoad = () => { loads++; return new Promise<string>(resolve => { releaseNew = resolve; }); };
+  const current = cache.readShared("a", version, currentLoad, new AbortController().signal);
+  await Promise.resolve();
+  releaseOld("late"); await old;
+  expect(cache.peek("a", "1")).toBeUndefined();
+  const peer = cache.readShared("a", version, currentLoad, new AbortController().signal);
+  expect(loads).toBe(1);
+  releaseNew("current");
+  expect(await Promise.all([current, peer])).toEqual(["current", "current"]);
+  expect(cache.peek("a", version)).toBe("current");
+  cache.dispose();
+});
