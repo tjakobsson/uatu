@@ -195,9 +195,7 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
   await page.goto("/");
   await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "19 files");
 
-  const yamlButton = treeRow(page, "config.yaml");
-  await expect(yamlButton).toBeVisible();
-  await yamlButton.click();
+  await openTreeFile(page, "config.yaml");
 
   await expect(page.locator("#preview-path")).toHaveText("config.yaml");
   await expect(page.locator('#preview pre code.hljs.language-yaml')).toBeVisible();
@@ -222,9 +220,7 @@ test("a non-image binary appears in the tree and routes to the preview-unavailab
   await page.reload();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
-  const binRow = treeRow(page, "data.bin");
-  await expect(binRow).toBeVisible();
-  await binRow.click();
+  await openTreeFile(page, "data.bin");
 
   await expect(page.locator("#preview-path")).toHaveText("data.bin");
   await expect(page.locator("#preview")).toContainText("isn't viewable");

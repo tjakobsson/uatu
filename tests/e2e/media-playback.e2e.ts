@@ -9,23 +9,34 @@ import { captureScreenshot, evidencePath, recordEvidence, saveEvidence } from ".
 const test = withEngineBrowsers(base);
 attachPageDiagnosticsOnFailure(test);
 test.afterEach(async ({ request }) => { await request.post("/__e2e/reset"); });
-async function seed(request: APIRequestContext) {
+async function publishCompletedMedia(name: string, bytes: Uint8Array, modified?: Date) {
+  const temporary = workspacePath(`.fixture-${name}.tmp`);
+  await fs.writeFile(temporary, bytes);
+  if (modified) await fs.utimes(temporary, modified, modified);
+  await fs.rename(temporary, workspacePath(name));
+}
+async function seed(request: APIRequestContext, { audioOrder = [], audioDuration = 4 }: { audioOrder?: readonly string[]; audioDuration?: number } = {}) {
   await request.post("/__e2e/reset", { data: { follow: false } });
   // These are completed decoding fixtures, not producer-in-progress cases.
-  await Promise.all(([
-    ["tone-a.wav", wavFixture()], ["tone-b.wav", wavFixture()],
+  // Stamp their final ordering before publication. Touching indexed files
+  // afterwards can invalidate an audition while its Play is still starting.
+  const written = Date.now();
+  const fixtures: Array<readonly [string, Uint8Array]> = [
+    ["tone-a.wav", wavFixture(audioDuration)], ["tone-b.wav", wavFixture(audioDuration)],
     ["clip.mp4", mp4Fixture()], ["incomplete.wav", truncatedMediaFixture()],
-  ] as const).map(async ([name, bytes]) => {
-    const temporary = workspacePath(`.fixture-${name}.tmp`);
-    await fs.writeFile(temporary, bytes);
-    await fs.rename(temporary, workspacePath(name));
+    ...audioOrder.filter(name => name !== "tone-a.wav" && name !== "tone-b.wav").map(name => [name, wavFixture()] as const),
+  ];
+  await Promise.all(fixtures.map(async ([name, bytes]) => {
+    const position = audioOrder.indexOf(name);
+    await publishCompletedMedia(name, bytes, position < 0 ? undefined : new Date(written - position * 10_000));
   }));
   await expect.poll(async () => {
     const state = await (await request.get("/api/state")).json();
     if (state.discovery.status !== "ready") return 0;
     return state.roots.flatMap((root: any) => root.docs).filter((doc: any) =>
-      ["tone-a.wav", "tone-b.wav", "clip.mp4", "incomplete.wav"].includes(doc.relativePath)).length;
-  }).toBe(4);
+      fixtures.some(([name]) => name === doc.relativePath)
+      && (!audioOrder.includes(doc.relativePath) || Math.abs(doc.mtimeMs - (written - audioOrder.indexOf(doc.relativePath) * 10_000)) < 1)).length;
+  }).toBe(fixtures.length);
 }
 async function open(page: Page, path = "tone-a.wav") {
   const { token } = await (await page.request.get("/__e2e/terminal-token")).json();
@@ -43,8 +54,12 @@ async function ready(page: Page) {
   await expect.poll(() => native(page).evaluate((element: HTMLMediaElement) => ({ duration: element.duration, error: element.error?.message, src: element.currentSrc }))).toMatchObject({ duration: expect.any(Number), error: undefined });
   await expect.poll(() => native(page).evaluate((element: HTMLMediaElement) => element.duration)).toBeGreaterThan(3);
 }
-async function playing(page: Page) {
-  await expect.poll(() => native(page).evaluate((element: HTMLMediaElement) => !element.paused && element.currentTime > 0)).toBe(true);
+async function playing(page: Page, path?: string) {
+  await expect.poll(() => native(page).evaluate((element: HTMLMediaElement) => ({
+    playing: !element.paused && element.currentTime > 0,
+    path: element.src ? new URL(element.currentSrc || element.src).searchParams.get("path") : null,
+    error: element.error?.message ?? null,
+  }))).toMatchObject({ playing: true, ...(path ? { path } : {}) });
 }
 for (const engine of ["chromium", "webkit"] as const) {
   test(`${engine}: direct, restored, and history media previews stay paused and share one source`, async ({ launchBrowser, request, serverPort }, info) => {
@@ -87,8 +102,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine}: document refreshes do not reinsert or pause a parked player`, async ({ launchBrowser, request, serverPort }) => {
-    await seed(request);
-    await fs.writeFile(workspacePath("tone-a.wav"), wavFixture(30));
+    await seed(request, { audioDuration: 30 });
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL: `http://127.0.0.1:${serverPort}` });
     await open(page); await ready(page);
@@ -240,11 +254,10 @@ for (const engine of ["chromium", "webkit"] as const) {
     await fs.writeFile(workspacePath("unrelated.txt"), "unrelated update"); await expect(treeRow(page, "unrelated.txt")).toBeVisible();
     expect(await native(page).evaluate((e: HTMLMediaElement) => e === (window as any).__mediaElement && Math.abs(e.currentTime - 1.5) < .2)).toBe(true);
     await dock(page).getByRole("button", { name: "Loop current clip" }).click();
-    await fs.writeFile(workspacePath("tone-a.wav"), wavFixture(5));
-    // A write notice can describe an intermediate producer revision. Wait for
-    // the final written metadata in both the index and client before Reload.
+    // Publish the completed render with its final metadata, then wait for both
+    // the server and client to hold that version before explicit Reload.
     const written = new Date(Date.now() + 3000);
-    await fs.utimes(workspacePath("tone-a.wav"), written, written);
+    await publishCompletedMedia("tone-a.wav", wavFixture(5), written);
     let writtenRevision = 0;
     await expect.poll(async () => {
       const state = await (await request.get("/api/state")).json();
@@ -264,6 +277,15 @@ for (const engine of ["chromium", "webkit"] as const) {
     const href = await page.locator(".media-preview").getByRole("link", { name: "Download" }).getAttribute("href");
     expect(new URL(href!, page.url()).searchParams.get("revision")).toBe(await native(page).evaluate((e: HTMLMediaElement) => new URL(e.src).searchParams.get("revision")));
     const download = await page.request.get(href!);
+    if (download.status() !== 200) {
+      const state = await (await request.get("/api/state")).json();
+      await saveEvidence(test.info(), "revision-diagnostics.json", JSON.stringify({
+        requested: href, status: download.status(),
+        currentHref: await page.locator(".media-preview").getByRole("link", { name: "Download" }).getAttribute("href"),
+        current: state.roots.flatMap((root: any) => root.docs).filter((doc: any) => doc.relativePath === "tone-a.wav"),
+        disk: await fs.stat(workspacePath("tone-a.wav")),
+      }, null, 2));
+    }
     expect(download.status()).toBe(200); expect(await download.body()).toEqual(wavFixture(5));
     await fs.rm(workspacePath("tone-a.wav")); await expect(dock(page)).toContainText("no longer available");
     await expect(native(page)).toHaveCount(0);
@@ -297,27 +319,34 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine}: captured audition order skips deleted entries and ignores later arrivals and filter changes`, async ({ launchBrowser, request, serverPort }) => {
-    await seed(request);
-    await fs.writeFile(workspacePath("tone-c.wav"), wavFixture());
-    for (const [i, name] of ["tone-a.wav", "tone-b.wav", "tone-c.wav"].entries()) {
-      const date = new Date(Date.now() - i * 10000); await fs.utimes(workspacePath(name), date, date);
-    }
+    const audioOrder = ["tone-a.wav", "tone-b.wav", "tone-c.wav"];
+    await seed(request, { audioOrder });
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL: `http://127.0.0.1:${serverPort}` });
-    await open(page);
+    const requested: string[] = [];
+    page.on("request", request => {
+      const url = new URL(request.url());
+      if (url.pathname.endsWith("/api/media")) requested.push(url.searchParams.get("path")!);
+    });
+    await open(page); await ready(page);
     await page.locator("#files-pane-filter-recent").click(); await page.locator("#files-query").fill("tone-");
-    await page.getByRole("button", { name: "Play tone-a.wav", exact: true }).click(); await playing(page);
+    await expect.poll(() => page.locator("#recent-files .recent-file-open").evaluateAll(rows => rows.map(row => row.getAttribute("data-path"))))
+      .toEqual(audioOrder);
+    await page.getByRole("button", { name: "Play tone-a.wav", exact: true }).click(); await playing(page, "tone-a.wav");
     await expect(dock(page).getByRole("button", { name: "Previous clip" })).toBeDisabled();
     await fs.rm(workspacePath("tone-b.wav"));
     await expect(page.getByRole("button", { name: "Play tone-b.wav", exact: true })).toHaveCount(0);
-    await fs.writeFile(workspacePath("tone-new.wav"), wavFixture());
+    await publishCompletedMedia("tone-new.wav", wavFixture());
     await expect(page.getByRole("button", { name: "Play tone-new.wav", exact: true })).toBeVisible();
     await page.locator("#files-query").fill("README");
     await dock(page).getByRole("button", { name: "Next clip" }).click();
-    await expect(dock(page)).toContainText("tone-c.wav"); await playing(page);
+    await expect(dock(page)).toContainText("tone-c.wav"); await playing(page, "tone-c.wav");
     await expect(dock(page).getByRole("button", { name: "Next clip" })).toBeDisabled();
     await dock(page).getByRole("button", { name: "Previous clip" }).click();
-    await expect(dock(page)).toContainText("tone-a.wav");
+    await expect(dock(page)).toContainText("tone-a.wav"); await playing(page, "tone-a.wav");
+    // Returning to a decoded clip may reuse Chromium's native media cache.
+    // The source assertions above check every activation; only a and c fetch.
+    expect([...new Set(requested)]).toEqual(["tone-a.wav", "tone-c.wav"]);
     await expect(dock(page).getByRole("button", { name: "Previous clip" })).toBeDisabled();
     await expect(native(page)).toHaveCount(1);
     await browser.close();
