@@ -4,6 +4,23 @@ PR-time capture using `tests/e2e/evidence.ts`, Bun 1.4.4, and Playwright Chromiu
 
 ## Screenshots
 
+### Phone video
+
+These are **390 × 844 touch-mode browser emulations**, with `hasTouch` and `isMobile` enabled and the layout suite's controlled visual viewport. WebKit is the iPhone-relevant engine here; these are not physical iPhone or iOS Safari tests. Both states show the persistent player on the Files tab and all four bottom tabs.
+
+| Browser and viewport | Compact video | Expanded video |
+| --- | --- | --- |
+| WebKit, 390 × 844 touch emulation | [Compact](webkit-phone-video-compact.png), 58,289 bytes | [Expanded](webkit-phone-video-expanded.png), 55,107 bytes |
+| Chromium, 390 × 844 touch emulation | [Compact](chromium-phone-video-compact.png), 45,455 bytes | [Expanded](chromium-phone-video-expanded.png), 40,551 bytes |
+
+The video is the existing synthetic four-second, solid-blue H264 fixture. Both browsers report actual decoded dimensions of 32 × 32 and a completed seek to 1.25 seconds before each capture. The video is paused in these images. Compact presentation has a 96 × 54 video element with a 54 × 54 square frame; expanded presentation has a 370 × 304 video element with an approximately 304 × 304 square frame. Native controls can cover part of the frame. The four screenshots total 199,402 bytes and were visually reviewed, with synthetic temporary paths displayed normally.
+
+**Observed UI concerns:** expanded video leaves only the Files header visible at this phone size; the Files query and results are clipped until the player is compacted. Player controls and bottom tabs remain visible and do not overlap. Chromium's native controls obscure most of the compact thumbnail. These captures preserve both observations.
+
+The two `390 phone: measured video dock` tests **passed 2/2 in 6.2 seconds**, using Bun 1.4.4, one worker, and zero retries. Capture checks verify touch mode, actual decoded dimensions, frame readiness, completed seeking, retained element/time, fully visible video/control/tab bounds, and separation between the dock and tabs. Existing assertions also exercise slider input, expansion/compaction, live playback across tabs, the last Files row in compact mode, rotation, mode changes, and Close. The passing tests do not establish Files-result accessibility while expanded; the clipping above was found during image review.
+
+Geometry reports: [WebKit](webkit-390-phone-geometry.json), 724 bytes; [Chromium](chromium-390-phone-geometry.json), 726 bytes. They contain expanded geometry and the final geometry after rotation/mode checks.
+
 ### Visible decoded video
 
 | Browser | Expanded H264 video with playback controls | Decode report |
@@ -32,6 +49,24 @@ The six audio-workflow PNGs total 311,323 bytes. Supporting reports: [Chromium](
 Assertions cover Recent query/counts, live reorder and pointer stability, windowed scrolling/focus, narrow layouts, ignored-output classification, audio/video filtering, paused filename navigation, persistent playback across Files/Preview/Chat, and explicit revision Reload. Reload paused at zero before playback was resumed for the final screenshot. Both engines reported MP4 support, three ignored outputs, and one live stream. Listing generated media fetched no media contents. The harness logged upstream-unreachable messages; all targeted tests passed.
 
 ## Capture command
+
+### Phone video only
+
+Run from the repository root with Bun 1.4.4 on `PATH`, including for the fixture server's child process:
+
+```sh
+evidence_root="$(mktemp -d "${TMPDIR:-/tmp}/recent-media-phone-evidence.XXXXXX")"
+env -u CI -u UATU_E2E_BINARY -u UATU_E2E_LEG \
+  UATU_E2E_BASE_PORT=29040 \
+  UATU_E2E_HUB_BASE_PORT=29140 \
+  UATU_E2E_WORKSPACE_ROOT="$evidence_root/workspaces" \
+  UATU_E2E_SCREENSHOTS_DIR=openspec/changes/add-recent-media-browsing/screenshots \
+  bun run test:e2e tests/e2e/media-layout.e2e.ts \
+  --grep='390 phone: measured video dock' --project=e2e --workers=1 --retries=0 --reporter=list \
+  --output="$evidence_root/test-results"
+```
+
+The fixture server used port 29040. Playwright outputs remain in the isolated temporary directory. The harness logged an upstream-unreachable message; both tests passed. This selection writes only the four phone screenshots and two phone geometry reports.
 
 ### Video only
 

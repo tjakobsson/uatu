@@ -1,4 +1,4 @@
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { APIRequestContext, Page, TestInfo } from "@playwright/test";
 import { promises as fs } from "node:fs";
 import { test as base, expect } from "./fixtures";
 import { withEngineBrowsers, attachPageDiagnosticsOnFailure } from "./page-diagnostics";
@@ -76,9 +76,30 @@ async function dockFits(page: Page) {
   expect(await page.locator("#media-dock").evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
 }
 
+async function capturePhoneVideo(page: Page, info: TestInfo, name: string) {
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+  await sameMedia(page); await dockFits(page);
+  const video = page.locator("#media-dock video");
+  await expect(video).toBeInViewport({ ratio: 1 });
+  await expect.poll(() => video.evaluate((node: HTMLVideoElement) =>
+    node.videoWidth === 32 && node.videoHeight === 32 && node.readyState >= 2 && !node.seeking)).toBe(true);
+  for (const tab of ["files", "preview", "chat", "terminal"]) {
+    await expect(page.locator(`#touch-tab-${tab}`)).toBeInViewport({ ratio: 1 });
+  }
+  const dock = page.locator("#media-dock");
+  for (const control of await dock.locator("button:visible, input[type=range]").all()) {
+    await expect(control).toBeInViewport({ ratio: 1 });
+  }
+  const tabs = await page.locator("#touch-tab-bar").boundingBox();
+  const player = await dock.boundingBox();
+  expect(player!.y + player!.height).toBeLessThanOrEqual(tabs!.y + 1);
+  await captureScreenshot(page, info, name);
+}
+
 for (const engine of ["chromium", "webkit"] as const) {
   for (const shape of [
     { name: "320 phone", size: { width: 320, height: 740 }, mode: "touch" as const },
+    { name: "390 phone", size: { width: 390, height: 844 }, mode: "touch" as const },
     { name: "iPad", size: { width: 834, height: 1194 }, mode: "touch" as const },
     { name: "desktop", size: { width: 1280, height: 900 }, mode: "desktop" as const },
   ]) {
@@ -99,6 +120,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         await expect.poll(() => page.locator("video").evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThan(1.25);
         await slider.blur();
         await page.locator("video").evaluate((node: HTMLVideoElement) => { node.currentTime = 1.25; });
+        if (shape.name === "390 phone") await page.locator("#touch-tab-files").click();
         if (shape.mode === "desktop") {
           await expect.poll(async () => {
             const m = await metrics(page);
@@ -110,6 +132,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         await expect(page.locator("#media-dock video")).toBeVisible();
         await dockFits(page); await sameMedia(page);
         const expanded = await metrics(page);
+        if (shape.name === "390 phone") await capturePhoneVideo(page, testInfo, `${engine}-phone-video-expanded`);
         await page.locator("#media-dock").getByRole("button", { name: "Compact video", exact: true }).click();
         await expect.poll(async () => (await metrics(page)).dock.height).toBeLessThan(expanded.dock.height);
         if (shape.mode === "touch") {
@@ -120,6 +143,7 @@ for (const engine of ["chromium", "webkit"] as const) {
           await page.locator("#media-dock").getByRole("button", { name: "Pause", exact: true }).click();
           await page.locator("video").evaluate((node: HTMLVideoElement) => { node.currentTime = 1.25; });
         }
+        if (shape.name === "390 phone") await capturePhoneVideo(page, testInfo, `${engine}-phone-video-compact`);
         await page.locator("#files-pane-filter-recent").click();
         await page.locator("#files-query-clear").click();
         const recent = page.locator("#recent-files");
@@ -140,7 +164,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         await dockFits(page); await sameMedia(page);
         await page.setViewportSize(shape.size); await viewport(page, shape.size.height);
         await dockFits(page); await sameMedia(page);
-        await captureScreenshot(page, testInfo, `${engine}-${shape.name.replaceAll(" ", "-")}-dock`);
+        if (shape.name !== "390 phone") await captureScreenshot(page, testInfo, `${engine}-${shape.name.replaceAll(" ", "-")}-dock`);
         await saveEvidence(testInfo, `${engine}-${shape.name.replaceAll(" ", "-")}-geometry.json`, JSON.stringify({ expanded, final: await metrics(page) }, null, 2));
         await page.locator("#media-dock").getByRole("button", { name: "Close player" }).click();
         await expect(page.locator("#media-dock")).toBeHidden();
