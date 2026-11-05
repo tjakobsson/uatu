@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { wavFixture, mp4Fixture, truncatedMediaFixture } from "./media-fixtures";
 import { treeRow } from "./tree-helpers";
-import { captureScreenshot, saveEvidence } from "./evidence";
+import { captureScreenshot, evidencePath, recordEvidence, saveEvidence } from "./evidence";
 
 const test = withEngineBrowsers(base);
 attachPageDiagnosticsOnFailure(test);
@@ -193,14 +193,39 @@ for (const engine of ["chromium", "webkit"] as const) {
       expect(await native(page).evaluate((e: HTMLMediaElement) => e === (window as any).__video && e.currentTime >= 1.4)).toBe(true);
       await expect(native(page)).toHaveCount(1);
       expect(await native(page).evaluate((e: HTMLMediaElement) => !e.paused)).toBe(true);
+      // Capture the decoded frame before native fullscreen can hide the page's
+      // video layer. The fixture is a solid blue 32x32 H264 clip, not a poster.
+      await expect(native(page)).toBeVisible();
+      await expect.poll(() => native(page).evaluate((e: HTMLVideoElement) => e.readyState >= 2 && !e.seeking)).toBe(true);
+      const frame = await native(page).evaluate((e: HTMLVideoElement) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 1;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(e, 0, 0, 1, 1);
+        const { width, height } = e.getBoundingClientRect();
+        return { pixel: [...context.getImageData(0, 0, 1, 1).data], width, height };
+      });
+      expect(frame.width).toBeGreaterThan(200);
+      expect(frame.height).toBeGreaterThan(200);
+      expect(frame.pixel[0]).toBeLessThan(80);
+      expect(frame.pixel[1]).toBeGreaterThan(80);
+      expect(frame.pixel[2]).toBeGreaterThan(150);
+      await expect(dock(page).getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+      await expect(dock(page).getByRole("slider", { name: "Playback position" })).toBeVisible();
+      await page.evaluate(() => document.fonts.ready);
+      const screenshot = evidencePath(info, `${engine}-native-h264.png`);
+      await page.screenshot({ path: screenshot, animations: "disabled", caret: "hide", mask: [
+        page.locator(".media-preview > p:not([role])"),
+        dock(page).locator(".media-dock-identity > span"),
+      ] });
+      await recordEvidence(info, screenshot);
       const fullscreen = dock(page).getByRole("button", { name: "Fullscreen video" });
       if (await fullscreen.isVisible()) {
         await fullscreen.click();
         await expect.poll(() => page.evaluate(() => !!document.fullscreenElement || !!(document.querySelector("video") as any)?.webkitDisplayingFullscreen || document.querySelector("#media-dock [role=status]")?.textContent?.includes("Fullscreen unavailable"))).toBeTruthy();
         await page.evaluate(async () => { if (document.fullscreenElement) await document.exitFullscreen(); });
       }
-      await captureScreenshot(page, info, `${engine}-native-h264`);
-      await saveEvidence(info, `${engine}-video-codec.txt`, `H264 Baseline canPlayType=${support}; actual videoWidth=32, native play and seek verified.`);
+      await saveEvidence(info, `${engine}-video-codec.txt`, `H264 Baseline canPlayType=${support}; actual videoWidth=32, native play and seek verified. Expanded decoded frame before fullscreen: ${JSON.stringify(frame)}.`);
     }
     await dock(page).getByRole("button", { name: "Close player" }).click(); await expect(native(page)).toHaveCount(0);
     await browser.close();
