@@ -3072,6 +3072,9 @@ Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, inter
 #### Scenario: A source-current child rewrite reprices an exact launcher
 - **WHEN** a successful child undo reconstructs reduced task accounting for an already-priced exact foreground launcher
 - **THEN** the parent projection, history, and following subscription reflect the current verified task amount, including authoritative zero, without clearing negative cohort restrictions
+- **AND** an ancestor-only view can reprice that exact nested receipt without opening intermediate conversations; retained path bindings, incoming ownership, source leases and visibility remain current through actual queued publication under the existing optional deadline
+- **AND** mixed projected/unprojected ancestor paths receive the same current receipt: one accepted publication from the exact bounded rewrite does not invalidate its remaining ancestor publications, while independent updates retain their existing precedence and fences
+- **AND** a deeper branch hidden by the same undo is selectively withdrawn only from complete current own topology, preserving visible and temporarily unavailable descendants
 - **AND** changed or unresolved launcher bindings, positive membership deficits, incoming ownership counterproof, cancellation, superseded generations, and newer live presentation keep their existing safeguards
 
 #### Scenario: Descendant expiry preserves promptly verified own accounting

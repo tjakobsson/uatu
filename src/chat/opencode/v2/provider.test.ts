@@ -8,6 +8,7 @@ import type { FormCancelled, FormCreated, FormReplied, PermissionAsked, Permissi
 import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../../provider";
 import { createOpenCodeV2Provider, formAnswerFromChoices, type OpenCodeV2Provider } from "./provider";
 import { ChatAdapter, SteerAlreadyDeliveredError, SteerWithdrawalUnconfirmedError } from "../../adapter";
+import { ProviderUpdateCoalescer } from "../../coalescer";
 import { conversationTotals } from "../../conversation-totals";
 import { compactWorkers, workerSummary } from "../../compact-work";
 import { workerState, workerExecutionClockRuns, workerCanStop, workerStateLabel } from "../../worker-state";
@@ -1133,6 +1134,514 @@ test(`source-current child undo reprices its exact retained foreground launcher 
     }
     expect(server.calls.filter(call => call.method !== "GET").map(call => call.path)).toEqual(["/api/session/ses_child/revert/stage"]);
   } finally { release(); releaseStartup(); await mutation?.catch(() => undefined); await adapter.dispose(); expect(closed).toBe(opened); }
+});
+
+function ancestorRewriteFixture(levels: number, remaining: number, stagedRoot = false, shared = false, nestedTail = false, tailInPrefix = false) {
+  const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+  const launch = (id: string, child: string, created: number) => {
+    const message = structuredClone(fixture.launch); message.id = `msg_${id}`; message.time.created = created;
+    const tool = message.content[0]; tool.id = id; tool.time = { created, completed: created + 5 };
+    tool.state.input.background = false; tool.state.metadata = { sessionID: child, status: "completed" };
+    tool.state.content = [{ type: "text", text: `${id} result` }];
+    return message;
+  };
+  const chain = ["ses_root", ...Array.from({ length: levels }, (_, index) => `ses_middle_${index}`), "ses_leaf"];
+  const launches = chain.slice(0, -1).map((_, index) => launch(index === 0 ? "root" : `nested_${index}`, chain[index + 1]!, 10 + index * 10));
+  for (const message of launches) message.content[0].state.input.prompt = `Task for ${message.content[0].state.metadata.sessionID}`;
+  const sibling = launch("second", "ses_leaf", 160); sibling.content[0].state.input.prompt = "Later work";
+  const middleSibling = launch("mixed_native_sibling", chain[2]!, 60); middleSibling.content[0].state.input.prompt = "A sibling middle task";
+  const peer = launch("peer", "ses_peer", 70); peer.content[0].state.input.prompt = "Task for ses_peer";
+  const tail = launch("tail", "ses_tail", tailInPrefix ? 110 : 210);
+  const state = { boundary: undefined as string | undefined, peerBoundary: undefined as string | undefined, foreignParent: "", foreignWorkspace: "", unavailable: "", laterCost: 0.25,
+    includeMiddleSibling: false, includePeer: false, failRoot: false, hidden: new Map<string, string>() };
+  if (stagedRoot) state.hidden.set("ses_root", "root_later");
+  let opened = 0, closed = 0, applied!: () => void;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; opened++; controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => { closed++; controller.close(); }, { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }), "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]), "GET /api/form": () => scoped([]),
+    "GET /api/session/:id": ({ path: route }) => {
+      const id = route.split("/").at(-1)!, index = chain.indexOf(id), boundary = id === "ses_leaf" ? state.boundary : state.hidden.get(id);
+      if (state.unavailable === id) return new Response(null, { status: 503 });
+      if (id === "ses_tail") return session(id, { parentID: "ses_leaf", cost: 0.125 });
+      if (id === "ses_peer") return session(id, { parentID: chain.at(-2), cost: state.peerBoundary ? remaining : remaining + state.laterCost, ...(state.peerBoundary ? { revert: { messageID: state.peerBoundary } } : {}) });
+      return session(id, { ...(index > 0 ? { parentID: state.foreignParent === id ? "ses_other" : chain[index - 1] } : {}),
+        cost: id === "ses_leaf" ? state.boundary ? remaining : remaining + state.laterCost : 0,
+        ...(boundary ? { revert: { messageID: boundary } } : {}), ...(state.foreignWorkspace === id ? { location: { directory: "/foreign" } } : {}) });
+    },
+    "GET /api/session/:id/message": ({ path: route }) => {
+      const id = route.split("/").at(-2)!, index = chain.indexOf(id);
+      if (id === "ses_root" && state.failRoot) return new Response(null, { status: 503 });
+      if (id === "ses_tail") return { data: [{ id: "spend_tail", type: "assistant", model: { id: "tail-model" }, cost: 0.125, content: [], time: { created: 220 } }], cursor: {} };
+      if (id === "ses_peer") return { data: [
+        { id: "peer_first", type: "user", text: peer.content[0].state.input.prompt, time: { created: 100 } },
+        { id: "peer_spend", type: "assistant", model: { id: "peer-model" }, cost: remaining, content: [], time: { created: 105 } },
+        { id: "peer_later", type: "user", text: "Later peer work", time: { created: 200 } },
+        { id: "peer_later_spend", type: "assistant", model: { id: "peer-model" }, cost: state.laterCost, content: [], time: { created: 205 } },
+      ], cursor: {} };
+      if (id === "ses_leaf") return { data: [
+        { id: "prompt_first", type: "user", text: launches.at(-1)!.content[0].state.input.prompt, time: { created: 100 } },
+        { id: "spend_first", type: "assistant", model: { id: "leaf-model" }, cost: shared ? remaining - 0.1 : remaining, content: [], time: { created: 105 } },
+        ...(nestedTail && tailInPrefix ? [tail] : []),
+        ...(shared ? [{ id: "prompt_continue", type: "user", text: "Continue first task", time: { created: 120 } },
+          { id: "spend_continue", type: "assistant", model: { id: "leaf-model" }, cost: 0.1, content: [], time: { created: 125 } }] : []),
+        { id: "prompt_later", type: "user", text: "Later work", time: { created: 200 } },
+        { id: "spend_later", type: "assistant", model: { id: "leaf-model" }, cost: state.laterCost, content: [], time: { created: 205 } },
+        ...(nestedTail && !tailInPrefix ? [tail] : []),
+      ], cursor: {} };
+      return { data: [...(index > 0 ? [{ id: `prompt_${id}`, type: "user", text: launches[index - 1]!.content[0].state.input.prompt, time: { created: launches[index - 1]!.time.created + 1 } }] : []),
+        launches[index], ...(shared && index === chain.length - 2 ? [sibling] : []), ...(state.includeMiddleSibling && index === 1 ? [middleSibling] : []),
+        ...(state.includeMiddleSibling && index === 2 ? [{ id: "middle_sibling_prompt", type: "user", text: middleSibling.content[0].state.input.prompt, time: { created: 66 } }] : []),
+        ...(state.includePeer && index === chain.length - 2 ? [peer] : []), ...(id === "ses_root" && stagedRoot ? [{ id: "root_later", type: "user", text: "Later root work", time: { created: 500 } }] : [])], cursor: {} };
+    },
+    "POST /api/session/ses_leaf/revert/stage": ({ body }) => { state.boundary = (body as { messageID: string }).messageID; return { messageID: state.boundary }; },
+    "POST /api/session/ses_peer/revert/stage": ({ body }) => { state.peerBoundary = (body as { messageID: string }).messageID; return { messageID: state.peerBoundary }; },
+  });
+  const provider = server.provider(), events = provider.events.bind(provider);
+  provider.events = async function* (signal) { for await (const event of events(signal)) { yield event; if (event.eventType === "diagnostic.ancestor.applied") applied(); } };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const history = adapter.history.bind(adapter), historyIds = new Set<string>();
+  adapter.history = (...args) => { historyIds.add(args[0]); return history(...args); };
+  const emit = async (batch: Array<Record<string, unknown>>) => {
+    const ready = new Promise<void>(resolve => { applied = resolve; });
+    for (const event of [...batch, { type: "diagnostic.ancestor.applied", data: {} }])
+      wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await ready;
+  };
+  const receipt = (items: import("../../types").ConversationItem[]) => {
+    const row = items.find(item => item.id === "tool:root");
+    return row?.type === "tool" ? row.descendants?.find(line => line.id === `tool:${launches.at(-1)!.content[0].id}`) : undefined;
+  };
+  const dispose = async () => { await adapter.dispose(); expect(closed).toBe(opened); };
+  return { adapter, provider, server, state, launches, sibling, middleSibling, peer, chain, emit, receipt, historyIds, dispose };
+}
+
+for (const levels of [1, 3]) for (const remaining of [0.5, 0]) for (const inspect of [true, false])
+test(`ancestor-only child undo retains its exact nested receipt without projecting the intermediate (${levels}/${remaining}/inspect=${inspect})`, async () => {
+  const { adapter, server, receipt, historyIds, dispose } = ancestorRewriteFixture(levels, remaining);
+  try {
+    expect(receipt((await adapter.history("ses_root")).items)).toMatchObject({ usage: { costUsd: remaining + 0.25 }, model: "leaf-model" });
+    if (inspect) expect(conversationTotals((await adapter.history("ses_leaf")).items)?.costUsd).toBeCloseTo(remaining + 0.25);
+    expect(await adapter.undo("ses_leaf", "ancestor-only-undo")).toMatchObject({ outcome: "changed" });
+    const leaf = await adapter.subscribe("ses_leaf"); leaf.events.cancel();
+    if (remaining) expect(conversationTotals(leaf.snapshot.items)?.costUsd).toBeCloseTo(remaining);
+    else expect(conversationTotals(leaf.snapshot.items)).toBeUndefined();
+    const current = await adapter.subscribe("ses_root"); current.events.cancel();
+    expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: remaining }, model: "leaf-model" });
+    expect([...historyIds].every(id => id === "ses_root" || id === "ses_leaf")).toBe(true);
+    expect(server.calls.filter(call => call.method !== "GET").map(call => call.path)).toEqual(["/api/session/ses_leaf/revert/stage"]);
+  } finally { await dispose(); }
+});
+
+for (const levels of [2, 4]) for (const remaining of [0.5, 0]) for (const laterCost of [0.25, 0])
+for (const direct of [false, true]) for (const order of ["near-first", "far-first"] as const) for (const delivery of ["single", "coalesced", "replayed"] as const)
+test(`mixed projected ancestors accept their own exact rewrite publications (${levels}/${remaining}/${laterCost}/direct=${direct}/${order}/${delivery})`, async () => {
+  const { adapter, state, chain, server, historyIds, dispose } = ancestorRewriteFixture(levels, remaining);
+  state.laterCost = laterCost;
+  const ancestors = ["ses_root", ...chain.slice(1, -2).filter((_, index) => index % 2 === 0)];
+  const projected = [...ancestors, ...(direct ? [chain.at(-2)!] : [])];
+  const receipt = (items: import("../../types").ConversationItem[]) => items.flatMap(item => item.type === "tool"
+    ? [...(item.childConversationId === "ses_leaf" ? [item] : []), ...(item.descendants ?? [])] : []).find(line => "conversationId" in line ? line.conversationId === "ses_leaf" : line.childConversationId === "ses_leaf");
+  const pending: Array<{ id: string; updates: Parameters<ProviderUpdateCoalescer["push"]>[1] }> = [];
+  const push = ProviderUpdateCoalescer.prototype.push;
+  const pushed = spyOn(ProviderUpdateCoalescer.prototype, "push").mockImplementation(function(this: ProviderUpdateCoalescer, id, updates) {
+    if (!state.boundary || !ancestors.includes(id) || !updates.some(update => update.kind === "upsert" && receipt([update.item])?.usage?.costUsd === remaining)) return push.call(this, id, updates);
+    pending.push({ id, updates });
+    if (id !== "ses_root") return;
+    const ordered = pending.splice(0).sort((a, b) => (chain.indexOf(a.id) - chain.indexOf(b.id)) * (order === "near-first" ? -1 : 1));
+    for (const entry of ordered) {
+      push.call(this, entry.id, delivery === "coalesced" ? [...entry.updates, ...entry.updates] : entry.updates);
+      if (delivery === "replayed") push.call(this, entry.id, entry.updates);
+    }
+  });
+  const subscriptions: Array<Awaited<ReturnType<ChatAdapter["subscribe"]>>> = [];
+  try {
+    for (const id of projected) expect(receipt((await adapter.history(id)).items)).toMatchObject({ usage: { costUsd: remaining + laterCost }, model: "leaf-model" });
+    await adapter.history("ses_leaf");
+    for (const id of projected) subscriptions.push(await adapter.subscribe(id));
+    expect(await adapter.undo("ses_leaf", "mixed-projected-undo")).toMatchObject({ outcome: "changed" });
+    expect(pending).toEqual([]);
+    for (const [index, id] of projected.entries()) {
+      const current = await adapter.subscribe(id); current.events.cancel();
+      expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: remaining }, model: "leaf-model" });
+      const subscription = subscriptions[index]!; subscription.events.cancel();
+      const events: import("../../types").ChatEvent[] = [];
+      for await (const event of subscription.events) events.push(event);
+      expect(events.filter(event => event.type === "item.upsert")).toHaveLength(laterCost ? 1 : 0);
+      expect(events.filter(event => event.type === "item.remove" || event.type === "resync")).toEqual([]);
+      if (!laterCost) expect(current.snapshot.cursor).toBe(subscription.snapshot.cursor);
+    }
+    expect(historyIds.has(chain.at(-2)!)).toBe(direct);
+    expect(server.calls.filter(call => call.method !== "GET").map(call => call.path)).toEqual(["/api/session/ses_leaf/revert/stage"]);
+  } finally { subscriptions.forEach(subscription => subscription.events.cancel()); pushed.mockRestore(); await dispose(); }
+});
+
+for (const levels of [2, 4]) for (const outcome of ["healthy", "equivalent", "equivalent-during-apply", "clone-proof", "native-sibling", "foreign-parent", "foreign-workspace", "expired", "cancel", "generation", "replayed-rejected", "coalesced-rejected"] as const)
+test(`mixed projected ancestors advance only their own accepted publication (${levels}/${outcome})`, async () => {
+  const { adapter, provider, state, chain, launches, middleSibling, emit, dispose } = ancestorRewriteFixture(levels, 0.5, true);
+  state.includeMiddleSibling = outcome === "native-sibling";
+  const history = adapter.history.bind(adapter), list = provider.listMessages.bind(provider), events = provider.events.bind(provider);
+  const near = chain[1]!;
+  const receipt = (items: import("../../types").ConversationItem[]) => items.flatMap(item => item.type === "tool" ? item.descendants ?? [] : []).find(line => line.conversationId === "ses_leaf");
+  let entered!: () => void, release!: () => void, published!: () => void, startupEntered!: () => void, releaseStartup!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const nearPublished = new Promise<void>(resolve => { published = resolve; });
+  const startupReady = new Promise<void>(resolve => { startupEntered = resolve; }), startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+  let block = false, held = false, holdStartup = false, heldHistory: ReturnType<ChatAdapter["history"]> | undefined;
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    if (holdStartup && event.eventType === "server.connected") { startupEntered(); await startup; }
+    yield event;
+  } };
+  provider.listMessages = (...args) => state.failRoot && args[0] === "ses_root" ? Promise.reject(new Error("Held independent parent read unavailable")) : list(...args);
+  adapter.history = (...args) => {
+    if (!block || held || args[0] !== "ses_root") return history(...args);
+    held = true; entered(); heldHistory = gate.then(() => history(...args)); void heldHistory.catch(() => undefined); return heldHistory;
+  };
+  let mutation: ReturnType<ChatAdapter["undo"]> | undefined, stopping: Promise<void> | undefined;
+  let observed: ReturnType<typeof spyOn> | undefined;
+  const push = ProviderUpdateCoalescer.prototype.push;
+  let candidate: { owner: ProviderUpdateCoalescer; updates: Parameters<ProviderUpdateCoalescer["push"]>[1] } | undefined;
+  const pushed = spyOn(ProviderUpdateCoalescer.prototype, "push").mockImplementation(function(this: ProviderUpdateCoalescer, id, updates) {
+    if (id === "ses_root" && state.boundary && updates.some(update => update.kind === "upsert" && receipt([update.item])?.usage?.costUsd === 0.5)) candidate = { owner: this, updates };
+    push.call(this, id, updates);
+  });
+  try {
+    for (const id of ["ses_root", ...chain.slice(1, -2).filter((_, index) => index % 2 === 0)]) await adapter.history(id);
+    await adapter.history("ses_leaf");
+    const projection = adapter.projectionForTests(near), apply = projection.apply.bind(projection);
+    observed = spyOn(projection, "apply").mockImplementation(update => {
+      const event = apply(update);
+      if (state.boundary && event?.type === "item.upsert" && event.item.type === "tool" && receipt([event.item])?.usage?.costUsd === 0.5) {
+        if (outcome === "equivalent-during-apply") projection.refreshEquivalentTool(event.item, { ...event.item });
+        published();
+      }
+      return event;
+    });
+    block = true;
+    const root = launches[0]!;
+    await emit([{ id: "evt_block_mixed_tail", created: root.time.created, type: "session.message.content.updated", durable: { aggregateID: "ses_root", seq: 1, version: 1 }, data: { sessionID: "ses_root", messageID: root.id, content: root.content } }]);
+    await ready;
+    mutation = adapter.undo("ses_leaf", "mixed-held-publication"); void mutation.catch(() => undefined);
+    await nearPublished;
+    const currentNear = await adapter.subscribe(near); currentNear.events.cancel();
+    expect(receipt(currentNear.snapshot.items)).toMatchObject({ usage: { costUsd: 0.5 }, model: "leaf-model" });
+    if (outcome === "equivalent" || outcome === "clone-proof" || outcome === "replayed-rejected" || outcome === "coalesced-rejected") {
+      const row = currentNear.snapshot.items.find(item => item.type === "tool" && item.childConversationId === chain[2]) as import("../../types").ToolItem;
+      projection.refreshEquivalentTool(row, { ...row, ...(outcome === "clone-proof" ? { descendants: row.descendants!.map(line => ({ ...line })) } : {}) });
+    }
+    if (outcome === "native-sibling") {
+      const message = middleSibling;
+      message.content[0].state.content = [{ type: "text", text: "New sibling presentation." }];
+      await emit([{ id: "evt_mixed_sibling", created: message.time.created, type: "session.message.content.updated", durable: { aggregateID: near, seq: 1, version: 1 }, data: { sessionID: near, messageID: message.id, content: message.content } }]);
+    }
+    if (outcome === "foreign-parent") { state.foreignParent = near; await provider.getSession(near); }
+    if (outcome === "foreign-workspace") { state.foreignWorkspace = "ses_leaf"; await provider.getSession("ses_leaf"); }
+    if (outcome === "cancel" || outcome === "generation") stopping = adapter.stopEventPump();
+    if (outcome === "expired" || outcome === "cancel" || outcome === "generation") expect(await mutation).toMatchObject({ outcome: "changed" });
+    state.failRoot = true; release();
+    await heldHistory?.catch(() => undefined);
+    expect(await mutation).toMatchObject({ outcome: "changed" });
+    await stopping; state.failRoot = false;
+    if (outcome === "replayed-rejected" || outcome === "coalesced-rejected") {
+      expect(candidate).toBeDefined();
+      push.call(candidate!.owner, "ses_root", outcome === "coalesced-rejected" ? [...candidate!.updates, ...candidate!.updates] : candidate!.updates);
+      candidate!.owner.flushAll(); await candidate!.owner.settled();
+    }
+    if (outcome === "generation") { holdStartup = true; void adapter.startEventPump(); await startupReady; }
+    const current = await adapter.subscribe("ses_root"); current.events.cancel();
+    expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: outcome === "healthy" ? 0.5 : 0.75 }, model: "leaf-model" });
+    if (outcome === "native-sibling") {
+      const updated = await adapter.subscribe(near); updated.events.cancel();
+      expect(updated.snapshot.items).toContainEqual(expect.objectContaining({ id: "tool:mixed_native_sibling", output: "New sibling presentation." }));
+    }
+    if (outcome === "generation") {
+      releaseStartup();
+      expect(receipt((await adapter.history("ses_root")).items)).toMatchObject({ usage: { costUsd: 0.5 }, model: "leaf-model" });
+    }
+  } finally { release(); releaseStartup(); await heldHistory?.catch(() => undefined); await mutation?.catch(() => undefined); await stopping; observed?.mockRestore(); pushed.mockRestore(); await dispose(); }
+});
+
+for (const levels of [2, 4]) for (const first of ["ses_leaf", "ses_peer"] as const)
+test(`mixed projected ancestors do not borrow another rewrite context (${levels}/${first})`, async () => {
+  const { adapter, provider, state, launches, emit, dispose } = ancestorRewriteFixture(levels, 0.5, true);
+  state.includePeer = true;
+  const pair = (items: import("../../types").ConversationItem[]) => {
+    const lines = items.flatMap(item => item.type === "tool" ? item.descendants ?? [] : []);
+    return ["ses_leaf", "ses_peer"].map(id => lines.find(line => line.conversationId === id)?.usage?.costUsd);
+  };
+  const history = adapter.history.bind(adapter), list = provider.listMessages.bind(provider), push = ProviderUpdateCoalescer.prototype.push;
+  let entered!: () => void, release!: () => void, firstQueued!: () => void, bothQueued!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const firstReady = new Promise<void>(resolve => { firstQueued = resolve; }), bothReady = new Promise<void>(resolve => { bothQueued = resolve; });
+  let block = false, held = false, roots = 0, heldHistory: ReturnType<ChatAdapter["history"]> | undefined;
+  adapter.history = (...args) => {
+    if (!block || held || args[0] !== "ses_root") return history(...args);
+    held = true; entered(); heldHistory = gate.then(() => history(...args)); void heldHistory.catch(() => undefined); return heldHistory;
+  };
+  provider.listMessages = (...args) => state.failRoot && args[0] === "ses_root" ? Promise.reject(new Error("Held independent context read unavailable")) : list(...args);
+  const candidates: Array<{ owner: ProviderUpdateCoalescer; id: string; updates: Parameters<ProviderUpdateCoalescer["push"]>[1]; child: string }> = [];
+  const pushed = spyOn(ProviderUpdateCoalescer.prototype, "push").mockImplementation(function(this: ProviderUpdateCoalescer, id, updates) {
+    const item = updates.find(update => update.kind === "upsert" && update.item.type === "tool");
+    const costs = item?.kind === "upsert" ? pair([item.item]) : [];
+    if ((id !== "ses_root" && id !== "ses_middle_0") || !costs.includes(0.5) || (!state.boundary && !state.peerBoundary)) return push.call(this, id, updates);
+    candidates.push({ owner: this, id, updates, child: costs[0] === 0.5 ? "ses_leaf" : "ses_peer" });
+    if (id === "ses_root") { if (++roots === 1) firstQueued(); if (roots === 2) bothQueued(); }
+  });
+  const subscriptions: Array<Awaited<ReturnType<ChatAdapter["subscribe"]>>> = [];
+  const mutations: Array<ReturnType<ChatAdapter["undo"]>> = [];
+  try {
+    for (const id of ["ses_root", "ses_middle_0"]) {
+      expect(pair((await adapter.history(id)).items)).toEqual([0.75, 0.75]);
+      subscriptions.push(await adapter.subscribe(id));
+    }
+    await adapter.history("ses_leaf"); await adapter.history("ses_peer");
+    block = true;
+    const root = launches[0]!;
+    await emit([{ id: "evt_block_duplicate_context", created: root.time.created, type: "session.message.content.updated", durable: { aggregateID: "ses_root", seq: 1, version: 1 }, data: { sessionID: "ses_root", messageID: root.id, content: root.content } }]);
+    await ready;
+    mutations.push(adapter.undo(first, `mixed-context-${first}`)); void mutations[0]!.catch(() => undefined);
+    await firstReady;
+    const other = first === "ses_leaf" ? "ses_peer" : "ses_leaf";
+    mutations.push(adapter.undo(other, `mixed-context-${other}`)); void mutations[1]!.catch(() => undefined);
+    await bothReady;
+    const ordered = candidates.splice(0).sort((a, b) => Number(a.child !== first) - Number(b.child !== first) || Number(a.id === "ses_root") - Number(b.id === "ses_root"));
+    for (const candidate of ordered) push.call(candidate.owner, candidate.id, candidate.updates);
+    state.failRoot = true; release(); await heldHistory?.catch(() => undefined);
+    expect(await Promise.all(mutations)).toEqual([expect.objectContaining({ outcome: "changed" }), expect.objectContaining({ outcome: "changed" })]);
+    state.failRoot = false;
+    const prices: Array<Array<number | undefined>> = [];
+    for (const [index, id] of ["ses_root", "ses_middle_0"].entries()) {
+      const current = await adapter.subscribe(id); current.events.cancel(); prices.push(pair(current.snapshot.items));
+      const subscription = subscriptions[index]!; subscription.events.cancel();
+      const events: import("../../types").ChatEvent[] = []; for await (const event of subscription.events) events.push(event);
+      expect(events.filter(event => event.type === "item.upsert")).toHaveLength(1);
+    }
+    expect(prices[0]).toEqual(prices[1]);
+    expect<ReadonlyArray<ReadonlyArray<number | undefined>>>([[0.5, 0.75], [0.75, 0.5]]).toContainEqual(prices[0]);
+    // Both native mutations succeeded. A new coherent reader can recover the
+    // other receipt, without promoting either old context by row ID/equality.
+    expect(pair((await adapter.history("ses_root")).items)).toEqual([0.5, 0.5]);
+  } finally { state.failRoot = true; release(); await heldHistory?.catch(() => undefined); await Promise.allSettled(mutations); subscriptions.forEach(subscription => subscription.events.cancel()); pushed.mockRestore(); await dispose(); }
+});
+
+for (const levels of [1, 3]) for (const change of ["input-root", "clock-root", "input-middle", "clock-middle", "input-leaf-launch", "clock-leaf-launch", "missing-proof", "hidden-root", "hidden-middle"] as const)
+test(`ancestor-only rewrite withholds an unproven retained path (${levels}/${change})`, async () => {
+  const { adapter, state, launches, chain, receipt, emit, dispose } = ancestorRewriteFixture(levels, 0.5);
+  try {
+    const initial = await adapter.history("ses_root");
+    expect(receipt(initial.items)).toMatchObject({ usage: { costUsd: 0.75 }, model: "leaf-model" });
+    await adapter.history("ses_leaf");
+    const index = change.endsWith("root") ? 0 : change.endsWith("middle") ? Math.min(1, launches.length - 1) : launches.length - 1;
+    const changed = launches[index]!, tool = changed.content[0];
+    if (change.startsWith("input")) tool.state.input.prompt = "A different retained invocation";
+    if (change.startsWith("clock")) { changed.time.created++; tool.time.created++; tool.time.completed++; }
+    if (change.startsWith("input") || change.startsWith("clock")) await emit([{ type: "session.updated", data: { info: session(chain[index]!, index > 0 ? { parentID: chain[index - 1] } : {}) } }]);
+    if (change === "hidden-root") state.hidden.set("ses_root", launches[0]!.id);
+    if (change === "hidden-middle") state.hidden.set(chain.at(-2)!, launches.at(-1)!.id);
+    if (change === "missing-proof") {
+      const projection = adapter.projectionForTests("ses_root"), row = initial.items.find(item => item.type === "tool" && item.id === "tool:root") as import("../../types").ToolItem;
+      projection.refreshEquivalentTool(row, { ...row, descendants: row.descendants!.map(line => ({ ...line })) });
+    }
+    expect(await adapter.undo("ses_leaf", "unproven-ancestor-undo")).toMatchObject({ outcome: "changed" });
+    const current = await adapter.subscribe("ses_root"); current.events.cancel();
+    expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: 0.75 }, model: "leaf-model" });
+  } finally { await dispose(); }
+});
+
+for (const levels of [1, 3]) for (const outcome of ["healthy", "expired", "cancel", "generation", "foreign-middle-parent", "foreign-middle-workspace", "foreign-leaf-parent", "foreign-leaf-workspace", "hidden-middle", "new-live-root", "new-live-middle"] as const)
+test(`ancestor-only rewrite fences an asynchronous ancestor query (${levels}/${outcome})`, async () => {
+  const { adapter, provider, state, chain, launches, receipt, emit, dispose } = ancestorRewriteFixture(levels, 0.5);
+  const get = provider.getSession.bind(provider), watch = provider.watchWorkerAssociations.bind(provider), events = provider.events.bind(provider);
+  const middle = chain.at(-2)!;
+  let entered!: () => void, release!: () => void, startupEntered!: () => void, releaseStartup!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const startupReady = new Promise<void>(resolve => { startupEntered = resolve; }), startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+  let held = false, holdStartup = false, scopeSignal: AbortSignal | undefined;
+  const queries: Promise<unknown>[] = [];
+  provider.watchWorkerAssociations = (...args) => {
+    if (state.boundary && args[0] === chain.at(-3) && args[1].includes(middle)) scopeSignal = args[2].signal;
+    return watch(...args);
+  };
+  provider.events = async function* (signal) { for await (const event of events(signal)) {
+    if (holdStartup && event.eventType === "server.connected") { startupEntered(); await startup; }
+    yield event;
+  } };
+  provider.getSession = (...args) => {
+    const reading = (async () => {
+      const value = await get(...args);
+      if (state.boundary && args[0] === middle && !held) { held = true; entered(); await gate; }
+      return value;
+    })();
+    queries.push(reading); return reading;
+  };
+  let mutation: ReturnType<ChatAdapter["undo"]> | undefined;
+  try {
+    expect(receipt((await adapter.history("ses_root")).items)).toMatchObject({ usage: { costUsd: 0.75 } });
+    await adapter.history("ses_leaf");
+    mutation = adapter.undo("ses_leaf", "held-ancestor-undo"); void mutation.catch(() => undefined);
+    await ready;
+    expect(scopeSignal).toBeDefined();
+    if (outcome === "expired") await new Promise<void>(resolve => { if (scopeSignal!.aborted) resolve(); else scopeSignal!.addEventListener("abort", () => resolve(), { once: true }); });
+    if (outcome === "cancel" || outcome === "generation") {
+      await adapter.stopEventPump();
+      if (outcome === "generation") { holdStartup = true; void adapter.startEventPump(); await startupReady; }
+    }
+    if (outcome.startsWith("foreign")) {
+      const target = outcome.startsWith("foreign-middle") ? middle : "ses_leaf";
+      if (outcome.endsWith("workspace")) state.foreignWorkspace = target; else state.foreignParent = target;
+      await provider.getSession(target);
+    }
+    if (outcome === "hidden-middle") state.hidden.set(middle, launches.at(-1)!.id);
+    if (outcome === "new-live-root" || outcome === "new-live-middle") {
+      const index = outcome === "new-live-root" ? 0 : launches.length - 1, message = launches[index]!;
+      message.content[0].state.content = [{ type: "text", text: "Newer native presentation." }];
+      if (outcome === "new-live-middle") message.content[0].state.input.prompt = "A newer middle invocation";
+      await emit([{ id: "evt_held_ancestor", created: message.time.created, type: "session.message.content.updated", durable: { aggregateID: chain[index], seq: 1, version: 1 }, data: { sessionID: chain[index], messageID: message.id, content: message.content } }]);
+    }
+    if (outcome === "expired" || outcome === "cancel" || outcome === "generation") {
+      expect(await mutation).toMatchObject({ outcome: "changed" });
+      const beforeLate = await adapter.subscribe("ses_root"); beforeLate.events.cancel();
+      expect(receipt(beforeLate.snapshot.items)).toMatchObject({ usage: { costUsd: 0.75 } });
+    }
+    release();
+    expect(await mutation).toMatchObject({ outcome: "changed" });
+    await Promise.allSettled(queries);
+    const current = await adapter.subscribe("ses_root"); current.events.cancel();
+    if (outcome === "healthy") expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: 0.5 }, model: "leaf-model" });
+    else expect(receipt(current.snapshot.items)?.usage?.costUsd).not.toBe(0.5);
+    if (outcome === "new-live-root") expect(current.snapshot.items.find(item => item.id === "tool:root")).toMatchObject({ output: "Newer native presentation." });
+    if (outcome === "generation") {
+      releaseStartup();
+      expect(receipt((await adapter.history("ses_root")).items)).toMatchObject({ usage: { costUsd: 0.5 }, model: "leaf-model" });
+    }
+  } finally { release(); releaseStartup(); await mutation?.catch(() => undefined); await Promise.allSettled(queries); await dispose(); }
+});
+
+for (const levels of [1, 3]) for (const outcome of ["healthy", "foreign-parent", "foreign-workspace", "clone-proof", "cancel", "expired"] as const)
+test(`ancestor-only rewrite validates its lease at queued publication (${levels}/${outcome})`, async () => {
+  const { adapter, provider, state, chain, launches, receipt, emit, dispose } = ancestorRewriteFixture(levels, 0.5, true);
+  const history = adapter.history.bind(adapter), push = ProviderUpdateCoalescer.prototype.push, list = provider.listMessages.bind(provider);
+  provider.listMessages = (...args) => state.failRoot && args[0] === "ses_root" ? Promise.reject(new Error("Held parent transcript unavailable")) : list(...args);
+  let entered!: () => void, release!: () => void, queued!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const publicationReady = new Promise<void>(resolve => { queued = resolve; });
+  let block = false, held = false, heldHistory: ReturnType<ChatAdapter["history"]> | undefined;
+  adapter.history = (...args) => {
+    if (!block || held || args[0] !== "ses_root") return history(...args);
+    held = true; entered();
+    heldHistory = gate.then(() => history(...args)); void heldHistory.catch(() => undefined);
+    return heldHistory;
+  };
+  const pushed = spyOn(ProviderUpdateCoalescer.prototype, "push").mockImplementation(function(this: ProviderUpdateCoalescer, id, updates) {
+    push.call(this, id, updates);
+    if (id === "ses_root" && state.boundary && updates.some(update => update.kind === "upsert" && update.item.type === "tool"
+      && receipt([update.item])?.usage?.costUsd === 0.5)) queued();
+  });
+  let mutation: ReturnType<ChatAdapter["undo"]> | undefined, stopping: Promise<void> | undefined;
+  try {
+    expect(receipt((await adapter.history("ses_root")).items)).toMatchObject({ usage: { costUsd: 0.75 } });
+    await adapter.history("ses_leaf");
+    block = true;
+    const root = launches[0]!;
+    await emit([{ id: "evt_block_root_tail", created: root.time.created, type: "session.message.content.updated", durable: { aggregateID: "ses_root", seq: 1, version: 1 }, data: { sessionID: "ses_root", messageID: root.id, content: root.content } }]);
+    await ready;
+    mutation = adapter.undo("ses_leaf", "queued-ancestor-undo"); void mutation.catch(() => undefined);
+    await publicationReady;
+    const before = await adapter.subscribe("ses_root"); before.events.cancel();
+    expect(receipt(before.snapshot.items)).toMatchObject({ usage: { costUsd: 0.75 } });
+    if (outcome === "foreign-parent" || outcome === "foreign-workspace") {
+      if (outcome === "foreign-parent") state.foreignParent = chain.at(-2)!; else state.foreignWorkspace = "ses_leaf";
+      await provider.getSession(outcome === "foreign-parent" ? chain.at(-2)! : "ses_leaf");
+    }
+    if (outcome === "clone-proof") {
+      const projection = adapter.projectionForTests("ses_root"), row = before.snapshot.items.find(item => item.type === "tool" && item.id === "tool:root") as import("../../types").ToolItem;
+      projection.refreshEquivalentTool(row, { ...row, descendants: row.descendants!.map(line => ({ ...line })) });
+    }
+    if (outcome === "cancel") stopping = adapter.stopEventPump();
+    if (outcome === "expired" || outcome === "cancel") expect(await mutation).toMatchObject({ outcome: "changed" });
+    // The preceding flush fails its required transcript read. It cannot be
+    // the source of a successful reprice or alter the guarded row reference.
+    state.failRoot = true; release();
+    await heldHistory?.catch(() => undefined);
+    expect(await mutation).toMatchObject({ outcome: "changed" });
+    await stopping;
+    state.failRoot = false;
+    const current = await adapter.subscribe("ses_root"); current.events.cancel();
+    expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: outcome === "healthy" ? 0.5 : 0.75 }, model: "leaf-model" });
+  } finally { state.failRoot = true; release(); await heldHistory?.catch(() => undefined); await mutation?.catch(() => undefined); await stopping; pushed.mockRestore(); await dispose(); }
+});
+
+for (const levels of [1, 3])
+test(`ancestor-only rewrite cannot clear a positive cohort deficit (${levels})`, async () => {
+  const { adapter, state, chain, sibling, receipt, emit, dispose } = ancestorRewriteFixture(levels, 0.5, false, true);
+  const middle = chain.at(-2)!;
+  const invalidate = () => emit([middle, "ses_leaf"].map(id => ({ type: "session.updated", data: { info: session(id, { parentID: chain[chain.indexOf(id) - 1] }) } })));
+  try {
+    expect(receipt((await adapter.history("ses_root")).items)).toMatchObject({ usage: { costUsd: 0.5 } });
+    await adapter.history(middle);
+    sibling.content[0].state.input.prompt = "A distinct second invocation"; state.unavailable = "ses_leaf";
+    await invalidate();
+    const degraded = await adapter.history(middle);
+    expect(degraded.items.find(item => item.id === "tool:second")).not.toHaveProperty("usage");
+    const degradedRoot = await adapter.history("ses_root");
+    expect(degradedRoot.items.flatMap(item => item.type === "tool" ? item.descendants ?? [] : []).find(line => line.id === "tool:second")).not.toHaveProperty("usage");
+    sibling.content[0].state.input.prompt = "Later work"; state.unavailable = "";
+    await invalidate();
+    expect(await adapter.undo("ses_leaf", "blocked-rewrite-second")).toMatchObject({ outcome: "changed" });
+    expect(await adapter.undo("ses_leaf", "blocked-rewrite-continuation")).toMatchObject({ outcome: "changed" });
+    const leaf = await adapter.subscribe("ses_leaf"); leaf.events.cancel();
+    expect(conversationTotals(leaf.snapshot.items)?.costUsd).toBeCloseTo(0.4);
+    const root = await adapter.subscribe("ses_root"); root.events.cancel();
+    expect(receipt(root.snapshot.items)).toMatchObject({ usage: { costUsd: 0.5 } });
+    const second = root.snapshot.items.flatMap(item => item.type === "tool" ? item.descendants ?? [] : []).find(line => line.id === "tool:second");
+    expect(second).not.toHaveProperty("usage");
+  } finally { await dispose(); }
+});
+
+for (const levels of [1, 3]) for (const laterCost of [0, 0.25])
+test(`ancestor-only rewrite publishes a changed receipt once and an unchanged receipt never (${levels}/${laterCost})`, async () => {
+  const { adapter, state, receipt, dispose } = ancestorRewriteFixture(levels, 0.5);
+  state.laterCost = laterCost;
+  let subscription: Awaited<ReturnType<ChatAdapter["subscribe"]>> | undefined;
+  try {
+    expect(receipt((await adapter.history("ses_root")).items)).toMatchObject({ usage: { costUsd: 0.5 + laterCost } });
+    await adapter.history("ses_leaf");
+    subscription = await adapter.subscribe("ses_root");
+    expect(await adapter.undo("ses_leaf", "ancestor-replay-noop")).toMatchObject({ outcome: "changed" });
+    subscription.events.cancel();
+    const changes: import("../../types").ChatEvent[] = [];
+    for await (const event of subscription.events) changes.push(event);
+    expect(changes.filter(event => event.type === "item.upsert" && event.item.id === "tool:root")).toHaveLength(laterCost ? 1 : 0);
+    expect(changes.filter(event => event.type === "item.remove" || event.type === "resync")).toEqual([]);
+    const current = await adapter.subscribe("ses_root"); current.events.cancel();
+    expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: 0.5 }, model: "leaf-model" });
+    if (!laterCost) expect(current.snapshot.cursor).toBe(subscription.snapshot.cursor);
+  } finally { subscription?.events.cancel(); await dispose(); }
+});
+
+for (const levels of [1, 3]) for (const topology of ["hidden", "visible", "incomplete"] as const)
+test(`ancestor-only rewrite withdraws only proven hidden descendants (${levels}/${topology})`, async () => {
+  const { adapter, state, receipt, emit, dispose } = ancestorRewriteFixture(levels, 0.5, false, false, true, topology !== "hidden");
+  const lines = (items: import("../../types").ConversationItem[]) => items.flatMap(item => item.type === "tool" ? item.descendants ?? [] : []);
+  try {
+    const initial = await adapter.history("ses_root");
+    expect(lines(initial.items)).toContainEqual(expect.objectContaining({ id: "tool:tail", usage: { costUsd: 0.125 } }));
+    await adapter.history("ses_leaf");
+    if (topology === "incomplete") {
+      state.unavailable = "ses_tail";
+      await emit(["ses_leaf", "ses_tail"].map(id => ({ type: "session.updated", data: { info: session(id, { parentID: id === "ses_tail" ? "ses_leaf" : `ses_middle_${levels - 1}` }) } })));
+    }
+    expect(await adapter.undo("ses_leaf", "ancestor-hidden-tail")).toMatchObject({ outcome: "changed" });
+    const current = await adapter.subscribe("ses_root"); current.events.cancel();
+    expect(receipt(current.snapshot.items)).toMatchObject({ usage: { costUsd: topology === "incomplete" ? 0.75 : 0.5 } });
+    if (topology === "hidden") expect(lines(current.snapshot.items).some(line => line.id === "tool:tail")).toBe(false);
+    else expect(lines(current.snapshot.items)).toContainEqual(expect.objectContaining({ id: "tool:tail", usage: { costUsd: 0.125 } }));
+  } finally { await dispose(); }
 });
 
 for (const depth of ["direct", "root"] as const) for (const initial of ["warm", "cold"] as const) for (const own of [0.5, 0])

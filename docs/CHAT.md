@@ -660,6 +660,14 @@ Evicting an accounting transcript does not permit subscription merging to restor
 pricing that current history withdrew from a changed invocation.
 After a successful source-current child undo, an exact retained launcher can
 show the child's reduced task cost without clearing cohort restrictions.
+This also works in ancestor-only views without opening intermediate
+conversations. Exact immutable path and current native visibility evidence must
+remain valid through queued publication; changed, missing, or expired proof
+cannot reprice the receipt. A branch hidden by that undo is withdrawn only from
+complete current own topology, not missing optional enrichment.
+When several ancestors are open, one accepted update from the same bounded
+rewrite must not block its remaining ancestor updates; independent native
+changes still keep their own precedence and invalidation checks.
 Promptly verified own accounting is also independent of descendant completion:
 if a grandchild read expires, available own cost/model remain usable while
 descendant completeness stays unset. Source, ownership, cancellation, and
