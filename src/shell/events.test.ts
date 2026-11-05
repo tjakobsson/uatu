@@ -206,6 +206,165 @@ describe("boot state and the first live frame", () => {
   });
 });
 
+describe("search ownership through accepted document events", () => {
+  let searchGeneratedAt = 100_000;
+  beforeAll(async () => {
+    const { initSearchPane } = await import("../sidebar/search-pane");
+    initSearchPane();
+  });
+
+  async function withSearch(run: (fixture: {
+    snapshot: DocumentSnapshot;
+    send: (values?: Partial<DocumentPatch>) => Promise<void>;
+    frame: (values?: Partial<DocumentSnapshot>) => Promise<void>;
+    hit: () => Promise<void>;
+    finish: () => Promise<void>;
+    signal: AbortSignal;
+  }) => Promise<void>, options: { pinned?: boolean; allRoots?: boolean; legacy?: boolean } = {}) {
+    const { disposeLiveChannel, installLiveChannelForTests } = await import("./live");
+    const { adoptBootSnapshot, connectEvents } = await import("./events");
+    const { appState } = await import("./state");
+    const documents = await import("./document-state");
+    const previous = { ...appState };
+    const location = Object.getOwnPropertyDescriptor(window, "location");
+    Object.defineProperty(window, "location", { configurable: true, value: { origin: "http://localhost" } });
+    const live = controllableChannel();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    let signal!: AbortSignal;
+    const encoder = new TextEncoder();
+    const emit = (event: unknown) => stream.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+    const fetcher = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
+      if (!String(input).includes("/api/search?")) return Response.json({});
+      signal = init!.signal!;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } }));
+    }) as typeof fetch);
+    let revision = 1;
+    let generatedAt = searchGeneratedAt += 100;
+    const doc = { id: "/search/a.md", rootId: "/search", name: "a.md", relativePath: "a.md",
+      kind: "markdown" as const, mtimeMs: 1, revision: 1, gitIgnoreStatus: "not-ignored" as const };
+    const snapshot: DocumentSnapshot = { ...state("search", generatedAt), kind: "snapshot", epoch: "search-owner",
+      revision, unscopedFingerprint: "search:1", roots: [{ ...root("/search"), path: "/search", docs: [doc] }],
+      discovery: { status: "ready", discovered: 1 }, repositoryState: { status: "ready", generation: 0 } };
+    if (options.pinned) snapshot.scope = { kind: "file", documentId: doc.id };
+    try {
+      disposeLiveChannel(); documents.resetDocumentIndex();
+      Object.assign(appState, { previewMode: { kind: "empty" }, followEnabled: false,
+        selectedId: null, selectionCleared: true, showIgnored: false });
+      installLiveChannelForTests(live.channel);
+      const { kind: _kind, epoch: _epoch, revision: _revision, ...legacy } = snapshot;
+      adoptBootSnapshot(options.legacy ? legacy : snapshot); connectEvents();
+      const query = document.querySelector<HTMLInputElement>("#search-query")!;
+      query.value = "";
+      if (options.allRoots) document.querySelector('[data-search-scope="all"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      query.value = "needle";
+      document.querySelector("#search-case")!.dispatchEvent(new window.Event("click"));
+      await settle();
+      emit({ kind: "file", result: { documentId: doc.id, rootId: doc.rootId, relativePath: doc.relativePath,
+        matches: [{ line: 1, start: 0, end: 6, text: "needle", ordinal: 0, literalTotal: 1 }] } });
+      await settle();
+      expect(document.querySelectorAll(".search-hit").length).toBe(1);
+      const send = async (values: Partial<DocumentPatch> = {}) => {
+        const previousRevision = revision++;
+        live.document().data!({ kind: "patch", epoch: snapshot.epoch, previousRevision, revision,
+          generatedAt: ++generatedAt, scope: snapshot.scope, compareTarget: "base", unscopedFingerprint: "search:1",
+          upserts: [], removals: [], changedId: null, ...values }, "patch", 1);
+        await settle();
+      };
+      await run({ snapshot, send, signal,
+        hit: async () => {
+          emit({ kind: "file", result: { documentId: doc.id, rootId: doc.rootId, relativePath: doc.relativePath,
+            matches: [{ line: 2, start: 0, end: 6, text: "needle again", ordinal: 1, literalTotal: 2 }] } });
+          await settle();
+        },
+        frame: async (values = {}) => {
+          live.document().data!({ ...(options.legacy ? legacy : documents.documentIndex.snapshot()!), revision: ++revision,
+            generatedAt: ++generatedAt, changedId: null, ...values }, "snapshot", 1);
+          await settle();
+        },
+        finish: async () => { emit({ kind: "done", truncated: false }); stream.close(); await settle(); },
+      });
+    } finally {
+      // Cancel any held stream and clear the pane before restoring globals/state.
+      document.querySelector<HTMLInputElement>("#search-query")!.value = "";
+      document.querySelector("#search-case")!.dispatchEvent(new window.Event("click"));
+      if (options.allRoots) document.querySelector('[data-search-scope="respect"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await settle();
+      fetcher.mockRestore(); disposeLiveChannel(); documents.resetDocumentIndex(); Object.assign(appState, previous);
+      if (location) Object.defineProperty(window, "location", location);
+      else Reflect.deleteProperty(window, "location");
+    }
+  }
+
+  for (const completed of [false, true]) {
+    test.each([false, true])(`repository-only patches and snapshots preserve ${completed ? "completed" : "streaming"} results, widened=%s`, async widened => {
+      await withSearch(async ({ snapshot, send, frame, hit, finish, signal }) => {
+        if (completed) await finish();
+        const roots = snapshot.roots.map(({ docs: _, ...metadata }) => metadata);
+        await send({ roots, repositoryState: { status: "pending", generation: 1 } });
+        await send({ roots, repositories: [], repositoryState: { status: "ready", generation: 1 } });
+        await frame({ repositories: [], repositoryState: { status: "ready", generation: 2 } });
+        expect(signal.aborted).toBe(false);
+        expect(document.querySelector<HTMLElement>("#search-notice")!.hidden).toBe(true);
+        if (!completed) {
+          expect(document.querySelector("#search-summary")!.textContent).toBe("1 result · 1 file…");
+          await hit();
+          await finish();
+        }
+        expect(document.querySelector("#search-summary")!.textContent).toBe(completed ? "1 result · 1 file" : "2 results · 1 file");
+        expect(document.querySelectorAll(".search-hit").length).toBe(completed ? 1 : 2);
+        expect(document.querySelector<HTMLElement>("#search-notice")!.hidden).toBe(true);
+      }, { pinned: widened, allRoots: widened });
+    });
+
+    for (const change of ["scope", "widen", "unscoped"] as const) {
+      test(`${change} invalidates ${completed ? "completed" : "streaming"} scoped search ownership`, async () => {
+        await withSearch(async ({ frame, send, finish, signal }) => {
+          if (completed) await finish();
+          if (change === "unscoped") await send({ unscopedFingerprint: "search:outside-change" });
+          else await frame({ scope: change === "widen" ? { kind: "folder" } : { kind: "file", documentId: "/search/b.md" } });
+          expect(signal.aborted).toBe(true);
+          expect(document.querySelector("#search-notice")!.textContent).toContain("changed since");
+        }, { pinned: true, allRoots: change === "unscoped" });
+      });
+    }
+
+    test(`legacy roots replacement still invalidates ${completed ? "completed" : "streaming"} results`, async () => {
+      await withSearch(async ({ snapshot, frame, finish, signal }) => {
+        if (completed) await finish();
+        await frame({ roots: snapshot.roots.map(root => ({ ...root, docs: [...root.docs] })) });
+        expect(signal.aborted).toBe(true);
+        expect(document.querySelector("#search-notice")!.textContent).toContain("changed since");
+      }, { legacy: true });
+    });
+
+    for (const change of ["write", "add", "remove", "rename", "classification", "exception", "epoch", "preference"] as const) {
+      test(`${change} invalidates ${completed ? "completed" : "streaming"} search ownership`, async () => {
+        await withSearch(async ({ snapshot, send, frame, finish, signal }) => {
+          if (completed) await finish();
+          const doc = snapshot.roots[0]!.docs[0]!;
+          switch (change) {
+            case "write": await send({ upserts: [{ ...doc, revision: 2 }] }); break;
+            case "add": await send({ upserts: [{ ...doc, id: "/search/b.md", name: "b.md", relativePath: "b.md", revision: 2 }] }); break;
+            case "remove": await send({ removals: [{ rootId: doc.rootId, id: doc.id }] }); break;
+            case "rename": await send({ removals: [{ rootId: doc.rootId, id: doc.id }], upserts: [{ ...doc, id: "/search/b.md", name: "b.md", relativePath: "b.md", revision: 2 }] }); break;
+            case "classification": await send({ upserts: [{ ...doc, gitIgnoreStatus: "ignored" }] }); break;
+            case "exception": await send({ upserts: [{ ...doc, ignoreVisibilityException: true }] }); break;
+            case "epoch": await frame({ epoch: "recovered" }); break;
+            case "preference": {
+              const { appState } = await import("./state");
+              const { reconcileSearchVisibility } = await import("../sidebar/search-pane");
+              appState.showIgnored = true; reconcileSearchVisibility(); break;
+            }
+          }
+          expect(signal.aborted).toBe(true);
+          expect(document.querySelector("#search-notice")!.textContent).toContain("changed since");
+          if (change === "classification" || change === "preference") expect(document.querySelectorAll(".search-hit").length).toBe(0);
+        });
+      });
+    }
+  }
+});
+
 class BufferedMedia extends EventTarget {
   paused = true; ended = false; currentTime = 3; duration = 8; loop = false;
   src = ""; preload = ""; controls = false; loads = 0;

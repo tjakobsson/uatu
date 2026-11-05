@@ -28,6 +28,54 @@ function patch(revision: number, values: Partial<DocumentPatch> = {}): DocumentP
 }
 
 describe("document update protocol", () => {
+  test("corpus ownership survives repository/discovery patches and replacement snapshots", () => {
+    const index = new DocumentStateIndex();
+    index.apply(snapshot());
+    const owner = index.corpusVersion;
+    const roots = snapshot().roots.map(({ docs: _, ...root }) => root);
+    for (const update of [
+      patch(1, { roots, repositoryState: { status: "pending", generation: 1 } }),
+      patch(2, { roots, repositories: [], repositoryState: { status: "ready", generation: 1 } }),
+      patch(3, { discovery: { status: "ready", discovered: 1 } }),
+    ]) {
+      expect(index.apply(update)).toBe("applied");
+      expect(index.corpusVersion).toBe(owner);
+    }
+    expect(index.apply(JSON.parse(JSON.stringify(index.snapshot())))).toBe("applied");
+    expect(index.corpusVersion).toBe(owner);
+    expect(index.revision).toBe(3);
+  });
+
+  test.each<Partial<DocumentPatch>>([
+    { upserts: [doc("/docs/a.md", 1)] }, // Equal-mtime write.
+    { upserts: [{ ...doc("/docs/a.md"), gitIgnoreStatus: "ignored" as const }] },
+    { upserts: [{ ...doc("/docs/a.md"), ignoreVisibilityException: true }] },
+    { upserts: [doc("/docs/b.md", 1)] },
+    { removals: [{ rootId: "/docs", id: "/docs/a.md" }] },
+    { removals: [{ rootId: "/docs", id: "/docs/a.md" }], upserts: [doc("/docs/renamed.md", 1)] },
+    { roots: [] },
+  ])("corpus ownership changes for file/visibility batches: %j", values => {
+    const index = new DocumentStateIndex(); index.apply(snapshot());
+    const owner = index.corpusVersion;
+    expect(index.apply(patch(1, values))).toBe("applied");
+    expect(index.corpusVersion).not.toBe(owner);
+    const snapshotOwner = index.corpusVersion;
+    expect(index.apply({ ...snapshot(), revision: 2 })).toBe("applied");
+    expect(index.corpusVersion).not.toBe(snapshotOwner);
+  });
+
+  test("ignored and rejected batches leave corpus ownership intact", () => {
+    const index = new DocumentStateIndex(); index.apply(snapshot());
+    const owner = index.corpusVersion;
+    expect(index.apply(patch(2, { upserts: [doc("/docs/a.md", 2)] }))).toBe("resync");
+    expect(index.apply({ ...snapshot(), revision: 0 })).toBe("applied");
+    expect(index.apply(patch(1))).toBe("applied");
+    expect(index.apply(patch(1, { upserts: [doc("/docs/a.md", 1)] }))).toBe("ignored");
+    expect(index.corpusVersion).toBe(owner);
+    expect(index.apply({ ...snapshot(), epoch: "recovered" })).toBe("applied");
+    expect(index.corpusVersion).not.toBe(owner);
+  });
+
   test("JSON round trips preserve revisions and a multi-file update", () => {
     const index = new DocumentStateIndex();
     expect(index.apply(JSON.parse(JSON.stringify(snapshot())))).toBe("applied");

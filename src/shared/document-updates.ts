@@ -75,14 +75,24 @@ type IndexedRoot = {
   positions: Map<string, number>;
 };
 
+function sameSearchDocument(a: RevisionedDocument | undefined, b: RevisionedDocument): boolean {
+  return a !== undefined && a.revision === b.revision && a.mtimeMs === b.mtimeMs
+    && a.name === b.name && a.relativePath === b.relativePath && a.kind === b.kind
+    && a.gitIgnoreStatus === b.gitIgnoreStatus && a.ignoreVisibilityException === b.ignoreVisibilityException;
+}
+
 export class DocumentStateIndex {
   private header: Omit<DocumentSnapshot, "roots"> | null = null;
   private roots = new Map<string, IndexedRoot>();
   private documents = new Map<string, Map<string, RevisionedDocument>>();
   private binaries = 0;
+  // Local ownership token, independent of transport revisions. Repository and
+  // discovery messages can advance the stream without changing searchable files.
+  private corpus = {};
 
   get epoch(): string | null { return this.header?.epoch ?? null; }
   get revision(): number | null { return this.header?.revision ?? null; }
+  get corpusVersion(): object { return this.corpus; }
   get discovery(): DiscoveryState | undefined { return this.header?.discovery; }
   get latestChange(): DocumentSnapshot["latestChange"] { return this.header?.latestChange; }
   get binaryCount(): number { return this.binaries; }
@@ -120,6 +130,11 @@ export class DocumentStateIndex {
     for (const removal of update.removals) {
       if (!this.roots.has(removal.rootId) || seen.get(removal.rootId)?.has(removal.id)) return "resync";
     }
+
+    if (update.upserts.some(doc => !sameSearchDocument(this.find(doc.id, doc.rootId), doc))
+      || update.removals.some(doc => this.find(doc.id, doc.rootId) !== undefined)
+      || newRoots && (newRoots.size !== this.roots.size
+        || [...newRoots].some(([id, root]) => this.roots.get(id)?.metadata.path !== root.path))) this.corpus = {};
 
     if (newRoots) {
       for (const [id, root] of this.roots) {
@@ -186,6 +201,15 @@ export class DocumentStateIndex {
       roots.set(metadata.id, { metadata, documents, rows: [...docs], positions: new Map(docs.map((doc, index) => [doc.id, index])) });
     }
     const { roots: _, ...header } = snapshot;
+    // Full comparison is confined to replacement snapshots. Patches above only
+    // inspect their changed paths and optional root headers, never the inventory.
+    if (!this.header || this.header.epoch !== snapshot.epoch
+      || roots.size !== this.roots.size || [...roots].some(([id, root]) => {
+        const previous = this.roots.get(id);
+        return !previous || previous.metadata.path !== root.metadata.path
+          || previous.documents.size !== root.documents.size
+          || [...root.documents.values()].some(doc => !sameSearchDocument(previous.documents.get(doc.id), doc));
+      })) this.corpus = {};
     this.header = header;
     this.roots = roots;
     this.binaries = snapshot.roots.reduce((count, root) => count + root.docs.filter(doc => doc.kind === "binary").length, 0);

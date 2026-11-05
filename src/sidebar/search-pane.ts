@@ -102,13 +102,13 @@ let debounceHandle: number | null = null;
 // Abandons an in-flight sweep when the query changes under it — without this a
 // slow search would keep streaming rows for a query the user has moved on from.
 let inFlight: AbortController | null = null;
-// The index revision includes metadata-only classification changes, even when
-// no file write or content revision changed. Capturing it also protects streamed
-// files that have not emitted a result yet. Older/unversioned snapshots use
-// their roots identity instead. None of this reads or fingerprints file contents.
+// Corpus ownership includes metadata-only classification changes, even when no
+// file write or content revision changed, but excludes repository-only updates.
+// It also protects streamed files that have not emitted a result yet.
+// Older/unversioned snapshots use their roots identity instead.
 function currentOwnership() {
   return { showIgnored: appState.showIgnored, epoch: documentIndex.epoch,
-    revision: documentIndex.revision, roots: appState.roots, unscopedFingerprint: appState.unscopedFingerprint };
+    corpusVersion: documentIndex.corpusVersion, roots: appState.roots, unscopedFingerprint: appState.unscopedFingerprint };
 }
 let resultsOwnership: ReturnType<typeof currentOwnership> | null = null;
 let observedShowIgnored = appState.showIgnored;
@@ -117,7 +117,7 @@ function ownsCurrentCorpus(): boolean {
   return resultsOwnership !== null && resultsOwnership.showIgnored === appState.showIgnored
     && resultsOwnership.epoch === documentIndex.epoch
     && (!resultsFromAllRoots || resultsOwnership.unscopedFingerprint === appState.unscopedFingerprint)
-    && (documentIndex.epoch ? resultsOwnership.revision === documentIndex.revision : resultsOwnership.roots === appState.roots);
+    && (documentIndex.epoch ? resultsOwnership.corpusVersion === documentIndex.corpusVersion : resultsOwnership.roots === appState.roots);
 }
 
 function resultIsVisible(result: SearchFileResult, discardUnverified = false): boolean {
