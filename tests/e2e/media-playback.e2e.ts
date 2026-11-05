@@ -214,10 +214,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(dock(page).getByRole("slider", { name: "Playback position" })).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
       const screenshot = evidencePath(info, `${engine}-native-h264.png`);
-      await page.screenshot({ path: screenshot, animations: "disabled", caret: "hide", mask: [
-        page.locator(".media-preview > p:not([role])"),
-        dock(page).locator(".media-dock-identity > span"),
-      ] });
+      await page.screenshot({ path: screenshot, animations: "disabled", caret: "hide" });
       await recordEvidence(info, screenshot);
       const fullscreen = dock(page).getByRole("button", { name: "Fullscreen video" });
       if (await fullscreen.isVisible()) {

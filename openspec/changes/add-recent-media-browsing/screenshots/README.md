@@ -8,10 +8,10 @@ PR-time capture using `tests/e2e/evidence.ts`, Bun 1.4.4, and Playwright Chromiu
 
 | Browser | Expanded H264 video with playback controls | Decode report |
 | --- | --- | --- |
-| Chromium | [Video](chromium-native-h264.png), 43,156 bytes | [Checks](chromium-video-codec.txt), 189 bytes |
-| WebKit | [Video](webkit-native-h264.png), 68,549 bytes | [Checks](webkit-video-codec.txt), 189 bytes |
+| Chromium | [Video](chromium-native-h264.png), 68,331 bytes | [Checks](chromium-video-codec.txt), 189 bytes |
+| WebKit | [Video](webkit-native-h264.png), 96,072 bytes | [Checks](webkit-video-codec.txt), 189 bytes |
 
-Both 1280 × 720 screenshots visibly show a browser-decoded frame from the synthetic four-second, 32 × 32 solid-blue H264 Baseline fixture. The square frame is displayed at about 259 × 259 pixels inside the expanded player, with black pillarboxing, Pause, Compact, Fullscreen, and seek controls. This fixture contains solid-color frames, not production animation content. Pink masks cover only temporary workspace-path labels; the decoded video and controls are unobscured. Both final images were visually reviewed.
+Both 1280 × 720 screenshots visibly show a browser-decoded frame from the synthetic four-second, 32 × 32 solid-blue H264 Baseline fixture. The square frame is displayed at about 259 × 259 pixels inside the expanded player, with black pillarboxing, Pause, Compact, Fullscreen, and seek controls. This fixture contains solid-color frames, not production animation content. Synthetic temporary workspace paths appear normally, as in the audio evidence. Both final images were visually reviewed.
 
 The targeted H264 tests **passed 2/2 in 2.7 seconds**, using Bun 1.4.4, one worker, and zero retries. Checks verify actual `videoWidth=32`, native playback, seeking to at least 1.4 seconds, the same single video element after expansion, `readyState >= 2`, completed seeking, and visible controls. Canvas sampling of the decoded video returned RGBA `[47,125,175,255]` in Chromium and `[64,136,184,255]` in WebKit. Capture happens before fullscreen; the existing fullscreen and Close assertions still run afterward.
 
@@ -23,7 +23,7 @@ The targeted H264 tests **passed 2/2 in 2.7 seconds**, using Bun 1.4.4, one work
 | Playback persists while sending a Chat message; Loop is enabled | [Chat](chromium-generated-media-chat.png), 36,796 bytes | [Chat](webkit-generated-media-chat.png), 46,900 bytes |
 | After explicit Reload and resuming playback: new 10-second render, Loop reset, latest write first | [Reloaded](chromium-generated-media-reloaded.png), 48,653 bytes | [Reloaded](webkit-generated-media-reloaded.png), 62,178 bytes |
 
-The six audio-workflow PNGs total 311,323 bytes. Supporting reports: [Chromium](chromium-media-workflow.json), 304 bytes; [WebKit](webkit-media-workflow.json), 303 bytes. The two additional video PNGs total 111,705 bytes.
+The six audio-workflow PNGs total 311,323 bytes. Supporting reports: [Chromium](chromium-media-workflow.json), 304 bytes; [WebKit](webkit-media-workflow.json), 303 bytes. The two additional video PNGs total 164,403 bytes.
 
 ## Verification
 
