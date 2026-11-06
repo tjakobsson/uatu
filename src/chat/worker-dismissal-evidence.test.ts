@@ -1,7 +1,24 @@
 import { expect, test } from "bun:test";
-import { compactWorkerEvidence, validatedWorkerDismissalSource, workerDismissalSourceStrength, WORKER_EVIDENCE_LIMIT } from "./worker-dismissal-evidence";
+import { compactWorkerEvidence, validatedWorkerDismissalSource, workerDismissalSourceStrength, workerSourceIsProtected, WORKER_EVIDENCE_LIMIT } from "./worker-dismissal-evidence";
 import type { BackgroundTaskItem, ConversationItem } from "./types";
 import { BackgroundWorkers, prepareTool, workerExecutionIds } from "./opencode/v2/background";
+
+test("protected worker source classification preserves activity and lifecycle distinctions", () => {
+  const protectedKinds = {
+    running: ["working", "needs-answer", "checking", "session-active"],
+    completed: ["working", "needs-answer"],
+    failed: ["working", "needs-answer"],
+    stopped: ["working", "needs-answer"],
+  };
+  for (const status of ["running", "completed", "failed", "stopped"] as const) {
+    const task: BackgroundTaskItem = { type: "background_task", id: "task:fixture", taskId: "fixture", description: "Fixture", createdAt: 1, status };
+    expect(workerSourceIsProtected(task)).toBe(false);
+    for (const kind of ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"] as const) {
+      expect(workerSourceIsProtected({ ...task, activity: { kind } })).toBe(protectedKinds[status].includes(kind));
+    }
+  }
+  expect(workerSourceIsProtected({ type: "tool", id: "tool:fixture", name: "subagent", status: "completed", createdAt: 1 })).toBe(false);
+});
 
 function nativeAliasFixture(complete: boolean): BackgroundTaskItem[] {
   const workers = new BackgroundWorkers({ executionHistory: new Map(complete ? [["child", []]] : []) });

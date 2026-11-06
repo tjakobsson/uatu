@@ -177,6 +177,12 @@ export function validatedWorkerDismissalSource(items: readonly ConversationItem[
   return source;
 }
 
+export function workerSourceIsProtected(item: ConversationItem): boolean {
+  if (item.type !== "background_task" || !item.activity) return false;
+  return item.activity.kind === "working" || item.activity.kind === "needs-answer"
+    || item.status === "running" && (item.activity.kind === "checking" || item.activity.kind === "session-active");
+}
+
 /** Retained presentation, absence and weaker inventory cannot grant dismissal
  * over a current source witness. A mixed/changed view fails closed; a fresh
  * source read, not a cache write or a clock, must establish weaker activity. */
@@ -184,7 +190,7 @@ export function workerDismissalSourceStrength(source: readonly ConversationItem[
   const witnesses = validatedWorkerDismissalSource(source).flatMap(item => {
     if (item.type !== "background_task" || !item.activity) return [];
     const active = item.activity.kind === "working" || item.activity.kind === "needs-answer";
-    const protectedRow = active || item.status === "running" && (item.activity.kind === "checking" || item.activity.kind === "session-active");
+    const protectedRow = workerSourceIsProtected(item);
     return [{ item, id: item.id, ids: workerDismissalIdentities(item), facts: associationFacts(item), generation: item.activity.generation, active, protectedRow }];
   });
   return items => {
@@ -201,7 +207,7 @@ export function workerDismissalSourceStrength(source: readonly ConversationItem[
       if (!nativeAliasShadow(witness.item, item, true)) mergeAssociations(witness.facts, associationFacts(item));
       if (item.type !== "background_task" || !item.activity) return weakened();
       const active = item.activity.kind === "working" || item.activity.kind === "needs-answer";
-      const protectedRow = active || item.status === "running" && (item.activity.kind === "checking" || item.activity.kind === "session-active");
+      const protectedRow = workerSourceIsProtected(item);
       if (witness.active && !active || witness.protectedRow && !protectedRow) weakened();
       if (witness.generation !== undefined && (item.activity.generation === undefined || item.activity.generation < witness.generation)) weakened();
     }

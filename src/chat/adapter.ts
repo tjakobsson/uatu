@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { compactWorkerEvidence, validatedWorkerDismissalSource, workerDismissalSourceStrength, WORKER_EVIDENCE_LIMIT, WorkerEvidenceError, type WorkerEvidenceSnapshot } from "./worker-dismissal-evidence";
+import { compactWorkerEvidence, validatedWorkerDismissalSource, workerDismissalSourceStrength, workerSourceIsProtected, WORKER_EVIDENCE_LIMIT, WorkerEvidenceError, type WorkerEvidenceSnapshot } from "./worker-dismissal-evidence";
 import { AgentNotificationTracker, type AgentNotificationEvent } from "./notifications";
 
 import { boundedSet } from "../shared/bounded-map";
@@ -1324,8 +1324,7 @@ export class ChatAdapter {
       for (const known of knownRows) {
         if (known.type !== "background_task" || byId.has(known.id)) continue;
         if (supersedes(known) && !coverage?.changed(known.id)) {
-          if (currentIds?.has(known.id) && known.activity && (known.activity.kind === "working" || known.activity.kind === "needs-answer"
-            || known.status === "running" && (known.activity.kind === "checking" || known.activity.kind === "session-active"))) {
+          if (currentIds?.has(known.id) && workerSourceIsProtected(known)) {
             // A weak launcher/result match cannot erase a current protected
             // source row, even before the final non-weakening assertion runs.
             throw new WorkerEvidenceError("unavailable", "authoritative worker source was weakened without newer evidence");
