@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1800" viewBox="0 0 1440 1800" role="img" aria-labelledby="title description">
+  <title id="title">Uatu development process — discussion draft</title>
+  <desc id="description">A proposed upstream contribution workflow. Plan and obtain initial human approval, then implement autonomously within the original outcome and explicit advance-approval exceptions. Validate and run independent Standards and Spec reviews locally and on GitHub. Humans explicitly accept material requirement tradeoffs before merge. Spec reviews use revised requirements only. Skills remain committed, with Renovate-owned update PRs and a proposed content-refresh helper. This diagram records discussion decisions, not implemented behavior.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#587187"/></marker>
+    <marker id="loop-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#157c78"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; fill: #18334a; }
+      .eyebrow { font-size: 14px; font-weight: 700; letter-spacing: 2px; }
+      .heading { font-size: 38px; font-weight: 750; }
+      .subtitle { font-size: 19px; fill: #536b7d; }
+      .section { font-size: 15px; font-weight: 700; letter-spacing: 1.3px; fill: #536b7d; }
+      .step-title { font-size: 23px; font-weight: 700; }
+      .body { font-size: 18px; }
+      .small { font-size: 16px; fill: #536b7d; }
+      .note-title { font-size: 20px; font-weight: 700; }
+      .number { font-size: 20px; font-weight: 700; fill: #fff; text-anchor: middle; }
+      .box { fill: #fff; stroke: #cbd8e3; stroke-width: 1.5; }
+      .human { fill: #fff7e8; stroke: #c78b26; stroke-width: 2; }
+      .review { fill: #eef8f7; stroke: #79b4af; stroke-width: 1.5; }
+      .note { fill: #eaf0f5; }
+      .flow { fill: none; stroke: #587187; stroke-width: 2.5; marker-end: url(#arrow); }
+      .loop { fill: none; stroke: #157c78; stroke-width: 2.5; marker-end: url(#loop-arrow); }
+      .loop-label { font-size: 15px; font-weight: 650; fill: #157c78; }
+    </style>
+  </defs>
+  <rect width="1440" height="1800" fill="#f5f8fb"/>
+  <rect x="0" y="0" width="1440" height="8" fill="#157c78"/>
+  <text x="56" y="53" class="eyebrow">UATU / UPSTREAM CONTRIBUTION WORKFLOW</text>
+  <rect x="1124" y="29" width="260" height="34" rx="17" fill="#fce9c5"/>
+  <text x="1254" y="51" text-anchor="middle" font-size="14" font-weight="700" fill="#75500e">DISCUSSION DRAFT</text>
+  <text x="56" y="108" class="heading">Approve the outcome. Let the plan evolve.</text>
+  <text x="56" y="145" class="subtitle">Autonomous delivery, independent review, and explicit human acceptance of material tradeoffs.</text>
+
+  <text x="210" y="192" class="section">CHANGE DELIVERY</text>
+  <text x="930" y="192" class="section">RULES THAT KEEP THE FLOW CLEAR</text>
+
+  <!-- The main sequence is deliberately vertical: every handoff has one next step. -->
+  <path d="M 510 310 V 352" class="flow"/>
+  <path d="M 510 470 V 512" class="flow"/>
+  <path d="M 510 630 V 672" class="flow"/>
+  <path d="M 510 790 V 832" class="flow"/>
+  <path d="M 510 960 V 1002" class="flow"/>
+  <path d="M 510 1130 V 1172" class="flow"/>
+
+  <rect x="210" y="210" width="620" height="100" rx="16" class="box"/>
+  <circle cx="242" cy="242" r="18" fill="#587187"/>
+  <text x="242" y="249" class="number">1</text>
+  <text x="276" y="249" class="step-title">Scope and plan</text>
+  <text x="238" y="279" class="body">OpenSpec for behavior or workflow changes.</text>
+  <text x="238" y="301" class="small">Strictly mechanical edits use a lightweight path.</text>
+
+  <rect x="210" y="360" width="620" height="110" rx="16" class="human"/>
+  <circle cx="242" cy="392" r="18" fill="#a66b13"/>
+  <text x="242" y="399" class="number">2</text>
+  <text x="276" y="399" class="step-title">Human approves the initial plan</text>
+  <text x="238" y="430" class="body">Agree on the outcome and advance-approval exceptions.</text>
+  <text x="238" y="455" class="small">Save the approved baseline until final acceptance.</text>
+
+  <rect x="210" y="520" width="620" height="110" rx="16" class="box"/>
+  <circle cx="242" cy="552" r="18" fill="#587187"/>
+  <text x="242" y="559" class="number">3</text>
+  <text x="276" y="559" class="step-title">Implement, evolve, and validate</text>
+  <text x="238" y="590" class="body">Update code, tests, docs, and OpenSpec artifacts together.</text>
+  <text x="238" y="615" class="small">Focused local checks pass; record requirement tradeoffs.</text>
+
+  <rect x="210" y="680" width="620" height="110" rx="16" class="review"/>
+  <circle cx="242" cy="712" r="18" fill="#157c78"/>
+  <text x="242" y="719" class="number">4</text>
+  <text x="276" y="719" class="step-title">Independent local review</text>
+  <text x="238" y="750" class="body">Standards + Spec, reported separately.</text>
+  <text x="238" y="775" class="small">Fix valid findings; explain rejected findings before ready.</text>
+
+  <rect x="210" y="840" width="620" height="120" rx="16" class="review"/>
+  <circle cx="242" cy="872" r="18" fill="#157c78"/>
+  <text x="242" y="879" class="number">5</text>
+  <text x="276" y="879" class="step-title">PR, CI, and independent GitHub review</text>
+  <text x="238" y="910" class="body">Applicable CI passes; GitHub AI review is advisory.</text>
+  <text x="238" y="936" class="small">Use the PR skill for summary, evidence, and merge risk.</text>
+
+  <rect x="210" y="1010" width="620" height="120" rx="16" class="human"/>
+  <circle cx="242" cy="1042" r="18" fill="#a66b13"/>
+  <text x="242" y="1049" class="number">6</text>
+  <text x="276" y="1049" class="step-title">Human explicitly accepts the tradeoffs</text>
+  <text x="238" y="1080" class="body">What changed from approval, why, and with what impact?</text>
+  <text x="238" y="1106" class="small">Include checks and unresolved findings. If rejected, revise.</text>
+
+  <rect x="210" y="1180" width="620" height="100" rx="16" class="box"/>
+  <circle cx="242" cy="1212" r="18" fill="#587187"/>
+  <text x="242" y="1219" class="number">7</text>
+  <text x="276" y="1219" class="step-title">Finalize and merge</text>
+  <text x="238" y="1249" class="body">Sync specs and archive before merge; recheck affected work.</text>
+  <text x="238" y="1271" class="small">Keep final artifacts and a short account of plan changes.</text>
+
+  <!-- Review findings return to implementation, not directly to human triage. -->
+  <path d="M 210 735 H 174 V 575 H 202" class="loop"/>
+  <path d="M 210 900 H 150 V 575 H 174" fill="none" stroke="#157c78" stroke-width="2.5"/>
+  <text x="56" y="665" class="loop-label">Review</text>
+  <text x="56" y="686" class="loop-label">feedback</text>
+  <text x="56" y="717" class="small">Agent fixes</text>
+  <text x="56" y="738" class="small">or explains;</text>
+  <text x="56" y="759" class="small">rechecks</text>
+  <text x="56" y="780" class="small">the changes.</text>
+
+  <rect x="910" y="210" width="474" height="140" rx="16" class="note"/>
+  <text x="934" y="244" class="note-title">One shared entry point</text>
+  <text x="934" y="276" class="body">AGENTS.md for current Claude Code</text>
+  <text x="934" y="301" class="body">and OpenCode. CONTRIBUTING.md owns</text>
+  <text x="934" y="326" class="body">the human-facing development workflow.</text>
+
+  <rect x="910" y="380" width="474" height="230" rx="16" class="note"/>
+  <text x="934" y="414" class="note-title">Autonomy by default</text>
+  <text x="934" y="446" class="body">Design, tasks, and requirements may evolve</text>
+  <text x="934" y="471" class="body">within the original outcome.</text>
+  <text x="934" y="510" class="body" font-weight="700">Pause for explicit exceptions only.</text>
+  <text x="934" y="535" class="body">The “Requires advance approval” list</text>
+  <text x="934" y="560" class="body">is agreed up front and may be empty.</text>
+  <text x="934" y="590" class="small">Existing permissions and safety rules still apply.</text>
+
+  <rect x="910" y="640" width="474" height="300" rx="16" class="note"/>
+  <text x="934" y="674" class="note-title">Same axes, independent reviewers</text>
+  <text x="934" y="706" class="body"><tspan font-weight="700">Standards:</tspan> documented repo conventions.</text>
+  <text x="934" y="738" class="body"><tspan font-weight="700">Spec:</tspan> revised requirements only.</text>
+  <text x="934" y="776" class="body">Both axes apply to every PR.</text>
+  <text x="934" y="801" class="body">Say when no applicable spec exists.</text>
+  <text x="934" y="839" class="body">External PRs: a maintainer authorizes</text>
+  <text x="934" y="864" class="body">GitHub review; it inspects the change</text>
+  <text x="934" y="889" class="body">without executing code from the PR.</text>
+  <text x="934" y="920" class="small">GitHub review does not inherit the local verdict.</text>
+
+  <rect x="910" y="980" width="474" height="200" rx="16" class="human"/>
+  <text x="934" y="1014" class="note-title">Passing review ≠ accepting tradeoffs</text>
+  <text x="934" y="1046" class="body">The human—not the Spec reviewer—</text>
+  <text x="934" y="1071" class="body">compares the result with the approved plan.</text>
+  <text x="934" y="1109" class="body">Keep that baseline through final approval.</text>
+  <text x="934" y="1134" class="body">Afterward, retain final artifacts and the</text>
+  <text x="934" y="1159" class="body">short explanation, not a second live spec.</text>
+
+  <rect x="910" y="1200" width="474" height="80" rx="16" class="note"/>
+  <circle cx="940" cy="1230" r="7" fill="#c78b26"/>
+  <text x="958" y="1236" class="small">Amber = explicit human decision</text>
+  <circle cx="940" cy="1257" r="7" fill="#157c78"/>
+  <text x="958" y="1263" class="small">Teal = independent review and correction</text>
+
+  <line x1="56" y1="1320" x2="1384" y2="1320" stroke="#cbd8e3" stroke-width="1.5"/>
+  <text x="56" y="1362" class="section">SKILL MAINTENANCE · COMMITTED FILES, HUMAN-REVIEWED UPDATES</text>
+
+  <path d="M 346 1478 H 392" class="flow"/>
+  <path d="M 696 1478 H 742" class="flow"/>
+  <path d="M 1046 1478 H 1092" class="flow"/>
+  <rect x="56" y="1392" width="290" height="158" rx="16" class="box"/>
+  <text x="78" y="1428" class="note-title">Renovate detects</text>
+  <text x="78" y="1454" class="note-title">an upstream revision</text>
+  <text x="78" y="1491" class="body">Updates the selected pin</text>
+  <text x="78" y="1517" class="body">and owns the update PR.</text>
+
+  <rect x="400" y="1392" width="296" height="158" rx="16" class="box"/>
+  <text x="422" y="1428" class="note-title">Proposed same-PR helper</text>
+  <text x="422" y="1465" class="body">Uses the skills CLI to</text>
+  <text x="422" y="1491" class="body">refresh selected files</text>
+  <text x="422" y="1517" class="body">and lock metadata.</text>
+
+  <rect x="750" y="1392" width="296" height="158" rx="16" class="review"/>
+  <text x="772" y="1428" class="note-title">Validate the update</text>
+  <text x="772" y="1465" class="body">Check source consistency,</text>
+  <text x="772" y="1491" class="body">client discovery, and</text>
+  <text x="772" y="1517" class="body">changed instructions.</text>
+
+  <rect x="1100" y="1392" width="284" height="158" rx="16" class="human"/>
+  <text x="1122" y="1428" class="note-title">Human reviews</text>
+  <text x="1122" y="1454" class="note-title">before merge</text>
+  <text x="1122" y="1491" class="body">No automatic acceptance</text>
+  <text x="1122" y="1517" class="body">of instruction updates.</text>
+
+  <text x="56" y="1592" class="body"><tspan font-weight="700">Separate ownership:</tspan> third-party skills → skills CLI; generated OpenSpec instructions → OpenSpec CLI.</text>
+  <text x="56" y="1622" class="small">Renovate already tracks the OpenSpec dependency. Its instruction regeneration remains a separate integration task.</text>
+
+  <rect x="56" y="1650" width="1328" height="100" rx="14" fill="#eaf0f5"/>
+  <text x="78" y="1682" class="note-title">Technical checks still open</text>
+  <text x="78" y="1712" class="body">Safe helper permissions and CI triggering · reproducible skill installation · client discovery</text>
+  <text x="78" y="1737" class="body">Repo-specific integration that survives upstream updates · approved-baseline storage and cleanup</text>
+  <text x="56" y="1781" class="small">Discussion visualization only. Creating this diagram does not approve an OpenSpec proposal or implement the workflow.</text>
+</svg>
