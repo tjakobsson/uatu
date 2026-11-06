@@ -91,6 +91,19 @@ class StubAgentService implements WorkspaceChatService {
 }
 
 describe("background task stops route to the owning agent", () => {
+  test("compact worker evidence resolves only the owning agent and verifies the bare conversation", async () => {
+    const { service, a, b } = fixture();
+    const calls: string[] = [];
+    Object.assign(a, { workerEvidence: async (id: string) => {
+      calls.push(id); return { version: 1, conversationId: id, complete: true, entries: [] };
+    } });
+    expect(await service.workerEvidence("opencode:parent")).toEqual({ version: 1, conversationId: "opencode:parent", complete: true, entries: [] });
+    expect(calls).toEqual(["parent"]); expect(b.calls).toEqual([]);
+    await expect(service.workerEvidence("claude:parent")).rejects.toThrow("unavailable");
+    await expect(service.workerEvidence("foreign:parent")).rejects.toThrow();
+    Object.assign(a, { workerEvidence: async () => ({ version: 1, conversationId: "foreign", complete: true, entries: [] }) });
+    await expect(service.workerEvidence("opencode:parent")).rejects.toThrow("identity mismatch");
+  });
   test("parent backgrounding dispatches the bare parent and receipt only to its owning agent", async () => {
     const { service, a, b } = fixture();
     const calls: unknown[] = [];

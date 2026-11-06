@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 13.35.0-experimental
+  version: 14.35.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 13 and workspace revision 35
+  summary: Hub revision 14 and workspace revision 35
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -21,7 +21,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 13
+    hubApiRevision: 14
     workspaceApiRevision: 35
 servers:
   - url: https://{hubHost}
@@ -1134,12 +1134,16 @@ paths:
     post:
       operationId: hubUpdateWorkerDismissal
       tags: [Hub]
-      summary: Dismiss one execution or retire its stale dismissal
-      description: "Cookie mutations require the existing same-origin protection. Dismiss is allowed only for an authoritatively dismissible execution at expectedRevision; retire only for positively verified activity. Writes merge per entry and acknowledge only durable saves. A stale revision returns 409; refetch instead of overwriting. Repeated identical operations are idempotent while the evidence revision is unchanged. No provider work, results or canonical interaction requests are changed. No generic Restore operation exists."
+      summary: Dismiss an execution group or retire one stale dismissal
+      description: "Cookie mutations require the existing same-origin protection. Singleton requests retain their existing shape and 4096-byte bound. Bulk dismiss uses targets (1–8192 unique execution IDs with independent expectedRevision), with a 4 MiB body bound. The Hub reads compact complete authoritative worker evidence once per operation. All bulk targets must be present, dismissible and current at conditional validation; refusal applies no selected dismissals. Successful bulk changes and reconciled evidence use one atomic durable save. Positive activity during persistence still retires affected marks. Singleton retire requires positively verified activity. A stale revision returns 409; refetch instead of overwriting. Repeated identical operations are idempotent while the evidence revision is unchanged. No provider work, results or canonical interaction requests are changed. No generic Restore operation exists."
       requestBody:
         required: true
         content:
-          application/json: { schema: { $ref: '#/components/schemas/WorkerDismissalMutation' } }
+          application/json:
+            schema:
+              oneOf:
+                - { $ref: '#/components/schemas/WorkerDismissalMutation' }
+                - { $ref: '#/components/schemas/WorkerDismissalBatch' }
       responses:
         '200':
           description: Durable personal state after the conditional operation
@@ -2489,6 +2493,27 @@ components:
         executionId: { type: string, minLength: 1, maxLength: 512 }
         expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
         operation: { enum: [dismiss, retire] }
+      additionalProperties: false
+    WorkerDismissalBatch:
+      type: object
+      required: [version, conversationId, operation, targets]
+      description: "Atomic explicit dismissal group. The body is at most 4 MiB; execution IDs are unique and identifiers are at most 512 UTF-8 bytes without control characters. Validation failure dismisses none of the selected targets. Trusted positive activity still retires stale marks."
+      properties:
+        version: { const: 1 }
+        conversationId: { type: string, minLength: 1, maxLength: 512, pattern: '^[a-z][a-z0-9-]*:.+' }
+        operation: { const: dismiss }
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 8192
+          uniqueItems: true
+          items:
+            type: object
+            required: [executionId, expectedRevision]
+            properties:
+              executionId: { type: string, minLength: 1, maxLength: 512 }
+              expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+            additionalProperties: false
       additionalProperties: false
     WorkerActivity:
       type: object

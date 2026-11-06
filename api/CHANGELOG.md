@@ -2,6 +2,19 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 14 / Workspace 35 - Unreleased (atomic worker dismissal groups)
+
+Compatibility: breaking (Hub schema); additive (accepted requests)
+
+### Changes
+
+- `POST /s/{workspaceId}/api/personal-worker-dismissals` now publishes a request union of the existing singleton mutation and a version-1 bulk dismissal. This changes the generated request type from an object to a union, so the conservative contract policy requires a Hub revision even though existing singleton requests remain valid.
+- Bulk dismissals carry 1–8192 unique execution targets with independent `expectedRevision` values and a 4 MiB body bound. The Hub validates all targets against complete authoritative evidence before applying any selected dismissal and persists successful changes atomically. Account scope, exact execution identity and activity fences remain enforced; bulk requests cannot retire marks or control provider work.
+
+### Migration
+
+Hub clients generating request types from OpenAPI must regenerate against Hub revision 14 to use the request union. Existing singleton callers may keep their version-1 body and 4096-byte bound unchanged. To dismiss a group, send `{version:1, conversationId, operation:"dismiss", targets:[{executionId, expectedRevision}]}` to the same endpoint; do not mix singleton fields with `targets`. On a stale-revision `409`, refetch personal state and current evidence rather than overwriting or assuming any selected dismissal succeeded. Keep retirement as a singleton operation. Stored version-1 records require no migration. Workspace revision remains 35 and bundled-web revision remains 3.
+
 ## Hub 13 / Workspace 35 - Unreleased (Recent and ignored Files state)
 
 Compatibility: breaking (Hub and workspace)

@@ -159,7 +159,40 @@ test("media authentication, exact roots, internal paths and policy are enforced 
   expect((await fetch(unindexed)).status).toBe(404);
   const reads = app.metrics.get("media.read_bytes_total");
   await writeFile(path.join(left, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["clip.mp3"] } }));
+  // Policy recovery temporarily refuses old indexed identities with 409.
+  // Assert the terminal exclusion only once the authoritative view applies it.
+  await wait(() => !app.session.findDocument(path.join(left, "clip.mp3")));
   expect((await fetch(url)).status).toBe(404);
+  expect(app.metrics.get("media.read_bytes_total")).toBe(reads);
+});
+
+test("policy recovery fails closed before the terminal media exclusion is visible", async () => {
+  const dir = await directory(), file = path.join(dir, "clip.mp3"), config = path.join(dir, ".uatu.json");
+  await writeFile(file, "clip"); await writeFile(config, "{}");
+  let observer!: EventEmitter;
+  const watch = (() => {
+    const next = new EventEmitter(); observer = next;
+    Object.assign(next, { close: async () => { next.removeAllListeners(); } });
+    queueMicrotask(async () => { next.emit("all", "add", file, await stat(file)); next.emit("ready"); });
+    return next;
+  }) as unknown as NonNullable<WatchSessionOptions["watch"]>;
+  const app = await serve([root(dir)], "/", { watch });
+  const url = app.url(dir, "clip.mp3");
+  const reads = app.metrics.get("media.read_bytes_total");
+  await writeFile(config, JSON.stringify({ ignore: { exclude: ["clip.mp3"] } }));
+  observer.emit("all", "change", config);
+  expect(app.session.getDiscoveryState().status).toBe("recovering");
+  // Start directly at the shared delivery seam so HTTP scheduling cannot hide
+  // the interval before the asynchronous policy reload has applied its matcher.
+  const recovering = await app.session.mediaResponse(new Request(url));
+  expect(recovering.status).toBe(409);
+  expect(recovering.headers.get("cache-control")).toBe("no-store, no-transform");
+  expect((await recovering.arrayBuffer()).byteLength).toBe(0);
+  expect(app.metrics.get("media.read_bytes_total")).toBe(reads);
+  await wait(() => !app.session.findDocument(file));
+  const excluded = await fetch(url);
+  expect(excluded.status).toBe(404);
+  expect((await excluded.arrayBuffer()).byteLength).toBe(0);
   expect(app.metrics.get("media.read_bytes_total")).toBe(reads);
 });
 

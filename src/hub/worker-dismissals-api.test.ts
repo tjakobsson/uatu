@@ -13,6 +13,7 @@ import { WorkerDismissalsStore } from "./worker-dismissals";
 import { observeWorkerProjection } from "./worker-dismissals-observation";
 import { parseConversationItem } from "../chat/validation";
 import { BackgroundWorkers, nativeProof, prepareTool, workerExecutionIds as nativeExecutionIds } from "../chat/opencode/v2/background";
+import { compactWorkerEvidence } from "../chat/worker-dismissal-evidence";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -23,8 +24,8 @@ function childPages(pages: ConversationItem[][]) {
   const requests: string[] = [];
   const mock = spyOn(globalThis, "fetch").mockImplementation((async (input: RequestInfo | URL) => {
     const url = new URL(String(input)); requests.push(url.searchParams.get("cursor") ?? "first");
-    const page = Number(url.searchParams.get("cursor") ?? 0);
-    return Response.json({ conversation: { id: conversationId, title: "Fixture", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } }, configuration: {}, generation: "fixture", cursor: "fixture", items: pages[page], ...(page + 1 < pages.length ? { olderCursor: String(page + 1) } : {}) });
+    expect(url.pathname.endsWith("/worker-evidence")).toBe(true);
+    return Response.json({ version: 1, conversationId, complete: true, entries: compactWorkerEvidence(pages.flat()) });
   }) as typeof fetch);
   cleanups.push(() => { mock.mockRestore(); });
   return requests;
@@ -49,6 +50,49 @@ function terminalItems(): ConversationItem[] {
   }
   return items;
 }
+
+test.each([
+  "bad-json", "partial", "wrong-conversation", "extra-field", "bad-entry", "duplicate", "over-capacity",
+])("compact authoritative %s evidence fails closed", async mode => {
+  const entry = { executionId: "execution", signature: "fixture", active: false, dismissible: true };
+  const body = { version: 1, conversationId, complete: mode !== "partial", entries: [entry],
+    ...(mode === "wrong-conversation" ? { conversationId: "opencode:foreign" } : {}), ...(mode === "extra-field" ? { output: "private fixture" } : {}),
+  };
+  if (mode === "bad-entry") body.entries = [{ ...entry, active: true }];
+  if (mode === "duplicate") body.entries.push(entry);
+  if (mode === "over-capacity") body.entries = Array.from({ length: 8193 }, (_, i) => ({ ...entry, executionId: String(i) }));
+  const mock = spyOn(globalThis, "fetch").mockResolvedValue(mode === "bad-json" ? new Response("not JSON") : Response.json(body));
+  try { await expect(readAuthoritativeWorkerEvidence(running, conversationId)).rejects.toThrow(); }
+  finally { mock.mockRestore(); }
+});
+
+test("285-target HTTP bulk save reads authoritative evidence once", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "uatu-bulk-api-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const store = new WorkerDismissalsStore(path.join(root, "marks.json")); await store.load();
+  const targets = Array.from({ length: 285 }, (_, i) => ({ executionId: `execution:${i}`, expectedRevision: 0 }));
+  let reads = 0;
+  const response = await handleWorkerDismissals(new Request("http://hub.invalid/api/personal-worker-dismissals", { method: "POST", body: JSON.stringify({ version: 1, conversationId, operation: "dismiss", targets }) }), {
+    user: "alice", workspaceId: "project", store, read: async () => { reads++; return targets.map(({ executionId }) => ({ executionId, signature: "fixture", active: false, dismissible: true })); },
+  });
+  expect(response.status).toBe(200); expect(reads).toBe(1);
+  expect((await response.json()).entries.filter((item: { dismissed: boolean }) => item.dismissed)).toHaveLength(285);
+});
+
+test.each(["empty", "duplicate", "invalid-revision", "mixed-fields", "overflow"])("invalid %s bulk body rejects before reading", async mode => {
+  const target = { executionId: "execution", expectedRevision: mode === "invalid-revision" ? -1 : 0 };
+  const targets = mode === "empty" ? [] : mode === "duplicate" ? [target, target] : mode === "overflow" ? Array.from({ length: 8193 }, (_, i) => ({ ...target, executionId: String(i) })) : [target];
+  const response = await handleWorkerDismissals(new Request("http://hub.invalid/api/personal-worker-dismissals", { method: "POST", body: JSON.stringify({ version: 1, conversationId, operation: "dismiss", targets, ...(mode === "mixed-fields" ? { executionId: "execution" } : {}) }) }), {
+    user: "alice", workspaceId: "project", read: async () => { throw new Error("must not read"); },
+  });
+  expect(response.status).toBe(400);
+});
+
+test("oversized bulk JSON returns 413 before evidence or store access", async () => {
+  const response = await handleWorkerDismissals(new Request("http://hub.invalid/api/personal-worker-dismissals", { method: "POST", body: JSON.stringify({ version: 1, conversationId, operation: "dismiss", targets: [{ executionId: "x".repeat(4 * 1024 * 1024), expectedRevision: 0 }] }) }), {
+    user: "alice", workspaceId: "project", read: async () => { throw new Error("must not read"); },
+  });
+  expect(response.status).toBe(413);
+});
 
 test.each(["foreign execution", "failed read", "failed wait", "invalid scope", "oversized body", "identity selector"] as const)("%s leaves no conditional authority or lifecycle wait behind", async failure => {
   const root = await mkdtemp(path.join(tmpdir(), "uatu-admission-cleanup-"));
@@ -143,7 +187,7 @@ test("all-page launcher reconciliation suppresses false terminal evidence from c
   const task: BackgroundTaskItem = { type: "background_task", id: "task:run", taskId: "run", toolUseId: "launch", status: "running", description: "Review", createdAt: 10, activity: { kind: "working", executionId: "exact" } };
   const requests = childPages([[tool], [task]]);
   const evidence = await readAuthoritativeWorkerEvidence(running, conversationId);
-  expect(requests).toEqual(["first", "1"]);
+  expect(requests).toEqual(["first"]);
   expect(evidence).toEqual([expect.objectContaining({ executionId: "exact", active: true, dismissible: false })]);
   expect(evidence.every(item => item.active && !item.dismissible)).toBe(true);
   tool.id = "launch"; // Legacy provider rows expose the native call directly.
@@ -310,7 +354,7 @@ test("header batch DOM skips an accepted oversized identity, posts supported wor
   const entries = [{ executionId: "worker-dismissal:tool:ordinary", revision: 0, dismissed: false }];
   const mock = spyOn(globalThis, "fetch").mockImplementation((async (_url: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === "POST") {
-      posts.push(JSON.parse(init.body as string).executionId);
+      posts.push(JSON.parse(init.body as string).targets[0].executionId);
       if (mode === "save-failure") return new Response(null, { status: 503 });
       entries[0]!.dismissed = true;
     } else { reads++; if (mode === "read-failure") return new Response(null, { status: 503 }); }

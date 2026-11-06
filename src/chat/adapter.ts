@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { compactWorkerEvidence, validatedWorkerDismissalSource, workerDismissalSourceStrength, workerSourceIsProtected, WORKER_EVIDENCE_LIMIT, WorkerEvidenceError, type WorkerEvidenceSnapshot } from "./worker-dismissal-evidence";
 import { AgentNotificationTracker, type AgentNotificationEvent } from "./notifications";
 
 import { boundedSet } from "../shared/bounded-map";
@@ -841,6 +842,16 @@ export class ChatAdapter {
     return this.summary(await this.requireSession(id));
   }
 
+  async workerEvidence(id: string): Promise<WorkerEvidenceSnapshot> {
+    let snapshot: ConversationSnapshot;
+    if (!this.provider.waitForEventStream) snapshot = await this.readHistory(id, { workers: true });
+    else {
+      if (!this.pumpPromise) void this.startEventPump().catch(() => undefined);
+      snapshot = await this.readCoveredHistory(id, { workers: true }, { dirty: false });
+    }
+    return { version: 1, conversationId: id, complete: true, entries: compactWorkerEvidence(snapshot.items) };
+  }
+
   async history(id: string, options: { cursor?: string; limit?: number } = {}): Promise<ConversationSnapshot> {
     if (!this.provider.waitForEventStream) return this.readHistory(id, options);
     if (!this.pumpPromise) void this.startEventPump().catch(() => undefined);
@@ -867,7 +878,7 @@ export class ChatAdapter {
     return marked;
   }
 
-  private async readCoveredHistory(id: string, options: { cursor?: string; limit?: number }, recovery: { dirty: boolean }, replacement?: { isCurrent?: () => boolean }): Promise<ConversationSnapshot> {
+  private async readCoveredHistory(id: string, options: { cursor?: string; limit?: number; workers?: true }, recovery: { dirty: boolean }, replacement?: { isCurrent?: () => boolean }): Promise<ConversationSnapshot> {
     // Pin only already-known native identities for this bounded read owner.
     // Pending owners can depart, and the global delivery cache can evict,
     // before a native history row (including a dirty reread) is applied.
@@ -957,7 +968,7 @@ export class ChatAdapter {
     }
   }
 
-  private async readHistory(id: string, options: { cursor?: string; limit?: number }, coverage?: HistoryCoverage): Promise<ConversationSnapshot> {
+  private async readHistory(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage?: HistoryCoverage): Promise<ConversationSnapshot> {
     const session = await this.requireSession(id);
     coverage?.assertCurrent();
     // Captured before the provider reads: a pump event landing during them
@@ -975,6 +986,42 @@ export class ChatAdapter {
     let page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
     coverage?.assertCurrent();
     if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+    if (options.workers && !page.completeItems) {
+      // The compact read requires complete coverage, not a cached projection.
+      // Native providers supply completeItems in one read. Legacy providers may
+      // page under the original bounded fallback; no transcript bytes cross HTTP.
+      const requireRowOnlyPage = (source: ProviderHistoryPage) => {
+        // Association/origin/revert/accounting facts are source-scoped, not
+        // independently unionable page decorations. Without completeItems we
+        // cannot prove one combined provenance view. Refuse rather than drop
+        // older counterproof (or misapply first-page authority to older rows).
+        const rowKeys = ["items", "accounting", "nextCursor", "isWorkerSourceCurrent"];
+        if (source.accounting.length || Object.entries(source).some(([key, value]) => value !== undefined && !rowKeys.includes(key))) {
+          throw new WorkerEvidenceError("unavailable", "authoritative worker provenance requires complete source coverage");
+        }
+      };
+      requireRowOnlyPage(page);
+      const items = [...page.items], cursors = new Set<string>();
+      const guards = page.isWorkerSourceCurrent ? [page.isWorkerSourceCurrent.bind(page)] : [];
+      let next = page.nextCursor;
+      for (let count = 1; next !== undefined; count++) {
+        if (count >= 20 || cursors.has(next)) throw new WorkerEvidenceError("unavailable", "authoritative worker history exceeds read budget");
+        cursors.add(next);
+        const older = await this.provider.listMessages(id, { cursor: next, limit: DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
+        coverage?.assertCurrent();
+        requireRowOnlyPage(older);
+        if (older.isWorkerSourceCurrent && !older.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+        if (older.revertVisibility?.boundaryId !== page.revertVisibility?.boundaryId) throw new HistoryReadChangedError();
+        if (older.isWorkerSourceCurrent) guards.push(older.isWorkerSourceCurrent.bind(older));
+        items.unshift(...older.items); next = older.nextCursor;
+      }
+      page = { ...page, completeItems: items, nextCursor: undefined, isWorkerSourceCurrent: () => guards.every(current => current()) };
+    }
+    // Current-source assertions must precede liveness normalization, recovery
+    // indexing and any row-id collapse. Otherwise a terminal duplicate could
+    // erase positive activity before the final compact evidence fold sees it.
+    const workerSource = options.workers ? validatedWorkerDismissalSource(page.completeItems ?? page.items, page.items) : undefined;
+    const workerStrength = workerSource && workerDismissalSourceStrength(workerSource);
     if (coverage?.replacement && !page.completeItems) {
       // Replacement needs the whole visible transcript, not just its newest
       // page. V2 normally supplies completeItems; other covered providers may
@@ -1017,7 +1064,10 @@ export class ChatAdapter {
     // that complete source for recovery, never the bounded visible page.
     const configuration = await this.configuration(id);
     coverage?.assertCurrent();
-    const items = (coverage?.replacement ? page.completeItems ?? page.items : page.items).map(item => this.correlateSteerMessage(id, item, coverage?.steerCorrelations));
+    const items = (workerSource ?? (coverage?.replacement ? page.completeItems ?? page.items : page.items))
+      .filter(item => !options.workers || item.type === "tool" || item.type === "background_task")
+      .map(item => this.correlateSteerMessage(id, item, coverage?.steerCorrelations));
+    if (options.workers && items.length > WORKER_EVIDENCE_LIMIT) throw new WorkerEvidenceError("capacity", "worker dismissal source capacity reached");
     const sourceProjection = this.projection(id);
     const revokedChildren = new Set(page.workerAssociationContradictions);
     const fallbackRelations = [...(page.workerResultFallbacks ?? [])];
@@ -1059,6 +1109,7 @@ export class ChatAdapter {
         }
         retained.push(item);
       }
+      if (options.workers) validatedWorkerDismissalSource(retained);
       items.splice(0, items.length, ...new Map(retained.map(item => [item.id, item])).values());
     };
     const nativeToolChildren = new Map<string, string | undefined>();
@@ -1258,6 +1309,7 @@ export class ChatAdapter {
       }
       coverage?.assertCurrent();
       coverage?.workerSources.assertCurrent();
+      if (options.workers) recovered = validatedWorkerDismissalSource(recovered) as BackgroundTaskItem[];
       for (const source of recoverySources) {
         for (const child of source.workerAssociationContradictions) revokedChildren.add(child);
         fallbackRelations.push(...source.workerResultFallbacks);
@@ -1267,15 +1319,24 @@ export class ChatAdapter {
       for (const task of recovered) if (task.resultId) positiveReports.add(task.resultId);
       if (this.provider.waitForEventStream) for (const task of recovered) if (task.status === "running" && !task.foreground) nativeLiveTasks.add(task.id);
       const { byId, supersedes } = indexRecoveredBackgroundTasks(recovered);
-      for (const known of [...this.projection(id).items(), ...items]) {
+      const currentIds = options.workers ? new Set(items.map(item => item.id)) : undefined;
+      const knownRows = options.workers ? [...items, ...this.projection(id).items()] : [...this.projection(id).items(), ...items];
+      for (const known of knownRows) {
         if (known.type !== "background_task" || byId.has(known.id)) continue;
         if (supersedes(known) && !coverage?.changed(known.id)) {
+          if (currentIds?.has(known.id) && workerSourceIsProtected(known)) {
+            // A weak launcher/result match cannot erase a current protected
+            // source row, even before the final non-weakening assertion runs.
+            throw new WorkerEvidenceError("unavailable", "authoritative worker source was weakened without newer evidence");
+          }
           this.projection(id).apply({ kind: "remove", itemId: known.id });
           const index = items.findIndex(item => item.id === known.id);
           if (index >= 0) items.splice(index, 1);
           continue;
         }
-        byId.set(known.id, known.status === "running" ? unverifyWorkerTask(known) : known);
+        // Missing/failed recovery can withdraw retained cache observations, not
+        // the current complete source's positive or nondismissible evidence.
+        byId.set(known.id, known.status === "running" && !currentIds?.has(known.id) ? unverifyWorkerTask(known) : known);
       }
       for (const task of byId.values()) {
         const index = items.findIndex(item => item.id === task.id);
@@ -1288,6 +1349,7 @@ export class ChatAdapter {
     }
     const liveTasks = this.provider.reconcileBackgroundTasks ? null : await this.liveBackgroundTasks(id);
     if (liveTasks !== null) {
+      if (options.workers) validatedWorkerDismissalSource([...items, ...liveTasks]);
       const live = new Set(liveTasks.map(task => task.id));
       for (const task of liveTasks) {
         if (!items.some(item => item.id === task.id)) items.push(task);
@@ -1583,7 +1645,7 @@ export class ChatAdapter {
       const item = items[index]!;
       if (item.type !== "background_task" || item.status !== "running") continue;
       const current = projection.find(candidate => candidate.id === item.id);
-      if (current?.type === "background_task" && current.status !== "running") items[index] = current;
+      if (current?.type === "background_task" && current.status !== "running" && (!options.workers || coverage?.changed(item.id))) items[index] = current;
     }
     // Likewise the wakeup snapshot: a wakeup that fired or was cancelled
     // during those awaits keeps that row, not the pending or paused copy read
@@ -1722,6 +1784,7 @@ export class ChatAdapter {
       if (!replace) for (const itemId of new Set([...resetReports, ...revokedRows])) if (projection.has(itemId)) projection.apply({ kind: "remove", itemId });
       if (page.workerOriginCoverage) projection.rememberWorkerOrigins(items, page.workerOriginCoverage, coverage?.changed);
       projection.rememberWorkerFallbacks(items, fallbackRelations, coverage?.changed, page.workerOriginCoverage);
+      workerStrength?.(items);
       if (replace) {
         // Worker retention, exact exclusions and result supersession above
         // apply equally to replacement. Ordinary transcript rows get no such
@@ -1752,7 +1815,7 @@ export class ChatAdapter {
         this.rememberReversibleHistory(id, reversibleHistory);
       }
       if (!replace && (removed || visibilityChanged)) projection.replay.publish({ type: "resync", reason: "conversation-rewritten" });
-    } else projection.seed(items);
+    } else { workerStrength?.(items); projection.seed(items); }
     for (let index = 0; index < items.length; index++) {
       const item = items[index]!;
       this.syncRecoveredPermission(item);

@@ -32,6 +32,191 @@ import { LiveBroker } from "../hub/live-broker";
 import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
 
+test("compact worker evidence reads a complete large source once without display pagination or output", async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const workers: ConversationItem[] = Array.from({ length: 290 }, (_, i) => ({ type: "background_task", id: `task:${i}`, taskId: String(i), description: "Fixture", createdAt: i + 1,
+    status: i < 285 ? "completed" : "running", activity: { kind: i < 285 ? "ended" : "checking", executionId: `execution:${i}` } }));
+  const completeItems: ConversationItem[] = [
+    ...Array.from({ length: 2100 }, (_, i) => ({ type: "tool" as const, id: `ordinary:${i}`, name: "read", status: "completed" as const, createdAt: i + 1, output: i === 0 ? "x".repeat(4 * 1024 * 1024 + 1) : "fixture" })), ...workers,
+  ];
+  const reads = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: completeItems.slice(-1), completeItems, accounting: [], nextCursor: "older" }));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try {
+    const evidence = await adapter.workerEvidence("parent");
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(evidence).toMatchObject({ version: 1, conversationId: "parent", complete: true });
+    expect(evidence.entries).toHaveLength(290);
+    expect(evidence.entries.filter(item => item.dismissible)).toHaveLength(285);
+    expect(JSON.stringify(evidence).length).toBeLessThan(100_000);
+    expect(JSON.stringify(evidence)).not.toContain("output");
+  } finally { reads.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact worker evidence retains the real V2 covered-source owner for long history and large output", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Compact evidence")).id;
+    const worker = fake.launchRequestWorker(parent);
+    fake.settleWorker(worker.childId, "completed", "x".repeat(4 * 1024 * 1024 + 1));
+    for (let i = 0; i < 10; i++) fake.appendHistory(parent, 120);
+    const read = spyOn(provider, "listMessages");
+    try {
+      const snapshot = await adapter.workerEvidence(parent);
+      expect(snapshot.complete).toBe(true);
+      expect(snapshot.entries.length).toBeGreaterThan(0);
+      expect(snapshot.entries.every(item => item.dismissible && !item.active)).toBe(true);
+      expect(JSON.stringify(snapshot).length).toBeLessThan(10_000);
+      expect(read.mock.calls.filter(([id]) => id === parent)).toHaveLength(1);
+    } finally { read.mockRestore(); }
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 30_000);
+
+test("compact evidence refuses incomplete fallback pages and source contradictions", async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  let reads = 0;
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: [], accounting: [], nextCursor: `older:${++reads}` }));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try {
+    await expect(adapter.workerEvidence("parent")).rejects.toThrow("read budget");
+    expect(reads).toBe(20);
+    const item: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "same" } };
+    read.mockImplementation(async () => ({ items: [], completeItems: [item, { ...item, id: "task:two", status: "failed" }], accounting: [] }));
+    await expect(adapter.workerEvidence("parent")).rejects.toThrow("ambiguous");
+  } finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+for (const source of ["fallback", "complete", "recovery", "page"] as const) for (const activeFirst of [false, true]) test(`compact source refuses contradictory same-ID rows before dedup (${source}, active first: ${activeFirst})`, async () => {
+  const ended: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "exact" } };
+  const active: BackgroundTaskItem = { ...ended, status: "running", activity: { kind: "working", executionId: "exact" } };
+  const rows = activeFirst ? [active, ended] : [ended, active];
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const read = spyOn(provider, "listMessages").mockImplementation(async (_id, options) => source === "page" ? { items: rows.slice(0, 1), completeItems: rows.slice(1), accounting: [] } : source === "recovery" ? { items: [], completeItems: [], accounting: [] } : source === "complete"
+    ? { items: rows.slice(-1), completeItems: rows, accounting: [] }
+    : options.cursor ? { items: rows.slice(0, 1), accounting: [] } : { items: rows.slice(1), accounting: [], nextCursor: "older" });
+  if (source === "recovery") Object.assign(provider, { reconcileBackgroundTasks: async () => rows });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { await expect(adapter.workerEvidence("parent")).rejects.toThrow("ambiguous"); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact source coalesces compatible history duplicates without losing newer owned recovery activity", async () => {
+  const task: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "exact", observedAt: 2 } };
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: [task], completeItems: [task, { ...task, description: "Enriched", activity: { ...task.activity!, observedAt: 3 } }], accounting: [] }));
+  Object.assign(provider, { reconcileBackgroundTasks: async () => [{ ...task, status: "running", activity: { kind: "working", executionId: "exact" } }] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { expect((await adapter.workerEvidence("parent")).entries).toEqual([expect.objectContaining({ executionId: "exact", active: true, dismissible: false })]); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+for (const recovery of ["empty", "failed", "positive"] as const) for (const kind of ["working", "needs-answer", "checking", "session-active"] as const) test(`compact source strength survives older retained terminal state (${kind}, recovery ${recovery})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  const terminal: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "native-one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "exact", generation: 1, launchRef: "launch:one" } };
+  try {
+    const parent = (await provider.createSession("Source precedence fixture")).id;
+    await adapter.history(parent); // Finish independent stream/bootstrap recovery first.
+    const current: BackgroundTaskItem = { ...terminal, status: "running", activity: { ...terminal.activity!, kind, ...(kind === "needs-answer" ? { request: { kind: "question" as const, id: "request" } } : {}) } };
+    provider.listMessages = async () => ({ items: [current], completeItems: [current], accounting: [] });
+    provider.reconcileBackgroundTasks = async () => { if (recovery === "failed") throw new Error("synthetic unavailable recovery"); return recovery === "positive" ? [current] : []; };
+    adapter.projectionForTests(parent).upsert(terminal);
+    expect((await adapter.workerEvidence(parent)).entries).toEqual([expect.objectContaining({ executionId: "exact", active: kind === "working" || kind === "needs-answer", dismissible: false })]);
+  } finally { await adapter.dispose(); await fake.stop(); }
+});
+
+for (const weakening of ["ended", "unavailable", "different-execution", "weak-supersession"] as const) test(`compact source strength refuses weaker recovery without newer authority (${weakening})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Weaker recovery fixture")).id;
+    await adapter.history(parent); // Isolate this read from independent bootstrap publication.
+    const source: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "native-one", toolUseId: "call", description: "Fixture", createdAt: 1, status: "running", activity: { kind: "working", executionId: "exact", generation: 1 } };
+    const recovered: BackgroundTaskItem = weakening === "unavailable" ? { ...source, activity: { ...source.activity!, kind: "unavailable" } }
+      : { ...source, status: "completed", ...(weakening === "weak-supersession" ? { id: "task:other", taskId: "native-other" } : {}), activity: { ...source.activity!, kind: "ended", executionId: weakening === "different-execution" || weakening === "weak-supersession" ? "other" : "exact" } };
+    provider.listMessages = async () => ({ items: [source], completeItems: [source], accounting: [] });
+    provider.reconcileBackgroundTasks = async () => [recovered];
+    adapter.projectionForTests(parent).upsert(source);
+    await expect(adapter.workerEvidence(parent)).rejects.toThrow("weakened");
+    expect(adapter.projectionForTests(parent).get(source.id)).toMatchObject({ status: "running", activity: { kind: "working", executionId: "exact" } });
+    if (weakening === "ended") {
+      provider.listMessages = async () => ({ items: [recovered], completeItems: [recovered], accounting: [] });
+      expect((await adapter.workerEvidence(parent)).entries).toEqual([expect.objectContaining({ executionId: "exact", active: false, dismissible: true })]);
+    }
+  } finally { await adapter.dispose(); await fake.stop(); }
+});
+
+test("compact fallback retains every page currentness guard until publication", async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  let reads = 0, changed = false;
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => {
+    const page = reads++;
+    if (page === 2) changed = true;
+    return { items: [], accounting: [], ...(page < 2 ? { nextCursor: `older:${page}` } : {}), isWorkerSourceCurrent: () => page !== 1 || !changed };
+  });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { await expect(adapter.workerEvidence("parent")).rejects.toThrow(); expect(reads).toBe(3); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact fallback never discards an older page's association contradiction", async () => {
+  const task: BackgroundTaskItem = { type: "background_task", id: "task:fixture", taskId: "fixture", description: "Fixture", createdAt: 1, childConversationId: "child", status: "completed", activity: { kind: "ended", executionId: "exact" } };
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: [task], completeItems: [task], accounting: [], workerAssociationContradictions: ["child"] }));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try {
+    expect((await adapter.workerEvidence("parent")).entries).toEqual([]);
+    read.mockImplementation(async (_id, options) => options.cursor
+      ? { items: [task], accounting: [], workerAssociationContradictions: ["child"] }
+      : { items: [], accounting: [], nextCursor: "older" });
+    // The fallback refuses source-scoped provenance rather than authorizing a
+    // worker whose association the older page explicitly contradicts.
+    await expect(adapter.workerEvidence("parent")).rejects.toThrow("provenance requires complete source coverage");
+  } finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+for (const owner of ["first", "older"] as const) for (const metadata of [
+  { hiddenWorkerResultIds: ["hidden-result"] },
+  { workerAssociationContradictions: ["child"] },
+  { workerResultFallbacks: [] },
+  { workerOriginCoverage: [] },
+  { revertVisibility: { boundaryId: null, state: { staged: false, canUndo: false, canRedo: false, revertedMessages: [] }, excludedItemIds: [] } },
+  { deliveryHistoryIncomplete: true },
+  { visibleDescendantsIncomplete: true },
+  { sessionCostUsd: 1 },
+  { workerSource: { isCurrent: () => true, retain: () => { throw new Error("must refuse opaque provenance"); } } },
+  { accounting: [{ messageId: "message", role: "assistant" }] },
+]) test(`compact fallback refuses ${owner}-page ${Object.keys(metadata)[0]} instead of dropping provenance`, async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const page = (older: boolean): ProviderHistoryPage => ({ items: [], accounting: [], ...(!older ? { nextCursor: "older" } : {}), ...((owner === "older") === older ? metadata : {}) }) as ProviderHistoryPage;
+  const read = spyOn(provider, "listMessages").mockImplementation(async (_id, options) => page(Boolean(options.cursor)));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { await expect(adapter.workerEvidence("parent")).rejects.toThrow("provenance requires complete source coverage"); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact V2 evidence retries a changed owned source rather than publishing stale facts", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Changed compact evidence")).id;
+    const worker = fake.launchRequestWorker(parent);
+    fake.settleWorker(worker.childId, "completed", "Fixture");
+    const list = provider.listMessages.bind(provider); let reads = 0;
+    provider.listMessages = async (id, options) => {
+      const page = await list(id, options);
+      if (id === parent && ++reads === 1) return { ...page, isWorkerSourceCurrent: () => false };
+      return page;
+    };
+    const snapshot = await adapter.workerEvidence(parent);
+    expect(reads).toBe(2); expect(snapshot.entries.length).toBeGreaterThan(0);
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 30_000);
+
 for (const action of ["remove", "replace", "upsert", "seed", "evict"] as const)
 test(`fallback result source authority retires projection provenance on ${action}`, async () => {
   const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent"), fixtureSession("other")];
@@ -5937,7 +6122,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(provider.interrupts).toEqual([]);
     await adapter.dispose(); await secondPump;
   });
-  async function exhaustedRecoveryFixture(terminal = false) {
+  async function exhaustedRecoveryFixture(terminal = false, beforeRead?: (read: number) => Promise<void>) {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     const unknown = { id: "task:unknown", type: "background_task" as const, taskId: "unknown", description: "Unknown", createdAt: 1, status: "running" as const, stateUncertain: true };
@@ -5945,25 +6130,135 @@ describe("prompt, abort, permission, and question mutations", () => {
       status: terminal ? "completed" as const : "running" as const, ...(terminal ? { terminalReportedAt: 2 } : {}) };
     let reads = 0, release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    Object.assign(provider, { reconcileBackgroundTasks: async () => { if (++reads === 1) await gate; return [unknown, known]; } });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { ++reads; await beforeRead?.(reads); if (reads === 1) await gate; return [unknown, known]; } });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
     adapter.projectionForTests("session").apply({ kind: "upsert", item: known });
+    // Event-triggered classification is detached from the pump and precedes
+    // backgroundPending admission. Observe both boundaries, not IO turn counts.
+    const phases = adapter as unknown as {
+      requireSession(id: string): Promise<ProviderSession>;
+      isInWorkspace(session: Pick<ProviderSession, "id" | "directory">): Promise<boolean>;
+      backgroundPending: Set<Promise<void>>;
+      eventCoalescer: { settled(): Promise<void> } | null;
+    };
+    const classifications = new Set<Promise<unknown>>();
+    const trackClassification = <T>(work: Promise<T>): Promise<T> => {
+      const tracked = work.finally(() => { classifications.delete(tracked); });
+      classifications.add(tracked);
+      return tracked;
+    };
+    const requireSession = phases.requireSession.bind(adapter);
+    const isInWorkspace = phases.isInWorkspace.bind(adapter);
+    phases.requireSession = id => trackClassification(requireSession(id));
+    phases.isInWorkspace = session => trackClassification(isInWorkspace(session));
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ type: "server.connected", data: {} });
-    await waitUntil(() => reads === 1);
-    jest.useFakeTimers();
-    release(); await flushRecoveryIo();
-    jest.advanceTimersByTime(1_000); await flushRecoveryIo();
-    jest.advanceTimersByTime(2_000); await flushRecoveryIo();
-    expect(reads).toBe(3);
-    return { adapter, provider, pump, unknown, known, reads: () => reads,
-      event: async (eventType = "session.tool.success", updates: NormalizedProviderEvent["updates"] = []) => {
-        provider.eventQueue.push({ normalized: { conversationId: "session", eventType, updates, outcome: "handled" } });
-        await flushRecoveryIo();
-        jest.advanceTimersByTime(0); await flushRecoveryIo();
+    const recoveryFinished = async () => {
+      while (phases.backgroundPending.size) await Promise.all([...phases.backgroundPending]);
+    };
+    const eventsApplied = async () => {
+      for (let turn = 0; turn < 1_000 && !provider.eventQueue.waiting; turn++) await realpath(process.cwd());
+      expect(provider.eventQueue.waiting).toBe(true);
+      while (classifications.size) await Promise.allSettled([...classifications]);
+      jest.advanceTimersByTime(0);
+      await phases.eventCoalescer?.settled();
+      while (classifications.size) await Promise.allSettled([...classifications]);
+    };
+    const emit = async (event: ProviderEvent, finishRecovery = true) => {
+      provider.eventQueue.push(event);
+      await eventsApplied();
+      if (finishRecovery) await recoveryFinished();
+    };
+    const advance = async (ms: number) => {
+      jest.advanceTimersByTime(ms);
+      await recoveryFinished();
+    };
+    try {
+      await waitUntil(() => reads === 1);
+      jest.useFakeTimers();
+      // A started read is not a completed read: only its completion installs
+      // the next retry timer. Do not spend that deadline while IO is pending.
+      release(); await recoveryFinished();
+      jest.advanceTimersByTime(1_000); await recoveryFinished();
+      jest.advanceTimersByTime(2_000); await recoveryFinished();
+      expect(reads).toBe(3);
+    } catch (error) {
+      release();
+      try { await adapter.dispose(); await pump; } finally { jest.useRealTimers(); }
+      throw error;
+    }
+    return { adapter, provider, pump, unknown, known, recoveryFinished, emit, advance, reads: () => reads,
+      event: async (eventType = "session.tool.success", updates: NormalizedProviderEvent["updates"] = [], conversationId = "session", finishRecovery = true) => {
+        await emit({ normalized: { conversationId, eventType, updates, outcome: "handled" } }, finishRecovery);
       },
     };
   }
+
+  for (const phase of ["confinement", "recovery"] as const) test(`exhausted recovery event acknowledgement waits for ${phase} before returning a fresh read`, async () => {
+    let release!: () => void;
+    let started = false, acknowledged = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const f = await exhaustedRecoveryFixture(false, async read => {
+      if (phase === "recovery" && read === 4) { started = true; await gate; }
+    });
+    f.provider.sessions.push(fixtureSession("fresh"));
+    const getSession = f.provider.getSession.bind(f.provider);
+    f.provider.getSession = async id => {
+      if (phase === "confinement" && id === "fresh") { started = true; await gate; }
+      return getSession(id);
+    };
+    const event = f.event("session.tool.success", [], "fresh").then(() => { acknowledged = true; });
+    try {
+      for (let turn = 0; turn < 1_000 && !started; turn++) await realpath(process.cwd());
+      expect(started).toBe(true);
+      // Keep the phase blocked beyond the old fixed-turn acknowledgement.
+      await flushRecoveryIo(); await flushRecoveryIo(); await flushRecoveryIo();
+      expect(f.reads()).toBe(phase === "confinement" ? 3 : 4);
+      expect(acknowledged).toBe(false);
+      release(); await event;
+      expect(f.reads()).toBe(4);
+    } finally {
+      release();
+      try { await event; }
+      finally {
+        try { await f.adapter.dispose(); await f.pump; }
+        finally { jest.useRealTimers(); }
+      }
+    }
+  });
+
+  test("exhausted recovery fixture waits for a retry to finish before advancing its next deadline", async () => {
+    let release!: () => void;
+    let retryStarted = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let settled = false;
+    const setup = exhaustedRecoveryFixture(false, async read => {
+      if (read === 2) { retryStarted = true; await gate; }
+    }).then(value => { settled = true; return value; }, error => { settled = true; throw error; });
+    // Attach a rejection handler while the controlled retry remains blocked.
+    void setup.catch(() => undefined);
+    try {
+      for (let turn = 0; turn < 1_000 && !retryStarted; turn++) await realpath(process.cwd());
+      expect(retryStarted).toBe(true);
+      await flushRecoveryIo();
+      expect(settled).toBe(false);
+    } finally {
+      release();
+      const f = await setup;
+      try { expect(f.reads()).toBe(3); }
+      finally { await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
+    }
+  });
+
+  test("exhausted recovery fixture restores real timers when setup fails", async () => {
+    const failure = new Error("Controlled fixture setup failure");
+    const advance = spyOn(jest, "advanceTimersByTime").mockImplementation(() => { throw failure; });
+    try {
+      await expect(exhaustedRecoveryFixture()).rejects.toBe(failure);
+      // This native timer can finish only if setup restored the real clock.
+      await Bun.sleep(1);
+    } finally { advance.mockRestore(); jest.useRealTimers(); }
+  });
 
   test("exhausted recovery ignores chatter until thirty seconds after exhaustion and never polls a quiet parked cycle", async () => {
     const f = await exhaustedRecoveryFixture();
@@ -5975,9 +6270,9 @@ describe("prompt, abort, permission, and question mutations", () => {
       await f.event(); expect(f.reads()).toBe(3);
       jest.advanceTimersByTime(29_999); now.mockReturnValue(exhaustedAt + 29_999); await f.event("session.message.content.updated"); expect(f.reads()).toBe(3);
       jest.advanceTimersByTime(1); now.mockReturnValue(exhaustedAt + 30_000); await f.event(); expect(f.reads()).toBe(4);
-      jest.advanceTimersByTime(1_000); await flushRecoveryIo();
-      jest.advanceTimersByTime(2_000); await flushRecoveryIo(); expect(f.reads()).toBe(6);
-      jest.advanceTimersByTime(120_000); await flushRecoveryIo(); expect(f.reads()).toBe(6);
+      await f.advance(1_000);
+      await f.advance(2_000); expect(f.reads()).toBe(6);
+      await f.advance(120_000); expect(f.reads()).toBe(6);
       expect(f.adapter.projectionForTests("session").get(f.unknown.id)).toMatchObject({ status: "running", stateUncertain: true });
     } finally { now.mockRestore(); await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
   });
@@ -5987,7 +6282,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     try {
       if (evidence === "worker") await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, createdAt: 2 } }]);
       else if (evidence === "refresh") await f.adapter.history("session");
-      else { f.provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo(); }
+      else await f.emit({ type: "server.connected", data: {} });
       expect(f.reads()).toBe(4);
       expect(f.provider.prompts).toEqual([]); expect(f.provider.interrupts).toEqual([]);
     } finally { await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
@@ -6014,8 +6309,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const exhaustedAt = parked.exhaustedAt!;
     const now = spyOn(Date, "now").mockReturnValue(exhaustedAt + 1);
     const event = async (id: string, updates: NormalizedProviderEvent["updates"] = []) => {
-      f.provider.eventQueue.push({ normalized: { conversationId: id, eventType: "session.tool.success", updates, outcome: "handled" } });
-      await flushRecoveryIo(); jest.advanceTimersByTime(0); await flushRecoveryIo();
+      await f.event("session.tool.success", updates, id);
     };
     try {
       for (let index = 1; index < 2_048; index++) records.set(`parked-${index}`, { ...parked, progress: new Map() });
@@ -6072,7 +6366,7 @@ describe("prompt, abort, permission, and question mutations", () => {
         await f.event("session.inbox.enqueued", [{ kind: "remove", itemId: previous }]);
         expect(records.get("session")?.sourceProgress?.has("call:same-call")).toBe(true);
         const before = f.reads();
-        jest.advanceTimersByTime(2_000); await flushRecoveryIo();
+        await f.advance(2_000);
         if (f.reads() > before) expect(f.adapter.projectionForTests("session").get(recoveredId)).toMatchObject({ status: "running", stateUncertain: false });
       }
       expect(f.reads()).toBe(6);
@@ -6105,7 +6399,7 @@ describe("prompt, abort, permission, and question mutations", () => {
         const previous = recoveredId; recoveredId = `overflow-read-${index}`;
         await f.event("session.inbox.enqueued", [{ kind: "remove", itemId: previous }]);
         const before = f.reads();
-        jest.advanceTimersByTime(2_000); await flushRecoveryIo();
+        await f.advance(2_000);
         if (f.reads() > before) expect(f.adapter.projectionForTests("session").get(recoveredId)).toMatchObject({ status: "running", stateUncertain: false });
       }
       expect(f.reads()).toBe(verifiedStart ? 7 : 6);
@@ -6126,7 +6420,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await f.event(); expect(f.reads()).toBe(4);
       expect(records.has("session")).toBe(false);
       expect(f.adapter.projectionForTests("session").get(f.unknown.id)).toMatchObject({ status: "running", stateUncertain: false });
-      jest.advanceTimersByTime(120_000); await flushRecoveryIo(); expect(f.reads()).toBe(4);
+      await f.advance(120_000); expect(f.reads()).toBe(4);
     } finally { now.mockRestore(); await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
   });
 
@@ -6140,9 +6434,10 @@ describe("prompt, abort, permission, and question mutations", () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     provider.reconcileBackgroundTasks = async (...args) => { const tasks = await reconcile(...args); await gate; return [...tasks, { ...f.known, id: "independent", taskId: "independent", toolUseId: "independent-native-call" }]; };
     try {
-      await f.event(); expect(f.reads()).toBe(4);
-      await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, status: "completed", terminalReportedAt: 3 } }]);
-      release(); await flushRecoveryIo();
+      // Keep the recovery deliberately in flight while the terminal frame wins.
+      await f.event("session.tool.success", [], "session", false); expect(f.reads()).toBe(4);
+      await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, status: "completed", terminalReportedAt: 3 } }], "session", false);
+      release(); await f.recoveryFinished();
       expect(f.adapter.projectionForTests("session").get(f.known.id)).toMatchObject({ status: "completed", terminalReportedAt: 3 });
       expect(f.adapter.projectionForTests("session").get("independent")).toMatchObject({ status: "running", stateUncertain: false });
       expect(f.provider.prompts).toEqual([]); expect(f.provider.interrupts).toEqual([]);
@@ -6205,7 +6500,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       // These scalars summarize lost scheduling metadata only, never workers.
       state.backgroundRecoveryFloorUntil = Date.now() + 30_000;
       state.backgroundRecoverySourceStartedAt = 1;
-      if (cleanup === "reconnect") { f.provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo(); expect(f.reads()).toBe(4); }
+      if (cleanup === "reconnect") { await f.emit({ type: "server.connected", data: {} }); expect(f.reads()).toBe(4); }
       else await f.adapter.dispose();
       expect(state.backgroundRecoveryFloorUntil).toBe(0);
       expect(state.backgroundRecoverySourceStartedAt).toBe(-Infinity);
@@ -6220,8 +6515,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await f.event("session.inbox.enqueued", [{ kind: "remove", itemId: f.known.id }]);
       expect(records.get("session")?.sourceProgress?.has("call:same-call")).toBe(true);
       f.provider.sessions = [];
-      f.provider.eventQueue.push({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
-      await flushRecoveryIo();
+      await f.emit({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
       expect(records.has("session")).toBe(false);
       await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, id: "stale-alias", taskId: "stale-alias" } }]);
       expect(records.has("session")).toBe(false);
@@ -6264,8 +6558,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect(records.get("session")).toMatchObject({ exhaustedAt: expect.any(Number) });
       expect(records.get("session")?.timer).toBeUndefined();
       if (cleanup === "deleted") {
-        f.provider.eventQueue.push({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
-        await flushRecoveryIo();
+        await f.emit({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
       } else if (cleanup === "evicted") for (let index = 0; index < 70; index++) f.adapter.projectionForTests(`evict-${index}`);
       else await f.adapter.dispose();
       expect(records.has("session")).toBe(false);
@@ -6304,8 +6597,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       const parked = records.get("session")!;
       for (let index = 1; index < 2_048; index++) records.set(`parked-${index}`, { ...parked, progress: new Map() });
       f.provider.sessions.push(fixtureSession("fresh"));
-      f.provider.eventQueue.push({ normalized: { conversationId: "fresh", eventType: "session.tool.success", updates: [], outcome: "handled" } });
-      await flushRecoveryIo();
+      await f.event("session.tool.success", [], "fresh");
       expect(records.size).toBe(2_048);
       expect(records.has("session")).toBe(false);
       expect(records.has("fresh")).toBe(true);

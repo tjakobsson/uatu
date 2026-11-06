@@ -56,6 +56,7 @@ export interface WorkspaceChatService {
   subscribeActivity(options?: { signal?: AbortSignal }): Promise<ConversationInventorySubscription>;
   createConversation(): Promise<ConversationSnapshot>;
   history(id: string, options?: { cursor?: string; limit?: number }): Promise<ConversationSnapshot>;
+  workerEvidence?(id: string): Promise<import("./worker-dismissal-evidence").WorkerEvidenceSnapshot>;
   subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }): Promise<{
     snapshot: ConversationSnapshot;
     events: ReplaySubscription;
@@ -301,6 +302,7 @@ export class LazyChatService implements WorkspaceChatService {
   async subscribeActivity(options: { signal?: AbortSignal } = {}) { return this.activityChanges.subscribe(options.signal); }
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
+  async workerEvidence(id: string) { return (await this.requireAdapter()).workerEvidence(id); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
   async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode, variant, attachments, delivery, context, operationReceipt); }
   async removeQueued(id: string, messageId: string, requestId: string) { return (await this.requireAdapter()).removeQueued(id, messageId, requestId); }

@@ -3396,7 +3396,7 @@ describe("hub end to end", () => {
   });
 
   test("personal worker dismissals black-box contracts include successful reads and durable writes", async () => {
-    // Exercise the actual Hub with a controlled child snapshot, without
+    // Exercise the actual Hub with controlled compact child evidence, without
     // starting a real agent runtime or depending on machine credentials.
     const root = path.join(tempRoot, "worker-dismissal-contract");
     await mkdir(root);
@@ -3410,11 +3410,10 @@ describe("hub end to end", () => {
     const child = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
       if (request.method !== "GET") { nativeMutations++; return new Response(null, { status: 405 }); }
       const url = new URL(request.url);
-      if (url.pathname !== "/s/contract-workers/api/chat/conversations/opencode%3Acontract" || url.searchParams.get("t") !== "contract-token") return new Response(null, { status: 404 });
+      if (url.pathname !== "/s/contract-workers/api/chat/conversations/opencode%3Acontract/worker-evidence" || url.searchParams.get("t") !== "contract-token") return new Response(null, { status: 404 });
       return Response.json({
-        conversation: { id: "opencode:contract", title: "Contract fixture", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } },
-        configuration: {}, generation: "contract", cursor: "contract-cursor",
-        items: [{ id: "task:contract", type: "background_task", taskId: "contract", description: "Contract worker", createdAt: 1, status: "running", activity: { kind: "unavailable", executionId: "contract-execution" } }],
+        version: 1, conversationId: "opencode:contract", complete: true,
+        entries: [{ executionId: "contract-execution", signature: "contract-terminal", active: false, dismissible: true }],
       });
     } });
     const manager = new SessionManager(ownRegistry, { local: { start: async () => ({

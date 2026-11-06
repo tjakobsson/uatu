@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
+import { assertCompatibilityPolicy, compareContracts } from "../scripts/api-contract/compatibility";
 
 import { createAjv, openApiOperations, readJson, readYaml, schemaForAjv, validateApi } from "../scripts/validate-api";
 import { HUB_COOKIE_NAME, hubCookieName } from "../src/hub/auth";
@@ -45,7 +46,7 @@ describe("API contract structure", () => {
   test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([35, 13, 3]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([35, 14, 3]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -290,6 +291,27 @@ describe("API contract structure", () => {
     for (const id of ["workspace-state-stream-refused", "workspace-inventory-stream-refused", "workspace-conversation-stream-refused", "workspace-activity-stream-refused"]) {
       expect(excluded.exclusions.find(item => item.id === id)?.reason).toContain("/api/hub/live");
     }
+  });
+
+  test("worker dismissal request union has a Hub revision and migration beyond singleton revision 13", async () => {
+    const [openapi, metadata, changelog] = await Promise.all([
+      readYaml<Record<string, unknown>>("api/openapi.yaml"),
+      readJson<Record<string, unknown>>("api/contract.json"),
+      Bun.file(new URL("CHANGELOG.md", new URL("./", import.meta.url))).text(),
+    ]);
+    // Pin the previous published request shape, not a checkout-relative base:
+    // singleton requests still work, but object -> union changes SDK shape
+    // and is breaking under the conservative contract comparison policy.
+    const base = structuredClone(openapi);
+    const paths = base.paths as Record<string, { post: { requestBody: { content: Record<string, { schema: unknown }> } } }>;
+    paths["/s/{workspaceId}/api/personal-worker-dismissals"]!.post.requestBody.content["application/json"]!.schema = {
+      $ref: "#/components/schemas/WorkerDismissalMutation",
+    };
+    const result = compareContracts(base, openapi);
+    expect(result.changedDomains).toEqual(["hub"]);
+    expect(result.breaking.hub).toContain("POST /s/{workspaceId}/api/personal-worker-dismissals: request schema for application/json: oneOf branch count changed");
+    expect(result.breaking.workspace).toEqual([]);
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 13, workspaceApiRevision: 35 }, metadata, changelog)).not.toThrow();
   });
 
   test("metadata revisions agree with OpenAPI and changelog", async () => {

@@ -243,6 +243,49 @@ describe("refcounted upstreams (2.1)", () => {
 });
 
 describe("cursors, replay, and topic-scoped resync (2.2)", () => {
+  for (const catchUp of [false, true]) {
+    test(`disposing during a ${catchUp ? "private catch-up" : "shared live"} burst stops the remainder after its yield`, async () => {
+      const child = fakeSource();
+      const stopped = Promise.withResolvers<void>();
+      const observed: unknown[] = [];
+      let armed = false;
+      let scheduled = false;
+      let stoppedAt = 0;
+      const live = broker(child.source, { observeConversation(_workspace, _conversation, data) {
+        observed.push(data);
+        if (!armed || scheduled) return;
+        scheduled = true;
+        queueMicrotask(() => {
+          stoppedAt = observed.length;
+          live.dispose();
+          stopped.resolve();
+        });
+      } });
+      const first = sink();
+      live.subscribe(first, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", catchUp ? 299 : 0) });
+      await waitFor(() => child.opened.length === 1, "shared upstream");
+      child.opened[0]!.push(": open\n\n");
+      if (catchUp) {
+        child.opened[0]!.push(chatFrame("g1", 300));
+        await waitFor(() => first.envelopes.some(e => e.cursor === cursorOf("g1", 300)), "shared head");
+        live.subscribe(sink(), "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 0) });
+        await waitFor(() => child.opened.length === 2, "private replay");
+      }
+      const baseline = observed.length;
+      armed = true;
+      // Enough small frames for several pacing batches, but bounded below
+      // the endpoint stress fixture's size. Disposal runs at the first yield.
+      child.opened[catchUp ? 1 : 0]!.push(Array.from({ length: 300 }, (_, index) =>
+        chatFrame("g1", index + 1, `,"message":"${"x".repeat(1024)}"`)).join(""));
+      await stopped.promise;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(observed.length).toBe(stoppedAt);
+      expect(observed.length - baseline).toBeGreaterThan(0);
+      expect(observed.length - baseline).toBeLessThan(300);
+      expect(live.upstreamCount()).toBe(0);
+    });
+  }
+
   test("trusted observation precedes live and catch-up delivery and never interrupts canonical chat", async () => {
     const observed: unknown[] = [];
     const child = fakeSource({ refuse: path => {

@@ -334,6 +334,65 @@ describe("LiveEndpoint (in-process)", () => {
     await stream.cancel();
   });
 
+  function conversationBurst(count: number): string {
+    return Array.from({ length: count }, (_, index) => {
+      const sequence = index + 1;
+      const event = { type: "item.upsert", generation: "g", conversationId: "long", sequence,
+        item: { id: `message:${sequence}`, type: "assistant_message", createdAt: sequence, text: "x".repeat(512), completedAt: sequence } };
+      return `id: ${cursorOf("g", sequence)}\nevent: chat\ndata: ${JSON.stringify(event)}\n\n`;
+    }).join("");
+  }
+
+  for (const chunkBytes of [Infinity, 16 * 1024]) {
+    test(`a reading client drains a long-history conversation burst in ${chunkBytes === Infinity ? "one chunk" : "16 KiB chunks"} without being mistaken for stalled`, async () => {
+      // Use the production queue bound, not this suite's small stall fixture.
+      endpoint = new LiveEndpoint({ broker, resolveWorkspace: id => id, keepaliveMs: 60_000 });
+      const subs = encodeURIComponent(JSON.stringify([{ topic: "conversation", key: "long", cursor: cursorOf("g", 0) }]));
+      const stream = await openStream(`ws=ws&subs=${subs}`);
+      try {
+        await stream.waitFor(() => child.opened.length === 1, "conversation upstream");
+        child.opened[0]!.push(": open\n\n");
+        await stream.waitFor(r => r.envelopes.some(e => e.event.kind === "ready"), "ready");
+        // A history normalization turn can publish thousands of recovered rows
+        // before the downstream reader gets another turn. Keep the synthetic
+        // payload bounded (~2 MiB), with the observed history's row count.
+        const count = 2713;
+        const burst = conversationBurst(count);
+        for (let offset = 0; offset < burst.length; offset += chunkBytes) {
+          child.opened[0]!.push(burst.slice(offset, offset + chunkBytes));
+        }
+        await stream.waitFor(r => r.ended || r.envelopes.at(-1)?.cursor === cursorOf("g", count), "burst delivered or stream ended");
+        expect(stream.ended).toBe(false);
+        expect(stream.envelopes.filter(e => e.event.kind === "data")).toHaveLength(count);
+        expect(stream.envelopes.filter(e => e.event.kind === "data").map(e => e.cursor))
+          .toEqual(Array.from({ length: count }, (_, index) => cursorOf("g", index + 1)));
+      } finally { await stream.cancel(); }
+    });
+  }
+
+  test("a reading client drains a large private catch-up chunk and merges into the shared upstream", async () => {
+    endpoint = new LiveEndpoint({ broker, resolveWorkspace: id => id, keepaliveMs: 60_000 });
+    const count = 2713;
+    const subs = (sequence: number) => encodeURIComponent(JSON.stringify([{ topic: "conversation", key: "long", cursor: cursorOf("g", sequence) }]));
+    const current = await openStream(`ws=ws&subs=${subs(count - 1)}`);
+    let behind: LiveReading | undefined;
+    try {
+      await current.waitFor(() => child.opened.length === 1, "shared upstream");
+      child.opened[0]!.push(`: open\n\nid: ${cursorOf("g", count)}\nevent: chat\ndata: {"sequence":${count}}\n\n`);
+      await current.waitFor(r => r.envelopes.some(e => e.cursor === cursorOf("g", count)), "shared head");
+      behind = await openStream(`ws=ws&subs=${subs(0)}`);
+      await behind.waitFor(() => child.opened.length === 2, "private catch-up opened");
+      child.opened[1]!.push(conversationBurst(count));
+      await behind.waitFor(r => r.ended || r.envelopes.some(e => e.event.kind === "ready"), "catch-up delivered or stream ended");
+      expect(behind.ended).toBe(false);
+      expect(behind.envelopes.filter(e => e.event.kind === "data").map(e => e.cursor))
+        .toEqual(Array.from({ length: count }, (_, index) => cursorOf("g", index + 1)));
+      expect(current.envelopes.filter(e => e.event.kind === "data")).toHaveLength(1);
+      child.opened[0]!.push(`id: ${cursorOf("g", count + 1)}\nevent: chat\ndata: {"sequence":${count + 1}}\n\n`);
+      await behind.waitFor(r => r.envelopes.at(-1)?.cursor === cursorOf("g", count + 1), "merged live event");
+    } finally { await behind?.cancel(); await current.cancel(); }
+  });
+
   // A stream whose client has read the opening frames and then stopped
   // pulling: what the endpoint queues for it is what these tests probe.
   async function stalledStream(query: string) {

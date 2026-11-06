@@ -21,6 +21,7 @@ function buildFontTestRoutes(
   getSession: () => never = stubSession,
   manifestScope?: "base-path" | "origin",
   notificationFeed?: NotificationFeed,
+  workerEvidence?: (id: string) => Promise<import("../chat/worker-dismissal-evidence").WorkerEvidenceSnapshot>,
 ) {
   const repoRoot = path.resolve(import.meta.dir, "..", "..");
   return buildRoutes({
@@ -41,7 +42,7 @@ function buildFontTestRoutes(
       },
     },
     getSession,
-    chatService: { notificationFeed } as never,
+    chatService: { notificationFeed, workerEvidence } as never,
     getWorkspaceCredential: () => "test-credential",
     debug: false,
     getMetricsSnapshot: () => ({}),
@@ -49,6 +50,20 @@ function buildFontTestRoutes(
 }
 
 describe("buildRoutes — bundled font asset routes", () => {
+  test("compact worker evidence uses existing authentication and base path without reading display history", async () => {
+    const calls: string[] = [];
+    const routes = buildFontTestRoutes("/s/test/", stubSession, "origin", undefined, async id => {
+      calls.push(id); return { version: 1, conversationId: id, complete: true, entries: [] };
+    });
+    const handler = (routes["/s/test/api/chat/conversations/:conversationId/worker-evidence"] as { GET: (request: Request) => Promise<Response> }).GET;
+    const request = (query = "") => Object.assign(new Request(`http://localhost/s/test/api/chat/conversations/opencode%3Aparent/worker-evidence${query}`), { params: { conversationId: "opencode:parent" } });
+    expect((await handler(request())).status).toBe(401);
+    expect((await handler(request("?t=test-credential&limit=100"))).status).toBe(400);
+    const response = await handler(request("?t=test-credential"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ version: 1, conversationId: "opencode:parent", complete: true, entries: [] });
+    expect(calls).toEqual(["opencode:parent"]);
+  });
   test("the internal notification stream authenticates, prefixes, and opens before an event", async () => {
     const feed = new NotificationFeed();
     const routes = buildFontTestRoutes("/s/test/", stubSession, "origin", feed);

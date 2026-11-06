@@ -17,6 +17,7 @@ import { AttachmentStoreError } from "../chat/attachment-store";
 import { OperationOutcomeUnknownError, BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
 import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
+import { WorkerEvidenceError } from "../chat/worker-dismissal-evidence";
 import { HistoryChangedError } from "../chat/history-reuse";
 import { resolveStartupTimeoutMs } from "../chat/opencode/opencode-service";
 import { ChatUnavailableError } from "../chat/service";
@@ -854,6 +855,17 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         }
       },
     },
+    [p("/api/chat/conversations/:conversationId/worker-evidence")]: {
+      GET: async (request: RouteRequest) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const id = routeIdentity(request, "conversationId");
+        if (id instanceof Response) return id;
+        if ([...new URL(request.url).searchParams.keys()].some(key => key !== "t")) return chatError(400, "unexpected query parameter");
+        if (!deps.chatService.workerEvidence) return chatError(503, "authoritative worker evidence unavailable");
+        return run(() => deps.chatService.workerEvidence!(id));
+      },
+    },
     [p("/api/chat/conversations/:conversationId")]: {
       GET: async (request: RouteRequest) => {
         const rejected = authenticated(request);
@@ -1430,6 +1442,7 @@ function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | 
 }
 
 function normalizedChatError(error: unknown): Response {
+  if (error instanceof WorkerEvidenceError) return chatError(error.code === "capacity" ? 507 : 503, error.message);
   if (error instanceof SideGenerationUnsupportedError) return chatError(409, error.message);
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
   if (error instanceof HistoryChangedError) return chatError(409, error.message);
