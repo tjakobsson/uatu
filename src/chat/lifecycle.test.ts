@@ -810,7 +810,7 @@ describe("chat lifecycle recovery", () => {
     window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("online"));
-    await Bun.sleep(5);
+    await waitUntil(() => sources.length === 2);
     expect(sources).toHaveLength(2);
     expect(sources[0]!.closed).toBe(true);
     expect(sources[1]!.closed).toBe(false);
