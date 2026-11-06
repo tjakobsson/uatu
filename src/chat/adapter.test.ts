@@ -6101,7 +6101,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(provider.interrupts).toEqual([]);
     await adapter.dispose(); await secondPump;
   });
-  async function exhaustedRecoveryFixture(terminal = false) {
+  async function exhaustedRecoveryFixture(terminal = false, beforeRead?: (read: number) => Promise<void>) {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     const unknown = { id: "task:unknown", type: "background_task" as const, taskId: "unknown", description: "Unknown", createdAt: 1, status: "running" as const, stateUncertain: true };
@@ -6109,17 +6109,29 @@ describe("prompt, abort, permission, and question mutations", () => {
       status: terminal ? "completed" as const : "running" as const, ...(terminal ? { terminalReportedAt: 2 } : {}) };
     let reads = 0, release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    Object.assign(provider, { reconcileBackgroundTasks: async () => { if (++reads === 1) await gate; return [unknown, known]; } });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { ++reads; await beforeRead?.(reads); if (reads === 1) await gate; return [unknown, known]; } });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
     adapter.projectionForTests("session").apply({ kind: "upsert", item: known });
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ type: "server.connected", data: {} });
-    await waitUntil(() => reads === 1);
-    jest.useFakeTimers();
-    release(); await flushRecoveryIo();
-    jest.advanceTimersByTime(1_000); await flushRecoveryIo();
-    jest.advanceTimersByTime(2_000); await flushRecoveryIo();
-    expect(reads).toBe(3);
+    const recoveryFinished = async () => {
+      const pending = (adapter as unknown as { backgroundPending: Set<Promise<void>> }).backgroundPending;
+      await Promise.all([...pending]);
+    };
+    try {
+      await waitUntil(() => reads === 1);
+      jest.useFakeTimers();
+      // A started read is not a completed read: only its completion installs
+      // the next retry timer. Do not spend that deadline while IO is pending.
+      release(); await recoveryFinished();
+      jest.advanceTimersByTime(1_000); await recoveryFinished();
+      jest.advanceTimersByTime(2_000); await recoveryFinished();
+      expect(reads).toBe(3);
+    } catch (error) {
+      release();
+      try { await adapter.dispose(); await pump; } finally { jest.useRealTimers(); }
+      throw error;
+    }
     return { adapter, provider, pump, unknown, known, reads: () => reads,
       event: async (eventType = "session.tool.success", updates: NormalizedProviderEvent["updates"] = []) => {
         provider.eventQueue.push({ normalized: { conversationId: "session", eventType, updates, outcome: "handled" } });
@@ -6128,6 +6140,39 @@ describe("prompt, abort, permission, and question mutations", () => {
       },
     };
   }
+
+  test("exhausted recovery fixture waits for a retry to finish before advancing its next deadline", async () => {
+    let release!: () => void;
+    let retryStarted = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let settled = false;
+    const setup = exhaustedRecoveryFixture(false, async read => {
+      if (read === 2) { retryStarted = true; await gate; }
+    }).then(value => { settled = true; return value; }, error => { settled = true; throw error; });
+    // Attach a rejection handler while the controlled retry remains blocked.
+    void setup.catch(() => undefined);
+    try {
+      for (let turn = 0; turn < 1_000 && !retryStarted; turn++) await realpath(process.cwd());
+      expect(retryStarted).toBe(true);
+      await flushRecoveryIo();
+      expect(settled).toBe(false);
+    } finally {
+      release();
+      const f = await setup;
+      try { expect(f.reads()).toBe(3); }
+      finally { await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
+    }
+  });
+
+  test("exhausted recovery fixture restores real timers when setup fails", async () => {
+    const failure = new Error("Controlled fixture setup failure");
+    const advance = spyOn(jest, "advanceTimersByTime").mockImplementation(() => { throw failure; });
+    try {
+      await expect(exhaustedRecoveryFixture()).rejects.toBe(failure);
+      // This native timer can finish only if setup restored the real clock.
+      await Bun.sleep(1);
+    } finally { advance.mockRestore(); jest.useRealTimers(); }
+  });
 
   test("exhausted recovery ignores chatter until thirty seconds after exhaustion and never polls a quiet parked cycle", async () => {
     const f = await exhaustedRecoveryFixture();
