@@ -6133,11 +6133,45 @@ describe("prompt, abort, permission, and question mutations", () => {
     Object.assign(provider, { reconcileBackgroundTasks: async () => { ++reads; await beforeRead?.(reads); if (reads === 1) await gate; return [unknown, known]; } });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
     adapter.projectionForTests("session").apply({ kind: "upsert", item: known });
+    // Event-triggered classification is detached from the pump and precedes
+    // backgroundPending admission. Observe both boundaries, not IO turn counts.
+    const phases = adapter as unknown as {
+      requireSession(id: string): Promise<ProviderSession>;
+      isInWorkspace(session: Pick<ProviderSession, "id" | "directory">): Promise<boolean>;
+      backgroundPending: Set<Promise<void>>;
+      eventCoalescer: { settled(): Promise<void> } | null;
+    };
+    const classifications = new Set<Promise<unknown>>();
+    const trackClassification = <T>(work: Promise<T>): Promise<T> => {
+      const tracked = work.finally(() => { classifications.delete(tracked); });
+      classifications.add(tracked);
+      return tracked;
+    };
+    const requireSession = phases.requireSession.bind(adapter);
+    const isInWorkspace = phases.isInWorkspace.bind(adapter);
+    phases.requireSession = id => trackClassification(requireSession(id));
+    phases.isInWorkspace = session => trackClassification(isInWorkspace(session));
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ type: "server.connected", data: {} });
     const recoveryFinished = async () => {
-      const pending = (adapter as unknown as { backgroundPending: Set<Promise<void>> }).backgroundPending;
-      await Promise.all([...pending]);
+      while (phases.backgroundPending.size) await Promise.all([...phases.backgroundPending]);
+    };
+    const eventsApplied = async () => {
+      for (let turn = 0; turn < 1_000 && !provider.eventQueue.waiting; turn++) await realpath(process.cwd());
+      expect(provider.eventQueue.waiting).toBe(true);
+      while (classifications.size) await Promise.allSettled([...classifications]);
+      jest.advanceTimersByTime(0);
+      await phases.eventCoalescer?.settled();
+      while (classifications.size) await Promise.allSettled([...classifications]);
+    };
+    const emit = async (event: ProviderEvent, finishRecovery = true) => {
+      provider.eventQueue.push(event);
+      await eventsApplied();
+      if (finishRecovery) await recoveryFinished();
+    };
+    const advance = async (ms: number) => {
+      jest.advanceTimersByTime(ms);
+      await recoveryFinished();
     };
     try {
       await waitUntil(() => reads === 1);
@@ -6153,14 +6187,45 @@ describe("prompt, abort, permission, and question mutations", () => {
       try { await adapter.dispose(); await pump; } finally { jest.useRealTimers(); }
       throw error;
     }
-    return { adapter, provider, pump, unknown, known, reads: () => reads,
-      event: async (eventType = "session.tool.success", updates: NormalizedProviderEvent["updates"] = []) => {
-        provider.eventQueue.push({ normalized: { conversationId: "session", eventType, updates, outcome: "handled" } });
-        await flushRecoveryIo();
-        jest.advanceTimersByTime(0); await flushRecoveryIo();
+    return { adapter, provider, pump, unknown, known, recoveryFinished, emit, advance, reads: () => reads,
+      event: async (eventType = "session.tool.success", updates: NormalizedProviderEvent["updates"] = [], conversationId = "session", finishRecovery = true) => {
+        await emit({ normalized: { conversationId, eventType, updates, outcome: "handled" } }, finishRecovery);
       },
     };
   }
+
+  for (const phase of ["confinement", "recovery"] as const) test(`exhausted recovery event acknowledgement waits for ${phase} before returning a fresh read`, async () => {
+    let release!: () => void;
+    let started = false, acknowledged = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const f = await exhaustedRecoveryFixture(false, async read => {
+      if (phase === "recovery" && read === 4) { started = true; await gate; }
+    });
+    f.provider.sessions.push(fixtureSession("fresh"));
+    const getSession = f.provider.getSession.bind(f.provider);
+    f.provider.getSession = async id => {
+      if (phase === "confinement" && id === "fresh") { started = true; await gate; }
+      return getSession(id);
+    };
+    const event = f.event("session.tool.success", [], "fresh").then(() => { acknowledged = true; });
+    try {
+      for (let turn = 0; turn < 1_000 && !started; turn++) await realpath(process.cwd());
+      expect(started).toBe(true);
+      // Keep the phase blocked beyond the old fixed-turn acknowledgement.
+      await flushRecoveryIo(); await flushRecoveryIo(); await flushRecoveryIo();
+      expect(f.reads()).toBe(phase === "confinement" ? 3 : 4);
+      expect(acknowledged).toBe(false);
+      release(); await event;
+      expect(f.reads()).toBe(4);
+    } finally {
+      release();
+      try { await event; }
+      finally {
+        try { await f.adapter.dispose(); await f.pump; }
+        finally { jest.useRealTimers(); }
+      }
+    }
+  });
 
   test("exhausted recovery fixture waits for a retry to finish before advancing its next deadline", async () => {
     let release!: () => void;
@@ -6205,9 +6270,9 @@ describe("prompt, abort, permission, and question mutations", () => {
       await f.event(); expect(f.reads()).toBe(3);
       jest.advanceTimersByTime(29_999); now.mockReturnValue(exhaustedAt + 29_999); await f.event("session.message.content.updated"); expect(f.reads()).toBe(3);
       jest.advanceTimersByTime(1); now.mockReturnValue(exhaustedAt + 30_000); await f.event(); expect(f.reads()).toBe(4);
-      jest.advanceTimersByTime(1_000); await flushRecoveryIo();
-      jest.advanceTimersByTime(2_000); await flushRecoveryIo(); expect(f.reads()).toBe(6);
-      jest.advanceTimersByTime(120_000); await flushRecoveryIo(); expect(f.reads()).toBe(6);
+      await f.advance(1_000);
+      await f.advance(2_000); expect(f.reads()).toBe(6);
+      await f.advance(120_000); expect(f.reads()).toBe(6);
       expect(f.adapter.projectionForTests("session").get(f.unknown.id)).toMatchObject({ status: "running", stateUncertain: true });
     } finally { now.mockRestore(); await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
   });
@@ -6217,7 +6282,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     try {
       if (evidence === "worker") await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, createdAt: 2 } }]);
       else if (evidence === "refresh") await f.adapter.history("session");
-      else { f.provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo(); }
+      else await f.emit({ type: "server.connected", data: {} });
       expect(f.reads()).toBe(4);
       expect(f.provider.prompts).toEqual([]); expect(f.provider.interrupts).toEqual([]);
     } finally { await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
@@ -6244,8 +6309,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const exhaustedAt = parked.exhaustedAt!;
     const now = spyOn(Date, "now").mockReturnValue(exhaustedAt + 1);
     const event = async (id: string, updates: NormalizedProviderEvent["updates"] = []) => {
-      f.provider.eventQueue.push({ normalized: { conversationId: id, eventType: "session.tool.success", updates, outcome: "handled" } });
-      await flushRecoveryIo(); jest.advanceTimersByTime(0); await flushRecoveryIo();
+      await f.event("session.tool.success", updates, id);
     };
     try {
       for (let index = 1; index < 2_048; index++) records.set(`parked-${index}`, { ...parked, progress: new Map() });
@@ -6302,7 +6366,7 @@ describe("prompt, abort, permission, and question mutations", () => {
         await f.event("session.inbox.enqueued", [{ kind: "remove", itemId: previous }]);
         expect(records.get("session")?.sourceProgress?.has("call:same-call")).toBe(true);
         const before = f.reads();
-        jest.advanceTimersByTime(2_000); await flushRecoveryIo();
+        await f.advance(2_000);
         if (f.reads() > before) expect(f.adapter.projectionForTests("session").get(recoveredId)).toMatchObject({ status: "running", stateUncertain: false });
       }
       expect(f.reads()).toBe(6);
@@ -6335,7 +6399,7 @@ describe("prompt, abort, permission, and question mutations", () => {
         const previous = recoveredId; recoveredId = `overflow-read-${index}`;
         await f.event("session.inbox.enqueued", [{ kind: "remove", itemId: previous }]);
         const before = f.reads();
-        jest.advanceTimersByTime(2_000); await flushRecoveryIo();
+        await f.advance(2_000);
         if (f.reads() > before) expect(f.adapter.projectionForTests("session").get(recoveredId)).toMatchObject({ status: "running", stateUncertain: false });
       }
       expect(f.reads()).toBe(verifiedStart ? 7 : 6);
@@ -6356,7 +6420,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await f.event(); expect(f.reads()).toBe(4);
       expect(records.has("session")).toBe(false);
       expect(f.adapter.projectionForTests("session").get(f.unknown.id)).toMatchObject({ status: "running", stateUncertain: false });
-      jest.advanceTimersByTime(120_000); await flushRecoveryIo(); expect(f.reads()).toBe(4);
+      await f.advance(120_000); expect(f.reads()).toBe(4);
     } finally { now.mockRestore(); await f.adapter.dispose(); await f.pump; jest.useRealTimers(); }
   });
 
@@ -6370,9 +6434,10 @@ describe("prompt, abort, permission, and question mutations", () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     provider.reconcileBackgroundTasks = async (...args) => { const tasks = await reconcile(...args); await gate; return [...tasks, { ...f.known, id: "independent", taskId: "independent", toolUseId: "independent-native-call" }]; };
     try {
-      await f.event(); expect(f.reads()).toBe(4);
-      await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, status: "completed", terminalReportedAt: 3 } }]);
-      release(); await flushRecoveryIo();
+      // Keep the recovery deliberately in flight while the terminal frame wins.
+      await f.event("session.tool.success", [], "session", false); expect(f.reads()).toBe(4);
+      await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, status: "completed", terminalReportedAt: 3 } }], "session", false);
+      release(); await f.recoveryFinished();
       expect(f.adapter.projectionForTests("session").get(f.known.id)).toMatchObject({ status: "completed", terminalReportedAt: 3 });
       expect(f.adapter.projectionForTests("session").get("independent")).toMatchObject({ status: "running", stateUncertain: false });
       expect(f.provider.prompts).toEqual([]); expect(f.provider.interrupts).toEqual([]);
@@ -6435,7 +6500,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       // These scalars summarize lost scheduling metadata only, never workers.
       state.backgroundRecoveryFloorUntil = Date.now() + 30_000;
       state.backgroundRecoverySourceStartedAt = 1;
-      if (cleanup === "reconnect") { f.provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo(); expect(f.reads()).toBe(4); }
+      if (cleanup === "reconnect") { await f.emit({ type: "server.connected", data: {} }); expect(f.reads()).toBe(4); }
       else await f.adapter.dispose();
       expect(state.backgroundRecoveryFloorUntil).toBe(0);
       expect(state.backgroundRecoverySourceStartedAt).toBe(-Infinity);
@@ -6450,8 +6515,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await f.event("session.inbox.enqueued", [{ kind: "remove", itemId: f.known.id }]);
       expect(records.get("session")?.sourceProgress?.has("call:same-call")).toBe(true);
       f.provider.sessions = [];
-      f.provider.eventQueue.push({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
-      await flushRecoveryIo();
+      await f.emit({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
       expect(records.has("session")).toBe(false);
       await f.event("session.inbox.enqueued", [{ kind: "upsert", item: { ...f.known, id: "stale-alias", taskId: "stale-alias" } }]);
       expect(records.has("session")).toBe(false);
@@ -6494,8 +6558,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect(records.get("session")).toMatchObject({ exhaustedAt: expect.any(Number) });
       expect(records.get("session")?.timer).toBeUndefined();
       if (cleanup === "deleted") {
-        f.provider.eventQueue.push({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
-        await flushRecoveryIo();
+        await f.emit({ normalized: { eventType: "session.deleted", updates: [], outcome: "handled", sessionLifecycle: { kind: "deleted", id: "session", directory: process.cwd(), title: "Session", createdAt: 1, updatedAt: 1 } } });
       } else if (cleanup === "evicted") for (let index = 0; index < 70; index++) f.adapter.projectionForTests(`evict-${index}`);
       else await f.adapter.dispose();
       expect(records.has("session")).toBe(false);
@@ -6534,8 +6597,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       const parked = records.get("session")!;
       for (let index = 1; index < 2_048; index++) records.set(`parked-${index}`, { ...parked, progress: new Map() });
       f.provider.sessions.push(fixtureSession("fresh"));
-      f.provider.eventQueue.push({ normalized: { conversationId: "fresh", eventType: "session.tool.success", updates: [], outcome: "handled" } });
-      await flushRecoveryIo();
+      await f.event("session.tool.success", [], "fresh");
       expect(records.size).toBe(2_048);
       expect(records.has("session")).toBe(false);
       expect(records.has("fresh")).toBe(true);
