@@ -13,6 +13,22 @@ afterEach(async () => {
 });
 
 describe("asset root helpers", () => {
+  test("narrow output includes share direct exposure policy, containment and runtime removal", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-static-output-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "uatu-static-output-outside-"));
+    tempDirectories.push(root, outside);
+    await mkdir(path.join(root, "build/renders/private"), { recursive: true });
+    await mkdir(path.join(root, "build/objects"));
+    await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"], exclude: ["build/renders/private/**"] } }));
+    for (const name of ["build/renders/public.txt", "build/renders/private/no.txt", "build/renders/.env", "build/objects/no.txt"]) await writeFile(path.join(root, name), "bytes");
+    await writeFile(path.join(outside, "outside.txt"), "outside");
+    await symlink(outside, path.join(root, "build/renders/link"));
+    const entries = [{ kind: "dir" as const, absolutePath: root }];
+    expect((await resolveStaticFileRequest("/build/renders/public.txt", entries)).status).toBe("found");
+    for (const name of ["build/renders/private/no.txt", "build/renders/.env", "build/objects/no.txt", "build/renders/link/outside.txt"]) expect((await resolveStaticFileRequest(`/${name}`, entries)).status).toBe("not-found");
+    await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { include: [] } }));
+    expect((await resolveStaticFileRequest("/build/renders/public.txt", entries)).status).toBe("not-found");
+  });
   test("getAssetRoots returns dir paths for dirs and parent dirs for files", () => {
     const roots = getAssetRoots([
       { kind: "dir", absolutePath: "/repo/docs" },
@@ -45,7 +61,7 @@ describe("asset root helpers", () => {
     expect(resolved).toEqual({ status: "not-found" });
   });
 
-  test("resolveStaticFileRequest rejects files hidden by ignore rules", async () => {
+  test("Git-ignore visibility does not deny static delivery, explicit Uatu exclusions do", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-ignore-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, ".gitignore"), "secret.txt\n");
@@ -57,14 +73,17 @@ describe("asset root helpers", () => {
       { respectGitignore: true },
     );
 
-    expect(resolved).toEqual({ status: "not-found" });
+    expect(resolved).toEqual({ status: "found", filePath: await realpath(path.join(tempDirectory, "secret.txt")) });
+    await writeFile(path.join(tempDirectory, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["secret.txt"] } }));
+    expect(await resolveStaticFileRequest("/secret.txt", [{ kind: "dir", absolutePath: tempDirectory }])).toEqual({ status: "not-found" });
   });
 
-  test("resolveStaticFileRequest applies ignore rules to single-file watch assets", async () => {
+  test("single-file static access retains launch scope and skips adjacent project configuration", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-file-ignore-"));
     tempDirectories.push(tempDirectory);
     const readmePath = path.join(tempDirectory, "README.md");
     await writeFile(readmePath, "# Readme\n");
+    await writeFile(path.join(tempDirectory, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["README.md"] } }));
     await writeFile(path.join(tempDirectory, ".gitignore"), "secret.txt\n");
     await writeFile(path.join(tempDirectory, "secret.txt"), "hidden\n");
 
@@ -75,6 +94,7 @@ describe("asset root helpers", () => {
     );
 
     expect(resolved).toEqual({ status: "not-found" });
+    expect((await resolveStaticFileRequest("/README.md", [{ kind: "file", absolutePath: readmePath, parentDir: tempDirectory }])).status).toBe("found");
   });
 
   test("resolveStaticFileRequest respects --no-gitignore", async () => {

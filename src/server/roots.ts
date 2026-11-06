@@ -10,72 +10,10 @@ import { classifyFile } from "../document/classify";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
 import { safeGit } from "../document/git-base-ref";
 import type { DocumentMeta, RootGroup } from "../shared/types";
+import { shouldDenyPath } from "../ignore/exposure";
+export { shouldDenyPath } from "../ignore/exposure";
 
 export const DEFAULT_RESPECT_GITIGNORE = true;
-
-// Directories and files to skip during the markdown scan. Unlike a blanket
-// "ignore anything starting with a dot" rule, this is an explicit denylist: we
-// DO want to surface markdown inside things like `.github/`, `.claude/`,
-// `.openspec/`, etc., and we only want to hide the well-known junk.
-const ignoredNames = new Set([
-  // Node / JS output
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  // Version control
-  ".git",
-  ".svn",
-  ".hg",
-  // OS metadata
-  ".DS_Store",
-  "Thumbs.db",
-  // Build / framework caches
-  ".cache",
-  ".parcel-cache",
-  ".turbo",
-  ".next",
-  ".nuxt",
-  ".vercel",
-  ".output",
-  ".nitro",
-  ".svelte-kit",
-  ".astro",
-  // Python
-  ".venv",
-  ".tox",
-  ".mypy_cache",
-  ".pytest_cache",
-  ".ruff_cache",
-  "__pycache__",
-  // JVM
-  ".gradle",
-  ".m2",
-  // Package managers
-  ".npm",
-  ".yarn",
-  ".pnpm-store",
-  // Infra
-  ".terraform",
-  ".serverless",
-]);
-const hiddenFileSuffixes = [".swp", ".tmp", ".temp", "~"];
-const secretFileNames = new Set([
-  ".env",
-  ".npmrc",
-  ".pypirc",
-  ".netrc",
-  ".ssh",
-  "credentials.json",
-  "credential.json",
-  "service-account.json",
-  "service_account.json",
-  "id_rsa",
-  "id_dsa",
-  "id_ecdsa",
-  "id_ed25519",
-]);
-const secretFileSuffixes = [".pem", ".key", ".p12", ".pfx"];
 
 export type WatchEntry =
   | { kind: "dir"; absolutePath: string }
@@ -238,7 +176,7 @@ async function walkAllFiles(
   let hiddenCount = 0;
 
   for (const entry of dirEntries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (shouldIgnoreEntry(entry.name)) {
+    if (shouldDenyPath(entry.name)) {
       continue;
     }
 
@@ -285,29 +223,4 @@ async function walkAllFiles(
   }
 
   return { docs, hiddenCount };
-}
-
-function shouldIgnoreEntry(name: string): boolean {
-  if (ignoredNames.has(name)) {
-    return true;
-  }
-
-  return hiddenFileSuffixes.some(suffix => name.endsWith(suffix)) || isSecretName(name);
-}
-
-export function shouldDenyPath(relativePath: string): boolean {
-  return relativePath.split("/").some(part => shouldIgnoreEntry(part));
-}
-
-function isSecretName(name: string): boolean {
-  const lower = name.toLowerCase();
-  return (
-    secretFileNames.has(lower) ||
-    lower.startsWith(".env.") ||
-    lower.endsWith("-credentials.json") ||
-    lower.endsWith("_credentials.json") ||
-    lower.includes("private-key") ||
-    lower.includes("private_key") ||
-    secretFileSuffixes.some(suffix => lower.endsWith(suffix))
-  );
 }

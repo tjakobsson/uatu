@@ -1,0 +1,13 @@
+{
+  "engine": "chromium",
+  "generatedOutputs": {
+    "a": "build/renders/render-a.wav",
+    "b": "build/renders/render-b.wav",
+    "video": "build/renders/render-video.mp4"
+  },
+  "videoSupport": "probably",
+  "mediaRequests": 6,
+  "liveStreams": 1,
+  "ignoredOutputs": 3,
+  "reloadPausedAtZero": true
+}

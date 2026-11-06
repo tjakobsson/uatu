@@ -24,6 +24,35 @@ async function writeUatuConfig(rootPath: string, payload: unknown): Promise<void
 }
 
 describe("loadIgnoreMatcher", () => {
+  test("output admission distinguishes traversal ancestors, subtrees and mandatory/positive denials", async () => {
+    const rootPath = await makeTempDir();
+    await writeUatuConfig(rootPath, { ignore: { include: ["packages/app/build/renders"], exclude: ["packages/app/build/renders/private/**", "!packages/app/build/renders/private/keep.md", "!.git/**"] } });
+    const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
+    expect(matcher.shouldIgnore("packages/app/build", true)).toBe(false);
+    expect(matcher.shouldIgnore("packages/app/build", false)).toBe(true);
+    expect(matcher.shouldIgnore("packages/app/build/renders", false)).toBe(true);
+    expect(matcher.shouldIgnore("packages/app/build/renders", true)).toBe(false);
+    expect(matcher.shouldIgnore("packages/app/build/objects", true)).toBe(true);
+    expect(matcher.shouldIgnore("packages/app/build/renders/out.wav")).toBe(false);
+    expect(matcher.shouldIgnore("packages/app/build/renders/private/keep.md")).toBe(true);
+    for (const denied of [".git/config", ".GIT/config", "NODE_MODULES/a.md", "node_modules/a.md", ".env.local", "private.key", "dist/no.md", "DIST/no.md"]) {
+      expect(matcher.shouldIgnore(`packages/app/build/renders/${denied}`)).toBe(true);
+    }
+    expect(matcher.toChokidarIgnored()(path.join(rootPath, "packages/app/build"))).toBe(false);
+  });
+
+  test("only explicit valid legacy configuration changes the initial visibility default", async () => {
+    const rootPath = await makeTempDir();
+    expect((await loadIgnoreMatcher({ rootPath, respectGitignore: true })).initialShowIgnored).toBe(true);
+    await writeUatuConfig(rootPath, { ignore: { respectGitignore: "invalid" } });
+    expect((await loadIgnoreMatcher({ rootPath, respectGitignore: true })).initialShowIgnored).toBe(true);
+    await writeUatuConfig(rootPath, { ignore: { respectGitignore: true } });
+    expect((await loadIgnoreMatcher({ rootPath, respectGitignore: true })).initialShowIgnored).toBe(false);
+    expect((await loadIgnoreMatcher({ rootPath, respectGitignore: false })).initialShowIgnored).toBe(true);
+    expect((await loadIgnoreMatcher({ rootPath, respectGitignore: true, isSingleFileRoot: true })).initialShowIgnored).toBe(true);
+    await writeUatuConfig(rootPath, { ignore: { respectGitignore: false } });
+    expect((await loadIgnoreMatcher({ rootPath, respectGitignore: true })).initialShowIgnored).toBe(true);
+  });
   test("built-in defaults always hide node_modules", async () => {
     const rootPath = await makeTempDir();
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });
@@ -40,11 +69,11 @@ describe("loadIgnoreMatcher", () => {
     expect(matcher.shouldIgnore("README.md")).toBe(false);
   });
 
-  test(".gitignore patterns hide files when respectGitignore is true", async () => {
+  test("Git-ignore is visibility metadata, never exposure policy", async () => {
     const rootPath = await makeTempDir();
     await writeFile(path.join(rootPath, ".gitignore"), "*.log\n");
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
-    expect(matcher.shouldIgnore("debug.log")).toBe(true);
+    expect(matcher.shouldIgnore("debug.log")).toBe(false);
     expect(matcher.shouldIgnore("README.md")).toBe(false);
   });
 
@@ -72,7 +101,9 @@ describe("loadIgnoreMatcher", () => {
     await writeUatuConfig(rootPath, { ignore: { exclude: ["!debug.log"] } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
     expect(matcher.shouldIgnore("debug.log")).toBe(false);
-    expect(matcher.shouldIgnore("error.log")).toBe(true);
+    expect(matcher.shouldIgnore("error.log")).toBe(false);
+    expect(matcher.isVisibilityException?.("debug.log")).toBe(true);
+    expect(matcher.isVisibilityException?.("error.log")).toBe(false);
   });
 
   test(".uatuignore is no longer honored", async () => {

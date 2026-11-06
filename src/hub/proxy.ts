@@ -225,6 +225,10 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
   }
 
   statusCategory = statusCategoryOf(upstream.status);
+  // Media must stay byte-for-byte even if a child supplies a compressible
+  // MIME type. Honor no-transform for other representations as well.
+  const noTransform = requestUrl.pathname === `${session.basePath}api/media`
+    || /(?:^|,)\s*no-transform\s*(?:,|$)/i.test(upstream.headers.get("cache-control") ?? "");
   // Bounded tap on the existing response body, not a tee/background reader:
   // observes history/initial snapshots without changing bytes or backpressure.
   // Oversized/invalid content is simply not trusted for retirement.
@@ -268,7 +272,7 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
       return Response.json({ error: "Steer outcome unconfirmed; refresh status without repeating it", code: "operation_outcome_unknown" }, { status: 409, headers: { "cache-control": "no-store" } });
     }
   }
-  if (upstream.status === 200 && upstream.headers.get("content-type")?.includes("text/html")) {
+  if (!noTransform && upstream.status === 200 && upstream.headers.get("content-type")?.includes("text/html")) {
     upstream = new HTMLRewriter().on("head", { element(head) {
       head.prepend('<meta name="uatu-hub" content="true">', { html: true });
     } }).transform(upstream);
@@ -285,7 +289,8 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
   // describes exactly the bytes we forward, so keep it — length-known
   // responses transit fronting proxies far better than open-ended chunked
   // streams. Only an (unexpected) encoded upstream body invalidates it.
-  const upstreamEncoded = upstream.headers.has("content-encoding");
+  const upstreamEncoded = upstream.headers.has("content-encoding")
+    && upstream.headers.get("content-encoding")?.toLowerCase() !== "identity";
   for (const [name, value] of upstream.headers) {
     const lower = name.toLowerCase();
     if (HOP_BY_HOP.has(lower)) continue;
@@ -302,6 +307,7 @@ export async function proxyHttp(request: Request, session: RunningSession, polic
   const contentLength = Number.parseInt(headers.get("content-length") ?? "", 10);
   const smallBody = Number.isFinite(contentLength) && contentLength <= 1400;
   if (
+    !noTransform &&
     upstream.status === 200 &&
     upstream.body !== null &&
     !smallBody &&
@@ -414,16 +420,10 @@ function cancellableBody(
         }
         controller.enqueue(result.value);
       } catch {
-        // The upstream failure is recorded through the diagnostic sink, which
-        // names only the transport class and status category. The browser
-        // gets a clean end-of-stream, never the error: EventSource treats an
-        // ended stream exactly like a dropped one (onerror, then reconnect),
-        // and the search client reads a stream that ends without `done` as
-        // cut off. Erroring the stream instead would make Bun print the raw
-        // fetch error to stderr — a source excerpt plus the child URL,
-        // brokered token included — which no sink can suppress.
+        // A truncated representation is a failed transfer, never clean EOF.
+        // Do not forward the fetch error: it can contain the credentialed URL.
         finish("failed");
-        controller.close();
+        controller.error(new Error("session response interrupted"));
       }
     },
     cancel(reason) {

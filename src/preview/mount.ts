@@ -38,6 +38,9 @@ import { observePreviewSvgImages, preparePreviewHtml } from "./svg-images";
 import { canEmbedImages, createEmbeddedImagesLearner, recordEmbeddedImages, type EmbeddedImagesLookup } from "./embedded-images";
 import { fetchWithinBudget } from "../shell/bounded-fetch";
 import { isViewableImageName } from "../shared/viewable-image";
+import { mediaKind } from "../shared/media";
+import { renderMediaPreview, releaseMediaPreview } from "../media/preview";
+import { documentIndex } from "../shell/document-state";
 import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
 import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
@@ -198,6 +201,7 @@ export async function applyDocumentPayload(
     );
   }
   if (!isCurrent()) return;
+  releaseMediaPreview();
   // Common header / title updates are payload-driven and identical across
   // single and split layouts.
   setPreviewMode({ kind: "document" });
@@ -504,6 +508,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // Skipping the /api/document fetch also avoids the misleading 4xx error
   // path that used to surface as "The selected file no longer exists."
   const doc = findDocumentById(documentId);
+  releaseMediaPreview();
   if (!doc) {
     documentLoadRetry.settle();
     renderUnavailableDocument(documentId);
@@ -513,7 +518,9 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   if (doc.kind === "binary") {
     documentLoadRetry.settle();
     syncFileFactsStrip({ kind: "hidden" });
-    if (isViewableImageName(doc.name)) {
+    if (mediaKind(doc.name)) {
+      renderMediaPreview(doc, documentIndex.epoch);
+    } else if (isViewableImageName(doc.name)) {
       renderImagePreview(doc);
     } else {
       renderBinaryUnavailable(doc);

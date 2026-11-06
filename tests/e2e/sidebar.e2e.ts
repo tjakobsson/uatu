@@ -89,24 +89,24 @@ test("sidebar panes can be hidden, restored, resized, and survive whole-sidebar 
 });
 
 test("Files-pane header title does not visually overlap the file count", async ({ page }) => {
-  // Wait until the document-count text reflects real workspace contents so
-  // the assertion exercises a populated header (the "65 files · 5 binary"
-  // shape from the bug report) rather than the empty-tree shape.
+  // Exercise a populated header rather than the empty-tree shape.
   const documentCount = page.locator("#document-count");
-  await expect(documentCount).not.toHaveText(/^0 files$/);
+  await expect(documentCount).not.toHaveText("0");
 
   const filesPane = page.locator('[data-pane-id="files"]');
   const title = filesPane.locator(".pane-header h2");
   const count = filesPane.locator("#document-count");
 
-  // At the default sidebar width, the title's right edge must clear the
-  // count's left edge with at least a 4px gap (the CSS gap is 0.5rem ≈ 8px;
-  // 4px gives subpixel tolerance without admitting overlap).
+  // A narrow header may wrap metadata below its title. Either layout must
+  // keep their rectangles disjoint, with a small subpixel tolerance.
+  const separated = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
+    a.x + a.width <= b.x + 1 || b.x + b.width <= a.x + 1
+    || a.y + a.height <= b.y + 1 || b.y + b.height <= a.y + 1;
   const titleRectDefault = await title.boundingBox();
   const countRectDefault = await count.boundingBox();
   expect(titleRectDefault).not.toBeNull();
   expect(countRectDefault).not.toBeNull();
-  expect(titleRectDefault!.x + titleRectDefault!.width + 4).toBeLessThanOrEqual(countRectDefault!.x);
+  expect(separated(titleRectDefault!, countRectDefault!)).toBe(true);
 
   // At the minimum supported sidebar width (320px) the title may have
   // ellipsised — but the rects MUST NOT overlap.
@@ -121,7 +121,7 @@ test("Files-pane header title does not visually overlap the file count", async (
   const countRectMin = await count.boundingBox();
   expect(titleRectMin).not.toBeNull();
   expect(countRectMin).not.toBeNull();
-  expect(titleRectMin!.x + titleRectMin!.width + 4).toBeLessThanOrEqual(countRectMin!.x);
+  expect(separated(titleRectMin!, countRectMin!)).toBe(true);
 });
 
 test("collapsed rail exposes a Follow toggle driving the same state as the chip", async ({ page }) => {

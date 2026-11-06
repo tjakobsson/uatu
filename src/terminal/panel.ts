@@ -5,6 +5,7 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { appUrl } from "../shared/app-url";
+import { MEDIA_LAYOUT_EVENT, mediaDockHeight } from "../media/layout";
 import { mountTerminalPanel, persistTerminalToken, type TerminalPanelHandle } from "./client";
 import { initTerminalKeybar, selectionSheetKeyRoute } from "./keybar";
 import { createPanelLifecycle, type PanelLifecycle } from "./lifecycle";
@@ -513,7 +514,7 @@ export function setupTerminalPanel(
         const barInset = Math.max(0, tabBarBottomInset() - occluded);
         panel!.style.setProperty(
           "--terminal-visual-height",
-          `${Math.round(metrics.height - barInset)}px`,
+          `${Math.max(0, Math.round(metrics.height - barInset - mediaDockHeight()))}px`,
         );
         panel!.style.setProperty("--terminal-visual-top", `${Math.round(metrics.offsetTop)}px`);
       }
@@ -530,6 +531,14 @@ export function setupTerminalPanel(
       viewportSizer.detach();
     }
   }
+
+  const mediaLayoutChanged = () => {
+    if (viewportSizer.isAttached()) {
+      viewportSizer.detach();
+      viewportSizer.attach();
+    } else requestAnimationFrame(() => fitAll());
+  };
+  document.addEventListener(MEDIA_LAYOUT_EVENT, mediaLayoutChanged);
 
   function applyDisplayModeToDom() {
     const display = effectiveDisplayMode();
@@ -2101,6 +2110,7 @@ export function setupTerminalPanel(
   }
 
   return () => {
+    document.removeEventListener(MEDIA_LAYOUT_EVENT, mediaLayoutChanged);
     stopTabChanges();
     stopModeChanges();
     registerTerminalFind(null);

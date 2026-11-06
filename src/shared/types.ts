@@ -1,8 +1,11 @@
 import { isViewableImageName } from "./viewable-image";
+import { mediaKind } from "./media";
 
 export type DocumentKind = "markdown" | "asciidoc" | "text" | "binary";
 
 export type DocumentMeta = {
+  gitIgnoreStatus?: "ignored" | "not-ignored" | "unknown";
+  ignoreVisibilityException?: boolean;
   id: string;
   name: string;
   relativePath: string;
@@ -18,8 +21,8 @@ export type RootGroup = {
   label: string;
   path: string;
   docs: DocumentMeta[];
-  // Number of files filtered by the user-controlled ignore matcher
-  // (`.uatu.json ignore.exclude` and `.gitignore`). Excludes the built-in
+  // Number of files filtered by user-controlled exposure exclusions.
+  // Git-ignore classification is separate browsing metadata. Excludes the built-in
   // directory denylist — those are infrastructure, not user choices, and we
   // never recurse into them so we cannot count their contents anyway.
   hiddenCount: number;
@@ -170,6 +173,8 @@ export type RepositorySnapshot = {
 export type TerminalAvailability = "enabled" | "disabled";
 
 export type StatePayload = WorkspaceApiCompatibility & {
+  showIgnored?: boolean;
+  initialShowIgnored?: boolean;
   roots: RootGroup[];
   repositories: RepositorySnapshot[];
   // The server-session compare target the snapshots were computed for. The
@@ -433,13 +438,17 @@ export function findDocument(
   return flattenDocuments(roots).find(doc => doc.id === documentId);
 }
 
-// Follow mode (Rule C) follows what the preview can show: every non-binary
-// document, and binary files the preview renders inline as an image. Other
-// binaries (archives, PDFs, fonts, …) have only a "not viewable" notice and
-// never take the preview over. The default document and Rule B's catch-up
-// stay documents-only (see `defaultDocumentId`).
+// Follow mode (Rule C) nominates non-binary documents and previewable images.
+// Audio/video can be opened manually but never take the preview over as an
+// automatic Follow target. The default document and Rule B's catch-up stay
+// documents-only (see `defaultDocumentId`).
 export function isFollowableFile(doc: DocumentMeta): boolean {
   return doc.kind !== "binary" || isViewableImageName(doc.name);
+}
+
+// Manual/direct/history preview eligibility is broader than automatic Follow.
+export function isPreviewableFile(doc: DocumentMeta): boolean {
+  return isFollowableFile(doc) || doc.kind === "binary" && mediaKind(doc.name) !== null;
 }
 
 export function defaultDocumentId(roots: RootGroup[]): string | null {

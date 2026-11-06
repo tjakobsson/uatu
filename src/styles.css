@@ -8,6 +8,7 @@
    two lines (e.g. attribute-scoped copies); see the system-theme spec. */
 @import "github-markdown-css/github-markdown-dark.css" (prefers-color-scheme: dark);
 @import "highlight.js/styles/github-dark.css" (prefers-color-scheme: dark);
+@import "./media/dock.css";
 
 /* Bundled Hack Nerd Font Mono. `local()` first so a user-installed copy
    short-circuits the network round-trip where the browser allows it
@@ -2918,6 +2919,64 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
 .document-count {
   white-space: nowrap;
 }
+
+[data-pane-id="files"] > .pane-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+[data-pane-id="files"] > .pane-header h2 { grid-column: 1; grid-row: 1; }
+[data-pane-id="files"] > .pane-header .pane-actions { grid-column: 2; grid-row: 1; }
+[data-pane-id="files"] > .pane-header .pane-meta {
+  grid-column: 1 / -1;
+  justify-content: space-between;
+  margin-left: 0;
+  min-width: 0;
+}
+[data-pane-id="files"] > .pane-body { display: flex; flex-direction: column; overflow: hidden; }
+.files-query-control { display: flex; flex: 0 0 auto; gap: 0.25rem; padding: 0.4rem 0.6rem; }
+.files-query-control input {
+  width: 100%; min-width: 0; border: 1px solid var(--border-soft); border-radius: 0.3rem;
+  padding: 0.35rem 0.5rem; background: var(--surface-raised); color: var(--text-strong); font: inherit; font-size: 0.75rem;
+}
+.files-query-control button {
+  border: 0; background: transparent; color: var(--text-subtle); cursor: pointer; min-width: 28px;
+}
+.recent-files { overflow: auto; flex: 1 1 0; min-height: 0; position: relative; overflow-anchor: none; }
+.recent-files > div { position: relative; }
+.recent-file { position: absolute; left: 0; right: 0; height: 56px; }
+.recent-file-open {
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; height: 100%; border: 0;
+  padding: 0.35rem 0.75rem; text-align: left; background: transparent; color: var(--text-strong); cursor: pointer; font: inherit;
+}
+.recent-file-open:hover { background: var(--surface-muted); }
+.recent-file-open.is-selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.recent-file-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.recent-file-icon { flex: 0 0 18px; color: var(--accent); }
+.recent-file-icon.is-binary { color: var(--text-subtle); }
+.recent-file-labels { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.recent-file-name, .recent-file-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-file-name { font-size: 0.8rem; }
+.recent-file-path, .recent-file time { font-size: 0.68rem; color: var(--text-subtle); }
+.recent-file time { flex-shrink: 0; }
+.recent-file-open.is-ignored .recent-file-name { color: var(--text-subtle); }
+.recent-file-open.is-ignored .recent-file-icon { opacity: 0.55; }
+.recent-file-open.is-ignored.is-selected .recent-file-name { color: var(--text-strong); }
+.files-options { position: relative; }
+.files-options-trigger {
+  display: flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px;
+  border: 0; background: transparent; font: inherit; border-radius: 0.3rem; cursor: pointer; color: var(--text-subtle);
+}
+.files-options-trigger:hover, .files-options-trigger[aria-expanded="true"] { background: var(--surface-muted); color: var(--text-strong); }
+.files-options-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.files-options-content {
+  position: fixed; inset: auto; margin: 0; min-width: 205px; max-width: calc(100vw - 16px); padding: 0.65rem;
+  border: 1px solid var(--border-soft); border-radius: 0.4rem; background: var(--surface-raised);
+  box-shadow: 0 4px 12px light-dark(#0002, #0006); color: var(--text-strong); font-size: 0.78rem;
+}
+.files-options-content label { display: flex; align-items: center; gap: 0.5rem; min-height: 32px; cursor: pointer; }
+.files-options-content input { accent-color: var(--accent); }
+html[data-ui-mode="touch"] #files-pane-filter button { min-height: 36px; }
+.recent-files[hidden] { display: none; }
 
 /* Segmented chip: same visual primitive as the view-control, sized down to sit
    alongside the file count inside a pane header. */
@@ -8272,7 +8331,7 @@ html[data-ui-mode="touch"] .plan-meter {
 
 :root {
   --tab-bar-height: 56px;
-  --tab-bar-total: calc(var(--tab-bar-height) + env(safe-area-inset-bottom));
+  --tab-bar-total: calc(var(--tab-bar-height) + var(--device-safe-bottom, env(safe-area-inset-bottom)));
 }
 
 /* The bar renders in touch mode only. Fixed to the LAYOUT viewport's bottom
@@ -11096,5 +11155,32 @@ html[data-ui-mode="touch"] .chat-surface:has(#chat-work-dock > details[open]:not
     html[data-ui-mode="desktop"] .chat-worker-row:is([data-state]) .chat-worker-model { grid-column: 4; }
     html[data-ui-mode="desktop"] .chat-worker-row:is([data-state]) .chat-worker-tokens { grid-column: 5; }
     html[data-ui-mode="desktop"] .chat-worker-row:is([data-state]) .chat-worker-cost { grid-column: 6; }
+  }
+}
+
+/* The measured media dock reserves space; it never becomes a fifth surface. */
+html[data-media-player][data-ui-mode="touch"] .app-shell {
+  padding-bottom: var(--media-bottom-inset);
+}
+html[data-media-player][data-ui-mode="touch"][data-active-tab="files"] .sidebar {
+  top: var(--media-visual-top, 0px);
+  bottom: var(--media-bottom-inset);
+}
+html[data-media-player][data-ui-mode="touch"] .terminal-panel[data-display="fullscreen"] {
+  height: var(--terminal-visual-height, calc(100dvh - var(--tab-bar-total) - var(--media-dock-height))) !important;
+}
+html[data-media-player][data-ui-mode="desktop"][data-notification-chat] .chat-surface {
+  height: calc(var(--desktop-visual-height, 100dvh) - var(--media-dock-height));
+  padding-bottom: 0;
+}
+@media (min-width: 901px) {
+  html[data-media-player][data-ui-mode="desktop"] .app-shell {
+    height: calc(var(--desktop-visual-height, 100dvh) - var(--media-dock-height));
+    padding-bottom: 0;
+  }
+}
+@media (max-width: 900px) {
+  html[data-media-player][data-ui-mode="desktop"] .app-shell {
+    padding-bottom: var(--media-dock-height);
   }
 }

@@ -12,6 +12,7 @@ import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
 import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
 import { refreshOutline } from "./outline";
 import { cancelDiffPresentation } from "./diff";
+import { releaseMediaPreview } from "../media/preview";
 
 const previewTitleElementMaybe = document.querySelector<HTMLElement>("#preview-title");
 const previewPathElementMaybe = document.querySelector<HTMLElement>("#preview-path");
@@ -30,6 +31,7 @@ const previewPathElement: HTMLElement = previewPathElementMaybe;
 const previewElement: HTMLElement = previewElementMaybe;
 
 export function renderEmptyPreview(title: string, body: string) {
+  releaseMediaPreview();
   cancelDiffPresentation();
   closeMermaidViewer();
   previewTitleElement.textContent = title;

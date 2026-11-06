@@ -60,7 +60,7 @@ async function touchBeforeEach(
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await expect(page.locator("#document-count")).toHaveText("18 files");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "18 files");
   await waitForPreviewToSettle(page);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   // Normalize follow to off inside the Files tab (the chip lives in the

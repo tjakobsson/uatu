@@ -8,6 +8,7 @@ import { DOCUMENT_NOT_READABLE_ERROR } from "../shared/document-errors";
 import { scanRoots } from "./roots";
 import * as markdownRenderer from "../render/markdown";
 import { NotificationFeed, CHILD_NOTIFICATIONS_PATH } from "../chat/notification-feed";
+import { createWatchSession } from "./watch-session";
 
 // Minimal stub: the asset routes never touch the session, so a thrown
 // getter is fine — it makes accidental coupling fail loudly.
@@ -203,6 +204,36 @@ describe("buildRoutes — base-path prefixing", () => {
 });
 
 describe("buildRoutes — watch context", () => {
+  test("content search filters scoped and allRoots corpora by visibility while direct preview stays readable", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-search-visibility-"));
+    const visible = path.join(directory, "visible.md"), ignored = path.join(directory, "ignored.md");
+    const session = createWatchSession([{ kind: "dir", absolutePath: directory }], false);
+    try {
+      const git = Bun.spawn(["git", "init", "-q"], { cwd: directory, stdout: "ignore", stderr: "ignore" });
+      expect(await git.exited).toBe(0);
+      await writeFile(path.join(directory, ".gitignore"), "ignored.md\n");
+      await writeFile(path.join(directory, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.md"] } }));
+      for (const file of [visible, ignored, path.join(directory, "excluded.md")]) await writeFile(file, "needle");
+      await session.start();
+      const deadline = Date.now() + 4000;
+      while (session.findDocument(ignored)?.gitIgnoreStatus !== "ignored") { if (Date.now() > deadline) throw new Error("classification timeout"); await Bun.sleep(10); }
+      const routes = buildFontTestRoutes(undefined, (() => session) as never);
+      const search = routes["/api/search"] as { GET(request: Request): Response };
+      for (const allRoots of ["0", "1"]) {
+        const query = `q=needle&showIgnored=0&allRoots=${allRoots}`;
+        const response = search.GET(new Request(`http://127.0.0.1/api/search?${query}`));
+        const text = await response.text();
+        expect(text).toContain('"relativePath":"visible.md"');
+        expect(text).not.toContain('"relativePath":"ignored.md"');
+        expect(text).not.toContain('"relativePath":"excluded.md"');
+      }
+      const shown = await search.GET(new Request("http://127.0.0.1/api/search?q=needle&showIgnored=1&allRoots=1")).text();
+      expect(shown).toContain('"relativePath":"ignored.md"');
+      const document = routes["/api/document"] as { GET(request: Request): Promise<Response> };
+      expect((await document.GET(new Request(`http://127.0.0.1/api/document?id=${encodeURIComponent(ignored)}&showIgnored=0`))).status).toBe(200);
+      expect((await document.GET(new Request(`http://127.0.0.1/api/document?id=${encodeURIComponent(path.join(directory, "excluded.md"))}&showIgnored=1`))).status).toBe(404);
+    } finally { await session.stop(); await rm(directory, { recursive: true, force: true }); }
+  });
   test("index recovery and repository refresh retain credential and origin gates", async () => {
     let calls = 0;
     const routes = buildFontTestRoutes(undefined, (() => ({ recover: async () => { calls++; }, requestRepositoryRefresh: () => { calls++; } })) as never);

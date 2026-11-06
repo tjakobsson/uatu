@@ -9,9 +9,11 @@ import type { WatchEntry } from "./roots";
 import { NewestDocument } from "./newest-document";
 import { createWatchPolicy, rootRelative } from "./watch-policy";
 import { createRefreshScheduler, type RefreshSchedulerClock } from "./refresh-scheduler";
+import { fileFingerprint, type FileFingerprint } from "./file-fingerprint";
 
 type Job = { id: string; stats?: Stats; order: number; live: boolean; attempts: number };
 export type FileIndexBatch = {
+  followCandidates?: { id: string; order: number }[];
   upserts: RevisionedDocument[];
   removals: { rootId: string; id: string }[];
   changedId: string | null;
@@ -26,6 +28,7 @@ export type FileIndexOptions = {
   concurrency?: number;
   clock?: RefreshSchedulerClock;
   onWork?: (kind: "stat" | "classify" | "batch") => void;
+  onInvalidate?: (id: string, descendants: boolean) => void;
 };
 
 export class FileIndex {
@@ -49,8 +52,9 @@ export class FileIndex {
   private publicationWaiters: (() => void)[] = [];
   private pathWaiters = new Map<string, (() => void)[]>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private fingerprints = new Map<string, { revision: number; value: FileFingerprint }>();
 
-  constructor(readonly entry: WatchEntry, matcher: IgnoreMatcher, private options: FileIndexOptions) {
+  constructor(readonly entry: WatchEntry, readonly matcher: IgnoreMatcher, private options: FileIndexOptions) {
     this.policy = createWatchPolicy(entry, matcher);
     this.scheduler = createRefreshScheduler(() => this.flush(), options.clock);
   }
@@ -63,6 +67,10 @@ export class FileIndex {
     };
   }
   get hasPendingChanges(): boolean { return this.pending.size > 0; }
+  fingerprint(id: string, revision: number): FileFingerprint | null {
+    const stored = this.fingerprints.get(id);
+    return stored?.revision === revision ? stored.value : null;
+  }
 
   metadata(): DocumentRoot {
     return { id: this.entry.absolutePath, path: this.entry.kind === "dir" ? this.entry.absolutePath : this.entry.parentDir,
@@ -78,6 +86,10 @@ export class FileIndex {
     id = path.resolve(id);
     if (rootRelative(this.entry, id) === null) return;
     if (event === "addDir") return;
+    if (["add", "change", "unlink", "unlinkDir"].includes(event)) {
+      this.fingerprints.delete(id);
+      this.options.onInvalidate?.(id, event === "unlinkDir");
+    }
     const order = this.options.revision();
     if (event === "unlinkDir") {
       // The membership map includes in-flight files, so a late classifier
@@ -146,6 +158,7 @@ export class FileIndex {
     const removals: { rootId: string; id: string }[] = [];
     let changedId: string | null = null;
     let changedOrder = 0;
+    const followCandidates: { id: string; order: number }[] = [];
     const pending = this.pending;
     const entries = function* () {
       const preferred = preferredId ? pending.get(preferredId) : undefined;
@@ -161,9 +174,9 @@ export class FileIndex {
         // Only a file Follow can show is nominated: documents and previewable
         // images. Other binaries are still published but never move a
         // following client's selection.
-        if (value.live && isFollowableFile(value.doc) && value.order > changedOrder) {
-          changedId = id;
-          changedOrder = value.order;
+        if (value.live && isFollowableFile(value.doc)) {
+          followCandidates.push({ id, order: value.order });
+          if (value.order > changedOrder) { changedId = id; changedOrder = value.order; }
         }
       } else {
         this.documents.delete(id);
@@ -174,7 +187,7 @@ export class FileIndex {
     }
     if (!this.pending.size && this.initialComplete) this.initialPublished = true;
     this.options.onWork?.("batch");
-    this.options.publish({ upserts, removals, changedId, changedOrder, discovery: this.discovery });
+    this.options.publish({ upserts, removals, changedId, changedOrder, followCandidates: followCandidates.sort((a, b) => b.order - a.order), discovery: this.discovery });
     if (this.pending.size) this.drainTimer = setTimeout(() => this.flush(), 0);
     else for (const resolve of this.publicationWaiters.splice(0)) resolve();
   }
@@ -189,6 +202,7 @@ export class FileIndex {
     this.requested.clear();
     this.pending.clear();
     this.current.clear();
+    this.fingerprints.clear();
     for (const resolve of this.waiters.splice(0)) resolve();
     for (const resolve of this.publicationWaiters.splice(0)) resolve();
     for (const waiting of this.pathWaiters.values()) for (const resolve of waiting) resolve();
@@ -212,6 +226,8 @@ export class FileIndex {
   }
 
   private remove(id: string, order: number): void {
+    this.fingerprints.delete(id);
+    this.options.onInvalidate?.(id, false);
     this.current.delete(id);
     this.cancelRetry(id);
     this.jobs.delete(id);
@@ -260,7 +276,10 @@ export class FileIndex {
       const doc: RevisionedDocument = {
         id: job.id, rootId: this.entry.absolutePath, name, relativePath: rootRelative(this.entry, job.id)!,
         mtimeMs: stats.mtimeMs, kind, revision: job.order,
+        gitIgnoreStatus: this.documents.get(job.id)?.gitIgnoreStatus ?? "unknown",
+        ...(this.matcher.isVisibilityException?.(rootRelative(this.entry, job.id)!) ? { ignoreVisibilityException: true } : {}),
       };
+      this.fingerprints.set(job.id, { revision: job.order, value: fileFingerprint(stats) });
       this.pending.set(job.id, { doc, live: job.live, order: job.order });
       this.schedule();
     } catch (error) {

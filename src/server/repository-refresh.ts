@@ -47,6 +47,7 @@ export function createRepositoryRefresh(options: {
   clock?: RefreshSchedulerClock;
   observe?: typeof createGitObserver;
   onObserverEvent?: () => void;
+  onIgnorePolicyChange?: () => void;
   onFallback?: (error: unknown) => void;
   // Each polling-fallback tick, for tests.
   onPoll?: () => void;
@@ -62,6 +63,7 @@ export function createRepositoryRefresh(options: {
   let demanded = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let observer: GitObserver | null = null;
+  let ignoreBaseline: string | undefined;
   let fellBack = false;
   let demandEpoch = 0;
   let lastStart = -Infinity;
@@ -209,6 +211,13 @@ export function createRepositoryRefresh(options: {
       const next = (options.observe ?? createGitObserver)({
         entries: options.entries,
         onChange: () => { options.onObserverEvent?.(); request(); },
+        onIgnoreChange: options.onIgnorePolicyChange,
+        onIgnoreBaseline: fingerprint => {
+          // Rejoin reconciles policy edits made while metadata watching was
+          // released. Identical contexts do not reclassify the corpus.
+          if (fingerprint !== ignoreBaseline) options.onIgnorePolicyChange?.();
+          ignoreBaseline = fingerprint;
+        },
         onFailure: error => { if (observer === next) fallBack(error); },
       });
       observer = next;

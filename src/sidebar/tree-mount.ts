@@ -3,6 +3,7 @@
 
 import { applyUserAncestorCollapse, applyUserRowClick } from "../shell/follow";
 import { TreeView } from "./tree-view";
+import { auditionFromFiles } from "./media-browsing";
 
 const treeElementMaybe = document.querySelector<HTMLDivElement>("#tree");
 
@@ -27,6 +28,7 @@ export function ensureTreeView(): TreeView {
       // Directory taps don't reach this handler at all.
       onSelectDocument: documentId => applyUserRowClick(documentId),
       onDeselectDocument: applyUserAncestorCollapse,
+      onPlayDocument: auditionFromFiles,
     });
   }
   return treeView;

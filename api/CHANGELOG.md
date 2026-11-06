@@ -2,7 +2,7 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
-## Hub 13 / Workspace 34 - Unreleased (atomic worker dismissal groups)
+## Hub 14 / Workspace 35 - Unreleased (atomic worker dismissal groups)
 
 Compatibility: breaking (Hub schema); additive (accepted requests)
 
@@ -13,7 +13,24 @@ Compatibility: breaking (Hub schema); additive (accepted requests)
 
 ### Migration
 
-Hub clients generating request types from OpenAPI must regenerate against Hub revision 13 to use the request union. Existing singleton callers may keep their version-1 body and 4096-byte bound unchanged. To dismiss a group, send `{version:1, conversationId, operation:"dismiss", targets:[{executionId, expectedRevision}]}` to the same endpoint; do not mix singleton fields with `targets`. On a stale-revision `409`, refetch personal state and current evidence rather than overwriting or assuming any selected dismissal succeeded. Keep retirement as a singleton operation. Stored version-1 records require no migration. Workspace revision remains 34 and bundled-web revision remains 3.
+Hub clients generating request types from OpenAPI must regenerate against Hub revision 14 to use the request union. Existing singleton callers may keep their version-1 body and 4096-byte bound unchanged. To dismiss a group, send `{version:1, conversationId, operation:"dismiss", targets:[{executionId, expectedRevision}]}` to the same endpoint; do not mix singleton fields with `targets`. On a stale-revision `409`, refetch personal state and current evidence rather than overwriting or assuming any selected dismissal succeeded. Keep retirement as a singleton operation. Stored version-1 records require no migration. Workspace revision remains 35 and bundled-web revision remains 3.
+
+## Hub 13 / Workspace 35 - Unreleased (Recent and ignored Files state)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- Personal workspace state accepts `recent` alongside `all` and `changed` for `filesFilter`. Partial updates retain unrelated preferences; an open client's view remains local.
+- Personal state accepts boolean `showIgnored`. Permitted Gitignored files remain in the shared inventory, with independent `gitIgnoreStatus` and optional Uatu visibility exceptions. Snapshots and patches carry the client's ignored-visibility context; snapshots supply the legacy initial default independently of the saved preference.
+
+### Migration
+
+Hub revision 13 consumers must regenerate strict personal-state readers for the `filesFilter` value `recent` and the closed-object `showIgnored` field. Existing All/Changed records retain their meaning and an absent Files view defaults to All. Partial updates retain unrelated preferences.
+
+Workspace revision 35 consumers must regenerate document and live-topic readers for `gitIgnoreStatus`, optional `ignoreVisibilityException`, and the `showIgnored` and `initialShowIgnored` snapshot/patch fields. Preserve these fields through document updates and keep ignored classification separate from exposure policy. Unknown classification stays visible without an ignored/clean assertion.
+
+Files presentation does not override explicit preview URLs. Saved ignored visibility wins; otherwise --no-gitignore shows, otherwise any watched root explicitly requesting respectGitignore=true initially hides, otherwise ignored files show. This aggregation is root-order independent and never rejects conflicting legacy defaults. Git-ignore rules are browsing visibility, not an exposure boundary: use explicit Uatu excludes to prevent delivery.
 
 ## Hub 12 / Workspace 34 - Unreleased (permission queue order)
 

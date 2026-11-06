@@ -29,6 +29,7 @@ const FIELD_OWNERS: Record<string, string> = {
   activeTab: "src/shell/tab-bar.ts",
   panes: "src/sidebar/panes.ts",
   filesPaneFilter: "src/sidebar/files-filter.ts",
+  showIgnored: "src/shell/ignored-visibility.ts",
   gitLogLimit: "src/sidebar/git-log.ts",
   compareTarget: "src/sidebar/change-overview.ts",
 };

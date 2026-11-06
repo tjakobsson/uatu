@@ -17,6 +17,8 @@ import { initGitLogClickHandler, initGitLogControls } from "./sidebar/git-log";
 import { startCommitAgeTicker } from "./shell/commit-ages";
 import { initChangeOverviewClickHandler } from "./sidebar/change-overview";
 import { initFilesPaneFilterControls } from "./sidebar/files-filter";
+import { initMediaDock } from "./media/dock";
+import { mediaPlayer } from "./media/controller";
 import { initFollowToggle } from "./shell/follow";
 import { initActiveSurfaceTracking } from "./find/active-surface";
 import { initFindBar } from "./find/find-bar";
@@ -97,6 +99,10 @@ if (
 initUiMode();
 initDesktopViewport();
 initTabBar();
+initMediaDock();
+// A cached page can return with its JS heap intact. End the audition before
+// page departure so pageshow/foreground recovery cannot restore playback.
+window.addEventListener("pagehide", () => mediaPlayer.close());
 initChatPanel();
 
 initActiveSurfaceTracking();

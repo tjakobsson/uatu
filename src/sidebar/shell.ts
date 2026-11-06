@@ -9,21 +9,26 @@ import { computeFilesPaneFilterMembership } from "./tree-view";
 import {
   collectGitStatusEntries,
   filterEmptyStateCopy,
-  filterMembershipHasAnyPath,
-  formatFileCountDisplay,
   renderChangeOverview,
 } from "./change-overview";
-import { syncFilesPaneFilterControl } from "./files-filter";
+import { filesQuery, syncFilesPaneFilterControl } from "./files-filter";
 import { renderGitLog } from "./git-log";
 import {
   renderPanelsMenu,
   schedulePaneHeightNormalization,
   syncPaneDom,
 } from "./panes";
-import { disposeTreeView, ensureTreeView } from "./tree-mount";
+import { ensureTreeView } from "./tree-mount";
 import type { DocumentPatch } from "../shared/document-updates";
 import { syncIndexStatus } from "../shell/index-status";
-import { documentIndex } from "../shell/document-state";
+import { matchesFileQuery, RecentModel } from "./recent-model";
+import { RecentView } from "./recent-view";
+import { applyUserRowClick } from "../shell/follow";
+import { isDocumentVisible } from "../shared/file-visibility";
+import { syncIgnoredVisibilityControl } from "./ignored-visibility";
+import { reconcileSearchVisibility } from "./search-pane";
+import { auditionFromFiles, filesMediaType } from "./media-browsing";
+import { matchesMediaType } from "./media-browsing-model";
 
 const appShellElementMaybe = document.querySelector<HTMLDivElement>(".app-shell");
 const sidebarResizerElementMaybe = document.querySelector<HTMLDivElement>("#sidebar-resizer");
@@ -54,6 +59,44 @@ const sidebarExpandElement: HTMLButtonElement = sidebarExpandElementMaybe;
 const treeElement: HTMLDivElement = treeElementMaybe;
 const treeEmptyMessageElement: HTMLElement = treeEmptyMessageElementMaybe;
 const documentCountElement: HTMLElement = documentCountElementMaybe;
+const recentElement = document.querySelector<HTMLElement>("#recent-files")!;
+const recentModel = new RecentModel();
+let recentRoots: typeof appState.roots | null = null;
+const recentView = new RecentView(recentElement, recentModel, applyUserRowClick, auditionFromFiles);
+
+export function currentAuditionDocuments() {
+  return appState.filesPaneFilter === "recent" ? recentView.getDocuments().filter(doc => isDocumentVisible(doc, appState.showIgnored)
+    && matchesMediaType(doc, filesMediaType) && matchesFileQuery(recentModel.searchPath(doc), filesQuery)) : ensureTreeView().getEligibleDocuments();
+}
+
+export function syncFilesPlayingIndicator(key: string | null): void {
+  recentView.setPlayingFile(key);
+  ensureTreeView().setPlayingFile(key);
+}
+
+function setResultCount(count: number): void {
+  documentCountElement.textContent = String(count);
+  documentCountElement.setAttribute("aria-label", `${count} ${count === 1 ? "file" : "files"}`);
+}
+
+function syncFilesPresentation(): void {
+  const view = ensureTreeView();
+  view.setQuery(filesQuery);
+  const recent = appState.filesPaneFilter === "recent";
+  syncIgnoredVisibilityControl();
+  const entries = recentModel.entries(filesQuery).filter(doc => isDocumentVisible(doc, appState.showIgnored) && matchesMediaType(doc, filesMediaType));
+  recentElement.hidden = !recent;
+  if (recent) recentView.update(entries, appState.selectedId);
+  const filterEmpty = appState.filesPaneFilter === "changed" && !view.hasFilterMembers();
+  const count = recent ? entries.length : filterEmpty ? 0 : view.getVisibleLeafCount();
+  setResultCount(count);
+  treeElement.hidden = recent || count === 0;
+  treeEmptyMessageElement.hidden = count > 0;
+  if (count === 0) treeEmptyMessageElement.textContent = filesQuery ? "No matching files."
+    : filterEmpty ? filterEmptyStateCopy(appState.repositories)
+    : appState.discovery.status === "ready" ? "No files found in the watched roots."
+    : appState.discovery.status === "error" ? `Indexing failed: ${appState.discovery.message ?? "Unavailable"}` : "Indexing files…";
+}
 
 const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
 const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
@@ -61,6 +104,7 @@ const SIDEBAR_MIN_WIDTH = 320;
 const SIDEBAR_MAX_WIDTH = 620;
 
 export function renderSidebar(incremental = false) {
+  reconcileSearchVisibility();
   syncIndexStatus();
   syncPaneDom();
   renderPanelsMenu();
@@ -71,88 +115,34 @@ export function renderSidebar(incremental = false) {
   // depends on `appState.repositories` which changes on every refresh.
   syncFilesPaneFilterControl();
 
-  const totalCount = appState.roots.reduce((sum, root) => sum + root.docs.length, 0);
-  const totalBinaryCount = appState.roots.reduce(
-    (sum, root) => sum + root.docs.filter(doc => doc.kind === "binary").length,
-    0,
-  );
-
-  if (totalCount === 0) {
-    disposeTreeView();
-    documentCountElement.textContent = "0 files";
-    // The library attaches a shadow root to #tree once mounted, and that
-    // shadow root persists across innerHTML writes — so we keep the empty
-    // message as a sibling element instead of overwriting #tree's children.
-    treeElement.hidden = true;
-    treeEmptyMessageElement.hidden = false;
-    treeEmptyMessageElement.textContent = appState.discovery.status === "ready" ? "No files found in the watched roots."
-      : appState.discovery.status === "error" ? `Indexing failed: ${appState.discovery.message ?? "Unavailable"}` : "Indexing files…";
-    return;
+  if (recentRoots !== appState.roots) {
+    recentModel.reset(appState.roots);
+    recentRoots = appState.roots;
   }
-
   const filterOn = appState.filesPaneFilter === "changed";
   const filter = filterOn ? computeFilesPaneFilterMembership(appState.repositories) : null;
 
-  // Decide whether the filter has anything to render. The membership map's
-  // emptiness is the right proxy: a non-git workspace has no entries; a clean
-  // working tree has empty entries (because the change set is empty). Either
-  // way the chip should fall into the empty state.
-  const hasFilterMembership = filter !== null
-    ? filterMembershipHasAnyPath(filter)
-    : false;
-  const showFilterEmptyState = filterOn && !hasFilterMembership;
-
-  if (showFilterEmptyState) {
-    // Git can still be loading. Preserve the All-mode expansion snapshot
-    // while the filtered view is empty, so Changed -> All can restore it.
-    ensureTreeView().update(appState.roots, appState.selectedId, { filter, incremental });
-    treeElement.hidden = true;
-    treeEmptyMessageElement.hidden = false;
-    treeEmptyMessageElement.textContent = filterEmptyStateCopy(appState.repositories);
-    documentCountElement.textContent = formatFileCountDisplay({
-      filterOn: true,
-      visibleCount: 0,
-      visibleBinaryCount: 0,
-      totalCount,
-      totalBinaryCount,
-    });
-    return;
-  }
-
-  treeElement.hidden = false;
-  treeEmptyMessageElement.hidden = true;
+  treeElement.hidden = appState.filesPaneFilter === "recent";
   const view = ensureTreeView();
-  view.update(appState.roots, appState.selectedId, { filter, incremental });
+  view.update(appState.roots, appState.selectedId, { filter, incremental, showIgnored: appState.showIgnored, mediaType: filesMediaType });
   view.setGitStatus(collectGitStatusEntries(appState.repositories));
-
-  documentCountElement.textContent = formatFileCountDisplay({
-    filterOn,
-    visibleCount: filterOn ? view.getVisibleLeafCount() : totalCount,
-    visibleBinaryCount: filterOn ? view.getVisibleBinaryLeafCount() : totalBinaryCount,
-    totalCount,
-    totalBinaryCount,
-  });
+  syncFilesPresentation();
 }
 
 export function renderSidebarPatch(patch: DocumentPatch): void {
   syncIndexStatus();
+  recentModel.applyPatch(patch);
+  recentRoots = appState.roots;
   const view = ensureTreeView();
   if (!view.applyPatch(patch, appState.selectedId)) {
     renderSidebar(true);
     return;
   }
-  if (patch.repositories && appState.filesPaneFilter !== "all" && !view.updateFilter(computeFilesPaneFilterMembership(appState.repositories))) {
+  if (patch.repositories && appState.filesPaneFilter === "changed" && !view.updateFilter(computeFilesPaneFilterMembership(appState.repositories))) {
     renderSidebar(true);
     return;
   }
-  const filterEmpty = appState.filesPaneFilter !== "all" && !view.hasFilterMembers();
-  treeElement.hidden = filterEmpty || view.getVisibleLeafCount() === 0;
-  treeEmptyMessageElement.hidden = !treeElement.hidden;
-  if (treeElement.hidden) treeEmptyMessageElement.textContent = filterEmpty ? filterEmptyStateCopy(appState.repositories)
-    : appState.discovery.status === "ready" ? "No files found in the watched roots." : "Indexing files…";
-  documentCountElement.textContent = formatFileCountDisplay({ filterOn: appState.filesPaneFilter !== "all",
-    visibleCount: filterEmpty ? 0 : view.getVisibleLeafCount(), totalCount: documentIndex.documentCount,
-    visibleBinaryCount: filterEmpty ? 0 : view.getVisibleBinaryLeafCount(), totalBinaryCount: documentIndex.binaryCount });
+  syncFilesPresentation();
   documentCountElement.title = appState.discovery.status === "ready" ? "" : appState.discovery.message ?? "Indexing files…";
   if (patch.repositories || patch.repositoryState) renderChangeOverview();
   if (patch.repositories) {

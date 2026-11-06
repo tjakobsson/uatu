@@ -163,7 +163,7 @@ describe("scanRoots", () => {
     expect(roots[0]?.hiddenCount).toBe(1);
   });
 
-  test("respects .gitignore by default and skips it when respectGitignore is false", async () => {
+  test("discovers the Gitignored superset regardless of the legacy visibility default", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-gitignore-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, ".gitignore"), "*.log\n");
@@ -171,7 +171,7 @@ describe("scanRoots", () => {
     await writeFile(path.join(tempDirectory, "debug.log"), "log line\n");
 
     const respected = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    expect(respected[0]?.docs.map(doc => doc.relativePath)).not.toContain("debug.log");
+    expect(respected[0]?.docs.map(doc => doc.relativePath)).toContain("debug.log");
 
     const ignored = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }], {
       respectGitignore: false,

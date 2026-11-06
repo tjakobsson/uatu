@@ -48,6 +48,7 @@ import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
+import { isDocumentVisible } from "../shared/file-visibility";
 import type { WatchSession } from "./watch-session";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
@@ -155,6 +156,12 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
   };
 
   const chat = buildChatRoutes(deps, p);
+  const media = (request: Request) => {
+    if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) {
+      return new Response(null, { status: 401, headers: { "cache-control": "no-store, no-transform", "content-length": "0" } });
+    }
+    return getSession().mediaResponse(request);
+  };
   const provenance = new Map<string, Promise<unknown>>();
 
   const modeRoutes =
@@ -275,6 +282,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         "cache-control": "public, max-age=86400",
       },
     }),
+    [p("/api/media")]: { GET: media, HEAD: media },
     [p("/api/state")]: {
       GET: async (request: Request) => {
         const context = requestContext(request);
@@ -450,10 +458,10 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
 
         // `allRoots` is the escape hatch for a scope narrowed so far that
         // search would otherwise be useless — a single-file scope most of all.
-        const roots =
+        const roots = (
           url.searchParams.get("allRoots") === "1"
             ? getSession().getUnscopedRoots()
-            : getSession().getRoots(context);
+            : getSession().getRoots(context)).map(root => ({ ...root, docs: root.docs.filter(doc => isDocumentVisible(doc, context.showIgnored)) }));
 
         // A superseded query aborts its fetch, but that alone only stops the
         // browser-side consumer — a no-match sweep yields nothing until its

@@ -11,8 +11,8 @@ export function rootRelative(entry: WatchEntry, file: string): string | null {
 }
 
 export function isPolicyFile(entry: WatchEntry, file: string): boolean {
-  return entry.kind === "dir" && path.dirname(file) === entry.absolutePath
-    && [".gitignore", ".uatu.json"].includes(path.basename(file));
+  return entry.kind === "dir" && rootRelative(entry, file) !== null
+    && (path.basename(file) === ".gitignore" || path.dirname(file) === entry.absolutePath && path.basename(file) === ".uatu.json");
 }
 
 export function createWatchPolicy(entry: WatchEntry, matcher: IgnoreMatcher) {
@@ -40,7 +40,8 @@ export function createWatchPolicy(entry: WatchEntry, matcher: IgnoreMatcher) {
       if (isPolicyFile(entry, file)) return false;
       const relativeToFile = path.relative(file, entry.absolutePath);
       if (relativeToFile === "" || (relativeToFile !== ".." && !relativeToFile.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeToFile))) return false;
-      return !accepts(file, stats);
+      // Without stats Chokidar is probing traversal, not file admission.
+      return !accepts(file, stats ?? { isDirectory: () => true, isSymbolicLink: () => false });
     },
   };
 }

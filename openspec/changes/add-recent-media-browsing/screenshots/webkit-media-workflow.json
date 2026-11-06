@@ -1,0 +1,13 @@
+{
+  "engine": "webkit",
+  "generatedOutputs": {
+    "a": "build/renders/render-a.wav",
+    "b": "build/renders/render-b.wav",
+    "video": "build/renders/render-video.mp4"
+  },
+  "videoSupport": "probably",
+  "mediaRequests": 14,
+  "liveStreams": 1,
+  "ignoredOutputs": 3,
+  "reloadPausedAtZero": true
+}

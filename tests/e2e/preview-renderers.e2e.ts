@@ -27,7 +27,7 @@ test("connection indicator exposes live and reconnecting classes", async ({ page
 test("single-file mode shows only the pinned markdown file in the sidebar", async ({ page, request }) => {
   await request.post("/__e2e/reset", { data: { file: "README.md" } });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("1 file");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "1 file");
   await expect(treeRow(page, "README.md")).toBeVisible();
   await expect(treeRow(page, "guides/setup.md")).toHaveCount(0);
 });
@@ -96,27 +96,45 @@ test("a multi-file burst refreshes the active document when another path is nomi
   const events = () => page.evaluate(() => (window as unknown as { __uatuWatchEvents: Batch[] }).__uatuWatchEvents);
   await expect.poll(async () => (await events()).length).toBeGreaterThan(0);
   const readme = workspacePath("README.md");
-  // README and a second document are written 50 ms apart, so they normally
-  // land in one batch, which nominates the later document. Event-loop jitter
-  // under a loaded suite can split the pair, and README's own batch then
-  // nominates README. That is a scheduling artifact, not the behavior under
-  // test, so the burst is retried until README's update arrives in a batch
-  // that nominates another path.
-  let round = 0;
-  await expect.poll(async () => {
-    const before = (await events()).length;
-    round++;
-    await fs.writeFile(readme, `# Uatu\n\n${marker} ${round}\n`, "utf8");
-    await page.waitForTimeout(50);
-    await fs.writeFile(workspacePath("burst-companion.md"), `# Companion ${round}\n`, "utf8");
+  const companion = workspacePath("burst-companion.md");
+  const before = (await events()).length;
+  // Hold the active preview's response so another file's classified Follow
+  // nomination arrives while its refresh is in flight. Content is published
+  // first, without a nomination; classification nominates a path separately.
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  let requested = false;
+  await page.route("**/api/document?*", async route => {
+    if (new URL(route.request().url()).searchParams.get("id") !== readme) return route.continue();
+    requested = true;
+    await refreshHeld;
+    await route.continue();
+  });
+  try {
+    await fs.writeFile(readme, `# Uatu\n\n${marker}\n`, "utf8");
+    await expect.poll(() => requested).toBe(true);
+    await fs.writeFile(companion, "# Companion\n", "utf8");
     await expect.poll(async () => (await events()).slice(before)
-      .some(batch => batch.upserts.includes(workspacePath("burst-companion.md")))).toBe(true);
-    return (await events()).slice(before)
-      .some(batch => batch.upserts.includes(readme) && batch.changedId !== null && batch.changedId !== readme);
-  }, { timeout: 20_000 }).toBe(true);
+      .some(batch => batch.changedId === companion)).toBe(true);
 
-  await expect(page.locator("#preview")).toContainText(`${marker} ${round}`);
-  await expect(page.locator("#preview-path")).toHaveText("README.md");
+    const published = (await events()).slice(before);
+    const contentIndex = published.findIndex(batch => batch.upserts.includes(readme) && batch.changedId === null);
+    const companionContentIndex = published.findIndex(batch => batch.upserts.includes(companion) && batch.changedId === null);
+    const nominationIndex = published.findIndex(batch => batch.changedId === companion);
+    expect(contentIndex).toBeGreaterThanOrEqual(0);
+    expect(companionContentIndex).toBeGreaterThanOrEqual(contentIndex);
+    expect(nominationIndex).toBeGreaterThan(companionContentIndex);
+    expect(published[nominationIndex]!.upserts).toEqual([]);
+    await expect(page.locator("#preview")).not.toContainText(marker);
+    await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+    releaseRefresh();
+    await expect(page.locator("#preview")).toContainText(marker);
+    await expect(page.locator("#preview-path")).toHaveText("README.md");
+  } finally {
+    releaseRefresh();
+    await page.unroute("**/api/document?*");
+    await page.evaluate(() => (window as unknown as { __uatuWatchSource: EventSource }).__uatuWatchSource.close());
+  }
 });
 
 // An SVG whose intrinsic width is `width` — the decoded image's
@@ -175,11 +193,9 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
     data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("19 files");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "19 files");
 
-  const yamlButton = treeRow(page, "config.yaml");
-  await expect(yamlButton).toBeVisible();
-  await yamlButton.click();
+  await openTreeFile(page, "config.yaml");
 
   await expect(page.locator("#preview-path")).toHaveText("config.yaml");
   await expect(page.locator('#preview pre code.hljs.language-yaml')).toBeVisible();
@@ -204,9 +220,7 @@ test("a non-image binary appears in the tree and routes to the preview-unavailab
   await page.reload();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
-  const binRow = treeRow(page, "data.bin");
-  await expect(binRow).toBeVisible();
-  await binRow.click();
+  await openTreeFile(page, "data.bin");
 
   await expect(page.locator("#preview-path")).toHaveText("data.bin");
   await expect(page.locator("#preview")).toContainText("isn't viewable");

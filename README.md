@@ -41,8 +41,10 @@ cognitive debt.
 - **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved compare base via [`@pierre/diffs`](https://diffs.com/)
 - **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
-- Whole-repo browsing with `.uatu.json ignore.exclude` and `.gitignore` filtering on top of built-in defaults
+- Whole-repo browsing with personal Gitignored-file visibility, explicit `.uatu.json ignore.exclude` exposure rules, and narrow generated-output includes
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
+- [All / Recent / Changed Files views](./docs/FILES.md), with disk-write ordering, filename/path filtering, and a saved per-workspace view
+- [Audio/video previews and quick auditioning](./docs/FILES.md#audio-and-video), with one persistent player, captured Previous/Next order, current-clip Loop, and explicit Reload for new renders
 - Git-aware workspaces: adding a folder outside a repository offers `git init`
 - [Git worktree workspaces](./docs/WORKTREES.md): create and switch branch checkouts from the workspace picker, with independent terminals and conversations, parent credential policy and guarded cleanup
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
@@ -249,10 +251,21 @@ Change Overview rather than aborting the watch session.
 {
   "ignore": {
     "exclude": ["bun.lock", "*.log", "!debug.log"],
+    "include": ["build/renders", "dist/previews"],
     "respectGitignore": true
   }
 }
 ```
+
+Gitignored files now show by default. **Files options → Show ignored files** is
+a personal browsing preference; direct authenticated access remains available
+for permitted hidden files. Explicit `respectGitignore` is a legacy initial
+visibility default, and a saved personal choice wins. Without a saved choice
+or `--no-gitignore`, any watched root's explicit `true` initially hides ignored
+files, regardless of root order. Use `ignore.exclude` to
+prevent indexing and delivery. `ignore.include` opens only the named build/dist
+output subtrees, subject to those exclusions and mandatory denied paths. See
+[Files](./docs/FILES.md) for migration and examples.
 
 Every monospace surface in the app — rendered Markdown code blocks,
 AsciiDoc code blocks, the source view, the diff view, the terminal —
@@ -266,8 +279,9 @@ The compare base is resolved automatically in order: `origin/HEAD` →
 staged + unstaged worktree changes against `HEAD`.
 
 Files at or above 1 MB render without syntax highlighting to keep the
-browser responsive. Binary files appear with VS Code-style icons and route
-to a "preview unavailable" view. Git status (added / modified / deleted /
+browser responsive. Binary files appear with VS Code-style icons; images use
+image previews, recognized audio/video opens paused with browser-native decoding,
+and other binaries show "preview unavailable". Git status (added / modified / deleted /
 renamed / untracked) is surfaced as ambient row annotations on the tree.
 
 ## Security posture of the terminal

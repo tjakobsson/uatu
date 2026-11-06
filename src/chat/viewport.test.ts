@@ -50,6 +50,24 @@ function harness(markup = TOUCH_MARKUP) {
 }
 
 describe("chat visual viewport geometry", () => {
+  test("player height and visible tabs each reserve their own band above a keyboard", () => {
+    expect(chatViewportMetrics(800, 0, 800, 70, 100).height).toBe(630);
+    expect(chatViewportMetrics(500, 40, 800, 70, 100).height).toBe(400);
+    const f = harness();
+    try {
+      f.controller.start();
+      f.root.style.setProperty("--media-dock-height", "110px");
+      f.documentEvent("uatu:media-layout");
+      f.runFrames();
+      expect(f.style("--chat-visual-height")).toBe("690px");
+      f.viewport.height = 480;
+      f.viewportEvent("resize"); f.runFrames();
+      expect(f.style("--chat-visual-height")).toBe("370px");
+      f.root.style.setProperty("--media-dock-height", "0px");
+      f.documentEvent("uatu:media-layout"); f.runFrames();
+      expect(f.style("--chat-visual-height")).toBe("480px");
+    } finally { f.restore(); }
+  });
   test("physical-minimum outer scrolling survives viewport and foreground resyncs only while active", () => {
     const f = harness();
     try {

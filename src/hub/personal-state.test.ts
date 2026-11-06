@@ -47,6 +47,7 @@ describe("personal workspace state validation", () => {
   });
 
   test("rejects unknown fields and unsafe values", () => {
+    expect(() => parsePersonalWorkspaceStatePatch({ filesFilter: "newest" })).toThrow(/filesFilter/);
     expect(() => parsePersonalWorkspaceStatePatch({ user: "other" })).toThrow(/unknown/);
     expect(() => parsePersonalWorkspaceStatePatch({ documentPath: "/etc/passwd" })).toThrow(/relative/);
     expect(() => parsePersonalWorkspaceStatePatch({ documentPath: "a/../b" })).toThrow(/relative/);
@@ -56,6 +57,34 @@ describe("personal workspace state validation", () => {
 });
 
 describe("PersonalWorkspaceStateStore", () => {
+  test("ignored visibility round trips, clears independently, and rejects invalid values atomically", async () => {
+    const { store, filePath } = await tempStore();
+    await store.patch("alice", "project", { showIgnored: false, filesFilter: "recent", follow: false });
+    const reloaded = new PersonalWorkspaceStateStore(filePath);
+    await reloaded.load();
+    expect(reloaded.get("alice", "project")).toEqual({ version: 1, showIgnored: false, filesFilter: "recent", follow: false });
+    expect(() => store.patch("alice", "project", { showIgnored: "false", follow: true })).toThrow(/showIgnored/);
+    expect(store.get("alice", "project").follow).toBe(false);
+    await store.patch("alice", "project", { showIgnored: true });
+    expect(store.get("alice", "project").showIgnored).toBe(true);
+    expect(store.get("bob", "project")).toEqual({ version: 1 });
+    await store.patch("alice", "project", { showIgnored: null });
+    expect(store.get("alice", "project")).toEqual({ version: 1, filesFilter: "recent", follow: false });
+  });
+  test("Recent round trips and partial updates preserve legacy records", async () => {
+    const { store, filePath } = await tempStore();
+    for (const filesFilter of ["all", "changed", "recent"] as const) {
+      await store.patch("alice", "project", { filesFilter, documentPath: "README.md", follow: false });
+      await store.patch("alice", "project", { previewMode: "source" });
+      const reloaded = new PersonalWorkspaceStateStore(filePath);
+      await reloaded.load();
+      expect(reloaded.get("alice", "project")).toEqual({ version: 1, filesFilter, documentPath: "README.md", follow: false, previewMode: "source" });
+    }
+    expect(() => store.patch("alice", "project", { filesFilter: "bad" })).toThrow(/filesFilter/);
+    expect(store.get("alice", "project").filesFilter).toBe("recent");
+    await store.patch("alice", "project", { filesFilter: null });
+    expect(store.get("alice", "project").filesFilter).toBeUndefined();
+  });
   test("missing file starts empty and persists owner-only state across reload", async () => {
     const { store, filePath } = await tempStore();
     expect(store.get("tobias", "uatu")).toEqual({ version: 1 });
