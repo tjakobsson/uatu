@@ -16,6 +16,11 @@ import { FileIndex, type FileIndexBatch, type FileIndexOptions } from "./file-in
 import { isPolicyFile, rootRelative } from "./watch-policy";
 import { createRepositoryRefresh, type RepositoryResults } from "./repository-refresh";
 import { observeFiles, type FileObserver } from "./file-observer";
+import { classifyGitIgnored } from "./git-ignore";
+import { isDocumentVisible } from "../shared/file-visibility";
+import { createRefreshScheduler } from "./refresh-scheduler";
+import { NewestDocument } from "./newest-document";
+import { MediaDelivery } from "./media-delivery";
 
 export { createRefreshScheduler, REFRESH_DEBOUNCE_MS, REFRESH_MAX_WAIT_MS } from "./refresh-scheduler";
 export const DOCUMENT_KEEPALIVE_MS = 15_000;
@@ -44,6 +49,8 @@ type Subscriber = {
   keepalive: ReturnType<typeof setInterval> | null;
 };
 type ObservedRoot = {
+  visibleNewest: NewestDocument;
+  classificationWaiters: Map<string, { revision: number; resolve: () => void }[]>;
   index: FileIndex;
   watcher: FileObserver;
   ready: boolean;
@@ -52,7 +59,7 @@ type ObservedRoot = {
 
 async function policyRevision(entry: WatchEntry): Promise<string> {
   if (entry.kind !== "dir") return "";
-  return (await Promise.all([".uatu.json", ".gitignore"].map(async name => {
+  return (await Promise.all([".uatu.json"].map(async name => {
     const stats = await stat(path.join(entry.absolutePath, name), { bigint: true }).catch(() => null);
     return stats ? `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}` : "unreadable";
   }))).join("|");
@@ -78,12 +85,31 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   let revision = 0;
   let corpusRevision = 0;
   let latestFollowOrder = 0;
-  let latestChange: DocumentSnapshot["latestChange"];
+  const latestChanges = new Map<boolean, { id: string; revision: number; order: number }>();
+  const cancellation = new AbortController();
+  const classificationQueue = new Map<ObservedRoot, Set<string>>();
+  let classificationRunning: Promise<void> | null = null;
+  const initialShowIgnored = (): boolean => {
+    if (options.respectGitignore === false) return true;
+    for (const root of roots.values()) {
+      if (root.index.entry.kind === "dir" && root.index.matcher.explicitInitialShowIgnored === false) return false;
+    }
+    return true;
+  };
   let generatedAt = Date.now();
   let stopped = false;
   let startPromise: Promise<void> | null = null;
   let publishedRepositories: RepositoryResults | null = null;
   const nextRevision = () => ++sequence;
+  const media = new MediaDelivery({ epoch, metrics, lookup: (rootId, relativePath) => {
+    const root = roots.get(rootId);
+    if (!root) return undefined;
+    const entry = root.index.entry;
+    const id = path.resolve(entry.kind === "dir" ? entry.absolutePath : entry.parentDir, relativePath);
+    const doc = root.index.documents.get(id);
+    if (!doc || doc.relativePath !== relativePath || !policies.get(rootId)?.accepts(id)) return undefined;
+    return { doc, entry, fingerprint: recovery.has(rootId) ? null : root.index.fingerprint(id, doc.revision) };
+  } });
   const find = (id: string) => {
     for (const root of roots.values()) {
       const doc = root.index.documents.get(id);
@@ -115,10 +141,10 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     if (entries.length === 1 && entries[0]?.kind === "file") return { ...context, scope: { kind: "file", documentId: entries[0].absolutePath } };
     return normalizeDocumentContext(context, discovery(), find);
   };
-  const newest = (): string | null => {
+  const newest = (context: WatchContext = DEFAULT_WATCH_CONTEXT): string | null => {
     let best: ReturnType<typeof find>;
     for (const root of roots.values()) {
-      const id = root.index.newest.id;
+      const id = context.showIgnored === false ? root.visibleNewest.id : root.index.newest.id;
       const candidate = id ? root.index.documents.get(id) : undefined;
       if (candidate && (!best || candidate.mtimeMs > best.mtimeMs || candidate.mtimeMs === best.mtimeMs && candidate.relativePath.localeCompare(best.relativePath) < 0)) best = candidate;
     }
@@ -128,6 +154,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   const repositories = createRepositoryRefresh({ entries, roots: unscopedRoots, collect: options.collectRepositories,
     usePolling: options.usePolling,
     onObserverEvent: () => metrics?.inc("git_observer.events_total"),
+    onIgnorePolicyChange: () => queueAllClassifications(),
+    onPoll: () => queueAllClassifications(),
     onFallback: () => metrics?.inc("git_observer.fallback_total"),
     publish: (results, freshness) => {
       if (stopped) return;
@@ -136,6 +164,62 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       publish({ upserts: [], removals: [], changedId: null, repositoryState: freshness }, changed);
     },
   });
+
+  const classificationScheduler = createRefreshScheduler(() => { void drainClassifications(); });
+  function queueClassifications(root: ObservedRoot, ids: Iterable<string>) {
+    if (stopped) return;
+    let pending = classificationQueue.get(root);
+    if (!pending) classificationQueue.set(root, pending = new Set());
+    for (const id of ids) pending.add(id);
+    classificationScheduler.schedule();
+  }
+  function queueAllClassifications() {
+    for (const root of roots.values()) queueClassifications(root, root.index.documents.keys());
+  }
+  function finishClassifications(root: ObservedRoot) {
+    for (const waiters of root.classificationWaiters.values()) for (const waiter of waiters) waiter.resolve();
+    root.classificationWaiters.clear();
+  }
+  function drainClassifications(): Promise<void> {
+    if (classificationRunning) return classificationRunning;
+    classificationRunning = (async () => {
+      while (!stopped && classificationQueue.size) {
+        const [root, pending] = classificationQueue.entries().next().value!;
+        const ids: string[] = [];
+        for (const id of pending) { ids.push(id); if (ids.length === 256) break; }
+        for (const id of ids) pending.delete(id);
+        if (!pending.size) classificationQueue.delete(root);
+        const before = ids.map(id => root.index.documents.get(id));
+        const statuses = await classifyGitIgnored(root.index.entry.kind === "dir" ? root.index.entry.absolutePath : root.index.entry.parentDir, ids, cancellation.signal);
+        if (stopped || roots.get(root.index.entry.absolutePath) !== root) { finishClassifications(root); continue; }
+        const upserts: import("../shared/document-updates").RevisionedDocument[] = [];
+        for (let i = 0; i < ids.length; i++) {
+          const doc = before[i];
+          if (!doc || root.index.documents.get(doc.id) !== doc || doc.gitIgnoreStatus === statuses[i]) continue;
+          const next = { ...doc, gitIgnoreStatus: statuses[i]! };
+          root.index.documents.set(doc.id, next);
+          if (isDocumentVisible(next, false)) root.visibleNewest.update(next); else root.visibleNewest.remove(next.id);
+          upserts.push(next);
+        }
+        if (upserts.length) { corpusRevision++; publish({ upserts, removals: [], changedId: null }); }
+        for (let i = 0; i < ids.length; i++) {
+          const id = ids[i]!;
+          const processed = before[i]?.revision ?? (root.index.documents.has(id) ? -1 : Infinity);
+          const waiters = root.classificationWaiters.get(id) ?? [];
+          const remaining = waiters.filter(waiter => {
+            if (waiter.revision > processed) return true;
+            waiter.resolve(); return false;
+          });
+          if (remaining.length) root.classificationWaiters.set(id, remaining);
+          else root.classificationWaiters.delete(id);
+        }
+      }
+    })().finally(() => {
+      classificationRunning = null;
+      if (!stopped && classificationQueue.size) return drainClassifications();
+    });
+    return classificationRunning;
+  }
 
   // A reconnecting client follows the latest change only while that file is
   // still present and still one Follow can show (see `isFollowableFile`).
@@ -149,10 +233,14 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const state: DocumentSnapshot = {
       kind: "snapshot", epoch, revision, workspaceApiRevision: WORKSPACE_API_REVISION,
       roots: unscopedRoots(), repositories: repositories.results[normalized.compareTarget], compareTarget: normalized.compareTarget,
-      initialFollow, defaultDocumentId: discovery().status === "ready" ? newest() : null, changedId, generatedAt, build: BUILD_SUMMARY,
+      initialFollow, initialShowIgnored: initialShowIgnored(), defaultDocumentId: discovery().status === "ready" ? newest(normalized) : null, changedId, generatedAt, build: BUILD_SUMMARY,
       scope: { kind: "folder" }, discovery: discovery(), repositoryState: repositories.freshness,
       unscopedFingerprint: `${epoch}:${corpusRevision}`, terminal: options.terminalEnabled ? "enabled" : "disabled",
-      ...(latestChange && isFollowableLatestChange(latestChange.id) ? { latestChange } : {}),
+      ...(() => {
+        const latest = latestChanges.get(normalized.showIgnored !== false);
+        return latest && isFollowableLatestChange(latest.id) && isDocumentVisible(find(latest.id)!, normalized.showIgnored)
+          ? { latestChange: { id: latest.id, revision: latest.revision } } : {};
+      })(),
     };
     return projectDocumentSnapshot(state, normalized, state.repositories);
   }
@@ -161,16 +249,20 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     try { subscriber.controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(value)}\n\n`)); }
     catch { drop(subscriber, "failed"); }
   }
-  function publish(fields: Pick<DocumentPatch, "upserts" | "removals" | "changedId"> & Partial<DocumentPatch>, repo = false) {
+  function publish(fields: Pick<DocumentPatch, "upserts" | "removals" | "changedId"> & Partial<DocumentPatch>, repo = false, candidates: { id: string; order: number }[] = []) {
     if (stopped) return;
     const previousRevision = revision;
     revision = nextRevision();
-    if (fields.changedId) latestChange = { id: fields.changedId, revision };
+    const previousOrders = new Map([...latestChanges].map(([show, latest]) => [show, latest.order]));
+    for (const show of [true, false]) {
+      const candidate = candidates.find(candidate => { const doc = find(candidate.id); return doc && isDocumentVisible(doc, show); });
+      if (candidate && candidate.order > (latestChanges.get(show)?.order ?? 0)) latestChanges.set(show, { ...candidate, revision });
+    }
     generatedAt = Math.max(Date.now(), generatedAt + 1);
     const patch: DocumentPatch = {
       kind: "patch", epoch, previousRevision, revision, generatedAt,
       ...DEFAULT_WATCH_CONTEXT, unscopedFingerprint: `${epoch}:${corpusRevision}`,
-      discovery: discovery(), defaultDocumentId: discovery().status === "ready" ? newest() : null, ...fields,
+      initialShowIgnored: initialShowIgnored(), discovery: discovery(), defaultDocumentId: discovery().status === "ready" ? newest() : null, ...fields,
     };
     for (const subscriber of subscribers) {
       const context = normalize(subscriber.context);
@@ -180,7 +272,9 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         continue;
       }
       const headers = entries.filter(entry => context.scope.kind === "folder" || roots.get(entry.absolutePath)?.index.documents.has(context.scope.documentId)).map(rootHeader);
-      send(subscriber, projectDocumentPatch(patch, context, headers, repo ? repositories.results[context.compareTarget] : undefined));
+      const candidate = candidates.find(candidate => { const doc = find(candidate.id); return candidate.order > (previousOrders.get(context.showIgnored !== false) ?? 0) && doc && isDocumentVisible(doc, context.showIgnored) && (context.scope.kind === "folder" || doc.id === context.scope.documentId); });
+      send(subscriber, projectDocumentPatch({ ...patch, changedId: candidates.length ? candidate?.id ?? null : patch.changedId,
+        defaultDocumentId: discovery().status === "ready" ? newest(context) : null }, context, headers, repo ? repositories.results[context.compareTarget] : undefined));
     }
     metrics?.inc("refresh.completed_total");
     metrics?.set("refresh.last_success_at", Date.now());
@@ -190,13 +284,30 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const policy = policies.get(root.index.entry.absolutePath)!;
     const upserts = batch.upserts.filter(doc => policy.accepts(doc.id));
     const removals = [...batch.removals, ...batch.upserts.filter(doc => !policy.accepts(doc.id)).map(doc => ({ rootId: doc.rootId, id: doc.id }))];
+    for (const doc of upserts) { if (isDocumentVisible(doc, false)) root.visibleNewest.update(doc); else root.visibleNewest.remove(doc.id); }
+    for (const removal of removals) root.visibleNewest.remove(removal.id);
     if (batch.upserts.length || batch.removals.length) {
       corpusRevision++;
       repositories.request();
     }
     const changedId = batch.changedOrder > latestFollowOrder && batch.changedId && policy.accepts(batch.changedId) ? batch.changedId : null;
     if (changedId) latestFollowOrder = batch.changedOrder;
-    publish({ upserts, removals, changedId });
+    publish({ upserts, removals, changedId: null });
+    queueClassifications(root, upserts.map(doc => doc.id));
+    const candidates = (batch.followCandidates ?? (changedId ? [{ id: changedId, order: batch.changedOrder }] : [])).filter(candidate => policy.accepts(candidate.id));
+    const classified = Promise.all(candidates.map(candidate => new Promise<void>(resolve => {
+      const waiters = root.classificationWaiters.get(candidate.id) ?? [];
+      waiters.push({ revision: candidate.order, resolve });
+      root.classificationWaiters.set(candidate.id, waiters);
+    })));
+    if (candidates.length) {
+      void drainClassifications();
+      void classified.then(() => {
+        if (stopped) return;
+        const current = candidates.filter(candidate => find(candidate.id)?.revision === candidate.order);
+        if (current.length) publish({ upserts: [], removals: [], changedId: null }, false, current);
+      });
+    }
   }
 
   async function observe(entry: WatchEntry, staged = false): Promise<ObservedRoot | null> {
@@ -207,6 +318,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     let root!: ObservedRoot;
     const index = new FileIndex(entry, matcher, { revision: nextRevision, classify: options.classify, publish: batch => fileBatch(root, batch),
       onWork: kind => metrics?.inc(`index.${kind}_total`),
+      onInvalidate: (id, descendants) => media.invalidate(entry.absolutePath, id, descendants),
     });
     policies.set(entry.absolutePath, index.policy);
     const watcher = options.watch ? options.watch(entry.absolutePath, {
@@ -216,13 +328,19 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       onWork: kind => metrics?.inc(`index.${kind}_total`),
     });
     const ready = Promise.withResolvers<void>();
-    root = { index, watcher, ready: false, finish: () => ready.resolve() };
+    root = { index, watcher, visibleNewest: new NewestDocument(), classificationWaiters: new Map(), ready: false, finish: () => ready.resolve() };
     owned.add(root);
     if (!staged) { roots.set(entry.absolutePath, root); prepared.get(entry.absolutePath)?.resolve(root); }
     watcher.on("all", (event, file, stats) => {
       if (stopped || !owned.has(root)) return;
       metrics?.inc(`watcher.events_total.${event}`);
       if (isPolicyFile(entry, path.resolve(file)) && (root.ready || event === "change" || event === "unlink")) {
+        if (path.basename(file) === ".gitignore") {
+          queueAllClassifications();
+          // Policy metadata updates its own row, but is not Follow intent.
+          index.observe(event, file, stats, true);
+          return;
+        }
         void recover(entry, true).catch(() => {});
         return;
       }
@@ -241,6 +359,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       void index.idle().then(() => ready.resolve());
     });
     watcher.on("error", error => {
+      media.invalidate(entry.absolutePath);
       metrics?.inc("watcher.errors_total");
       index.fail(error);
       rootErrors.set(entry.absolutePath, error instanceof Error ? error.message : String(error));
@@ -280,6 +399,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       return current;
     }
     if (stopped) return Promise.resolve();
+    media.invalidate(entry.absolutePath);
     const promise = (async () => {
       do {
         pendingPolicyRecovery.delete(entry.absolutePath);
@@ -287,9 +407,11 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         const next = await observe(entry, true);
         if (!next || stopped) return;
         roots.set(entry.absolutePath, next);
+        for (const doc of next.index.documents.values()) if (isDocumentVisible(doc, false)) next.visibleNewest.update(doc);
+        queueClassifications(next, next.index.documents.keys());
         rootErrors.delete(entry.absolutePath);
         failures.delete(entry.absolutePath);
-        if (old) { owned.delete(old); old.index.stop(); old.finish(); await old.watcher.close(); }
+        if (old) { owned.delete(old); old.index.stop(); old.finish(); finishClassifications(old); await old.watcher.close(); }
         corpusRevision++;
         repositories.request();
         // A policy edit can arrive after the replacement loaded its matcher.
@@ -329,7 +451,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       return startPromise;
     },
     async stop() {
-      stopped = true; repositories.stop();
+      media.stop();
+      stopped = true; repositories.stop(); cancellation.abort(); classificationScheduler.cancel(); classificationQueue.clear();
       for (const pending of prepared.values()) pending.resolve(null);
       for (const timer of retryTimers.values()) clearTimeout(timer);
       retryTimers.clear();
@@ -337,11 +460,12 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         drop(subscriber, "completed");
         try { subscriber.controller.close(); } catch { /* Peer already closed. */ }
       }
-      await Promise.all([...owned].map(async root => { root.index.stop(); root.finish(); await root.watcher.close(); }));
+      await Promise.all([...owned].map(async root => { root.index.stop(); root.finish(); finishClassifications(root); await root.watcher.close(); }));
+      await classificationRunning;
       owned.clear();
     },
     async recover() { await Promise.all(entries.map(entry => recover(entry))); },
-    requestRepositoryRefresh() { repositories.request(); },
+    requestRepositoryRefresh() { queueAllClassifications(); repositories.request(); },
     async ensureDocument(id: string) {
       const existing = find(id);
       if (existing && !recovery.has(existing.rootId)) return existing;
@@ -376,6 +500,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       return undefined;
     },
     findDocument: find,
+    mediaResponse: (request: Request) => media.response(request),
     getDiscoveryState: discovery,
     documentRevision: (id: string) => `${epoch}:${find(id)?.revision ?? "missing"}`,
     repositoryGeneration: () => repositories.freshness.generation,

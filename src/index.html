@@ -294,7 +294,7 @@
             <header class="pane-header">
               <h2>Files</h2>
               <div class="pane-meta">
-                <span id="document-count" class="document-count">0 files</span>
+                <span id="document-count" class="document-count" role="status" aria-live="off" aria-label="0 files">0</span>
                 <div
                   id="files-pane-filter"
                   class="files-pane-filter"
@@ -310,6 +310,7 @@
                     data-files-filter-value="all"
                     title="Show all files"
                   >All</button>
+                  <button id="files-pane-filter-recent" class="files-pane-filter-segment" type="button" role="radio" aria-checked="false" tabindex="-1" data-files-filter-value="recent" title="Show files by latest disk write">Recent</button>
                   <button
                     id="files-pane-filter-changed"
                     class="files-pane-filter-segment"
@@ -322,12 +323,24 @@
                 </div>
               </div>
               <div class="pane-actions">
+                <div class="files-options">
+                  <button class="files-options-trigger" type="button" popovertarget="files-options-popover" aria-label="Files options" aria-expanded="false" title="Files options">⋯</button>
+                  <div id="files-options-popover" class="files-options-content" popover role="group" aria-label="Files options">
+                    <label><input id="files-show-ignored" type="checkbox" checked> Show ignored files</label>
+                    <div id="files-type-options" hidden></div>
+                  </div>
+                </div>
                 <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
                 <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
               </div>
             </header>
             <div class="pane-body">
+              <div class="files-query-control">
+                <input id="files-query" type="search" aria-label="Filter filenames and paths" placeholder="Filter filenames and paths" autocomplete="off" spellcheck="false">
+                <button id="files-query-clear" type="button" aria-label="Clear filename filter" title="Clear filename filter">×</button>
+              </div>
               <div id="tree" class="tree"></div>
+              <div id="recent-files" class="recent-files" hidden></div>
               <p id="tree-empty-message" class="tree-empty" hidden>No files found in the watched roots.</p>
             </div>
             <div class="pane-resizer" data-pane-resizer="files" role="separator" aria-orientation="horizontal" aria-label="Resize Files"></div>

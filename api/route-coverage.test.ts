@@ -11,7 +11,7 @@ import {
 } from "../src/shared/live-protocol";
 
 type Operation = { operationId: string; domain: "hub" | "workspace"; method: string; path: string; childPath?: string; runtime: string };
-type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string };
+type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string; methods?: string[] };
 
 const root = new URL("../", import.meta.url);
 
@@ -74,6 +74,24 @@ test("every workspace child route is an explicit internal exclusion", async () =
   for (const path of [CHILD_DOCUMENT_EVENTS_PATH, CHILD_INVENTORY_EVENTS_PATH, childConversationEventsPath("sample"), CHILD_ACTIVITY_PATH, CHILD_NOTIFICATIONS_PATH]) {
     expect(classified(path)).toBe(true);
   }
+});
+
+test("media GET and HEAD are explicit internal exclusions, never public operations", async () => {
+  const [source, inventory, excluded, openapi] = await Promise.all([
+    Bun.file(new URL("src/server/routes.ts", root)).text(),
+    readYaml<{ operations: Operation[] }>("api/operations.yaml"),
+    readYaml<{ exclusions: Exclusion[] }>("api/exclusions.yaml"),
+    readYaml<{ paths: Record<string, unknown> }>("api/openapi.yaml"),
+  ]);
+  expect(source).toContain('p("/api/media")');
+  for (const [id, path] of [["workspace-media", "/s/{workspaceId}/api/media"], ["direct-child-media", "/api/media"]]) {
+    const entry = excluded.exclusions.find(item => item.id === id);
+    expect(entry?.path).toBe(path);
+    expect(entry?.scope).toBe("workspace");
+    expect(entry?.methods).toEqual(["GET", "HEAD"]);
+  }
+  expect(inventory.operations.filter(item => item.path.endsWith("/api/media"))).toEqual([]);
+  expect(Object.keys(openapi.paths).filter(path => path.endsWith("/api/media"))).toEqual([]);
 });
 
 test("Hub dispatch families are public or explicitly excluded", async () => {

@@ -3,12 +3,14 @@ import { parseHTML } from "linkedom";
 import type { FileTree, FileTreeDirectoryHandle } from "@pierre/trees";
 
 import type { ChangedFileSummary, RepositorySnapshot, RootGroup } from "../shared/types";
+import type { DocumentPatch } from "../shared/document-updates";
 import {
   ancestorPaths,
   buildPathInputs,
   computeFilesPaneFilterMembership,
   computeFilteredPaths,
   reconcileFilterExpansion,
+  resolveFileGitStatus,
   TreeView,
   type FilesPaneFilterMembership,
 } from "./tree-view";
@@ -170,6 +172,111 @@ describe("TreeView selection lifecycle with the real library", () => {
     expect(directory("guides/deep/").isExpanded()).toBe(true);
     expect(directory("other/").isExpanded()).toBe(false);
     expect(tree().getSelectedPaths()).toEqual([leaf]);
+  });
+
+  it("type filtering excludes an active nonmatching file and captures natural tree order including closed folders", () => {
+    const inventory = roots(["z.wav", "renders/take10.wav", "renders/take2.wav", "movie.mp4", "README.md", "ignored.wav"]);
+    inventory[0]!.docs.find(doc => doc.name === "ignored.wav")!.gitIgnoreStatus = "ignored";
+    view.update(inventory, "README.md", { mediaType: "audio", showIgnored: false });
+    expect(tree().getItem("README.md")).toBeNull();
+    expect(tree().getItem("movie.mp4")).toBeNull();
+    expect(tree().getItem("ignored.wav")).toBeNull();
+    expect(directory("renders/").isExpanded()).toBe(false);
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["renders/take2.wav", "renders/take10.wav", "z.wav"]);
+    expect(view.getVisibleLeafCount()).toBe(3);
+    view.setQuery("renders/");
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["renders/take2.wav", "renders/take10.wav"]);
+    const original = tree();
+    view.update(inventory, "README.md", { mediaType: "video", showIgnored: false });
+    view.setQuery("");
+    expect(tree()).toBe(original);
+    expect(view.getVisibleLeafCount()).toBe(1);
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["movie.mp4"]);
+    expect(tree().getSelectedPaths()).toEqual([]);
+    expect(deselections).toBe(0);
+  });
+
+  it("Changed type membership composes with ignored visibility and does not inject a mismatching active file", () => {
+    const inventory = roots(["clip.wav", "clip.mp4", "README.md", "ignored.wav"]);
+    inventory[0]!.docs.find(doc => doc.name === "ignored.wav")!.gitIgnoreStatus = "ignored";
+    const filter = { allowedByRoot: new Map([["r1", new Set(["clip.wav", "clip.mp4", "ignored.wav"])]]) };
+    view.update(inventory, "README.md", { filter, mediaType: "audio", showIgnored: false });
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["clip.wav"]);
+    view.updateFilter(filter);
+    expect(tree().getItem("README.md")).toBeNull();
+    expect(view.getVisibleLeafCount()).toBe(1);
+    expect(tree().getSelectedPaths()).toEqual([]);
+  });
+
+  for (const mode of ["all", "changed"] as const) {
+    it(`${mode} hides an ignored active file without injecting it back or emitting navigation`, () => {
+      const inventory = roots();
+      inventory[0]!.docs.find(doc => doc.id === leaf)!.gitIgnoreStatus = "ignored";
+      inventory[0]!.docs.find(doc => doc.id === "guides/direct.md")!.gitIgnoreStatus = "unknown";
+      const exception = inventory[0]!.docs.find(doc => doc.id === "guides/deep/sibling.md")!;
+      exception.gitIgnoreStatus = "ignored";
+      exception.ignoreVisibilityException = true;
+      const filter = mode === "changed" ? { allowedByRoot: new Map([["r1", new Set(paths)]]) } : null;
+      view.update(inventory, leaf, { filter, showIgnored: true });
+      const original = tree();
+      directory("kept/").expand();
+      view.update(inventory, leaf, { filter, showIgnored: false });
+      expect(tree()).toBe(original);
+      expect(tree().getItem(leaf)).toBeNull();
+      expect(tree().getItem("guides/direct.md")).not.toBeNull();
+      expect(tree().getItem(exception.relativePath)).not.toBeNull();
+      expect(view.getVisibleLeafCount()).toBe(paths.length - 1);
+      expect(tree().getSelectedPaths()).toEqual([]);
+      expect(deselections).toBe(0);
+      if (mode === "changed") {
+        expect(view.updateFilter(filter!)).toBe(true);
+        expect(tree().getItem(leaf)).toBeNull();
+      }
+      view.setQuery("active");
+      expect(view.getVisibleLeafCount()).toBe(0);
+      view.setQuery("");
+      view.update(inventory, leaf, { filter, showIgnored: true });
+      expect(tree().getSelectedPaths()).toEqual([leaf]);
+      if (mode === "all") expect(directory("kept/").isExpanded()).toBe(true);
+    });
+  }
+
+  it("a metadata-only ignored classification removes the active row, and later patches do not resurrect it", () => {
+    const inventory = roots();
+    view.update(inventory, leaf, { showIgnored: false });
+    const doc = inventory[0]!.docs.find(doc => doc.id === leaf)!;
+    const patch: DocumentPatch = { kind: "patch", epoch: "test", previousRevision: 1, revision: 2, generatedAt: 10,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "test", changedId: null,
+      removals: [], upserts: [{ ...doc, revision: 2, gitIgnoreStatus: "ignored" }] };
+    expect(view.applyPatch(patch, leaf)).toBe(true);
+    expect(tree().getItem(leaf)).toBeNull();
+    expect(view.getVisibleLeafCount()).toBe(paths.length - 1);
+    expect(view.applyPatch({ ...patch, previousRevision: 2, revision: 3, upserts: [] }, leaf)).toBe(true);
+    expect(tree().getItem(leaf)).toBeNull();
+    view.updateFilter({ allowedByRoot: new Map([["r1", new Set([leaf])]]) });
+    expect(tree().getItem(leaf)).toBeNull();
+    expect(tree().getSelectedPaths()).toEqual([]);
+    expect(deselections).toBe(0);
+    expect(view.applyPatch({ ...patch, previousRevision: 3, revision: 4,
+      upserts: [{ ...doc, revision: 4, gitIgnoreStatus: "unknown" }] }, leaf)).toBe(true);
+    expect(tree().getItem(leaf)).not.toBeNull();
+    expect(view.getVisibleLeafCount()).toBe(paths.length);
+    expect(container.shadowRoot!.querySelector(`[data-item-path="${leaf}"]`)?.getAttribute("data-item-git-status")).toBeNull();
+  });
+
+  it("independent ignore metadata uses native muted status and preserves unrelated Git modifications", () => {
+    const inventory = roots();
+    inventory[0]!.docs.find(doc => doc.id === leaf)!.gitIgnoreStatus = "ignored";
+    inventory[0]!.docs.find(doc => doc.id === "guides/direct.md")!.gitIgnoreStatus = "unknown";
+    view.update(inventory, leaf);
+    view.setGitStatus([{ rootId: "r1", relativePath: "guides/", status: "ignored" },
+      { rootId: "r1", relativePath: "guides/deep/sibling.md", status: "modified" }]);
+    const row = (path: string) => container.shadowRoot!.querySelector<HTMLElement>(`[data-item-path="${path}"]`);
+    expect(row(leaf)?.getAttribute("data-item-git-status")).toBe("ignored");
+    expect(row("guides/direct.md")?.getAttribute("data-item-git-status")).toBeNull();
+    expect(row("guides/deep/sibling.md")?.getAttribute("data-item-git-status")).toBe("modified");
+    expect(row(leaf)?.textContent).not.toMatch(/ignored/i);
+    expect(resolveFileGitStatus({ ...inventory[0]!.docs[0]!, gitIgnoreStatus: "unknown" }, "ignored")).toBeUndefined();
   });
 
   for (const refresh of ["unchanged", "addition", "removal", "rename"] as const) {

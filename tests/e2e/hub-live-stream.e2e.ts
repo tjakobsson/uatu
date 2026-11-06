@@ -117,13 +117,13 @@ test("six session tabs with conversations open: background tabs release their st
 
   // A watched-file change reaches the visible tab through the hub, and a
   // hidden tab catches up when it is shown.
-  await expect(first.locator("#document-count")).toHaveText("18 files");
+  await expect(first.locator("#document-count")).toHaveAttribute("aria-label", "18 files");
   await fs.writeFile(path.join(workspace.path, "hub-live.md"), "# Hub live\n\nadded while one of six tabs watched\n");
-  await expect(first.locator("#document-count")).toHaveText("19 files", { timeout: 15_000 });
+  await expect(first.locator("#document-count")).toHaveAttribute("aria-label", "19 files", { timeout: 15_000 });
   const second = tabs[1]!;
   await setVisibility(first, "hidden");
   await setVisibility(second, "visible");
-  await expect(second.locator("#document-count")).toHaveText("19 files", { timeout: 15_000 });
+  await expect(second.locator("#document-count")).toHaveAttribute("aria-label", "19 files", { timeout: 15_000 });
   await expect.poll(() => openEventSources(first)).toHaveLength(0);
   expect(await openEventSources(second)).toHaveLength(1);
 });

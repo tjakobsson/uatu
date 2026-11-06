@@ -2,11 +2,12 @@
 // the /s/<id>/ proxy dispatch. Assembled as a single fetch handler so the
 // gate provably runs before anything session- or dashboard-shaped executes.
 
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import type { ServerWebSocket } from "bun";
+import { startMediaHttpBoundary, type MediaHttpBoundary } from "../server/media-http-boundary";
 
 import hubMonoFontAsset from "../assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
 import hubIcon192Asset from "../assets/icon-192.png" with { type: "file" };
@@ -1688,7 +1689,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (message.startsWith("unknown workspace:")) return json(404, { error: message });
-          if (/personal state|documentPath|follow|previewMode|compareTarget|filesFilter|lastPtyId|unknown/.test(message)) {
+          if (/personal state|documentPath|follow|previewMode|compareTarget|filesFilter|showIgnored|lastPtyId|unknown/.test(message)) {
             return json(400, { error: message });
           }
           return json(500, { error: "failed to persist personal state" });
@@ -2217,8 +2218,8 @@ function bindWorkerDismissals(store: WorkerDismissalsStore, live: LiveEndpoint):
   store.subscribe((scope, notice) => live.invalidatePersonal(scope.user, scope.workspaceId, notice));
 }
 
-// Starts the hub's Bun.serve with TLS when configured and the WebSocket
-// bridge handlers wired.
+// Starts the public HTTP/TLS media boundary around the private Bun router
+// and its existing WebSocket bridge handlers.
 export function startHubServer(deps: HubDeps) {
   const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
     processFactory: new CloneProcessAdapter({ gitCommand: deps.gitCommand }),
@@ -2232,15 +2233,14 @@ export function startHubServer(deps: HubDeps) {
   deps.notifications?.usePresence(liveBroker);
   const worktreeReconciler = assembleWorktreeReconciler(deps, liveBroker);
   const handler = createHubFetchHandler({ ...deps, cloneJobs, live, liveBroker, ...(worktreeReconciler ? { worktreeReconciler } : {}) });
-  const server = Bun.serve<BridgeData>({
-    hostname: deps.config.host,
-    port: deps.config.port,
+  let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve<BridgeData>>> | undefined;
+  const tls = deps.config.tls ? { cert: readFileSync(deps.config.tls.cert), key: readFileSync(deps.config.tls.key) } : undefined;
+  const inner = Bun.serve<BridgeData>({
+    hostname: "127.0.0.1",
+    port: 0,
     // SSE and long-lived terminal sockets must never be idle-reaped.
     idleTimeout: 0,
-    ...(deps.config.tls
-      ? { tls: { cert: Bun.file(deps.config.tls.cert), key: Bun.file(deps.config.tls.key) } }
-      : {}),
-    fetch: (request, server) => handler(request, server),
+    fetch: (request, server) => handler(boundary?.normalizeRequest(request) ?? request, boundary?.server ?? server),
     websocket: {
       open(socket: ServerWebSocket<BridgeData>) {
         bridgeWebSocketHandlers.open(socket);
@@ -2253,5 +2253,9 @@ export function startHubServer(deps: HubDeps) {
       },
     },
   });
-  return Object.assign(server, { cloneJobs, live, liveBroker, worktreeReconciler });
+  boundary = startMediaHttpBoundary({ server: inner, hostname: deps.config.host, port: deps.config.port, tls,
+    isMediaRequest: request => /^\/s\/[^/]+\/api\/media$/.test(new URL(request.url).pathname),
+    fetch: (request, server) => handler(request, server),
+  });
+  return Object.assign(boundary.server, { ready: boundary.ready, cloneJobs, live, liveBroker, worktreeReconciler });
 }

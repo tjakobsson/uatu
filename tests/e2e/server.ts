@@ -45,6 +45,7 @@ import { normalizeBasePath, stripBasePath } from "../../src/shared/base-path";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, spaShellResponse } from "../../src/server/navigation";
 import { resolveWatchRoots, type WatchEntry } from "../../src/server/roots";
 import { createWatchSession } from "../../src/server/watch-session";
+import { startMediaHttpBoundary, type MediaHttpBoundary } from "../../src/server/media-http-boundary";
 import { classifyFile } from "../../src/document/classify";
 import { collectRepositorySnapshots } from "../../src/document/git-data";
 import {
@@ -743,9 +744,12 @@ async function handleE2EChat(request: Request): Promise<Response> {
 }
 
 let server: ReturnType<typeof Bun.serve>;
-server = Bun.serve({
+let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
+let workspaceRoutes!: ReturnType<typeof buildRoutes>;
+const mediaPath = `${E2E_BASE_PATH}api/media`;
+const inner = Bun.serve({
   hostname: "127.0.0.1",
-  port: E2E_PORT,
+  port: 0,
   idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
   // Serve the HTMLBundle as a production bundle, as the compiled binary
   // does. Bun's default (`NODE_ENV !== "production"`) is its dev server: an
@@ -777,7 +781,7 @@ server = Bun.serve({
               liveEndpoint.changeSubscriptions(request, request.params.streamId, E2E_LIVE_PRINCIPAL),
           },
         }) as Record<string, never>),
-    ...buildRoutes({
+    ...(workspaceRoutes = buildRoutes({
       mode: "e2e",
       assets: {
         mermaid: mermaidAsset,
@@ -802,9 +806,11 @@ server = Bun.serve({
       handleE2EReset,
       handleE2EPersonalState,
       handleE2EChat,
-    }),
+    })),
   },
   fetch: async (request, srv) => {
+    request = boundary?.normalizeRequest(request) ?? request;
+    srv = boundary?.server ?? srv;
     const url = new URL(request.url);
     // Root-relative for the comparisons below; outside the prefix the
     // fallback answers 404 itself.
@@ -893,6 +899,12 @@ server = Bun.serve({
       }
     : undefined,
 });
+boundary = startMediaHttpBoundary({ server: inner, hostname: "127.0.0.1", port: E2E_PORT,
+  isMediaRequest: request => new URL(request.url).pathname === mediaPath,
+  fetch: request => (workspaceRoutes[mediaPath] as { GET(request: Request): Response | Promise<Response>; HEAD(request: Request): Response | Promise<Response> })[request.method as "GET" | "HEAD"](request),
+});
+server = boundary.server;
+await boundary.ready;
 
 const navigationFetch = createNavigationFetchHandler({
   getUnscopedRoots: () => watchSession.getUnscopedRoots(),

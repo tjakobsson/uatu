@@ -206,7 +206,7 @@ export function liveSubscriptionId(subscription: LiveSubscriptionKey): string {
 // same context share one upstream.
 export function documentContextKey(params: URLSearchParams): string {
   const canonical = new URLSearchParams();
-  for (const name of ["compareTarget", "scope", "documentId"]) {
+  for (const name of ["compareTarget", "scope", "documentId", "showIgnored"]) {
     const value = params.get(name);
     if (value !== null) canonical.set(name, value);
   }

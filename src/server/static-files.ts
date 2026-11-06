@@ -39,6 +39,7 @@ export async function resolveStaticFileRequest(
   for (const entry of entries) {
     const rootPath = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
     const candidate = path.resolve(rootPath, relativeUrlPath);
+    if (entry.kind === "file" && candidate !== entry.absolutePath) continue;
     const relativeToRoot = path.relative(rootPath, candidate);
 
     if (
@@ -56,7 +57,7 @@ export async function resolveStaticFileRequest(
 
     let matcher = matcherCache.get(rootPath);
     if (!matcher) {
-      matcher = await loadIgnoreMatcher({ rootPath, respectGitignore });
+      matcher = await loadIgnoreMatcher({ rootPath, respectGitignore, isSingleFileRoot: entry.kind === "file" });
       matcherCache.set(rootPath, matcher);
     }
 

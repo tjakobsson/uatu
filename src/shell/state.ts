@@ -148,7 +148,7 @@ export function readActiveTabPreference(
 
 // Files-pane filter chip: `all` shows the full tree, `changed` reduces the
 // tree to the changed-files list plus ancestor directories.
-export type FilesPaneFilter = "all" | "changed";
+export type FilesPaneFilter = "all" | "recent" | "changed";
 
 const DEFAULT_FILES_PANE_FILTER: FilesPaneFilter = "all";
 
@@ -213,6 +213,7 @@ export const appState = {
   // the mode attribute). Owned by shell/tab-bar.ts.
   activeTab: readActiveTabPreference() as TouchTab,
   filesPaneFilter: DEFAULT_FILES_PANE_FILTER as FilesPaneFilter,
+  showIgnored: true,
   gitLogLimit: readGitLogLimitPreference(),
   // Which lens the Change Overview measures changes against. Mirrors the
   // server-session value; persisted and reconciled to the server on boot.

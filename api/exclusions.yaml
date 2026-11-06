@@ -1,5 +1,7 @@
 schemaVersion: 1
 exclusions:
+  - { id: workspace-media, scope: workspace, methods: [GET, HEAD], path: "/s/{workspaceId}/api/media", reason: "internal same-build revision-bound media delivery, authenticated and proxied to the child; full/range/HEAD responses are documented in docs/INTERNAL-MEDIA.md and tested without becoming public Hub operations" }
+  - { id: direct-child-media, scope: workspace, methods: [GET, HEAD], path: /api/media, reason: "internal authenticated child media protocol; exact indexed root/path/epoch/revision identity, bounded streaming, single ranges and cancellation" }
   - { id: hub-push-worker, scope: hub, methods: [GET], path: /push-worker.js, reason: push-only service worker asset }
   - { id: workspace-notification-stream-refused, scope: workspace, methods: [GET], path: "/s/{workspaceId}/api/chat/notifications/events", reason: "internal child-to-hub notification feed; not proxied to browser clients" }
   - { id: hub-login-page, scope: hub, methods: [GET], path: /login, reason: browser HTML flow }

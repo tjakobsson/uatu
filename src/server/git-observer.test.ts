@@ -6,6 +6,7 @@ import path from "node:path";
 import { safeGit } from "../document/git-base-ref";
 import { createGitObserver, isGitNoise } from "./git-observer";
 import type { WatchEntry } from "./roots";
+import { classifyGitIgnored } from "./git-ignore";
 
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const step of cleanup.splice(0).reverse()) await step(); });
@@ -58,6 +59,29 @@ async function settle(gitDir: string, names: Array<string | null>) {
 }
 
 const dir = (absolutePath: string): WatchEntry => ({ kind: "dir", absolutePath } as WatchEntry);
+
+test("ignore-only invalidation observes global/info excludes and forced tracking independently", async () => {
+  const { directory, work } = await checkout();
+  const global = path.join(directory, "global-ignore");
+  await writeFile(global, "");
+  await git(work, ["config", "core.excludesFile", global]);
+  let policyEvents = 0;
+  const observer = createGitObserver({ entries: [dir(work)], onChange: () => {}, onIgnoreChange: () => { policyEvents++; }, onFailure: error => { throw error; } });
+  cleanup.push(() => observer.close());
+  await observer.start();
+  await writeFile(global, "export.md\n");
+  await until(() => policyEvents > 0, "global excludes invalidation");
+  expect(await classifyGitIgnored(work, ["export.md"])).toEqual(["ignored"]);
+  let before = policyEvents;
+  await writeFile(path.join(work, ".git/info/exclude"), "info.md\n");
+  await until(() => policyEvents > before, "info excludes invalidation");
+  expect(await classifyGitIgnored(work, ["info.md"])).toEqual(["ignored"]);
+  before = policyEvents;
+  await writeFile(path.join(work, "export.md"), "tracked export");
+  await git(work, ["add", "-f", "export.md"]);
+  await until(() => policyEvents > before, "tracked-state invalidation");
+  expect(await classifyGitIgnored(work, ["export.md"])).toEqual(["not-ignored"]);
+}, 20_000);
 
 test("Git's lock, temp, object and fetch-head entries are noise", () => {
   for (const name of ["index.lock", "main.lock", "packed-refs.new", "objects", "FETCH_HEAD", "gc.pid", ".watchman-cookie-host-1-2"]) expect(isGitNoise(name)).toBe(true);

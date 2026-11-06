@@ -45,7 +45,7 @@ describe("API contract structure", () => {
   test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([34, 12, 3]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([35, 13, 3]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -170,6 +170,38 @@ describe("API contract structure", () => {
       expect(validate(invalid)).toBe(false);
       expect(() => parsePersonalChatPreferencesUpdate(invalid)).toThrow();
     }
+  });
+  test("personal Files views agree with server validation", async () => {
+    const { parsePersonalWorkspaceStatePatch } = await import("../src/hub/personal-state");
+    const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(spec.components.schemas.PersonalStatePatch, spec.components.schemas));
+    for (const filesFilter of ["all", "recent", "changed", null]) {
+      expect(validate({ filesFilter })).toBe(true);
+      expect(parsePersonalWorkspaceStatePatch({ filesFilter })).toEqual({ filesFilter });
+    }
+    for (const filesFilter of ["newest", "", true, 1]) {
+      expect(validate({ filesFilter })).toBe(false);
+      expect(() => parsePersonalWorkspaceStatePatch({ filesFilter })).toThrow();
+    }
+    for (const showIgnored of [true, false, null]) {
+      expect(validate({ showIgnored })).toBe(true);
+      expect(parsePersonalWorkspaceStatePatch({ showIgnored })).toEqual({ showIgnored });
+    }
+    for (const showIgnored of ["false", 1, {}, []]) {
+      expect(validate({ showIgnored })).toBe(false);
+      expect(() => parsePersonalWorkspaceStatePatch({ showIgnored })).toThrow();
+    }
+  });
+  test("document metadata keeps ignore classification separate from content revision", async () => {
+    const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(spec.components.schemas.DocumentMeta, spec.components.schemas));
+    const doc = { id: "/docs/output.wav", rootId: "/docs", relativePath: "output.wav", name: "output.wav", kind: "binary", mtimeMs: 1, revision: 2 };
+    expect(validate(doc)).toBe(true);
+    for (const gitIgnoreStatus of ["ignored", "not-ignored", "unknown"]) {
+      expect(validate({ ...doc, gitIgnoreStatus, ignoreVisibilityException: false })).toBe(true);
+    }
+    for (const gitIgnoreStatus of [true, null, "clean"]) expect(validate({ ...doc, gitIgnoreStatus })).toBe(false);
+    expect(validate({ ...doc, ignoreVisibilityException: "true" })).toBe(false);
   });
   test("background task uncertainty and child inspection agree across strict wire validators", async () => {
     const { parseConversationItem } = await import("../src/chat/validation");

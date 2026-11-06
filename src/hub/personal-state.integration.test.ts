@@ -88,13 +88,13 @@ describe("Hub personal workspace state API", () => {
     await fetch(url, {
       method: "PATCH",
       headers: { cookie: await cookie("alice"), origin: fixture.origin, "content-type": "application/json" },
-      body: JSON.stringify({ filesFilter: "changed" }),
+      body: JSON.stringify({ filesFilter: "recent" }),
     });
     expect(fixture.personalState.get("alice", "project")).toEqual({
       version: 1,
       documentPath: "README.md",
       follow: false,
-      filesFilter: "changed",
+      filesFilter: "recent",
     });
     expect(fixture.personalState.get("bob", "project")).toEqual({ version: 1 });
 
@@ -121,6 +121,8 @@ describe("Hub personal workspace state API", () => {
     expect((await request({ user: "bob" })).status).toBe(400);
     expect((await request({ documentPath: "/etc/passwd" })).status).toBe(400);
     expect((await request({ lastPtyId: "bad" })).status).toBe(400);
+    expect((await request({ filesFilter: "newest" })).status).toBe(400);
+    expect((await request({ showIgnored: "false" })).status).toBe(400);
     expect(fixture.personalState.get("alice", "project")).toEqual({ version: 1 });
 
     const method = await fetch(url, { method: "POST", headers: { cookie: aliceCookie, origin: fixture.origin } });

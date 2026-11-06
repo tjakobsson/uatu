@@ -1,0 +1,44 @@
+{
+  "expanded": {
+    "dock": {
+      "top": 335.171875,
+      "bottom": 788,
+      "left": 0,
+      "right": 390,
+      "height": 452.828125
+    },
+    "shell": {
+      "top": 0,
+      "bottom": 508.828125,
+      "left": 0,
+      "right": 390,
+      "height": 508.828125
+    },
+    "viewport": {
+      "top": 0,
+      "bottom": 844
+    },
+    "reservation": 452.828125
+  },
+  "final": {
+    "dock": {
+      "top": 707,
+      "bottom": 844,
+      "left": 0,
+      "right": 390,
+      "height": 137
+    },
+    "shell": {
+      "top": 0,
+      "bottom": 1521.78125,
+      "left": 0,
+      "right": 390,
+      "height": 1521.78125
+    },
+    "viewport": {
+      "top": 0,
+      "bottom": 844
+    },
+    "reservation": 137
+  }
+}

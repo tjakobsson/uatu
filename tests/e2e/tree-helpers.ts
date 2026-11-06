@@ -106,8 +106,11 @@ export async function openTreeFile(
     await revealTreeRow(page, path);
     await expect(row).toBeVisible();
     await waitForTreeIdle(page);
+    await expect(page.locator("#tree [data-is-scrolling]")).toHaveCount(0);
     if (!clicked || (await row.getAttribute("aria-selected")) !== "true") {
-      await row.click();
+      // Activate the filename, not the full virtualized row rectangle: WebKit
+      // can scroll that rectangle again in a very short Files viewport.
+      await row.locator('[data-item-section="content"]').click();
       clicked = true;
     }
     await expect(row).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
@@ -117,10 +120,13 @@ export async function openTreeFile(
 
 async function expandTreeAncestors(page: Page, path: string): Promise<void> {
   for (const ancestor of ancestorDirs(path)) {
+    await revealTreeRow(page, ancestor);
+    await waitForTreeIdle(page);
+    await expect(page.locator("#tree [data-is-scrolling]")).toHaveCount(0);
     const handle = treeRow(page, ancestor);
     const expanded = await handle.getAttribute("aria-expanded", { timeout: 2_000 }).catch(() => null);
     if (expanded === "false") {
-      await handle.click();
+      await handle.locator('[data-item-section="content"]').click();
       await expect(handle).toHaveAttribute("aria-expanded", "true", { timeout: 2_000 });
     }
   }

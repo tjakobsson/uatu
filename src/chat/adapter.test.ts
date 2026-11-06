@@ -377,6 +377,19 @@ for (const large of [false, true]) test(`real V2 unchanged parent and child snap
       fake.settleWorker(worker.childId, "completed", "Large worker result. ".repeat(14_000));
       fake.launchWorker(parent, true, worker.childId);
     }
+    // The handshake starts an independent inventory recovery. Its first
+    // publication can exceed retention after history returns but before
+    // subscribe attaches. Finish that initial recovery before measuring
+    // unchanged snapshots, including its adapter-side publications.
+    let recoveryStarted!: () => void;
+    const started = new Promise<void>(resolve => { recoveryStarted = resolve; });
+    const recover = provider.reconcileBackgroundTasks!.bind(provider);
+    provider.reconcileBackgroundTasks = async (...args) => { recoveryStarted(); return recover(...args); };
+    void adapter.startEventPump();
+    await started;
+    const pending = (adapter as unknown as { backgroundPending: Set<Promise<unknown>> }).backgroundPending;
+    await Promise.all([...pending]);
+    provider.reconcileBackgroundTasks = recover;
     const listMessages = provider.listMessages.bind(provider);
     let report = 0, reporting = false, cost = 0;
     provider.listMessages = async (id, options) => {
@@ -409,6 +422,14 @@ for (const large of [false, true]) test(`real V2 unchanged parent and child snap
         const replay: ChatEvent[] = [];
         for await (const event of client.events) replay.push(event);
         resyncs.push(replay.filter(event => event.type === "resync"));
+        let browser = projectionFromSnapshot(snapshot);
+        for (const event of replay) {
+          const result = applyChatEvent(browser, event);
+          expect(result.outcome).not.toBe("gap");
+          browser = result.projection;
+        }
+        expect(new Map(browser.items.map(item => [item.id, item]))).toEqual(new Map(client.snapshot.items.map(item => [item.id, item])));
+        expect(browser.cursor).toBe(client.snapshot.cursor);
       }
       expect(resyncs).toEqual([[], [], []]);
     }

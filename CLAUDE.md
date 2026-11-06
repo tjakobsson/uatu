@@ -82,7 +82,12 @@ src/
 │                   svg-images (visibility-bound image loading and suspension),
 │                   mermaid trigger, anchors, image/binary fallbacks,
 │                   metadata card, code-block decorations
-├── sidebar/        the left pane — tree-view, panes
+├── media/          page-local controller (one source/generation/captured order),
+│                   paused preview presentation, persistent dock, and measured
+│                   viewport reservation; playback never enters personal state
+├── sidebar/        the left pane — tree-view, recent-model/recent-view
+│                   (incremental disk-write projection and windowed list),
+│                   ignored-visibility (Files options), panes
 │                   shell/render, change-overview, git-log, files-filter,
 │                   search-pane (⇧⌘F project search: pane + result model +
 │                   open-and-jump); in touch mode the whole pane stack
@@ -93,7 +98,11 @@ src/
 │                   a user-shaped `serve` gets) and output (TTY banner +
 │                   indexing status); cli.ts imports these
 ├── server/         routes (single source of truth for the HTTP route
-│                   table + the shared fetch fallback), watch-session
+│                   table + the shared fetch fallback), media-delivery
+│                   (indexed revision-bound range streaming) +
+│                   media-http-boundary (the narrow shared Node response writer
+│                   preserving media lengths/cancellation; other traffic keeps
+│                   the private Bun listener and HTMLBundle/upgrade semantics), watch-session
 │                   (coordinates incremental document updates and recovery),
 │                   file-observer (native recursive directory observation,
 │                   shared subscriptions and bounded discovery; Chokidar is
@@ -113,8 +122,9 @@ src/
 │                   sweep: changed files, commit log, repo metadata),
 │                   language detection
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
-├── ignore/         engine + config (the `.uatu.json ignore` block — the
-│                   file's only block — and --no-gitignore)
+├── ignore/         engine + config (the `.uatu.json ignore` block — explicit
+│                   exposure excludes, narrow build/dist output includes, and
+│                   legacy initial ignored-visibility defaults)
 ├── hub/            `uatu hub` — self-hostable session server: config,
 │                   state-dir, registry (stable workspace slugs), backend
 │                   (SessionBackend seam + local-process impl), proxy

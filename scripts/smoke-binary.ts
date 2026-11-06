@@ -292,6 +292,13 @@ try {
   }
   await git(["init", "--initial-branch=main"]);
   await fs.writeFile(path.join(worktreeRepo, "README.md"), "# worktree-repo\n");
+  // An ignored generated output admitted by the same narrow policy used in
+  // production. All fixture writes stay inside the throwaway workspace.
+  const mediaBytes = Uint8Array.from({ length: 1024 * 1024 }, (_, index) => index % 251);
+  await fs.writeFile(path.join(worktreeRepo, ".gitignore"), "build/\n");
+  await fs.writeFile(path.join(worktreeRepo, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"] } }));
+  await fs.mkdir(path.join(worktreeRepo, "build/renders"), { recursive: true });
+  await fs.writeFile(path.join(worktreeRepo, "build/renders/smoke.wav"), mediaBytes);
   await git(["add", "."]);
   await git(["commit", "-m", "initial"]);
   const registeredRepo = await fetch(`${BASE}/api/hub/workspaces`, {
@@ -303,6 +310,36 @@ try {
   if (!registeredRepo.ok || !repoWorkspace.id) {
     fail(`registering the worktree smoke fixture repo returned ${registeredRepo.status}: ${JSON.stringify(repoWorkspace).slice(0, 200)}`);
   } else {
+    const mediaSession = `${BASE}/s/${encodeURIComponent(repoWorkspace.id)}/`;
+    type MediaState = { epoch: string; roots: { docs: { rootId: string; relativePath: string; revision: number }[] }[] };
+    let mediaIdentity: { epoch: string; rootId: string; relativePath: string; revision: number } | undefined;
+    const deadline = Date.now() + 10_000;
+    while (!mediaIdentity && Date.now() < deadline) {
+      const state = await fetch(`${mediaSession}api/state`, { headers: cookie }).then(response => response.json()) as MediaState;
+      const doc = state.roots?.flatMap(root => root.docs).find(doc => doc.relativePath === "build/renders/smoke.wav");
+      if (doc && state.epoch) mediaIdentity = { ...doc, epoch: state.epoch };
+      else await sleep(50);
+    }
+    if (!mediaIdentity) throw new BootFailure("compiled child did not index the narrow ignored media output");
+    const mediaUrl = new URL("api/media", mediaSession);
+    mediaUrl.search = new URLSearchParams({ rootId: mediaIdentity.rootId, path: mediaIdentity.relativePath, epoch: mediaIdentity.epoch, revision: String(mediaIdentity.revision) }).toString();
+    if ((await fetch(mediaUrl)).status !== 401) throw new BootFailure("compiled Hub media route did not enforce authentication");
+    for (const variant of ["full", "range", "head"] as const) {
+      const response = await fetch(mediaUrl, { method: variant === "head" ? "HEAD" : "GET", headers: { ...cookie, ...(variant !== "full" ? { range: "bytes=7-18" } : {}) } });
+      const body = new Uint8Array(await response.arrayBuffer());
+      const expected = variant === "head" ? new Uint8Array() : variant === "range" ? mediaBytes.subarray(7, 19) : mediaBytes;
+      const length = variant === "range" ? 12 : mediaBytes.length;
+      if (response.status !== (variant === "range" ? 206 : 200)
+        || response.headers.get("content-type") !== "audio/wav"
+        || response.headers.get("content-length") !== String(length)
+        || response.headers.get("accept-ranges") !== "bytes"
+        || response.headers.has("content-encoding")
+        || (variant === "range" && response.headers.get("content-range") !== `bytes 7-18/${mediaBytes.length}`)
+        || !Buffer.from(body).equals(Buffer.from(expected))) {
+        throw new BootFailure(`compiled Hub media ${variant} response violated its internal byte/range/HEAD contract (${response.status})`);
+      }
+    }
+    pass("compiled Hub and child authenticate ignored media and preserve full/range/HEAD bytes and headers");
     const created = await fetch(`${BASE}/api/hub/worktrees/create`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${sessionId}` },
@@ -400,7 +437,7 @@ try {
     await expect(page.locator("#connection-state .connection-label"))
       .toHaveText("Connected", { timeout: 10_000 });
     await expect(page.locator("#document-count"))
-      .not.toHaveText("0 files", { timeout: 10_000 });
+      .not.toHaveText("0", { timeout: 10_000 });
 
     const documentCount = (await page.locator("#document-count").textContent())?.trim() ?? "";
     const connectionLabel = (await page.locator(".connection-label").textContent())?.trim() ?? "";
@@ -411,7 +448,7 @@ try {
       pass("SPA loaded with no page errors");
     }
 
-    const countMatch = documentCount.match(/^(\d+)\s+files?/);
+    const countMatch = documentCount.match(/^(\d+)$/);
     const reportedCount = countMatch ? Number.parseInt(countMatch[1]!, 10) : 0;
     if (reportedCount === 0) {
       fail(`SPA never populated #document-count (got "${documentCount}")`);

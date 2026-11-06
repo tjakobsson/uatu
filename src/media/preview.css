@@ -1,0 +1,5 @@
+.media-preview { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; padding: 1rem; }
+.media-preview h2, .media-preview p, .media-preview-element { flex-basis: 100%; overflow-wrap: anywhere; }
+.media-preview video { display: block; max-width: 100%; max-height: 60vh; margin-inline: auto; }
+.media-preview audio { width: min(100%, 40rem); }
+.media-preview button, .media-preview a { min-height: 44px; padding: .5rem 1rem; }

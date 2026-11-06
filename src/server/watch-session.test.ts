@@ -760,7 +760,10 @@ test("repository failure preserves file progress for scoped subscribers", async 
     expect(unscoped.scope).toEqual({ kind: "folder" });
     expect(scoped.roots[0]!.docs[0]!.revision).toBeGreaterThan(before.roots[0]!.docs[0]!.revision);
     expect(unscoped.roots).toEqual(scoped.roots);
-    expect(unscoped.changedId).toBe(file);
+    // File delivery does not wait for Git-ignore classification. Follow intent
+    // arrives separately once eligibility is known.
+    expect(unscoped.changedId).toBeNull();
+    await waitUntil(() => session.getStatePayload().latestChange?.id === file);
     fail = false;
     repoGate.resolve();
     await Promise.all([pinned.cancel(), folder.cancel()]);

@@ -15,7 +15,7 @@ import { setFilesPaneFilter, syncFilesPaneFilterControl } from "../sidebar/files
 import { adoptCompareTarget } from "../sidebar/change-overview";
 import { setPaneState } from "../sidebar/panes";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
-import { isFollowableFile, type StatePayload } from "../shared/types";
+import { isPreviewableFile, type StatePayload } from "../shared/types";
 import { applyViewMode } from "../preview/view-mode";
 import { renderBuildBadge } from "./connection";
 import { adoptBootSnapshot, connectEvents } from "./events";
@@ -33,6 +33,8 @@ import {
 import { applyWatchContext } from "../shared/watch-context";
 import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId, setPendingDocumentPath } from "./selection";
 import { readSelectionCleared } from "./selection-storage";
+import { setShowIgnored } from "./ignored-visibility";
+import { resolveIgnoredVisibility } from "./ignored-default";
 import {
   commitPreviewParamsFromUrl,
   renderCommitPreview,
@@ -59,11 +61,12 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
     loadPersonalWorkspaceState(),
   ]);
   let payload = (await response.json()) as StatePayload;
+  setShowIgnored(resolveIgnoredVisibility(personalState.showIgnored, payload.initialShowIgnored));
 
   const requestedPath = urlRelativePath || personalState.documentPath;
   if (requestedPath) {
     const url = applyWatchContext(new URL(appUrl(`/api/state?documentPath=${encodeURIComponent(requestedPath)}`), window.location.href), {
-      scope: payload.scope, compareTarget: payload.compareTarget,
+      scope: payload.scope, compareTarget: payload.compareTarget, showIgnored: appState.showIgnored,
     });
     const resolved = await fetch(url, { cache: "no-store" });
     if (resolved.ok) payload = await resolved.json() as StatePayload;
@@ -71,9 +74,9 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
 
   adoptCompareTarget(personalState.compareTarget ?? "base");
   if (personalState.previewMode) applyViewMode(personalState.previewMode);
-  if (payload.compareTarget !== appState.compareTarget) {
+  if (payload.compareTarget !== appState.compareTarget || (payload.showIgnored ?? true) !== appState.showIgnored) {
     const contextualResponse = await fetch(applyWatchContext(new URL(appUrl("/api/state"), window.location.href), {
-      scope: payload.scope, compareTarget: appState.compareTarget,
+      scope: payload.scope, compareTarget: appState.compareTarget, showIgnored: appState.showIgnored,
     }));
     if (contextualResponse.ok) payload = (await contextualResponse.json()) as StatePayload;
   }
@@ -108,9 +111,9 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
     const savedDocument = personalState.documentPath
       ? findDocumentByRelativePath(personalState.documentPath)
       : null;
-    // A saved image is restored like a document: Follow may have left the
-    // user on it (Rule C), and a reload must not drop it.
-    setSelectedId(savedDocument && isFollowableFile(savedDocument) ? savedDocument.id : payload.defaultDocumentId);
+    // Saved images and recognized media are valid preview destinations.
+    // Media restoration prepares a paused preview, never an audition session.
+    setSelectedId(savedDocument && isPreviewableFile(savedDocument) ? savedDocument.id : payload.defaultDocumentId);
     setPreviewMode({ kind: "document" });
   } else if (!urlRelativePath) {
     // A fragment-bearing root URL is explicit navigation. Render the session
@@ -121,9 +124,8 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   } else {
     setFollowEnabled(false);
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
-    if (requestedDoc && isFollowableFile(requestedDoc)) {
-      // Direct link to a known document or previewable image (the URL a
-      // followed image left in the address bar) — force follow off (Rule
+    if (requestedDoc && isPreviewableFile(requestedDoc)) {
+      // Direct link to a known document, image, or recognized media — force follow off (Rule
       // "URL direct links force OFF on boot") and override the
       // server-provided default selection.
       setSelectedId(requestedDoc.id);

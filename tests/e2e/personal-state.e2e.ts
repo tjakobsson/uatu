@@ -18,6 +18,23 @@ async function expectSavedDocument(request: APIRequestContext, documentPath: str
 }
 
 test.describe("personal workspace resume state", () => {
+  test("Recent persists without steering another open client's Files view or explicit preview", async ({ browser, page, request, baseURL }) => {
+    await standardBeforeEach(page, request);
+    const secondContext = await browser.newContext();
+    try {
+      const second = await secondContext.newPage();
+      await second.goto(`${baseURL}/README.md`);
+      await expect(second.locator("#files-pane-filter-all")).toHaveAttribute("aria-checked", "true");
+      await page.locator("#files-pane-filter-recent").click();
+      await expect.poll(async () => (await (await request.get("/api/personal-state")).json()).filesFilter).toBe("recent");
+      await expect(second.locator("#files-pane-filter-all")).toHaveAttribute("aria-checked", "true");
+      await second.reload();
+      await expect(second.locator("#files-pane-filter-recent")).toHaveAttribute("aria-checked", "true");
+      await expect(second.locator("#preview-path")).toHaveText("README.md");
+    } finally {
+      await secondContext.close();
+    }
+  });
   test("workspace root resumes the saved document while an explicit document URL wins", async ({
     page,
     request,

@@ -124,6 +124,16 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     await page.locator("#search-query").fill("child-checkout-marker");
     await expect(page.locator(".search-hit")).toHaveCount(1);
     await expect(page.locator(".search-file")).toContainText("CHILD.md");
+    await expect(page.locator("#search-summary")).toHaveText("1 result · 1 file");
+    await expect(page.locator("#search-notice")).toBeHidden();
+    await page.locator(".search-hit").click();
+    await surface(page, "Preview");
+    await expect(page.locator("#preview-path")).toHaveText("CHILD.md");
+    await expect.poll(() => page.evaluate(() => {
+      const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights;
+      return [...registry.get("uatu-find-current") ?? []][0]?.toString();
+    })).toBe("child-checkout-marker");
+    await surface(page, "Files");
     await expect(page.locator("#change-overview")).toContainText("feature/browser");
     await expect(page.locator("#git-log")).toContainText("child-only-commit");
     const state = await page.request.get(`/s/${child.workspaceId}/api/state`).then(r => r.json());

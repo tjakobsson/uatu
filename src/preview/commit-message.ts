@@ -11,6 +11,7 @@ import { clearPreviewType } from "./header";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { hideViewToggle } from "./view-mode";
 import { commitAgesRendered, commitBylineHtml } from "../shell/commit-ages";
+import { releaseMediaPreview } from "../media/preview";
 
 const previewTitleElementMaybe = document.querySelector<HTMLElement>("#preview-title");
 const previewPathElementMaybe = document.querySelector<HTMLElement>("#preview-path");
@@ -39,6 +40,7 @@ export function renderCommitMessage(
   repository: RepositorySnapshot,
   commit: RepositorySnapshot["commitLog"][number],
 ) {
+  releaseMediaPreview();
   closeMermaidViewer();
   previewTitleElement.textContent = commit.subject;
   previewPathElement.textContent = `${repository.label} · ${commit.sha}`;
