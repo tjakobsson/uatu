@@ -32,6 +32,191 @@ import { LiveBroker } from "../hub/live-broker";
 import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
 
+test("compact worker evidence reads a complete large source once without display pagination or output", async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const workers: ConversationItem[] = Array.from({ length: 290 }, (_, i) => ({ type: "background_task", id: `task:${i}`, taskId: String(i), description: "Fixture", createdAt: i + 1,
+    status: i < 285 ? "completed" : "running", activity: { kind: i < 285 ? "ended" : "checking", executionId: `execution:${i}` } }));
+  const completeItems: ConversationItem[] = [
+    ...Array.from({ length: 2100 }, (_, i) => ({ type: "tool" as const, id: `ordinary:${i}`, name: "read", status: "completed" as const, createdAt: i + 1, output: i === 0 ? "x".repeat(4 * 1024 * 1024 + 1) : "fixture" })), ...workers,
+  ];
+  const reads = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: completeItems.slice(-1), completeItems, accounting: [], nextCursor: "older" }));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try {
+    const evidence = await adapter.workerEvidence("parent");
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(evidence).toMatchObject({ version: 1, conversationId: "parent", complete: true });
+    expect(evidence.entries).toHaveLength(290);
+    expect(evidence.entries.filter(item => item.dismissible)).toHaveLength(285);
+    expect(JSON.stringify(evidence).length).toBeLessThan(100_000);
+    expect(JSON.stringify(evidence)).not.toContain("output");
+  } finally { reads.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact worker evidence retains the real V2 covered-source owner for long history and large output", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Compact evidence")).id;
+    const worker = fake.launchRequestWorker(parent);
+    fake.settleWorker(worker.childId, "completed", "x".repeat(4 * 1024 * 1024 + 1));
+    for (let i = 0; i < 10; i++) fake.appendHistory(parent, 120);
+    const read = spyOn(provider, "listMessages");
+    try {
+      const snapshot = await adapter.workerEvidence(parent);
+      expect(snapshot.complete).toBe(true);
+      expect(snapshot.entries.length).toBeGreaterThan(0);
+      expect(snapshot.entries.every(item => item.dismissible && !item.active)).toBe(true);
+      expect(JSON.stringify(snapshot).length).toBeLessThan(10_000);
+      expect(read.mock.calls.filter(([id]) => id === parent)).toHaveLength(1);
+    } finally { read.mockRestore(); }
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 30_000);
+
+test("compact evidence refuses incomplete fallback pages and source contradictions", async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  let reads = 0;
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: [], accounting: [], nextCursor: `older:${++reads}` }));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try {
+    await expect(adapter.workerEvidence("parent")).rejects.toThrow("read budget");
+    expect(reads).toBe(20);
+    const item: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "same" } };
+    read.mockImplementation(async () => ({ items: [], completeItems: [item, { ...item, id: "task:two", status: "failed" }], accounting: [] }));
+    await expect(adapter.workerEvidence("parent")).rejects.toThrow("ambiguous");
+  } finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+for (const source of ["fallback", "complete", "recovery", "page"] as const) for (const activeFirst of [false, true]) test(`compact source refuses contradictory same-ID rows before dedup (${source}, active first: ${activeFirst})`, async () => {
+  const ended: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "exact" } };
+  const active: BackgroundTaskItem = { ...ended, status: "running", activity: { kind: "working", executionId: "exact" } };
+  const rows = activeFirst ? [active, ended] : [ended, active];
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const read = spyOn(provider, "listMessages").mockImplementation(async (_id, options) => source === "page" ? { items: rows.slice(0, 1), completeItems: rows.slice(1), accounting: [] } : source === "recovery" ? { items: [], completeItems: [], accounting: [] } : source === "complete"
+    ? { items: rows.slice(-1), completeItems: rows, accounting: [] }
+    : options.cursor ? { items: rows.slice(0, 1), accounting: [] } : { items: rows.slice(1), accounting: [], nextCursor: "older" });
+  if (source === "recovery") Object.assign(provider, { reconcileBackgroundTasks: async () => rows });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { await expect(adapter.workerEvidence("parent")).rejects.toThrow("ambiguous"); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact source coalesces compatible history duplicates without losing newer owned recovery activity", async () => {
+  const task: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "exact", observedAt: 2 } };
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: [task], completeItems: [task, { ...task, description: "Enriched", activity: { ...task.activity!, observedAt: 3 } }], accounting: [] }));
+  Object.assign(provider, { reconcileBackgroundTasks: async () => [{ ...task, status: "running", activity: { kind: "working", executionId: "exact" } }] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { expect((await adapter.workerEvidence("parent")).entries).toEqual([expect.objectContaining({ executionId: "exact", active: true, dismissible: false })]); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+for (const recovery of ["empty", "failed", "positive"] as const) for (const kind of ["working", "needs-answer", "checking", "session-active"] as const) test(`compact source strength survives older retained terminal state (${kind}, recovery ${recovery})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  const terminal: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "native-one", description: "Fixture", createdAt: 1, status: "completed", activity: { kind: "ended", executionId: "exact", generation: 1, launchRef: "launch:one" } };
+  try {
+    const parent = (await provider.createSession("Source precedence fixture")).id;
+    await adapter.history(parent); // Finish independent stream/bootstrap recovery first.
+    const current: BackgroundTaskItem = { ...terminal, status: "running", activity: { ...terminal.activity!, kind, ...(kind === "needs-answer" ? { request: { kind: "question" as const, id: "request" } } : {}) } };
+    provider.listMessages = async () => ({ items: [current], completeItems: [current], accounting: [] });
+    provider.reconcileBackgroundTasks = async () => { if (recovery === "failed") throw new Error("synthetic unavailable recovery"); return recovery === "positive" ? [current] : []; };
+    adapter.projectionForTests(parent).upsert(terminal);
+    expect((await adapter.workerEvidence(parent)).entries).toEqual([expect.objectContaining({ executionId: "exact", active: kind === "working" || kind === "needs-answer", dismissible: false })]);
+  } finally { await adapter.dispose(); await fake.stop(); }
+});
+
+for (const weakening of ["ended", "unavailable", "different-execution", "weak-supersession"] as const) test(`compact source strength refuses weaker recovery without newer authority (${weakening})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Weaker recovery fixture")).id;
+    await adapter.history(parent); // Isolate this read from independent bootstrap publication.
+    const source: BackgroundTaskItem = { type: "background_task", id: "task:one", taskId: "native-one", toolUseId: "call", description: "Fixture", createdAt: 1, status: "running", activity: { kind: "working", executionId: "exact", generation: 1 } };
+    const recovered: BackgroundTaskItem = weakening === "unavailable" ? { ...source, activity: { ...source.activity!, kind: "unavailable" } }
+      : { ...source, status: "completed", ...(weakening === "weak-supersession" ? { id: "task:other", taskId: "native-other" } : {}), activity: { ...source.activity!, kind: "ended", executionId: weakening === "different-execution" || weakening === "weak-supersession" ? "other" : "exact" } };
+    provider.listMessages = async () => ({ items: [source], completeItems: [source], accounting: [] });
+    provider.reconcileBackgroundTasks = async () => [recovered];
+    adapter.projectionForTests(parent).upsert(source);
+    await expect(adapter.workerEvidence(parent)).rejects.toThrow("weakened");
+    expect(adapter.projectionForTests(parent).get(source.id)).toMatchObject({ status: "running", activity: { kind: "working", executionId: "exact" } });
+    if (weakening === "ended") {
+      provider.listMessages = async () => ({ items: [recovered], completeItems: [recovered], accounting: [] });
+      expect((await adapter.workerEvidence(parent)).entries).toEqual([expect.objectContaining({ executionId: "exact", active: false, dismissible: true })]);
+    }
+  } finally { await adapter.dispose(); await fake.stop(); }
+});
+
+test("compact fallback retains every page currentness guard until publication", async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  let reads = 0, changed = false;
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => {
+    const page = reads++;
+    if (page === 2) changed = true;
+    return { items: [], accounting: [], ...(page < 2 ? { nextCursor: `older:${page}` } : {}), isWorkerSourceCurrent: () => page !== 1 || !changed };
+  });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { await expect(adapter.workerEvidence("parent")).rejects.toThrow(); expect(reads).toBe(3); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact fallback never discards an older page's association contradiction", async () => {
+  const task: BackgroundTaskItem = { type: "background_task", id: "task:fixture", taskId: "fixture", description: "Fixture", createdAt: 1, childConversationId: "child", status: "completed", activity: { kind: "ended", executionId: "exact" } };
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+  const read = spyOn(provider, "listMessages").mockImplementation(async () => ({ items: [task], completeItems: [task], accounting: [], workerAssociationContradictions: ["child"] }));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try {
+    expect((await adapter.workerEvidence("parent")).entries).toEqual([]);
+    read.mockImplementation(async (_id, options) => options.cursor
+      ? { items: [task], accounting: [], workerAssociationContradictions: ["child"] }
+      : { items: [], accounting: [], nextCursor: "older" });
+    // The fallback refuses source-scoped provenance rather than authorizing a
+    // worker whose association the older page explicitly contradicts.
+    await expect(adapter.workerEvidence("parent")).rejects.toThrow("provenance requires complete source coverage");
+  } finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+for (const owner of ["first", "older"] as const) for (const metadata of [
+  { hiddenWorkerResultIds: ["hidden-result"] },
+  { workerAssociationContradictions: ["child"] },
+  { workerResultFallbacks: [] },
+  { workerOriginCoverage: [] },
+  { revertVisibility: { boundaryId: null, state: { staged: false, canUndo: false, canRedo: false, revertedMessages: [] }, excludedItemIds: [] } },
+  { deliveryHistoryIncomplete: true },
+  { visibleDescendantsIncomplete: true },
+  { sessionCostUsd: 1 },
+  { workerSource: { isCurrent: () => true, retain: () => { throw new Error("must refuse opaque provenance"); } } },
+  { accounting: [{ messageId: "message", role: "assistant" }] },
+]) test(`compact fallback refuses ${owner}-page ${Object.keys(metadata)[0]} instead of dropping provenance`, async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];
+  const page = (older: boolean): ProviderHistoryPage => ({ items: [], accounting: [], ...(!older ? { nextCursor: "older" } : {}), ...((owner === "older") === older ? metadata : {}) }) as ProviderHistoryPage;
+  const read = spyOn(provider, "listMessages").mockImplementation(async (_id, options) => page(Boolean(options.cursor)));
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  try { await expect(adapter.workerEvidence("parent")).rejects.toThrow("provenance requires complete source coverage"); }
+  finally { read.mockRestore(); await adapter.dispose(); }
+});
+
+test("compact V2 evidence retries a changed owned source rather than publishing stale facts", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Changed compact evidence")).id;
+    const worker = fake.launchRequestWorker(parent);
+    fake.settleWorker(worker.childId, "completed", "Fixture");
+    const list = provider.listMessages.bind(provider); let reads = 0;
+    provider.listMessages = async (id, options) => {
+      const page = await list(id, options);
+      if (id === parent && ++reads === 1) return { ...page, isWorkerSourceCurrent: () => false };
+      return page;
+    };
+    const snapshot = await adapter.workerEvidence(parent);
+    expect(reads).toBe(2); expect(snapshot.entries.length).toBeGreaterThan(0);
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 30_000);
+
 for (const action of ["remove", "replace", "upsert", "seed", "evict"] as const)
 test(`fallback result source authority retires projection provenance on ${action}`, async () => {
   const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent"), fixtureSession("other")];

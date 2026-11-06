@@ -87,6 +87,21 @@ Alt/Option+Enter for Queue. Attachment and configuration controls stay inline;
 the existing picker and header options retain their own actions. Geometry
 continues through the measured work dock/viewport and coordinated scroll owner.
 
+### Personal worker dismissal batches
+
+The Workers action sends one conditional group to the Hub's personal dismissal
+resource. The store admits every exact target before its workspace lifecycle
+lane, validates the group against one compact complete child evidence read, and
+atomically saves the selected changes together. Trusted activity during a save
+still retires affected marks; client observation fences keep active work visible.
+Singleton dismiss/retire ordering and the version-1 private store remain unchanged.
+The child reuses the adapter's owned current-history read and provider complete
+coverage, not a cached browser projection. Transcript text and tool output never
+enter the compact evidence response. Legacy incomplete sources retain a bounded
+fallback and fail closed on exhaustion. See
+[the dismissal protocol guide](api/guides/worker-dismissals.md) for bounds,
+failure behavior and remaining provider-read costs.
+
 ## The 30-second map
 
 ```mermaid

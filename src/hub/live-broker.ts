@@ -253,6 +253,10 @@ function recordUpstreamFailure(record: LiveUpstreamDiagnostic): void {
 
 export const LIVE_LINGER_MS = 3_000;
 export const LIVE_REPLAY_BUFFER_BYTES = 256 * 1024;
+// A child read can contain a whole normalization/replay burst. Let outbound
+// response pulls and socket I/O drain between batches instead of filling a
+// reading client's bounded queue in one synchronous turn.
+const LIVE_DELIVERY_BATCH_BYTES = 64 * 1024;
 const RETRY_MIN_MS = 1_000;
 const RETRY_MAX_MS = 15_000;
 const INVENTORY_OPEN_GRACE_MS = 250;
@@ -960,6 +964,7 @@ export class LiveBroker implements PresenceSource {
       }
       const parser = new SseFrameParser();
       const reader = response.body.getReader();
+      let batchBytes = 0;
       try {
         for (;;) {
           const next = await reader.read();
@@ -979,6 +984,12 @@ export class LiveBroker implements PresenceSource {
               release();
               await reader.cancel().catch(() => undefined);
               return;
+            }
+            batchBytes += Buffer.byteLength(frame.data);
+            if (batchBytes >= LIVE_DELIVERY_BATCH_BYTES) {
+              batchBytes = 0;
+              await new Promise<void>(resolve => setImmediate(resolve));
+              if (controller.signal.aborted || subscriber.detached) return;
             }
           }
         }
@@ -1124,6 +1135,7 @@ export class LiveBroker implements PresenceSource {
       const parser = new SseFrameParser();
       const reader = response.body.getReader();
       let sawResync = false;
+      let batchBytes = 0;
       try {
         for (;;) {
           const next = await reader.read();
@@ -1135,6 +1147,12 @@ export class LiveBroker implements PresenceSource {
             if (this.handleFrame(upstream, frame)) {
               sawResync = true;
               break;
+            }
+            batchBytes += Buffer.byteLength(frame.data);
+            if (batchBytes >= LIVE_DELIVERY_BATCH_BYTES) {
+              batchBytes = 0;
+              await new Promise<void>(resolve => setImmediate(resolve));
+              if (upstream.abort !== controller || controller.signal.aborted) return;
             }
           }
           if (sawResync) break;

@@ -36,6 +36,41 @@ async function chat(page: Page, conversationId: string): Promise<void> {
   await expect(page.locator("#chat-conversation-select")).toHaveValue(conversationId);
 }
 
+test("285 finished workers dismiss in one atomic request beside five unresolved workers", async ({ hub }) => {
+  const browser = await chromium.launch();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  try {
+    const workspace = hub.workspaces[0]!;
+    const items: BackgroundTaskItem[] = Array.from({ length: 290 }, (_, i) => ({ type: "background_task", id: `bulk:${i}`, taskId: `task:${i}`, taskType: "agent", description: `Fixture worker ${i}`, createdAt: i + 1,
+      status: i < 285 ? "completed" : "running", activity: { kind: i < 285 ? "ended" : "checking", executionId: `execution:${i}`, generation: 1 } }));
+    const snapshot = await childChatControl(workspace, { action: "seed", title: "Atomic bulk dismissal", items }) as ConversationSnapshot;
+    const login = await context.newPage(); await signIn(login, hub); await login.close();
+    const page = await openSessionTab(context, workspace); await chat(page, snapshot.conversation.id); await openChatWorkers(page);
+    await expect(page.locator("[data-worker-id]")).toHaveCount(290);
+    const bodies: unknown[] = [];
+    page.on("request", request => { if (request.method() === "POST" && new URL(request.url()).pathname.endsWith("/api/personal-worker-dismissals")) bodies.push(request.postDataJSON()); });
+    await page.evaluate(() => {
+      const host = document.querySelector("#chat-compact-workers-items")!;
+      const counts: number[] = [];
+      (window as unknown as { bulkDismissalCounts: number[] }).bulkDismissalCounts = counts;
+      new MutationObserver(() => {
+        const count = host.querySelectorAll("[data-worker-id]").length;
+        if (counts.at(-1) !== count) counts.push(count);
+      }).observe(host, { childList: true, subtree: true });
+    });
+    const saved = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/api/personal-worker-dismissals"));
+    await page.getByRole("button", { name: "Dismiss finished", exact: true }).click();
+    expect((await saved).status()).toBe(200);
+    await expect(page.locator("[data-worker-id]")).toHaveCount(5);
+    expect(bodies).toHaveLength(1);
+    expect((bodies[0] as { targets: unknown[] }).targets).toHaveLength(285);
+    const counts = await page.evaluate(() => (window as unknown as { bulkDismissalCounts: number[] }).bulkDismissalCounts);
+    expect(counts.filter(count => count < 290)).toEqual([5]);
+    await page.reload(); await chat(page, snapshot.conversation.id); await openChatWorkers(page);
+    await expect(page.locator("[data-worker-id]")).toHaveCount(5);
+  } finally { await context.close(); await browser.close(); }
+});
+
 for (const engine of ["chromium", "webkit"] as const) test(`${engine}: real authenticated private dismissal convergence, activity retirement, reconnect and Hub listener/store restart`, async ({ hub, hubProcess }, info) => {
   test.setTimeout(120_000);
   const browser = await ({ chromium, webkit })[engine].launch();

@@ -51,7 +51,7 @@ export class WorkerDismissalClient {
   private retirementRunning = false;
   private read: AbortController | null = null;
   private writes = new Set<AbortController>();
-  private pendingDismissals = new Map<AbortController, DismissalAttempt>();
+  private pendingDismissals = new Map<AbortController, DismissalAttempt[]>();
   private queued = false;
   private subscription: LiveSubscriptionHandle | null = null;
   private generation: number | null = null;
@@ -137,6 +137,26 @@ export class WorkerDismissalClient {
     return this.mutate(executionId, "dismiss", aliases);
   }
 
+  async dismissMany(groups: readonly (readonly string[])[]): Promise<boolean> {
+    if (!groups.length) return true;
+    if (this.identityUnavailable || this.capacityExceeded) {
+      this.healthError = this.retirementWarning(); this.changed(); return false;
+    }
+    const unique = new Map<string, readonly string[]>();
+    const identities = new Set<string>();
+    for (const ids of groups) {
+      if (!ids[0]) { this.healthError = "Cannot save this dismissal: the worker's exact execution identity is unverified."; this.changed(); return false; }
+      for (const id of ids) {
+        identities.add(id);
+        if (identities.size > MAX_IDENTITIES) {
+          this.healthError = "Worker dismissal tracking is full. Rows remain visible; chat is still available."; this.changed(); return false;
+        }
+      }
+      unique.set(ids[0], [...new Set([...(unique.get(ids[0]) ?? []), ...ids])]);
+    }
+    return this.mutate([...unique.keys()][0]!, "dismiss", [], [...unique.values()]);
+  }
+
   observe(workers: readonly CompactWorker[]): void {
     // A later native generation cannot re-admit a replay from an older one.
     for (const worker of workers) {
@@ -195,7 +215,7 @@ export class WorkerDismissalClient {
       }
       if (!active && !ids.some(id => this.retired.has(id))) continue;
       for (const id of ids) {
-        if (active) for (const attempt of this.pendingDismissals.values()) attempt.pending.delete(id);
+        if (active) for (const attempts of this.pendingDismissals.values()) for (const attempt of attempts) attempt.pending.delete(id);
         if (!this.retired.has(id) && this.retired.size >= MAX_IDENTITIES) {
           this.capacityExceeded = true;
           this.healthError = "Worker dismissal tracking is full. Rows remain visible; chat is still available.";
@@ -263,50 +283,54 @@ export class WorkerDismissalClient {
     } finally { if (epoch === this.epoch) this.retirementRunning = false; }
   }
 
-  private async mutate(executionId: string, operation: "dismiss" | "retire", aliases: readonly string[] = []): Promise<boolean> {
+  private async mutate(executionId: string, operation: "dismiss" | "retire", aliases: readonly string[] = [], batch?: readonly (readonly string[])[]): Promise<boolean> {
     if (!this.conversation) return false;
     // A read begun before a commit must never overwrite its response.
     this.read?.abort(); this.read = null;
     const epoch = this.epoch, conversationId = this.conversation, observation = this.observationSequence, write = new AbortController();
     this.writes.add(write);
-    const identities = [...new Set([executionId, ...aliases])];
-    const attempt: DismissalAttempt = { sources: identities, pending: new Set(identities), current: true };
+    const attempts: DismissalAttempt[] = (batch ?? [[executionId, ...aliases]]).map(ids => {
+      const identities = [...new Set(ids)];
+      return { sources: identities, pending: new Set(identities), current: true };
+    });
     if (operation === "dismiss") {
       // Only in-flight feedback ownership is superseded. Durable revisions and
       // activity fences keep their existing authority; no attempt ledger remains.
-      for (const previous of this.pendingDismissals.values()) {
-        if (previous.sources.some(id => attempt.pending.has(id))) previous.current = false;
+      for (const previousGroup of this.pendingDismissals.values()) for (const previous of previousGroup) {
+        if (attempts.some(attempt => previous.sources.some(id => attempt.pending.has(id)))) previous.current = false;
       }
-      this.pendingDismissals.set(write, attempt);
+      this.pendingDismissals.set(write, attempts);
     }
     try {
       const response = await this.fetcher(path(), { method: "POST", signal: write.signal, cache: "no-store", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ version: 1, conversationId, executionId, expectedRevision: this.entries.get(executionId)?.revision ?? 0, operation }) });
+        body: JSON.stringify(batch ? { version: 1, conversationId, operation, targets: attempts.map(attempt => ({ executionId: attempt.sources[0], expectedRevision: this.entries.get(attempt.sources[0]!)?.revision ?? 0 })) }
+          : { version: 1, conversationId, executionId, expectedRevision: this.entries.get(executionId)?.revision ?? 0, operation }) });
       if (epoch !== this.epoch || write.signal.aborted) return false;
       if (response.status === 409) {
         this.queued = true;
-        if (attempt.current) this.mutationFailure(executionId, operation, operation === "dismiss"
+        for (const attempt of attempts) if (attempt.current) this.mutationFailure(attempt.sources[0]!, operation, operation === "dismiss"
           ? "Worker status changed before dismissal could be saved. Review current visibility before choosing to retry dismissal."
           : "Worker status changed before saved dismissal retirement could be confirmed. Active work stays visible.");
         return false;
       }
       if (!response.ok) throw new Error("save");
       const entries = await this.parse(response, conversationId);
+      if (batch && attempts.some(attempt => entries.get(attempt.sources[0]!)?.dismissed !== true)) throw new Error("incomplete batch save response");
       if (epoch !== this.epoch || write.signal.aborted) return false;
       this.acceptDismissals(entries, observation);
       // Concurrent full responses merge by durable per-execution revision.
       for (const [id, entry] of entries) if (entry.revision >= (this.entries.get(id)?.revision ?? -1)) this.entries.set(id, entry);
       // Clear old visibility fences only after durable success, provided no
       // positive activity arrived while this explicit action was in flight.
-      if (operation === "dismiss" && identities.every(id => attempt.pending.has(id))) {
-        for (const id of identities) this.retired.delete(id);
+      if (operation === "dismiss") for (const attempt of attempts) {
+        if (attempt.sources.every(id => attempt.pending.has(id))) for (const id of attempt.sources) this.retired.delete(id);
+        if (attempt.current) for (const id of attempt.sources) this.actionFailures.delete(id);
       }
-      if (operation === "dismiss" && attempt.current) for (const id of identities) this.actionFailures.delete(id);
       this.healthError = this.retirementWarning();
       return true;
     } catch {
       if (epoch !== this.epoch || write.signal.aborted) return false;
-      if (attempt.current) this.mutationFailure(executionId, operation, operation === "dismiss"
+      for (const attempt of attempts) if (attempt.current) this.mutationFailure(attempt.sources[0]!, operation, operation === "dismiss"
         ? "Could not save worker dismissal changes. The attempt did not receive a successful save response; check current visibility before retrying. Chat remains available."
         : "Could not save worker dismissal changes. Chat remains available; this change is not confirmed across devices.");
       return false;

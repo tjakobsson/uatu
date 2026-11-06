@@ -702,6 +702,141 @@ describe("chat lifecycle recovery", () => {
     installLiveChannelForTests(null);
   });
 
+  test("a slow conversation resync recovers across an invalidation burst and wake-up on the one live channel", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    // The page under test is on screen: a hide is a release now, and a
+    // document that reports itself hidden would gate every recovery.
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+
+    const conversationSelect = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selectedConversation = "";
+    Object.defineProperty(conversationSelect, "value", {
+      configurable: true,
+      get: () => selectedConversation,
+      set: value => { selectedConversation = String(value); },
+    });
+
+    // Every EventSource the page constructs, whoever asks for it.
+    const sources: FakeLiveSource[] = [];
+    Reflect.set(globalThis, "EventSource", class {
+      constructor(url: string) {
+        const source = new FakeLiveSource(url);
+        sources.push(source);
+        return source;
+      }
+    });
+    const posts: { url: string; body: unknown }[] = [];
+    let snapshots = 0;
+    const refreshing = Promise.withResolvers<void>();
+    const fetcher = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/api/hub/live/")) {
+        posts.push({ url, body: JSON.parse(String(init?.body)) });
+        return Response.json({ ok: true });
+      }
+      if (url.endsWith("/api/chat/status")) {
+        return Response.json({ agents: [{
+          agent: { id: "test", name: "Test" },
+          availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
+        }] });
+      }
+      if (url.endsWith("/api/chat/conversations")) return Response.json({ conversations: [conversation("one")] });
+      if (url.includes("/api/chat/conversations/one")) {
+        snapshots += 1;
+        if (snapshots === 2) await refreshing.promise;
+        return Response.json({ ...snapshot("one"), cursor: `cursor-one-${snapshots}` });
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 404 });
+    };
+
+    const { installLiveChannelForTests, liveChannel, watchPageLifecycle, disposeLiveChannel } = await import("../shell/live");
+    const { createLiveChannel } = await import("../shell/live-channel");
+    const { ChatApiClient } = await import("./client");
+    installLiveChannelForTests(null);
+    const channel = createLiveChannel({
+      ws: null,
+      activity: false,
+      openSource: url => new (globalThis as unknown as { EventSource: new (url: string) => FakeLiveSource }).EventSource(url),
+      fetcher,
+    });
+    installLiveChannelForTests(channel);
+    watchPageLifecycle();
+    // As boot does: the shell opens the one stream before chat comes up.
+    liveChannel().connect();
+    expect(sources).toHaveLength(1);
+
+    const { initChat } = await import(`./ui.ts?slow-resync-burst-ui-test=${Date.now()}`);
+    initChat(new ChatApiClient(fetcher, liveChannel));
+
+    const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+    await waitUntil(
+      () => conversationSelect.value === "one" && !form.hidden && channel.subscriptions().some(sub => sub.topic === "conversation"),
+      () => document.querySelector("#chat-state")?.textContent ?? "no chat state",
+    );
+    expect(channel.subscriptions()).toEqual([
+      { topic: "inventory" },
+      { topic: "conversation", key: "one", cursor: "cursor-one-1" },
+    ]);
+
+    // The stream says hello: the subscriptions made meanwhile are sent as
+    // control changes on the open stream, not as connections.
+    sources[0]!.hello("s1");
+    await waitUntil(() => posts.length === 1);
+    expect(posts[0]!.url).toBe("/api/hub/live/s1/subscriptions");
+    expect(sources).toHaveLength(1);
+
+    // Reproduce the visible interruption while the replacement snapshot is
+    // still pending. Inventory invalidations can arrive in a dismissal burst;
+    // none may prevent this conversation from attaching again after recovery.
+    const status = document.querySelector<HTMLElement>("#chat-state")!;
+    sources[0]!.live({ ws: "e2e", topic: "conversation", key: "one", cursor: "cursor-one-1", event: { kind: "unavailable" } });
+    expect(status.textContent).toContain("Chat connection interrupted; reconnecting");
+    sources[0]!.live({ ws: "e2e", topic: "conversation", key: "one", cursor: "cursor-one-1", event: { kind: "resync" } });
+    await waitUntil(() => snapshots === 2);
+    await waitUntil(() => document.querySelector(".uatu-loading-label")?.textContent === "Updating conversation...");
+    expect(status.textContent).toContain("Chat connection interrupted; reconnecting");
+    for (let i = 0; i < 285; i++) {
+      sources[0]!.live({ ws: "e2e", topic: "inventory", cursor: "", event: { kind: "data", data: { type: "conversation.inventory" } } });
+    }
+    expect(channel.subscriptions().some(sub => sub.topic === "conversation")).toBe(false);
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.closed).toBe(false);
+
+    // A wake-up burst replaces the one source exactly once, presenting every
+    // retained cursor. The pending snapshot does not block that replacement.
+    window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    await Bun.sleep(5);
+    expect(sources).toHaveLength(2);
+    expect(sources[0]!.closed).toBe(true);
+    expect(sources[1]!.closed).toBe(false);
+    const query = new URL(sources[1]!.url, "http://hub.invalid").searchParams;
+    expect(query.get("reconnect")).toBe("1");
+    expect(JSON.parse(query.get("subs")!)).toEqual([
+      { topic: "inventory" },
+    ]);
+
+    sources[1]!.hello("s2");
+    refreshing.resolve();
+    await waitUntil(() => channel.subscriptions().some(sub => sub.topic === "conversation" && sub.cursor === "cursor-one-2"));
+    await waitUntil(() => posts.some(post => post.url === "/api/hub/live/s2/subscriptions"
+      && JSON.stringify(post.body).includes("cursor-one-2")));
+    sources[1]!.live({ ws: "e2e", topic: "conversation", key: "one", cursor: "cursor-one-2", event: { kind: "ready" } });
+    await waitUntil(() => !status.textContent?.includes("interrupted"));
+    await waitUntil(() => document.querySelector("#chat-timeline")!.getAttribute("aria-busy") !== "true");
+    await waitUntil(() => !document.querySelector(".uatu-loading-label"));
+    expect(snapshots).toBe(2);
+    expect(sources).toHaveLength(2);
+
+    window.dispatchEvent(new Event("pagehide"));
+    disposeLiveChannel();
+    installLiveChannelForTests(null);
+  });
+
   test("an unpersisted pagehide keeps Chat subscribed: a return to visible delivers again and the draft survives", async () => {
     // iOS backgrounding a home-screen page: `pagehide` with `persisted:
     // false` — the shape of a discard — and then the same document runs

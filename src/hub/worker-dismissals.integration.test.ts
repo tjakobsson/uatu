@@ -16,6 +16,7 @@ import { compactWorkers } from "../chat/compact-work";
 import { WorkerDismissalClient, visibleWorkers } from "../chat/worker-dismissal-client";
 import { workerDismissalIdentities } from "../chat/worker-dismissal-identity";
 import { workerDismissalEvidenceForItem } from "./worker-dismissals-observation";
+import { compactWorkerEvidence } from "../chat/worker-dismissal-evidence";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -146,8 +147,10 @@ async function fixture() {
   const child = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     if (request.method !== "GET") { nativeMutations++; return new Response(null, { status: 405 }); }
     const url = new URL(request.url); reads++;
-    if (url.pathname !== "/s/project/api/chat/conversations/opencode%3Aparent" || url.searchParams.get("t") !== "synthetic-token") return new Response(null, { status: 404 });
-    const response = Response.json({ conversation: { id: foreign ? "opencode:foreign" : "opencode:parent", title: "Synthetic", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } }, configuration: {}, generation: "synthetic", cursor: "synthetic-cursor", items: [...items, ...extraItems] });
+    if (!["/s/project/api/chat/conversations/opencode%3Aparent", "/s/project/api/chat/conversations/opencode%3Aparent/worker-evidence"].includes(url.pathname) || url.searchParams.get("t") !== "synthetic-token") return new Response(null, { status: 404 });
+    const response = url.pathname.endsWith("/worker-evidence")
+      ? Response.json({ version: 1, conversationId: foreign ? "opencode:foreign" : "opencode:parent", complete: true, entries: compactWorkerEvidence(items) })
+      : Response.json({ conversation: { id: foreign ? "opencode:foreign" : "opencode:parent", title: "Synthetic", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } }, configuration: {}, generation: "synthetic", cursor: "synthetic-cursor", items: [...items, ...extraItems] });
     const blocked = nextRead; nextRead = undefined;
     if (blocked) { blocked.entered(); await blocked.waiting; }
     return response;

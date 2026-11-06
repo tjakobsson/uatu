@@ -1101,21 +1101,18 @@ export function initChat(api = new ChatApiClient()): void {
     syncDesktopWorkLayout();
   });
   let dismissalBatchFeedback: { conversationId: string; skipped: number } | null = null;
-  const dismissWorkers = async (workers: readonly CompactWorker[]) => {
+  const dismissWorkers = async (workers: readonly CompactWorker[], bulk = false) => {
     if (!projection) return;
     const conversationId = projection.conversationId;
     if (personalDismissals) {
       const eligible = workers.filter(worker => workerDismissible(checkingPresentation.worker(worker)));
       dismissalBatchFeedback = { conversationId, skipped: eligible.filter(worker => !workerExecutionIds(worker).length).length };
       syncCompactWork();
-      // Serialize this explicit batch, retaining independent per-entry revisions.
-      for (const worker of eligible) {
-        if (projection?.conversationId !== conversationId) break;
-        if (!workerDismissible(checkingPresentation.worker(worker))) continue;
-        const ids = workerExecutionIds(worker);
-        if (!ids.length) continue;
-        if (!await personalDismissals.dismiss(ids[0], ids)) break;
-      }
+      // One explicit conditional group, one durable outcome. Active observations
+      // and selection epochs stay owned by the dismissal client while it saves.
+      const groups = eligible.map(workerExecutionIds).filter(ids => ids.length);
+      if (bulk) await personalDismissals.dismissMany(groups);
+      else if (groups[0]) await personalDismissals.dismiss(groups[0][0], groups[0]);
       return;
     }
     const dismissed = new Set(presentation.dismissedSubagents[projection.conversationId] ?? []);
@@ -1126,7 +1123,7 @@ export function initChat(api = new ChatApiClient()): void {
     save(); syncCompactWork();
   };
   const compactView = compactWorkersItems ? new CompactWorkersView(compactWorkersItems, () => {
-    void dismissWorkers(compactWorkers(projection?.items ?? []).filter(worker => worker.state !== "working" && worker.state !== "unknown"));
+    void dismissWorkers(compactWorkers(projection?.items ?? []).filter(worker => worker.state !== "working" && worker.state !== "unknown"), true);
   }) : null;
   const syncCompactWork = () => {
     if (!compactWorkersList || !compactWorkersItems || !compactWorkersLabel) return;

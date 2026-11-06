@@ -101,6 +101,7 @@ export interface MultiAgentWorkspaceChatService {
   subscribeActivity(options?: { signal?: AbortSignal }): Promise<ConversationInventorySubscription>;
   createConversation(agentId?: string): Promise<AgentConversationSnapshot>;
   history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot>;
+  workerEvidence?(id: string): Promise<import("./worker-dismissal-evidence").WorkerEvidenceSnapshot>;
   subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }): Promise<{
     snapshot: AgentConversationSnapshot;
     events: ChatEventSubscription;
@@ -329,6 +330,14 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot> {
     const { agent, conversationId } = this.resolve(id);
     return this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId, options));
+  }
+
+  async workerEvidence(id: string): Promise<import("./worker-dismissal-evidence").WorkerEvidenceSnapshot> {
+    const { agent, conversationId } = this.resolve(id);
+    if (!agent.service.workerEvidence) throw new Error("authoritative worker evidence unavailable");
+    const snapshot = await agent.service.workerEvidence(conversationId);
+    if (snapshot.conversationId !== conversationId) throw new Error("authoritative conversation identity mismatch");
+    return { ...snapshot, conversationId: id };
   }
 
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }): Promise<{

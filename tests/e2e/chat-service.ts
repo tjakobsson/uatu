@@ -366,6 +366,13 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.snapshot(id);
   }
 
+  async workerEvidence(id: string): Promise<import("../../src/chat/worker-dismissal-evidence").WorkerEvidenceSnapshot> {
+    const { compactWorkerEvidence } = await import("../../src/chat/worker-dismissal-evidence");
+    const snapshot = await this.history(id);
+    const older = snapshot.olderCursor ? (await this.history(id, { cursor: snapshot.olderCursor })).items : [];
+    return { version: 1, conversationId: id, complete: true, entries: compactWorkerEvidence([...older, ...snapshot.items]) };
+  }
+
   async history(id: string, options: { cursor?: string } = {}): Promise<ConversationSnapshot> {
     if (options.cursor === "older" && this.failNextOlderHistory) {
       this.failNextOlderHistory = false;
