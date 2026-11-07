@@ -3010,33 +3010,58 @@ export function initChat(api = new ChatApiClient()): void {
       .reduce<ConversationItem | undefined>((oldest, item) => !oldest || item.createdAt < oldest.createdAt ? item : oldest, undefined);
     try {
       return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id, pendingEntry); }, async signal => {
-        const ownsRead = () => !signal.aborted && token === selectionGeneration && projection === current
-          && projectionEpoch === epoch && activeConversationId() === id && composer.historyBusy(id) === historyBusy;
+        // Inventory may replace only the summary wrapper while this read is
+        // pending. Live events may advance content too; the final snapshot
+        // must cover their cursor. Local changes without that evidence still
+        // invalidate the read. Neither change grants new selection ownership.
+        const ownsRead = () => !signal.aborted && token === selectionGeneration && projection?.conversationId === id
+          && projection.generation === current.generation && (projection.sequence > current.sequence
+            || projection.cursor === current.cursor && projection.status === current.status && projection.items === current.items
+              && projection.queued === current.queued && projection.configuration === current.configuration && projection.acceptedDrafts === current.acceptedDrafts)
+          && projectionEpoch === epoch
+          && activeConversationId() === id && composer.historyBusy(id) === historyBusy;
         let snapshot = await api.snapshot(id, undefined, signal);
         if (!ownsRead()) return false;
-        const head = snapshot;
-        if (head.generation === current.generation && projectionFromSnapshot(head).sequence < current.sequence) return false;
-        const cursors = new Set<string>();
-        // Only message rows prove that paging reached a time boundary: tool
-        // launchers can be backfilled into the newest page for accounting.
-        const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.items.some(item =>
-          (item.type === "user_message" || item.type === "assistant_message") && (item.id === boundary.id || item.createdAt < boundary.createdAt)));
-        while (snapshot.olderCursor && !covered()) {
-          // Fail closed without installing a truncated view for a broken or
-          // non-convergent provider. The existing read retry keeps the draft
-          // and retained transcript. Never chase an unbounded cursor chain.
-          if (cursors.size >= 1_000 || cursors.has(snapshot.olderCursor)) return false;
-          const cursor = snapshot.olderCursor;
-          cursors.add(cursor);
-          const page = await api.snapshot(id, cursor, signal);
-          if (!ownsRead()) return false;
-          if (page.conversation.id !== id || page.generation !== head.generation || page.cursor !== head.cursor) return false;
-          snapshot = { ...head, items: prependSnapshot(projectionFromSnapshot(snapshot), page).items, olderCursor: page.olderCursor };
+        let pageReads = 0;
+        for (let pass = 0; pass < 2; pass++) {
+          const head = snapshot;
+          if (head.conversation.id !== id || head.generation === current.generation && projectionFromSnapshot(head).sequence < current.sequence) return false;
+          const cursors = new Set<string>();
+          let advanced = false;
+          // Only message rows prove that paging reached a time boundary: tool
+          // launchers can be backfilled into the newest page for accounting.
+          const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.items.some(item =>
+            (item.type === "user_message" || item.type === "assistant_message") && (item.id === boundary.id || item.createdAt < boundary.createdAt)));
+          while (snapshot.olderCursor && !covered()) {
+            if (pageReads >= 1_000 || cursors.has(snapshot.olderCursor)) return false;
+            const cursor = snapshot.olderCursor;
+            cursors.add(cursor);
+            pageReads++;
+            const page = await api.snapshot(id, cursor, signal);
+            if (!ownsRead() || page.conversation.id !== id || page.generation !== head.generation) return false;
+            if (page.cursor !== snapshot.cursor) {
+              if (pass !== 0 || projectionFromSnapshot(page).sequence <= projectionFromSnapshot(snapshot).sequence) return false;
+              advanced = true;
+            }
+            snapshot = { ...head, cursor: page.cursor, items: prependSnapshot(projectionFromSnapshot(snapshot), page).items, olderCursor: page.olderCursor };
+          }
+          if (!advanced) break;
+          // A cold native adapter publishes the older rows it first reads.
+          // Warm the entire range once, then verify one stable-cursor range.
+          // The wire has no separate source revision: monotonic advancement
+          // alone cannot distinguish page publication from a native mutation.
+          // This bounded second traversal is linear, not a retry per new page,
+          // and installs only fresh rows sharing the final replay boundary.
+          const previous = snapshot;
+          snapshot = await api.snapshot(id, undefined, signal);
+          if (!ownsRead() || snapshot.generation !== previous.generation
+            || projectionFromSnapshot(snapshot).sequence < projectionFromSnapshot(previous).sequence) return false;
         }
         if (!ownsRead() || snapshot.conversation.id !== id) return false;
+        if (snapshot.generation === projection!.generation && projectionFromSnapshot(snapshot).sequence < projection!.sequence) return false;
         snapshot = composer.checkedSnapshot(id, snapshot, pendingEntry);
         const previousStream = stream;
-        installConversationSnapshot(snapshot, current.acceptedDrafts, token, anchor.currentAnchor());
+        installConversationSnapshot(snapshot, projection!.acceptedDrafts, token, anchor.currentAnchor());
         if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
           stopConversationRefreshRecovery();
         }

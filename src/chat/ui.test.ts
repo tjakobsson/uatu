@@ -35,6 +35,120 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
+  for (const change of ["unchanged", "during-warmup", "during-verification"] as const) test(`bulk resync recovers a cold native adapter's loaded pages in linear reads at the final publication cursor: ${change}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const { ChatAdapter } = await import("./adapter");
+    const { decodeReplayCursor } = await import("./replay");
+    const answers = Array.from({ length: 200 }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Cold answer ${i}` }));
+    let deliver: ((event: import("./provider").NormalizedProviderEvent | undefined) => void) | undefined;
+    let providerReads = 0;
+    const provider = {
+      describe: () => ({ id: "test", name: "Test", capabilities: [] }),
+      getSession: async () => ({ id: "one", title: "one", directory: process.cwd(), createdAt: 1, updatedAt: 1 }),
+      getConversationConfiguration: async () => ({}),
+      listMessages: async (_id: string, options: { cursor?: string }) => {
+        if (active === cold) {
+          providerReads++;
+          if (providerReads === (change === "during-warmup" ? 2 : change === "during-verification" ? 6 : -1)) {
+            answers[199] = { ...answers[199]!, markdown: "New native answer during range recovery" };
+            deliver!({ conversationId: "one", updates: [{ kind: "upsert", item: answers[199] }], outcome: "handled", eventType: "test.native" });
+            await waitUntil(() => (cold.projectionForTests("one").get("answer:199") as { markdown?: string })?.markdown === answers[199]!.markdown);
+          }
+        }
+        const end = Number(options.cursor ?? answers.length), start = Math.max(0, end - 50);
+        return { items: answers.slice(start, end), nextCursor: start ? String(start) : undefined };
+      },
+      waitForEventStream: async () => {},
+      events: async function* (signal: AbortSignal) {
+        while (!signal.aborted) {
+          const event = await new Promise<import("./provider").NormalizedProviderEvent | undefined>(resolve => {
+            deliver = resolve;
+            signal.addEventListener("abort", () => resolve(undefined), { once: true });
+          });
+          if (event) yield event;
+        }
+      },
+    } as unknown as import("./provider").ChatProvider;
+    const warm = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    const cold = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    let active = warm;
+    const recoveryReads: ConversationSnapshot[] = [];
+    let streams = 0, installedCursor = "";
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    const api = questionApi(document);
+    api.snapshot = async (id, cursor) => {
+      const page = await active.history(id, { cursor, limit: 50 });
+      if (active === cold) recoveryReads.push(page);
+      return page;
+    };
+    api.stream = (_id, cursor, next) => { handlers = next; streams++; installedCursor = cursor; return { close() {} }; };
+    try {
+      const { initChat } = await import(`./ui.ts?cold-native-pages=${change}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => streams === 1);
+      for (const oldest of [100, 50, 0]) {
+        document.querySelector<HTMLButtonElement>("#chat-load-older")!.click();
+        await waitUntil(() => document.querySelector(`[data-chat-item-id="answer:${oldest}"]`) !== null);
+      }
+      type(document.querySelector<HTMLTextAreaElement>("#chat-input")!, "Cold recovery draft");
+      await warm.dispose();
+      active = cold;
+      handlers!.resync();
+      await waitUntil(() => streams === 2);
+      await flush();
+      expect(recoveryReads).toHaveLength(change === "during-verification" ? 10 : 8);
+      if (change === "unchanged") expect(recoveryReads.map(page => decodeReplayCursor(page.cursor)!.sequence)).toEqual([50, 100, 150, 200, 200, 200, 200, 200]);
+      expect(installedCursor).toBe(cold.projectionForTests("one").replay.latestCursor());
+      expect(document.querySelectorAll('#chat-items [data-chat-item-id^="answer:"]')).toHaveLength(200);
+      expect(document.querySelector('[data-chat-item-id="answer:5"]')?.textContent).toContain("Cold answer 5");
+      expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("Cold recovery draft");
+      if (change !== "unchanged") expect(document.querySelector('[data-chat-item-id="answer:199"]')?.textContent).toContain("New native answer during range recovery");
+    } finally { window.dispatchEvent(new Event("pagehide")); await warm.dispose(); await cold.dispose(); }
+  });
+
+  test("an uncertain steer status check accepts a snapshot covering live events delivered during its read", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const pending = deferred<ConversationSnapshot>();
+    const cursorAt = (sequence: number) => btoa(JSON.stringify({ v: 1, g: "g", s: sequence }));
+    let reads = 0, streams = 0;
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    const api = questionApi(document, { capabilities: ["steering"] });
+    api.snapshot = async id => ++reads === 1 ? { ...snapshot(id), cursor: cursorAt(0), conversation: { ...conversation(id), status: "running" } } : pending.promise;
+    api.stream = (_id, _cursor, next) => { handlers = next; streams++; return { close() {} }; };
+    api.prompt = async () => ({ messageId: "steer", pending: true, delivery: "steer", configuration: {}, automaticBackground: "unknown" });
+    try {
+      const { initChat } = await import(`./ui.ts?covered-live-status-check=${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => streams === 1);
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      submit(document.querySelector<HTMLFormElement>("#chat-composer")!, input, "Steer with uncertain outcome");
+      await waitUntil(() => reads === 2);
+      type(input, "Keep the editable draft");
+      const queued: QueuedMessage[] = [{ id: "steer", text: "Steer with uncertain outcome", queuedAt: 1, delivery: "steer" }];
+      const answer = { id: "answer:latest", type: "assistant_message" as const, createdAt: 2, markdown: "Latest answer" };
+      handlers!.event({ type: "conversation.queue", generation: "g", sequence: 1, conversationId: "one", queued, change: { kind: "steered", messageId: "steer" } }, cursorAt(1));
+      handlers!.event({ type: "item.upsert", generation: "g", sequence: 2, conversationId: "one", item: answer }, cursorAt(2));
+      pending.resolve({ ...snapshot("one"), cursor: cursorAt(2), conversation: { ...conversation("one"), status: "running" }, items: [answer], queued });
+      const warning = document.querySelector("#chat-action-feedback")!;
+      await waitUntil(() => warning.textContent!.includes("Status checked; automatic backgrounding still unconfirmed"));
+      await flush();
+      expect(reads).toBe(2);
+      expect(streams).toBe(2);
+      expect(warning.textContent).not.toContain("Status check unavailable");
+      expect(document.querySelector('[data-chat-item-id="answer:latest"]')?.textContent).toContain("Latest answer");
+      expect(document.querySelector('[data-chat-queued-id="steer"]')).not.toBeNull();
+      expect(input.value).toBe("Keep the editable draft");
+    } finally { window.dispatchEvent(new Event("pagehide")); }
+  });
+
   for (const range of ["complete", "partial", "removed-boundary", "tool-boundary"] as const) test(`bulk resync retains the loaded history range from fresh capped pages and the reading anchor: ${range}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
@@ -820,7 +934,8 @@ describe("chat reversible-history composer", () => {
     const unknown: QueuedMessage = { id: "unknown", text: "Original uncertain input", queuedAt: 1, delivery: "steer", unconfirmed: true, admissionUncertaintyId: "opaque-1" };
     const held: QueuedMessage = { id: "held", text: "Keep this queued", queuedAt: 2, delivery: "queue" };
     const unrelated: QueuedMessage = { id: "unrelated", text: "Remove this separately", queuedAt: 3, delivery: "queue" };
-    let entries = [unknown, held, unrelated], reads = 0, removes = 0;
+    let entries = [unknown, held, unrelated], reads = 0, removes = 0, snapshotSequence = 0;
+    const snapshotCursor = () => btoa(JSON.stringify({ v: 1, g: "g", s: snapshotSequence }));
     let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
     const response = deferred<Response>();
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
@@ -831,7 +946,9 @@ describe("chat reversible-history composer", () => {
     });
     // No Hub metadata, automatic preferences or background capability is needed.
     const api = questionApi(document, { capabilities: [], conversations: ["one", "two"] });
-    api.snapshot = async id => { reads++; return { ...snapshot(id), queued: id === "one" ? entries : [] }; };
+    // The authoritative snapshot includes the queue/status events already
+    // delivered below, so its replay boundary must include those events too.
+    api.snapshot = async id => { reads++; return { ...snapshot(id), cursor: snapshotCursor(), conversation: { ...conversation(id), status: id === "one" && snapshotSequence >= 2 ? "running" : "idle" }, queued: id === "one" ? entries : [] }; };
     api.stream = (_id, _cursor, handlers) => { stream = handlers; return { close() {} }; };
     api.discardUnconfirmedSteer = transport.discardUnconfirmedSteer.bind(transport);
     api.removeQueued = async (_id, messageId) => { expect(messageId).toBe("unrelated"); removes++; entries = [held]; return { removed: true }; };
@@ -864,10 +981,12 @@ describe("chat reversible-history composer", () => {
       };
       // The acknowledgement wins first; its genuine later event is not a receipt
       // confirming delivery, cancellation or non-arrival of the original input.
-      stream!.event({ type: "conversation.queue", generation: "g", sequence: 1, conversationId: "one", queued: entries, change: { kind: "removed", messageId: "unknown" } }, "cursor-one-1");
+      snapshotSequence = 1;
+      stream!.event({ type: "conversation.queue", generation: "g", sequence: 1, conversationId: "one", queued: entries, change: { kind: "removed", messageId: "unknown" } }, snapshotCursor());
       await flush();
       check();
-      stream!.event({ type: "conversation.status", generation: "g", sequence: 2, conversationId: "one", status: "running" }, "cursor-one-2");
+      snapshotSequence = 2;
+      stream!.event({ type: "conversation.status", generation: "g", sequence: 2, conversationId: "one", status: "running" }, snapshotCursor());
       await flush();
       check();
       const previousStream = stream, previousReads = reads;
