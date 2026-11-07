@@ -35,7 +35,206 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
-  for (const change of ["unchanged", "during-warmup", "during-verification"] as const) test(`bulk resync recovers a cold native adapter's loaded pages in linear reads at the final publication cursor: ${change}`, async () => {
+  for (const range of ["complete", "partial", "rewrite"] as const) test(`child bulk resync retains the loaded range, authoritative removals, draft and anchor: ${range}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const total = range === "partial" ? 100 : 60;
+    const readingId = range === "partial" ? "answer:45" : "answer:5";
+    const removedId = range === "partial" ? "answer:46" : range === "rewrite" ? "answer:59" : "answer:6";
+    const answers = Array.from({ length: total }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Child answer ${i}` }));
+    const api = taskApi(document, { items: () => [] });
+    const reads: Array<string | undefined> = [];
+    let fresh = false, childStreams = 0;
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    api.snapshot = async (id, cursor) => {
+      if (id === "one") return { ...snapshot(id), items: [{ id: "task:child", type: "background_task", taskId: "child", taskType: "local_agent", description: "Child review", status: "completed", createdAt: 1, childConversationId: "child", foreground: true }] };
+      reads.push(cursor);
+      const end = Number(cursor ?? total), start = Math.max(0, end - (fresh ? 20 : cursor ? 10 : 50));
+      return { ...snapshot(id), items: answers.slice(start, end).filter(item => !fresh || (range === "rewrite" ? item.createdAt <= 10 : item.id !== removedId)).map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item), olderCursor: start ? String(start) : undefined,
+        ...(fresh && range === "rewrite" ? { reversibleHistory: { staged: true, canUndo: true, canRedo: true, revertedMessages: [] } } : {}) };
+    };
+    api.stream = (id, _cursor, next) => { if (id === "child") { handlers = next; childStreams++; } return { close() {} }; };
+    const { TimelineAnchorController } = await import("./anchor");
+    const restore = TimelineAnchorController.prototype.restore;
+    let controller: InstanceType<typeof TimelineAnchorController> | undefined;
+    const restored: unknown[] = [];
+    TimelineAnchorController.prototype.restore = function (value) { controller = this; restored.push(value); return restore.call(this, value); };
+    try {
+      const { initChat } = await import(`./ui.ts?child-loaded-range=${range}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => document.querySelector('[data-inspect-task="child"]') !== null);
+      document.querySelector<HTMLButtonElement>('[data-inspect-task="child"]')!.click();
+      await waitUntil(() => childStreams === 1);
+      document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.click();
+      await waitUntil(() => document.querySelector(`#chat-drilldown-items [data-chat-item-id="${readingId}"]`) !== null);
+      type(document.querySelector<HTMLTextAreaElement>("#chat-input")!, "Parent draft stays private");
+      const reading = { itemId: readingId, offset: -12 };
+      controller!.restore(reading);
+      fresh = true;
+      handlers!.resync();
+      await waitUntil(() => childStreams === 2);
+      await flush();
+      expect(document.querySelector(`#chat-drilldown-items [data-chat-item-id="${readingId}"]`)?.textContent).toContain("refreshed");
+      expect(document.querySelector(`#chat-drilldown-items [data-chat-item-id="${removedId}"]`)).toBeNull();
+      expect(document.querySelectorAll('#chat-drilldown-items [data-chat-item-id^="answer:"]')).toHaveLength(range === "rewrite" ? 10 : 59);
+      expect(restored.at(-1)).toEqual(reading);
+      expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("Parent draft stays private");
+      expect(document.querySelector<HTMLSelectElement>("#chat-conversation-select")!.value).toBe("one");
+      expect(document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.hidden).toBe(range !== "partial");
+      expect(reads).toEqual(range !== "partial" ? [undefined, "10", undefined, "40", "20"] : [undefined, "50", undefined, "80", "60"]);
+    } finally { TimelineAnchorController.prototype.restore = restore; window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  for (const overlap of ["close", "child-switch", "parent-switch", "newer-refresh", "parent-refresh", "parent-undo", "page-generation"] as const) test(`child bulk resync fences its held range read: ${overlap}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const answers = Array.from({ length: 100 }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Child answer ${i}` }));
+    const held = deferred<ConversationSnapshot>(), undo = deferred<ReversibleHistoryResult>();
+    let fresh = false, heldOnce = false, childStreams = 0, parentStreams = 0, recoveryHeads = 0, undos = 0;
+    let heldPage: ConversationSnapshot | undefined;
+    let parentHandlers: Parameters<ChatApiClient["stream"]>[2], childHandlers: Parameters<ChatApiClient["stream"]>[2];
+    const api = questionApi(document, { conversations: ["one", "two"], capabilities: ["subagents", "background-tasks", "reversible-history"] });
+    api.commands = async () => [{ name: "undo", description: "Undo", argumentHint: "", kind: "local-operation" }];
+    api.undo = async () => { undos++; return undo.promise; };
+    api.snapshot = async (id, cursor) => {
+      if (id === "one" || id === "two") return { ...snapshot(id), items: ["child", "other"].map(childId => ({ id: `task:${childId}`, type: "background_task", taskId: childId, taskType: "local_agent", description: childId, status: "completed", createdAt: 1, childConversationId: childId, foreground: true })) };
+      if (id === "other") return { ...snapshot(id), items: [{ id: "other:answer", type: "assistant_message", createdAt: 1, markdown: "Other child answer" }] };
+      if (fresh && !cursor) recoveryHeads++;
+      const end = Number(cursor ?? 100), start = Math.max(0, end - (fresh ? 20 : cursor ? 10 : 50));
+      const page = { ...snapshot(id), items: answers.slice(start, end).filter(item => !fresh || item.id !== "answer:46"), olderCursor: start ? String(start) : undefined };
+      if (fresh && cursor && !heldOnce) { heldOnce = true; heldPage = page; return held.promise; }
+      return page;
+    };
+    api.stream = (id, _cursor, handlers) => {
+      if (id === "child") { childHandlers = handlers; childStreams++; }
+      if (id === "one") { parentHandlers = handlers; parentStreams++; }
+      return { close() {} };
+    };
+    const openChild = (id: string) => document.querySelector<HTMLButtonElement>(`[data-inspect-task="${id}"]`)!.click();
+    try {
+      const { initChat } = await import(`./ui.ts?child-range-owner=${overlap}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => parentStreams === 1);
+      await flush();
+      openChild("child");
+      await waitUntil(() => childStreams === 1);
+      document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.click();
+      await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="answer:45"]') !== null);
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      type(input, "Preserved parent draft");
+      fresh = true;
+      childHandlers!.resync();
+      await waitUntil(() => heldPage !== undefined);
+      expect(document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.hidden).toBe(false);
+      expect(document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.disabled).toBe(true);
+      if (overlap === "close") document.querySelector<HTMLButtonElement>("#chat-drilldown-back")!.click();
+      if (overlap === "child-switch") { openChild("other"); await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="other:answer"]') !== null); }
+      if (overlap === "parent-switch") {
+        const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+        select.value = "two"; select.dispatchEvent(new window.Event("change"));
+        await flush(); type(input, "Second parent draft");
+      }
+      if (overlap === "newer-refresh") { openChild("child"); await waitUntil(() => childStreams === 2); }
+      if (overlap === "parent-refresh") { parentHandlers!.resync(); await waitUntil(() => parentStreams === 2); }
+      if (overlap === "parent-undo") {
+        submit(document.querySelector<HTMLFormElement>("#chat-composer")!, input, "/undo");
+        await waitUntil(() => undos === 1);
+      }
+      held.resolve({ ...heldPage!, ...(overlap === "page-generation" ? { generation: "obsolete" } : {}) });
+      if (overlap === "parent-undo") {
+        await flush();
+        expect(childStreams).toBe(1);
+        undo.resolve({ outcome: "changed", state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [] }, restoredDraft: { text: "Undo draft" } });
+      }
+      if (["close", "child-switch", "parent-switch", "newer-refresh"].includes(overlap)) await Bun.sleep(150);
+      else await waitUntil(() => childStreams === 2);
+      await flush();
+      if (overlap === "close" || overlap === "parent-switch") {
+        expect(document.querySelector<HTMLElement>("#chat-drilldown")!.hidden).toBe(true);
+        expect(childStreams).toBe(1);
+      } else if (overlap === "child-switch") {
+        expect(document.querySelector('#chat-drilldown-items [data-chat-item-id="other:answer"]')).not.toBeNull();
+        expect(document.querySelector('#chat-drilldown-items [data-chat-item-id="answer:45"]')).toBeNull();
+        expect(childStreams).toBe(1);
+      } else {
+        expect(childStreams).toBe(2);
+        expect(recoveryHeads).toBe(2);
+        expect(document.querySelector('#chat-drilldown-items [data-chat-item-id="answer:45"]')).not.toBeNull();
+        expect(document.querySelector('#chat-drilldown-items [data-chat-item-id="answer:46"]')).toBeNull();
+        expect(document.querySelectorAll('#chat-drilldown-items [data-chat-item-id^="answer:"]')).toHaveLength(59);
+        expect(document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.disabled).toBe(false);
+      }
+      expect(input.value).toBe(overlap === "parent-switch" ? "Second parent draft" : overlap === "parent-undo" ? "Undo draft" : "Preserved parent draft");
+    } finally { window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  for (const surface of ["main", "child"] as const) test(`range installation rechecks ownership after the shared reader's final await: ${surface}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const target = surface === "main" ? "one" : "child";
+    const two = deferred<ConversationSnapshot>(), undo = deferred<ReversibleHistoryResult>();
+    let fresh = false, scheduled = false, undos = 0;
+    const streams: string[] = [];
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    const api = questionApi(document, { conversations: ["one", "two"], capabilities: ["background-tasks", "subagents", "reversible-history"] });
+    api.commands = async () => [{ name: "undo", description: "Undo", argumentHint: "", kind: "local-operation" }];
+    api.undo = async () => { undos++; return undo.promise; };
+    api.snapshot = async id => {
+      if (id === "two") return two.promise;
+      if (surface === "child" && id === "one") return { ...snapshot(id), items: [{ id: "task:child", type: "background_task", taskId: "child", taskType: "local_agent", description: "Child", status: "completed", createdAt: 1, childConversationId: "child", foreground: true }] };
+      const page = { ...snapshot(id), items: [{ id: "answer:one", type: "assistant_message" as const, createdAt: 1, markdown: "Retained answer" }] };
+      Object.defineProperty(page, "cursor", { get: () => {
+        if (fresh && !scheduled) {
+          scheduled = true;
+          // Queue an ownership change after the helper's synchronous final
+          // validation but before its awaiting caller can install the result.
+          queueMicrotask(() => {
+            if (surface === "main") {
+              const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+              select.value = "two"; select.dispatchEvent(new window.Event("change"));
+            } else submit(document.querySelector<HTMLFormElement>("#chat-composer")!, document.querySelector<HTMLTextAreaElement>("#chat-input")!, "/undo");
+          });
+        }
+        return btoa(JSON.stringify({ v: 1, g: "g", s: fresh ? 1 : 0 }));
+      } });
+      return page;
+    };
+    api.stream = (id, _cursor, next) => { streams.push(id); if (id === target) handlers = next; return { close() {} }; };
+    try {
+      const { initChat } = await import(`./ui.ts?range-install-owner=${surface}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => streams.includes("one"));
+      if (surface === "child") {
+        await flush(); document.querySelector<HTMLButtonElement>('[data-inspect-task="child"]')!.click();
+        await waitUntil(() => streams.includes("child"));
+      }
+      fresh = true;
+      handlers!.resync();
+      await waitUntil(() => scheduled && (surface === "main" ? document.querySelector<HTMLSelectElement>("#chat-conversation-select")!.value === "two" : undos === 1));
+      await flush();
+      expect(streams.filter(id => id === target)).toHaveLength(1);
+      if (surface === "main") {
+        two.resolve(snapshot("two"));
+        await waitUntil(() => streams.at(-1) === "two");
+        expect(document.querySelector('#chat-items [data-chat-item-id="answer:one"]')).toBeNull();
+      } else {
+        undo.resolve({ outcome: "changed", state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [] }, restoredDraft: { text: "Undo draft" } });
+        await waitUntil(() => streams.filter(id => id === "child").length === 2);
+        expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("Undo draft");
+      }
+    } finally { window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  for (const surface of ["main", "child"] as const) for (const change of ["unchanged", "during-warmup", "during-verification"] as const) test(`${surface} bulk resync recovers a cold native adapter's loaded pages in linear reads at the final publication cursor: ${change}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
@@ -43,20 +242,22 @@ describe("chat reversible-history composer", () => {
     stubConversationSelect(document);
     const { ChatAdapter } = await import("./adapter");
     const { decodeReplayCursor } = await import("./replay");
+    const id = surface === "main" ? "one" : "child";
+    const itemsSelector = surface === "main" ? "#chat-items" : "#chat-drilldown-items";
     const answers = Array.from({ length: 200 }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Cold answer ${i}` }));
     let deliver: ((event: import("./provider").NormalizedProviderEvent | undefined) => void) | undefined;
     let providerReads = 0;
     const provider = {
       describe: () => ({ id: "test", name: "Test", capabilities: [] }),
-      getSession: async () => ({ id: "one", title: "one", directory: process.cwd(), createdAt: 1, updatedAt: 1 }),
+      getSession: async (id: string) => ({ id, title: id, directory: process.cwd(), createdAt: 1, updatedAt: 1 }),
       getConversationConfiguration: async () => ({}),
       listMessages: async (_id: string, options: { cursor?: string }) => {
         if (active === cold) {
           providerReads++;
           if (providerReads === (change === "during-warmup" ? 2 : change === "during-verification" ? 6 : -1)) {
             answers[199] = { ...answers[199]!, markdown: "New native answer during range recovery" };
-            deliver!({ conversationId: "one", updates: [{ kind: "upsert", item: answers[199] }], outcome: "handled", eventType: "test.native" });
-            await waitUntil(() => (cold.projectionForTests("one").get("answer:199") as { markdown?: string })?.markdown === answers[199]!.markdown);
+            deliver!({ conversationId: id, updates: [{ kind: "upsert", item: answers[199] }], outcome: "handled", eventType: "test.native" });
+            await waitUntil(() => (cold.projectionForTests(id).get("answer:199") as { markdown?: string })?.markdown === answers[199]!.markdown);
           }
         }
         const end = Number(options.cursor ?? answers.length), start = Math.max(0, end - 50);
@@ -79,20 +280,25 @@ describe("chat reversible-history composer", () => {
     const recoveryReads: ConversationSnapshot[] = [];
     let streams = 0, installedCursor = "";
     let handlers: Parameters<ChatApiClient["stream"]>[2];
-    const api = questionApi(document);
+    const api = surface === "main" ? questionApi(document) : taskApi(document, { items: () => [] });
     api.snapshot = async (id, cursor) => {
+      if (surface === "child" && id === "one") return { ...snapshot(id), items: [{ id: "task:child", type: "background_task", taskId: "child", taskType: "local_agent", description: "Cold child", status: "completed", createdAt: 1, childConversationId: "child", foreground: true }] };
       const page = await active.history(id, { cursor, limit: 50 });
       if (active === cold) recoveryReads.push(page);
       return page;
     };
-    api.stream = (_id, cursor, next) => { handlers = next; streams++; installedCursor = cursor; return { close() {} }; };
+    api.stream = (streamId, cursor, next) => { if (streamId === id) { handlers = next; streams++; installedCursor = cursor; } return { close() {} }; };
     try {
-      const { initChat } = await import(`./ui.ts?cold-native-pages=${change}-${Date.now()}`);
+      const { initChat } = await import(`./ui.ts?cold-native-pages=${surface}-${change}-${Date.now()}`);
       initChat(api);
+      if (surface === "child") {
+        await waitUntil(() => document.querySelector('[data-inspect-task="child"]') !== null);
+        document.querySelector<HTMLButtonElement>('[data-inspect-task="child"]')!.click();
+      }
       await waitUntil(() => streams === 1);
       for (const oldest of [100, 50, 0]) {
-        document.querySelector<HTMLButtonElement>("#chat-load-older")!.click();
-        await waitUntil(() => document.querySelector(`[data-chat-item-id="answer:${oldest}"]`) !== null);
+        document.querySelector<HTMLButtonElement>(surface === "main" ? "#chat-load-older" : "#chat-drilldown-older")!.click();
+        await waitUntil(() => document.querySelector(`${itemsSelector} [data-chat-item-id="answer:${oldest}"]`) !== null);
       }
       type(document.querySelector<HTMLTextAreaElement>("#chat-input")!, "Cold recovery draft");
       await warm.dispose();
@@ -102,11 +308,11 @@ describe("chat reversible-history composer", () => {
       await flush();
       expect(recoveryReads).toHaveLength(change === "during-verification" ? 10 : 8);
       if (change === "unchanged") expect(recoveryReads.map(page => decodeReplayCursor(page.cursor)!.sequence)).toEqual([50, 100, 150, 200, 200, 200, 200, 200]);
-      expect(installedCursor).toBe(cold.projectionForTests("one").replay.latestCursor());
-      expect(document.querySelectorAll('#chat-items [data-chat-item-id^="answer:"]')).toHaveLength(200);
-      expect(document.querySelector('[data-chat-item-id="answer:5"]')?.textContent).toContain("Cold answer 5");
+      expect(installedCursor).toBe(cold.projectionForTests(id).replay.latestCursor());
+      expect(document.querySelectorAll(`${itemsSelector} [data-chat-item-id^="answer:"]`)).toHaveLength(200);
+      expect(document.querySelector(`${itemsSelector} [data-chat-item-id="answer:5"]`)?.textContent).toContain("Cold answer 5");
       expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("Cold recovery draft");
-      if (change !== "unchanged") expect(document.querySelector('[data-chat-item-id="answer:199"]')?.textContent).toContain("New native answer during range recovery");
+      if (change !== "unchanged") expect(document.querySelector(`${itemsSelector} [data-chat-item-id="answer:199"]`)?.textContent).toContain("New native answer during range recovery");
     } finally { window.dispatchEvent(new Event("pagehide")); await warm.dispose(); await cold.dispose(); }
   });
 

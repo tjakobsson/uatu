@@ -837,12 +837,23 @@ export class OpenCodeV2Provider implements ChatProvider {
           && previousActivity.executionId === activity.executionId && previousActivity.launchRef === activity.launchRef
           && JSON.stringify(previousActivity.executionAliases) === JSON.stringify(activity.executionAliases)
           && previousActivity.request?.id === activity.request?.id && previousActivity.request?.kind === activity.request?.kind;
-        if (unchanged || !previousActivity && coldIdentity) activity.observedAt = lastSeen ?? observedAt;
+        if (unchanged) activity.observedAt = lastSeen ?? observedAt;
+        else if (!previousActivity && verified && !liveOccurrence) {
+          // Cold inventory confirms liveness, not a new native observation.
+          // Use the accepted occurrence's source observation (the execution
+          // start or completed background-launch report), never cache admission
+          // time. Eviction must not manufacture progress on the next page.
+          activity.observedAt = occurrence?.executionStart?.created;
+          for (const launch of occurrence!.launches) {
+            const at = launch.reportedCompletion ?? launch.completed;
+            if (at !== undefined && (activity.observedAt === undefined || at > activity.observedAt)) activity.observedAt = at;
+          }
+        }
       }
       if (live) this.eventMemory?.workers.rememberActivity(item.taskId, activity, occurrence);
-      if (coldIdentity && activity.kind === "working") {
+      if (coldIdentity && activity.kind === "working" && activity.observedAt !== undefined) {
         this.coldActivityObservations.delete(coldIdentity);
-        this.coldActivityObservations.set(coldIdentity, activity.observedAt!);
+        this.coldActivityObservations.set(coldIdentity, activity.observedAt);
         while (this.coldActivityObservations.size > 128) this.coldActivityObservations.delete(this.coldActivityObservations.keys().next().value!);
       }
       tasks.push({ ...item, activity, stateUncertain: item.stateUncertain === true || !confirmed || !shellControlConfirmed });

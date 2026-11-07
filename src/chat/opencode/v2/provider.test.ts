@@ -5757,6 +5757,30 @@ function historyWorkerLaunch(id: string, at: number) {
   ] };
 }
 
+for (const sourceClock of ["reported", "absent", "unqualified"] as const) test(`cold inventory uses only a source observation clock (${sourceClock})`, async () => {
+  const launch = historyWorkerLaunch("source-clock", 20), part = launch.content[0]!;
+  const { completed: _completed, ...unfinished } = part.time;
+  const { ran: _ran, ...unqualified } = unfinished;
+  const history = [{ ...launch, content: [{ ...part, time: sourceClock === "reported" ? part.time : sourceClock === "absent" ? unfinished : unqualified }] }];
+  const server = fakeOpenCode({
+    "GET /api/session/active": () => ({ ses_child: { type: "running" } }),
+    "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+    "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+  });
+  const provider = server.provider();
+  let now = 1_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const [first] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(first?.activity?.kind).toBe("working");
+    expect(first?.activity?.observedAt).toBe(sourceClock === "reported" ? 22 : undefined);
+    now = 2_000;
+    expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toEqual(first?.activity);
+  } finally { clock.mockRestore(); await provider.dispose(); }
+});
+
 test("cold worker inventory failure retains the last positive server observation without authorizing Stop", async () => {
   let unavailable = false, now = 1_000;
   const server = fakeOpenCode({
@@ -5769,12 +5793,12 @@ test("cold worker inventory failure retains the last positive server observation
   const provider = server.provider(), clock = spyOn(Date, "now").mockImplementation(() => now);
   try {
     const [initial] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
-    expect(initial).toMatchObject({ activity: { kind: "working", observedAt: 1_000 }, control: { available: true } });
+    expect(initial).toMatchObject({ activity: { kind: "working", observedAt: 22 }, control: { available: true } });
     expect(initial!.control).toEqual({ available: true });
     unavailable = true;
     for (now of [2_000, 3_000]) {
       const [lost] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
-      expect(lost).toMatchObject({ activity: { kind: "unavailable", observedAt: 1_000, executionId: initial!.activity!.executionId }, control: { available: false, reason: "Worker control is unverified" } });
+      expect(lost).toMatchObject({ activity: { kind: "unavailable", observedAt: 22, executionId: initial!.activity!.executionId }, control: { available: false, reason: "Worker control is unverified" } });
       expect(lost!.control).toEqual({ available: false, reason: "Worker control is unverified" });
     }
     await expect(provider.stopTask("ses_parent", initial!.taskId)).rejects.toThrow();
@@ -5802,7 +5826,7 @@ for (const scenario of ["new execution", "changed launch clock", "ambiguous alia
       stream = observedNativeStream(provider);
       await stream.seen(event => event.eventType === "server.connected");
     }
-    expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toMatchObject({ kind: "working", observedAt: 1_000 });
+    expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toMatchObject({ kind: "working", observedAt: 22 });
     now = 2_000; unavailable = true;
     if (scenario === "new execution") history = [historyWorkerLaunch("cold", 50)];
     if (scenario === "changed launch clock") { history = [structuredClone(first)]; history[0]!.content[0]!.time.ran = 29; }

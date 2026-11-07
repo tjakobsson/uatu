@@ -995,6 +995,44 @@ describe("production recovery Checking presentation", () => {
   });
 });
 
+for (const count of [128, 129, 318]) test(`real V2 cold paginated history converges beyond observation cache retention (${count} workers)`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const producer = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const parent = (await producer.createSession("Cold inventory beyond caption retention")).id;
+    const workers = Array.from({ length: count }, () => fake.launchRequestWorker(parent));
+    // Every launch predates this adapter's stream. No live occurrence memory
+    // may hide eviction of a cold observation between complete inventory reads.
+    void adapter.startEventPump();
+    await provider.waitForEventStream!(new AbortController().signal);
+    const range = async () => {
+      const pages = [await adapter.history(parent, { limit: 50 })];
+      while (pages.at(-1)!.olderCursor) {
+        expect(pages.length).toBeLessThan(10);
+        pages.push(await adapter.history(parent, { limit: 50, cursor: pages.at(-1)!.olderCursor }));
+      }
+      expect(pages.length).toBeGreaterThan(1);
+      expect(pages[0]!.items.filter(item => item.type === "background_task" && item.activity?.kind === "working")).toHaveLength(count);
+      expect((provider as unknown as { coldActivityObservations: Map<string, number> }).coldActivityObservations.size).toBe(128);
+      return pages;
+    };
+    await range(); await range();
+    const cursor = adapter.projectionForTests(parent).replay.latestCursor();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      now += 1_000;
+      const pages = await range();
+      expect(pages.map(page => page.cursor)).toEqual(pages.map(() => cursor));
+    }
+    fake.workerReport(workers[0]!.childId, "New native report beyond cache retention", "high", 0.001);
+    await waitUntil(() => adapter.projectionForTests(parent).items().some(item => item.type === "background_task" && item.taskId === workers[0]!.taskId && item.workerSession?.model === "New native report beyond cache retention"));
+    expect(adapter.projectionForTests(parent).replay.latestCursor()).not.toBe(cursor);
+  } finally { clock.mockRestore(); await adapter.dispose(); await producer.dispose!(); await fake.stop(); }
+}, 30_000);
+
 test("real V2 resumed-worker paginated history reaches a stable cursor and retains native progress", async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
