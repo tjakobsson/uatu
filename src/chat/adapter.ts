@@ -1628,7 +1628,13 @@ export class ChatAdapter {
         for (const existing of projection.items()) {
           if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id) || coverage?.changed(existing.id)) continue;
           if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
-          stageHistoryRemoval(existing.id, () => this.retireRecoveredPermission(existing, id));
+          stageHistoryRemoval(existing.id, () => {
+            // A child can announce this request again before its async parent
+            // mirror replaces our row. Recheck the read's interaction fence
+            // before retiring other copies or resolving that newer announcement.
+            if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) return;
+            this.retireRecoveredPermission(existing, id);
+          });
         }
       }
     } catch {

@@ -8507,6 +8507,103 @@ describe("pending permission recovery", () => {
     await adapter.dispose();
   });
 
+  for (const newer of ["none", "reannouncement", "remove-reinsert"] as const) test(`deferred permission retirement fences a newer child ${newer}`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listPermissions = async () => [];
+    provider.agent.capabilities.push("reversible-history");
+    const state: ReversibleHistoryState = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+    let historyEntered = false, mirrorEntered = false, holdHistory = false, holdMirror = false;
+    let releaseHistory!: () => void, releaseMirror!: () => void;
+    const historyGate = new Promise<void>(resolve => { releaseHistory = resolve; });
+    const mirrorGate = new Promise<void>(resolve => { releaseMirror = resolve; });
+    provider.getReversibleHistoryState = async () => {
+      if (holdHistory) { historyEntered = true; await historyGate; }
+      return state;
+    };
+    provider.undo = provider.redo = provider.revert = provider.restore = async () => ({ outcome: "nothing-to-undo", state });
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0, onNotification: event => events.push(event) });
+    const child = adapter.projectionForTests("child"), parent = adapter.projectionForTests("parent");
+    const itemId = "permission:perm_child";
+    const getSession = provider.getSession.bind(provider);
+    let childLookups = 0;
+    provider.getSession = async id => {
+      // Confinement and observeNotifications read the child first; the third
+      // lookup belongs to mirrorToParent, after the child update is queued.
+      if (holdMirror && id === "child" && ++childLookups === 3) {
+        mirrorEntered = true;
+        await mirrorGate;
+      }
+      return getSession(id);
+    };
+    const ask = (resource: string) => provider.eventQueue.push({ id: `ask-${resource}`, type: "permission.v2.asked",
+      data: { id: "perm_child", sessionID: "child", action: "shell", resources: [resource], timestamp: Date.now() } } as never);
+    const pump = adapter.startEventPump();
+    let load: Promise<unknown> | undefined;
+    try {
+      ask("old");
+      await liveEventsApplied(adapter, provider);
+      const originalParent = parent.get(itemId);
+      expect(originalParent).toBeDefined();
+      holdHistory = true;
+      load = adapter.history("parent");
+      await waitUntil(() => historyEntered); // absence has already staged retirement
+      if (newer !== "none") {
+        if (newer === "remove-reinsert") {
+          // A native removal revokes both old row identities before the same
+          // request is announced again. Drive the provider seam through the
+          // pump, including its notification resolution and parent mirror.
+          provider.eventQueue.push({ normalized: { conversationId: "child", updates: [{ kind: "remove", itemId }],
+            outcome: "handled", eventType: "permission.replied" } } as never);
+          await liveEventsApplied(adapter, provider);
+          expect(child.has(itemId)).toBe(false);
+          expect(parent.has(itemId)).toBe(false);
+        }
+        holdMirror = true;
+        ask("new");
+        await waitUntil(() => mirrorEntered);
+        await waitUntil(() => {
+          const item = child.get(itemId);
+          return item?.type === "permission" && item.resources[0] === "new";
+        });
+        if (newer === "reannouncement") expect(parent.get(itemId)).toBe(originalParent);
+      }
+      const resolutions = events.filter(event => event.type === "resolved").length;
+      releaseHistory();
+      await load;
+      if (newer === "none") {
+        expect(child.has(itemId)).toBe(false);
+        expect(parent.has(itemId)).toBe(false);
+        expect(events.filter(event => event.type === "resolved")).toHaveLength(resolutions + 1);
+        expect(adapter.activity().awaiting).toBe(false);
+      } else {
+        expect(child.get(itemId)).toMatchObject({ status: "pending", resources: ["new"] });
+        expect(events.filter(event => event.type === "resolved")).toHaveLength(resolutions);
+        expect(adapter.activity().awaiting).toBe(true);
+      }
+      releaseMirror();
+      await liveEventsApplied(adapter, provider);
+      if (newer !== "none") {
+        expect(child.get(itemId)).toMatchObject({ status: "pending", resources: ["new"] });
+        expect(parent.get(itemId)).toMatchObject({ status: "pending", resources: ["new"], conversationId: "child" });
+        // The fence belongs to the old read, not to the request forever: a
+        // subsequent authoritative absence must retire the newer copies too.
+        holdHistory = false;
+        await adapter.history("parent");
+        expect(child.has(itemId)).toBe(false);
+        expect(parent.has(itemId)).toBe(false);
+        expect(adapter.activity().awaiting).toBe(false);
+      }
+    } finally {
+      releaseHistory(); releaseMirror();
+      await load;
+      await adapter.stopEventPump();
+      await pump;
+      await adapter.dispose();
+    }
+  });
+
   test("a request announced while the authoritative read is in flight is neither retired nor resolved", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
