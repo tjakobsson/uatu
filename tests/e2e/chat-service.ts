@@ -1053,6 +1053,16 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.subscriptions.clear();
   }
 
+  // Exercise the production replay budget and terminal resync without a fake
+  // provider mutation or disconnect. Core adapter admission is tested separately.
+  recoverItems(id: string, updates: ConversationItem[]): void {
+    this.require(id);
+    const publish = this.replay.get(id)!.prepareBatch(updates.map(item => ({ type: "item.upsert" as const, item })));
+    for (const item of updates) this.items.get(id)!.set(item.id, item);
+    this.authoritativeItems.set(id, [...this.items.get(id)!.values()]);
+    publish();
+  }
+
   rotateGeneration(): void {
     this.disconnect();
     this.generation = `e2e-chat-${this.nextId++}`;

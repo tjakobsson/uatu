@@ -733,6 +733,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "modes":
       targetFake.setModes(body.modes ?? []);
       return Response.json({ ok: true });
+    case "recoverItems":
+      targetFake.recoverItems(body.conversationId!, body.items ?? []);
+      return Response.json({ ok: true });
     case "resync":
       fakeChatAgent.rotateGeneration();
       return Response.json({ ok: true });
