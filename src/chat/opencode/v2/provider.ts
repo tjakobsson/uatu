@@ -810,7 +810,8 @@ export class OpenCodeV2Provider implements ChatProvider {
       const verified = confirmed && unique && compatibleCurrent
         && (item.taskType === "shell" ? shellExecuting : true);
       const coldIdentity = unique && !liveOccurrence && coveredColdRead ? this.coldActivityIdentity(occurrence) : undefined;
-      const lastSeen = this.eventMemory?.workers.lastActivity(item.taskId, occurrence)?.observedAt
+      const previousActivity = this.eventMemory?.workers.lastActivity(item.taskId, occurrence);
+      const lastSeen = previousActivity?.observedAt
         ?? (coldIdentity ? this.coldActivityObservations.get(coldIdentity) : undefined);
       const executionAliases = workerExecutionIds(occurrence), executionId = executionAliases[0];
       const activity: import("../../types").WorkerActivity = live?.executionEnd || shellEndedAt !== undefined
@@ -827,10 +828,21 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (request && pendingRequests?.some(entry => entry.id === request.id && entry.sessionID === occurrence?.worker)
         && activity.kind !== "ended") { activity.kind = "needs-answer"; activity.request = request; activity.observedAt = observedAt; }
       else if (request && pendingRequests && !pendingRequests.some(entry => entry.id === request.id && entry.sessionID === occurrence?.worker)) this.eventMemory?.workers.resolveRequest(request.id, request.kind, occurrence?.worker);
+      // An unchanged inventory answer verifies the same observation; it is not
+      // native progress. Keep its clock stable so paginated snapshot recovery
+      // can reach one replay boundary. Native events update previousActivity
+      // independently, and changed activity/proof/request identities get now.
+      if (activity.kind === "working" || activity.kind === "needs-answer") {
+        const unchanged = previousActivity?.kind === activity.kind && previousActivity.generation === activity.generation
+          && previousActivity.executionId === activity.executionId && previousActivity.launchRef === activity.launchRef
+          && JSON.stringify(previousActivity.executionAliases) === JSON.stringify(activity.executionAliases)
+          && previousActivity.request?.id === activity.request?.id && previousActivity.request?.kind === activity.request?.kind;
+        if (unchanged || !previousActivity && coldIdentity) activity.observedAt = lastSeen ?? observedAt;
+      }
       if (live) this.eventMemory?.workers.rememberActivity(item.taskId, activity, occurrence);
       if (coldIdentity && activity.kind === "working") {
         this.coldActivityObservations.delete(coldIdentity);
-        this.coldActivityObservations.set(coldIdentity, observedAt);
+        this.coldActivityObservations.set(coldIdentity, activity.observedAt!);
         while (this.coldActivityObservations.size > 128) this.coldActivityObservations.delete(this.coldActivityObservations.keys().next().value!);
       }
       tasks.push({ ...item, activity, stateUncertain: item.stateUncertain === true || !confirmed || !shellControlConfirmed });

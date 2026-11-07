@@ -5211,8 +5211,61 @@ for (const outcome of ["unavailable", "denied", "foreign-parent", "foreign-works
   } finally { await provider.dispose(); }
 });
 
-// Fresh native reads legitimately advance last-positive-observation clocks;
-// projection/filtering assertions still compare every other task/control fact.
+test("cold inventory observation clocks converge without inventing native progress", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const parent = (await provider.createSession("Cold observation clock")).id;
+    fake.launchRequestWorker(parent);
+    const first = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    expect(first.activity?.kind).toBe("working");
+    now += 1_000;
+    expect((await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!.activity).toEqual(first.activity);
+  } finally { clock.mockRestore(); await provider.dispose!(); await fake.stop(); }
+});
+
+test("inventory observation clocks converge while native request activity still advances", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const abort = new AbortController();
+  let reportApplied: (() => void) | undefined, requestApplied: (() => void) | undefined;
+  const pump = (async () => { for await (const event of provider.events(abort.signal)) {
+    if (event.eventType === "session.usage.updated") reportApplied?.();
+    if (event.eventType === "permission.asked") requestApplied?.();
+  } })();
+  try {
+    await provider.waitForEventStream!(abort.signal);
+    const parent = (await provider.createSession("Observation clock")).id;
+    const worker = fake.launchRequestWorker(parent);
+    const report = async (model: string) => {
+      const applied = new Promise<void>(resolve => { reportApplied = resolve; });
+      fake.workerReport(worker.childId, model, "high", 0.001);
+      await applied;
+      reportApplied = undefined;
+    };
+    await report("First observation");
+    const first = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    now += 1_000;
+    const repeated = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    expect(repeated.activity).toEqual(first.activity);
+    await report("Native progress");
+    const requested = new Promise<void>(resolve => { requestApplied = resolve; });
+    fake.workerRequest(worker.childId, "permission");
+    await requested;
+    const blocked = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    expect(blocked.activity?.kind).toBe("needs-answer");
+    expect(blocked.activity?.observedAt).toBeGreaterThan(first.activity!.observedAt!);
+    now += 1_000;
+    expect((await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!.activity).toEqual(blocked.activity);
+  } finally { clock.mockRestore(); abort.abort(); await pump; await provider.dispose!(); await fake.stop(); }
+});
+
+// These filtering assertions compare every other task/control fact; clock
+// convergence and real native observation progress are checked separately.
 const withoutObservationClock = (tasks: import("../../types").BackgroundTaskItem[]) => tasks.map(task => ({ ...task,
   ...(task.activity ? { activity: { ...task.activity, observedAt: undefined } } : {}) }));
 

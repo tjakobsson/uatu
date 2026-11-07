@@ -995,6 +995,38 @@ describe("production recovery Checking presentation", () => {
   });
 });
 
+test("real V2 resumed-worker paginated history reaches a stable cursor and retains native progress", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Stable recovery pages")).id;
+    void adapter.startEventPump();
+    await provider.waitForEventStream!(new AbortController().signal);
+    const worker = fake.launchWorker(parent, true);
+    fake.settleWorker(worker.childId, "completed", "Large result. ".repeat(20_000));
+    const resumed = fake.launchWorker(parent, true, worker.childId);
+    fake.appendHistory(parent, 60);
+    const range = async () => {
+      const pages = [await adapter.history(parent, { limit: 50 })];
+      while (pages.at(-1)!.olderCursor) pages.push(await adapter.history(parent, { limit: 50, cursor: pages.at(-1)!.olderCursor }));
+      expect(pages.length).toBeGreaterThan(1);
+      return pages;
+    };
+    await range(); await range(); // Warm native pages and independent bootstrap recovery.
+    const cursor = adapter.projectionForTests(parent).replay.latestCursor();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const pages = await range();
+      expect(pages.map(page => page.cursor)).toEqual(pages.map(() => cursor));
+    }
+    fake.workerReport(worker.childId, "Genuine later report", "high", 0.001);
+    await waitUntil(() => adapter.projectionForTests(parent).items().some(item => item.type === "background_task" && item.taskId === resumed.taskId && item.workerSession?.model === "Genuine later report"));
+    expect(adapter.projectionForTests(parent).replay.latestCursor()).not.toBe(cursor);
+    const pages = await range();
+    expect(pages[0]!.items).toContainEqual(expect.objectContaining({ taskId: resumed.taskId, workerSession: expect.objectContaining({ model: "Genuine later report" }) }));
+  } finally { await adapter.dispose(); await fake.stop(); }
+});
+
 test("covered V2 snapshot preserves a rename published during its history read", async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
