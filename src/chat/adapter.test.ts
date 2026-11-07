@@ -8698,6 +8698,96 @@ describe("pending permission recovery", () => {
     await adapter.dispose();
   });
 
+  for (const announcement of ["before read", "during deferred cleanup"] as const) test(`deferred question cleanup fences child announcement ${announcement}`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const question = { requestId: "que_child", conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] };
+    let pending = [question];
+    provider.listQuestions = async () => pending;
+    provider.agent.capabilities.push("reversible-history");
+    const state: ReversibleHistoryState = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+    let historyEntered = false, mirrorEntered = false, holdHistory = false, holdMirror = false;
+    let releaseHistory!: () => void, releaseMirror!: () => void;
+    const historyGate = new Promise<void>(resolve => { releaseHistory = resolve; });
+    const mirrorGate = new Promise<void>(resolve => { releaseMirror = resolve; });
+    provider.getReversibleHistoryState = async () => {
+      if (holdHistory) { historyEntered = true; await historyGate; }
+      return state;
+    };
+    provider.undo = provider.redo = provider.revert = provider.restore = async () => ({ outcome: "nothing-to-undo", state });
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0, onNotification: event => events.push(event) });
+    const child = adapter.projectionForTests("child"), parent = adapter.projectionForTests("parent");
+    const itemId = "question:que_child";
+    const getSession = provider.getSession.bind(provider);
+    let childLookups = 0;
+    provider.getSession = async id => {
+      // Confinement and notification destination lookup precede the mirror.
+      if (holdMirror && id === "child" && ++childLookups === 3) {
+        mirrorEntered = true;
+        await mirrorGate;
+      }
+      return getSession(id);
+    };
+    const ask = () => provider.eventQueue.push({ type: "question.asked", data: { sessionID: "child", id: "que_child", timestamp: Date.now(),
+      questions: [{ question: "New live question", options: [{ label: "A" }] }] } } as never);
+    const pump = adapter.startEventPump();
+    let load: Promise<unknown> | undefined;
+    try {
+      // History alone creates answerable cards, not an announced notification.
+      await adapter.history("child");
+      await adapter.history("parent");
+      expect(child.get(itemId)).toMatchObject({ status: "pending" });
+      expect(events.filter(event => event.type === "notification")).toEqual([]);
+      if (announcement === "before read") { ask(); await liveEventsApplied(adapter, provider); }
+      const originalParent = parent.get(itemId);
+      expect(originalParent).toBeDefined();
+      pending = [];
+      holdHistory = true;
+      load = adapter.history("parent");
+      await waitUntil(() => historyEntered); // absence already staged cleanup
+      if (announcement === "during deferred cleanup") {
+        holdMirror = true;
+        ask();
+        await waitUntil(() => mirrorEntered);
+        await waitUntil(() => {
+          const item = child.get(itemId);
+          return item?.type === "question" && item.questions[0]?.prompt === "New live question";
+        });
+        expect(parent.get(itemId)).toBe(originalParent);
+      }
+      const notifications = events.flatMap(event => event.type === "notification" ? [event.notification] : []);
+      expect(notifications).toHaveLength(1);
+      const resolutions = events.filter(event => event.type === "resolved").length;
+      releaseHistory(); await load;
+      expect(parent.has(itemId)).toBe(false);
+      expect(child.get(itemId)).toMatchObject({ status: "pending" });
+      if (announcement === "during deferred cleanup") {
+        expect(events.filter(event => event.type === "resolved")).toHaveLength(resolutions);
+        expect(adapter.activity().awaiting).toBe(true);
+      } else expect(events.flatMap(event => event.type === "resolved" ? [event.id] : [])).toEqual([notifications[0]!.id]);
+      releaseMirror(); await liveEventsApplied(adapter, provider);
+      if (announcement === "during deferred cleanup") {
+        expect(parent.get(itemId)).toMatchObject({ status: "pending", conversationId: "child" });
+        expect(events.filter(event => event.type === "resolved")).toHaveLength(resolutions);
+        // The guard belongs to this read: a later authoritative absence must
+        // still retire the notification whose announcement it now covers.
+        holdHistory = false;
+        await adapter.history("parent");
+        expect(events.flatMap(event => event.type === "resolved" ? [event.id] : [])).toEqual([notifications[0]!.id]);
+      }
+      holdHistory = false;
+      await adapter.history("child");
+      expect(child.has(itemId)).toBe(false);
+      expect(parent.has(itemId)).toBe(false);
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally {
+      releaseHistory(); releaseMirror(); await load;
+      await adapter.stopEventPump(); await pump; await adapter.dispose();
+    }
+  });
+
   for (const newer of ["none", "reannouncement", "remove-reinsert"] as const) test(`deferred permission retirement fences a newer child ${newer}`, async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

@@ -1548,6 +1548,10 @@ export class ChatAdapter {
           // stays on the timeline and its notification stays pending.
           if ((this.announced.get(existing.id)?.tick ?? 0) > questionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
           stageHistoryRemoval(existing.id, () => {
+            // A child's newer announcement can precede its awaited parent
+            // mirror without changing this row's identity. Retire only the
+            // announcement covered by this read, not the newer notification.
+            if ((this.announced.get(existing.id)?.tick ?? 0) > questionTick) return;
             this.questionCreatedAt.delete(existing.id);
             this.resolveAnnounced(existing.id);
           });
