@@ -160,7 +160,7 @@ describe("chat reversible-history composer", () => {
         const page = await adapter.history(id, options);
         return { ...page, conversation: { ...page.conversation, agent: { id: "test", name: "Test" } } };
       } } as never, getWorkspaceCredential: () => "fixture-only", debug: false, getMetricsSnapshot: () => ({}) });
-    const route = routes["/api/chat/conversations/:conversationId"] as { GET(request: never): Response | Promise<Response> };
+    const route = routes["/api/chat/conversations/:conversationId"] as unknown as { GET(request: never): Response | Promise<Response> };
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, routes: { ...routes, "/api/chat/conversations/:conversationId": { GET: async request => {
       const cursor = new URL(request.url).searchParams.get("cursor");
       if (recovering && !cursor) heads++;
