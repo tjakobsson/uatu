@@ -231,7 +231,7 @@ jobs:
     # Pinned: Playwright's WebKit build links ICU 74, which ubuntu-26.04
     # (what ubuntu-latest now resolves to) does not ship. Move this to a newer
     # image once a Playwright release supports it.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     strategy:
       # Every leg runs to the end so the merged report shows all failures.
