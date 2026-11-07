@@ -35,6 +35,154 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
+  for (const range of ["complete", "partial", "removed-boundary", "tool-boundary"] as const) test(`bulk resync retains the loaded history range from fresh capped pages and the reading anchor: ${range}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const total = range === "complete" ? 80 : 130;
+    const readingId = range === "complete" ? "answer:5" : "answer:35";
+    const removedId = range === "removed-boundary" ? "answer:30" : range === "complete" ? "answer:6" : "answer:36";
+    const answers = Array.from({ length: total }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Loaded answer ${i}` }));
+    const metadata: ConversationSnapshot["items"] = Array.from({ length: 225 }, (_, i) => ({ id: `worker:${i}`, type: "background_task", createdAt: 0, taskId: `worker:${i}`, description: `Worker ${i}`, status: "completed" }));
+    if (range === "tool-boundary") metadata.push({ id: "tool:backfill", type: "tool", name: "task", status: "completed", createdAt: 30.5 });
+    let fresh = false;
+    const reads: Array<string | undefined> = [];
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    let streams = 0;
+    const api = questionApi(document);
+    api.snapshot = async (id, cursor) => {
+      reads.push(cursor);
+      const offset = cursor ? Number(cursor) : total;
+      const start = Math.max(0, offset - (fresh ? 20 : 50));
+      return { ...snapshot(id), items: [...answers.slice(start, offset).filter(item => !fresh || item.id !== removedId).map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item), ...(!cursor ? metadata : [])], olderCursor: start ? String(start) : undefined };
+    };
+    api.stream = (_id, _cursor, next) => { handlers = next; streams++; return { close() {} }; };
+    const { TimelineAnchorController } = await import("./anchor");
+    const restore = TimelineAnchorController.prototype.restore;
+    let controller: InstanceType<typeof TimelineAnchorController> | undefined;
+    const restored: unknown[] = [];
+    TimelineAnchorController.prototype.restore = function (value) { controller = this; restored.push(value); return restore.call(this, value); };
+    try {
+      const { initChat } = await import(`./ui.ts?loaded-range=${range}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => streams === 1);
+      document.querySelector<HTMLButtonElement>("#chat-load-older")!.click();
+      await waitUntil(() => document.querySelector(`[data-chat-item-id="${readingId}"]`) !== null);
+      type(document.querySelector<HTMLTextAreaElement>("#chat-input")!, "Keep this draft");
+      const reading = { itemId: readingId, offset: -12 };
+      controller!.restore(reading);
+      fresh = true;
+      handlers!.resync();
+      await waitUntil(() => streams === 2);
+      await flush();
+      expect(document.querySelector(`[data-chat-item-id="${readingId}"]`)?.textContent).toContain(`Loaded answer ${readingId.split(":")[1]} refreshed`);
+      expect(document.querySelector(`[data-chat-item-id="${removedId}"]`)).toBeNull();
+      expect(document.querySelectorAll('#chat-items [data-chat-item-id^="answer:"]')).toHaveLength(range === "complete" ? 79 : range === "partial" ? 99 : 119);
+      expect(restored.at(-1)).toEqual(reading);
+      expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("Keep this draft");
+      expect(document.querySelector<HTMLButtonElement>("#chat-load-older")!.hidden).toBe(range === "complete");
+      expect(reads).toEqual(range === "complete" ? [undefined, "30", undefined, "60", "40", "20"]
+        : [undefined, "80", undefined, "110", "90", "70", "50", ...(range !== "partial" ? ["30"] : [])]);
+      if (range !== "complete") {
+        document.querySelector<HTMLButtonElement>("#chat-load-older")!.click();
+        await waitUntil(() => reads.length === (range === "partial" ? 8 : 9));
+        expect(reads.at(-1)).toBe(range === "partial" ? "30" : "10");
+      }
+    } finally { TimelineAnchorController.prototype.restore = restore; window.dispatchEvent(new Event("pagehide")); }
+  });
+
+  for (const overlap of ["switch", "live-update", "stale-head", "history-mutation", "page-generation", "page-cursor", "cursor-cycle"] as const) test(`bulk resync fences a held older page: ${overlap}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const answers = Array.from({ length: 80 }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Loaded answer ${i}` }));
+    const native = { id: "native:new", type: "assistant_message" as const, createdAt: 100, completedAt: 101, markdown: "Newest native answer" };
+    const held = deferred<ConversationSnapshot>();
+    let recovering = false, heldOnce = false, live = false;
+    let streams = 0;
+    let selectedStream = "";
+    let recoveryHeads = 0;
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    let heldPage: ConversationSnapshot | undefined;
+    let staleHeadServed = false;
+    let rewritten = false, undos = 0;
+    const undo = deferred<ReversibleHistoryResult>();
+    const cursorAt = (sequence: number) => btoa(JSON.stringify({ v: 1, s: sequence }));
+    const api = questionApi(document, { conversations: ["one", "two"], capabilities: ["reversible-history"] });
+    api.commands = async () => [{ name: "undo", description: "Undo", argumentHint: "", kind: "local-operation" }];
+    api.undo = async () => { undos++; return undo.promise; };
+    api.snapshot = async (id, cursor) => {
+      if (id === "two") return snapshot(id);
+      if (recovering && !cursor) recoveryHeads++;
+      if (rewritten) return { ...snapshot(id), items: answers.slice(0, 5) };
+      const offset = cursor ? Number(cursor) : 80;
+      const start = Math.max(0, offset - (recovering ? 20 : 50));
+      const page = { ...snapshot(id), cursor: cursorAt(live ? 1 : 0), items: [...answers.slice(start, offset).filter(item => !recovering || item.id !== "answer:6"), ...(!cursor && live ? [native] : [])], olderCursor: start ? String(start) : undefined };
+      if (recovering && !cursor && overlap === "stale-head" && !staleHeadServed) {
+        staleHeadServed = true;
+        return { ...page, cursor: cursorAt(0), items: page.items.filter(item => item.id !== native.id) };
+      }
+      if (recovering && cursor && !heldOnce) { heldOnce = true; heldPage = page; return held.promise; }
+      return page;
+    };
+    api.stream = (id, _cursor, next) => { handlers = next; selectedStream = id; streams++; return { close() {} }; };
+    try {
+      const { initChat } = await import(`./ui.ts?loaded-range-overlap=${overlap}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => streams === 1);
+      document.querySelector<HTMLButtonElement>("#chat-load-older")!.click();
+      await waitUntil(() => document.querySelector('[data-chat-item-id="answer:5"]') !== null);
+      recovering = true;
+      if (overlap === "stale-head") {
+        live = true;
+        handlers!.event({ type: "item.upsert", conversationId: "one", generation: "g", sequence: 1, item: native }, cursorAt(1));
+      }
+      handlers!.resync();
+      await waitUntil(() => heldPage !== undefined);
+      if (overlap === "switch") {
+        const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+        select.value = "two"; select.dispatchEvent(new window.Event("change"));
+        await waitUntil(() => selectedStream === "two");
+      } else if (overlap === "live-update") {
+        live = true;
+        handlers!.event({ type: "item.upsert", conversationId: "one", generation: "g", sequence: 1, item: native }, cursorAt(1));
+      } else if (overlap === "history-mutation") {
+        submit(document.querySelector<HTMLFormElement>("#chat-composer")!, document.querySelector<HTMLTextAreaElement>("#chat-input")!, "/undo");
+        await waitUntil(() => undos === 1);
+        handlers!.resync();
+        rewritten = true;
+        undo.resolve({ outcome: "changed", state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [] }, restoredDraft: { text: "Native undo draft" } });
+        await waitUntil(() => streams === 2);
+      }
+      held.resolve({ ...heldPage!, ...(overlap === "page-generation" ? { generation: "obsolete" } : {}), ...(overlap === "page-cursor" ? { cursor: "obsolete" } : {}), ...(overlap === "cursor-cycle" ? { olderCursor: "60" } : {}) });
+      if (overlap === "switch") {
+        await Bun.sleep(150);
+        await flush();
+        expect(selectedStream).toBe("two");
+        expect(streams).toBe(2);
+        expect(document.querySelector('[data-chat-item-id="answer:5"]')).toBeNull();
+      } else if (overlap === "history-mutation") {
+        await flush();
+        expect(document.querySelector('[data-chat-item-id="answer:5"]')).toBeNull();
+        expect(document.querySelectorAll('#chat-items [data-chat-item-id^="answer:"]')).toHaveLength(5);
+        expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("Native undo draft");
+        expect(undos).toBe(1);
+      } else {
+        await waitUntil(() => streams === 2);
+        await flush();
+        expect(document.querySelector('[data-chat-item-id="answer:5"]')).not.toBeNull();
+        expect(document.querySelector('[data-chat-item-id="answer:6"]')).toBeNull();
+        expect(document.querySelectorAll('#chat-items [data-chat-item-id^="answer:"]')).toHaveLength(79);
+        if (live) expect(document.querySelector('[data-chat-item-id="native:new"]')?.textContent).toContain("Newest native answer");
+      }
+      expect(recoveryHeads).toBe(overlap === "switch" ? 1 : 2);
+    } finally { window.dispatchEvent(new window.Event("pagehide")); }
+  });
+
   test("opening readiness preserves drafts through failure, retry and switching", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

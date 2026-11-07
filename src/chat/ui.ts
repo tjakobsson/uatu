@@ -2932,7 +2932,7 @@ export function initChat(api = new ChatApiClient()): void {
     });
   };
 
-  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number) => {
+  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number, readingAnchor: TimelineAnchor | null = presentation.anchors[snapshot.conversation.id] ?? null) => {
     projection = composer.acceptSnapshot(snapshot, acceptedDrafts);
     const carried = removedRows.get(snapshot.conversation.id);
     if (carried) projection = { ...projection, removedIds: carried };
@@ -2942,7 +2942,7 @@ export function initChat(api = new ChatApiClient()): void {
     renderAttachments();
     announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
     cancelForSnapshot(parentScroll);
-    anchor.restore(presentation.anchors[snapshot.conversation.id] ?? null);
+    anchor.restore(readingAnchor);
     scheduleRender(false, false);
     stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
   };
@@ -3000,13 +3000,43 @@ export function initChat(api = new ChatApiClient()): void {
     const token = selectionGeneration;
     const current = projection;
     if (!current || current.conversationId !== id || activeConversationId() !== id) return false;
+    const epoch = projectionEpoch;
+    const historyBusy = composer.historyBusy(id);
+    // Follow the oldest loaded transcript boundary, not item count: snapshots
+    // also carry workers/permissions and providers can cap each history page.
+    // A removed boundary is covered once paging passes its timestamp. If the
+    // reader reached the beginning, recover through the beginning again.
+    const boundary = current.items.filter(item => !["background_task", "scheduled_wakeup", "permission", "question", "context_window", "context_report"].includes(item.type))
+      .reduce<ConversationItem | undefined>((oldest, item) => !oldest || item.createdAt < oldest.createdAt ? item : oldest, undefined);
     try {
       return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id, pendingEntry); }, async signal => {
+        const ownsRead = () => !signal.aborted && token === selectionGeneration && projection === current
+          && projectionEpoch === epoch && activeConversationId() === id && composer.historyBusy(id) === historyBusy;
         let snapshot = await api.snapshot(id, undefined, signal);
-        if (signal.aborted || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
+        if (!ownsRead()) return false;
+        const head = snapshot;
+        if (head.generation === current.generation && projectionFromSnapshot(head).sequence < current.sequence) return false;
+        const cursors = new Set<string>();
+        // Only message rows prove that paging reached a time boundary: tool
+        // launchers can be backfilled into the newest page for accounting.
+        const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.items.some(item =>
+          (item.type === "user_message" || item.type === "assistant_message") && (item.id === boundary.id || item.createdAt < boundary.createdAt)));
+        while (snapshot.olderCursor && !covered()) {
+          // Fail closed without installing a truncated view for a broken or
+          // non-convergent provider. The existing read retry keeps the draft
+          // and retained transcript. Never chase an unbounded cursor chain.
+          if (cursors.size >= 1_000 || cursors.has(snapshot.olderCursor)) return false;
+          const cursor = snapshot.olderCursor;
+          cursors.add(cursor);
+          const page = await api.snapshot(id, cursor, signal);
+          if (!ownsRead()) return false;
+          if (page.conversation.id !== id || page.generation !== head.generation || page.cursor !== head.cursor) return false;
+          snapshot = { ...head, items: prependSnapshot(projectionFromSnapshot(snapshot), page).items, olderCursor: page.olderCursor };
+        }
+        if (!ownsRead() || snapshot.conversation.id !== id) return false;
         snapshot = composer.checkedSnapshot(id, snapshot, pendingEntry);
         const previousStream = stream;
-        installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
+        installConversationSnapshot(snapshot, current.acceptedDrafts, token, anchor.currentAnchor());
         if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
           stopConversationRefreshRecovery();
         }
