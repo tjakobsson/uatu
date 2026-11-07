@@ -3035,7 +3035,14 @@ export function initChat(api = new ChatApiClient()): void {
         const cursor = snapshot.olderCursor;
         cursors.add(cursor);
         pageReads++;
-        const page = await api.snapshot(id, cursor, signal);
+        const page = await api.snapshot(id, cursor, signal).catch(error => {
+          // This is specifically a history-cursor GET. A source revision can
+          // invalidate its older-page cursor between requests; restart the
+          // owned range read, not the child layer or a provider mutation.
+          if (error instanceof ChatTransportError && error.status === 409) return null;
+          throw error;
+        });
+        if (!page) return null;
         if (!ownsRead() || page.conversation.id !== id || page.generation !== head.generation) return null;
         if (page.cursor !== snapshot.cursor) {
           if (pass !== 0 || projectionFromSnapshot(page).sequence <= projectionFromSnapshot(snapshot).sequence) return null;

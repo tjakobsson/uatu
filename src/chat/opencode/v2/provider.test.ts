@@ -5869,7 +5869,9 @@ test("cold last-seen retention is bounded and losing a caption never restores co
     for (index of [0, 128]) {
       const [task] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
       expect(task?.activity?.kind).toBe("unavailable");
-      expect(task?.activity?.observedAt).toBe(index === 0 ? undefined : 1_000);
+      // Retain the launch report's source clock (20 + 2), not the inventory
+      // receipt clock. Eviction loses only that caption, never control guards.
+      expect(task?.activity?.observedAt).toBe(index === 0 ? undefined : 22);
       expect(task?.control).toEqual({ available: false, reason: "Worker control is unverified" });
       await expect(provider.stopTask("ses_parent", task!.taskId)).rejects.toThrow();
     }

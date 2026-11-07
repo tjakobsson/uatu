@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { ConversationProjection } from "./adapter";
-import { ConversationReplay, encodeReplayCursor } from "./replay";
+import { ConversationReplay, decodeReplayCursor, encodeReplayCursor } from "./replay";
 import { parseChatEvent } from "./validation";
 import type { ChatEvent } from "./types";
 
@@ -383,4 +383,25 @@ describe("conversation replay", () => {
     expect((await pending).done).toBe(true);
     expect(replay.subscriberCount()).toBe(0);
   });
+});
+test("shared replay sequence allocation fences rebuilt lifetimes without changing generation", () => {
+  const clock = { next: 0 };
+  const original = new ConversationReplay("g", "one", 1024 * 1024, clock);
+  for (let n = 0; n < 10; n++) original.publish({ type: "conversation.status", status: "idle" });
+  original.prepareBatch([{ type: "conversation.status", status: "running" }, { type: "conversation.status", status: "idle" }])();
+  const before = decodeReplayCursor(original.latestCursor())!;
+  const other = new ConversationReplay("g", "other", 1024 * 1024, clock);
+  const replacement = new ConversationReplay("g", "one", 1024 * 1024, clock);
+  expect(before.sequence).toBe(12);
+  expect(decodeReplayCursor(replacement.latestCursor())!.sequence).toBeGreaterThan(before.sequence);
+  const event = replacement.publish({ type: "conversation.status", status: "running" });
+  expect(event.generation).toBe("g");
+  expect(event.sequence).toBe(decodeReplayCursor(replacement.latestCursor())!.sequence);
+  const local = original.publish({ type: "conversation.status", status: "idle" });
+  expect(local.sequence).toBe(before.sequence + 1);
+  const successor = new ConversationReplay("g", "one", 1024 * 1024, clock);
+  expect(decodeReplayCursor(successor.latestCursor())!.sequence).toBeGreaterThan(event.sequence);
+  const cursor = other.latestCursor();
+  other.prepareBatch([])();
+  expect(other.latestCursor()).toBe(cursor);
 });

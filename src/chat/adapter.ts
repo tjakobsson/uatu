@@ -521,6 +521,7 @@ export class ChatAdapter {
   private readonly replayBytes: number;
   private readonly id: () => string;
   private readonly projections = new Map<string, ConversationProjection>();
+  private readonly replayClock = { next: 0 };
   private readonly permissionQueueOrder = new PermissionQueueOrder();
   private readonly receipts: IdempotencyReceipts;
   // Question item ids currently published per conversation, so a question that
@@ -6335,7 +6336,7 @@ export class ChatAdapter {
       this.projections.set(id, existing);
       return existing;
     }
-    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), (status, sourceTransition) => {
+    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes, this.replayClock), (status, sourceTransition) => {
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.
       const stop = this.stoppingTurns.get(id);
@@ -6383,8 +6384,9 @@ export class ChatAdapter {
     for (const [candidateId, candidate] of this.projections) {
       if (this.projections.size <= this.maxProjections) break;
       if (candidateId === id || candidate.replay.subscriberCount() > 0) continue;
-      // Evicted conversations lose their replay ring; a returning client's
-      // stale cursor resolves to a retention-gap resync, which is safe.
+      // Evicted conversations lose their ring. The shared high-water mark
+      // gives a replacement a newer boundary without retaining tombstones;
+      // old subscriptions still receive an explicit retention-gap resync.
       this.projections.delete(candidateId);
       if (this.backgroundRecoveries.get(candidateId)?.exhaustedAt !== undefined) this.retireBackgroundRecovery(candidateId);
       this.configurations.delete(candidateId);

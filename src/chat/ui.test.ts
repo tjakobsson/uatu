@@ -35,6 +35,188 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
+  for (const surface of ["main", "child"] as const) test(`bulk resync recovers an evicted legacy adapter replay without accepting stale responses: ${surface}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const { ChatAdapter } = await import("./adapter");
+    const { decodeReplayCursor, encodeReplayCursor } = await import("./replay");
+    const id = surface === "main" ? "one" : "child";
+    const itemsSelector = surface === "main" ? "#chat-items" : "#chat-drilldown-items";
+    const answers = Array.from({ length: 60 }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Legacy answer ${i}` }));
+    const provider = {
+      describe: () => ({ id: "test", name: "Test", capabilities: [] }),
+      getSession: async (id: string) => ({ id, title: id, directory: process.cwd(), createdAt: 1, updatedAt: 1 }),
+      getConversationConfiguration: async () => ({}),
+      listMessages: async (_id: string, options: { cursor?: string }) => {
+        const end = Number(options.cursor ?? 60), start = Math.max(0, end - 50);
+        return { items: answers.slice(start, end), nextCursor: start ? String(start) : undefined };
+      },
+    } as unknown as import("./provider").ChatProvider;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+    const gate = deferred<void>();
+    let recovering = false, reads = 0, streams = 0, attached = 0;
+    const controllers = new Set<AbortController>();
+    const pumps: Promise<void>[] = [];
+    const api = questionApi(document, { capabilities: ["subagents", "background-tasks"], conversations: ["one", "two"] });
+    api.snapshot = async (requested, cursor) => {
+      if (requested === "two") return snapshot(requested);
+      if (surface === "child" && requested === "one") return { ...snapshot(requested), items: [{ id: "task:child", type: "background_task", taskId: "child", taskType: "local_agent", description: "Legacy child", status: "completed", createdAt: 1, childConversationId: "child", foreground: true }] };
+      if (recovering) { reads++; if (reads === 1) await gate.promise; }
+      return adapter.history(requested, { cursor, limit: 50 });
+    };
+    api.stream = (requested, cursor, handlers) => {
+      if (requested !== id) return { close() {} };
+      streams++;
+      const controller = new AbortController(); controllers.add(controller);
+      pumps.push((async () => {
+        const { events } = await adapter.subscribe(id, { cursor, signal: controller.signal });
+        attached++;
+        for await (const event of events) {
+          if (controller.signal.aborted) break;
+          if (event.type === "resync") { recovering = true; controller.abort(); handlers.resync(event); break; }
+          handlers.event(event, encodeReplayCursor({ generation: event.generation, sequence: event.sequence }));
+        }
+      })());
+      return { close() { controller.abort(); } };
+    };
+    try {
+      const { initChat } = await import(`./ui.ts?evicted-replay=${surface}-${Date.now()}`);
+      initChat(api);
+      if (surface === "child") {
+        await waitUntil(() => document.querySelector('[data-inspect-task="child"]') !== null);
+        document.querySelector<HTMLButtonElement>('[data-inspect-task="child"]')!.click();
+      }
+      await waitUntil(() => attached === 1);
+      document.querySelector<HTMLButtonElement>(surface === "main" ? "#chat-load-older" : "#chat-drilldown-older")!.click();
+      await waitUntil(() => document.querySelector(`${itemsSelector} [data-chat-item-id="answer:5"]`) !== null);
+      type(document.querySelector<HTMLTextAreaElement>("#chat-input")!, "Eviction-safe draft");
+      const original = adapter.projectionForTests(id);
+      for (let n = 1; n <= 10; n++) {
+        answers[59] = { ...answers[59]!, markdown: `Live revision ${n}` };
+        original.upsert(answers[59]!);
+      }
+      await waitUntil(() => document.querySelector(`${itemsSelector} [data-chat-item-id="answer:59"]`)?.textContent?.includes("Live revision 10") === true);
+      const before = decodeReplayCursor(original.replay.latestCursor())!;
+      expect(before.sequence).toBe(10);
+      original.recover(Array.from({ length: 318 }, (_, n) => ({ kind: "upsert" as const, item: { id: `worker:${n}`, type: "background_task" as const, createdAt: 100 + n, taskId: `worker:${n}`, description: `Worker ${n}`, status: "completed" as const, summary: "x".repeat(4096) } })));
+      await waitUntil(() => reads === 1);
+      expect(original.replay.subscriberCount()).toBe(0);
+      adapter.projectionForTests("other");
+      const replacement = adapter.projectionForTests(id);
+      expect(replacement).not.toBe(original);
+      const reset = decodeReplayCursor(replacement.replay.latestCursor())!;
+      gate.resolve();
+      await waitUntil(() => streams === 2 && attached === 2, () => `evicted replay recovery: old=${before.sequence}, replacement=${reset.sequence}, head reads=${reads}`);
+      await flush();
+      expect(reset.generation).toBe(before.generation);
+      expect(reset.sequence).toBeGreaterThan(before.sequence);
+      expect(document.querySelectorAll(`${itemsSelector} [data-chat-item-id^="answer:"]`)).toHaveLength(60);
+      expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("Eviction-safe draft");
+    } finally {
+      gate.resolve();
+      if (surface === "child") document.querySelector<HTMLButtonElement>("#chat-drilldown-back")?.click();
+      else { const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!; select.value = "two"; select.dispatchEvent(new window.Event("change")); }
+      for (const controller of controllers) controller.abort();
+      await Promise.all(pumps);
+      await flush(); window.dispatchEvent(new Event("pagehide")); await adapter.dispose();
+    }
+  });
+
+  for (const outcome of ["recover", "close", "switch", "head-409", "permanent-401", "permanent-404", "permanent-500"] as const) test(`child bulk resync handles an actual HTTP history cursor refusal: ${outcome}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const { ChatAdapter } = await import("./adapter");
+    const { ChatApiClient } = await import("./client");
+    const { historyPageCursor, historyPageEnd } = await import("./history-reuse");
+    const { buildRoutes } = await import("../server/routes");
+    let recovering = false, invalidated = false, version = "v1", heads = 0, streams = 0;
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    const statuses: number[] = [];
+    const answers = Array.from({ length: 60 }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `HTTP child answer ${i}` }));
+    const provider = {
+      describe: () => ({ id: "test", name: "Test", capabilities: [] }),
+      getSession: async (id: string) => ({ id, title: id, directory: process.cwd(), createdAt: 1, updatedAt: 1 }),
+      getConversationConfiguration: async () => ({}),
+      listMessages: async (_id: string, options: { cursor?: string }) => {
+        if (recovering && options.cursor && !invalidated) {
+          invalidated = true; version = "v2";
+          answers[59] = { ...answers[59]!, markdown: "Fresh after history invalidation" };
+        }
+        const end = historyPageEnd(options.cursor, version, answers.length), start = Math.max(0, end - (recovering ? 20 : 50));
+        return { items: answers.slice(start, end), nextCursor: historyPageCursor(start, version) };
+      },
+    } as unknown as import("./provider").ChatProvider;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+    const asset = "src/assets/uatu-logo.svg";
+    const routes = buildRoutes({ mode: "prod", assets: { mermaid: asset, logo: asset, icon192: asset, icon512: asset, manifest: asset,
+      fonts: { hackMono: asset, hackLicense: asset, nerdFontsLicense: asset, notices: asset } }, getSession: () => { throw new Error("Unexpected document read"); },
+      chatService: { history: async (id: string, options: { cursor?: string; limit?: number }) => {
+        const page = await adapter.history(id, options);
+        return { ...page, conversation: { ...page.conversation, agent: { id: "test", name: "Test" } } };
+      } } as never, getWorkspaceCredential: () => "fixture-only", debug: false, getMetricsSnapshot: () => ({}) });
+    const route = routes["/api/chat/conversations/:conversationId"] as { GET(request: never): Response | Promise<Response> };
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, routes: { ...routes, "/api/chat/conversations/:conversationId": { GET: async request => {
+      const cursor = new URL(request.url).searchParams.get("cursor");
+      if (recovering && !cursor) heads++;
+      if (recovering && (outcome === "head-409" && !cursor || outcome.startsWith("permanent") && cursor)) {
+        return Response.json({ error: "History read refused" }, { status: outcome === "head-409" ? 409 : Number(outcome.slice(-3)) });
+      }
+      return route.GET(request as never);
+    } } } });
+    const transport = new ChatApiClient(async (input, init) => {
+      const url = new URL(String(input), server.url); url.searchParams.set("t", "fixture-only");
+      const response = await fetch(url, init);
+      if (recovering) statuses.push(response.status);
+      return response;
+    });
+    const api = questionApi(document, { capabilities: ["subagents", "background-tasks"] });
+    api.snapshot = (id, cursor, signal) => id === "child" ? transport.snapshot(id, cursor, signal) : Promise.resolve(id === "other"
+      ? { ...snapshot(id), items: [{ id: "other:answer", type: "assistant_message", createdAt: 1, markdown: "Other child" }] }
+      : { ...snapshot(id), items: ["child", "other"].map(childId => ({ id: `task:${childId}`, type: "background_task", taskId: childId, taskType: "local_agent", description: childId, status: "completed", createdAt: 1, childConversationId: childId, foreground: true })) });
+    api.stream = (id, _cursor, next) => { if (id === "child") { handlers = next; streams++; } return { close() {} }; };
+    try {
+      const { initChat } = await import(`./ui.ts?http-cursor-refusal=${outcome}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => document.querySelector('[data-inspect-task="child"]') !== null);
+      document.querySelector<HTMLButtonElement>('[data-inspect-task="child"]')!.click();
+      await waitUntil(() => streams === 1, () => document.querySelector("#chat-drilldown > .chat-read-error")?.textContent ?? "first HTTP snapshot");
+      document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.click();
+      await waitUntil(() => document.querySelector('#chat-drilldown-items [data-chat-item-id="answer:5"]') !== null);
+      type(document.querySelector<HTMLTextAreaElement>("#chat-input")!, "HTTP recovery draft");
+      recovering = true;
+      handlers!.resync();
+      await waitUntil(() => statuses.some(status => status !== 200));
+      if (outcome === "close") document.querySelector<HTMLButtonElement>("#chat-drilldown-back")!.click();
+      if (outcome === "switch") document.querySelector<HTMLButtonElement>('[data-inspect-task="other"]')!.click();
+      if (outcome === "recover") {
+        await waitUntil(() => streams === 2, () => `automatic child reattachment after HTTP ${statuses.join(",")}`);
+        await flush();
+        expect(heads).toBe(2);
+        expect(statuses.filter(status => status === 409)).toHaveLength(1);
+        expect(document.querySelectorAll('#chat-drilldown-items [data-chat-item-id^="answer:"]')).toHaveLength(60);
+        expect(document.querySelector('#chat-drilldown-items [data-chat-item-id="answer:59"]')?.textContent).toContain("Fresh after history invalidation");
+        expect(document.querySelector<HTMLButtonElement>("#chat-drilldown-older")!.hidden).toBe(true);
+      } else {
+        await Bun.sleep(150); await flush();
+        expect(heads).toBe(1);
+        expect(streams).toBe(1);
+        if (outcome === "close") expect(document.querySelector<HTMLElement>("#chat-drilldown")!.hidden).toBe(true);
+        else if (outcome === "switch") expect(document.querySelector('#chat-drilldown-items [data-chat-item-id="other:answer"]')).not.toBeNull();
+        else {
+          expect(document.querySelector<HTMLElement>("#chat-drilldown > .chat-read-error")!.hidden).toBe(false);
+          expect(document.querySelector("#chat-drilldown > .chat-read-error")!.textContent).toContain("History read refused");
+        }
+      }
+      expect(document.querySelector<HTMLTextAreaElement>("#chat-input")!.value).toBe("HTTP recovery draft");
+    } finally { document.querySelector<HTMLButtonElement>("#chat-drilldown-back")?.click(); window.dispatchEvent(new Event("pagehide")); server.stop(true); await adapter.dispose(); }
+  });
+
   for (const range of ["complete", "partial", "rewrite"] as const) test(`child bulk resync retains the loaded range, authoritative removals, draft and anchor: ${range}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

@@ -4548,6 +4548,36 @@ describe("OpenCode conversation inventory and history", () => {
     expect(items).toEqual([expect.objectContaining({ id: "tool:p1", status: "running" })]);
   });
 
+  test("recreated replay boundaries exceed evicted snapshots while old cursors still resync", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local"), fixtureSession("other")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 1 });
+    try {
+      const original = adapter.projectionForTests("local");
+      for (let n = 0; n < 10; n++) original.upsert({ id: "notice", type: "notice", createdAt: 1, level: "info", message: `Revision ${n}` });
+      const oldSnapshot = (await adapter.subscribe("local"));
+      oldSnapshot.events.cancel();
+      const before = decodeReplayCursor(oldSnapshot.snapshot.cursor)!;
+      adapter.projectionForTests("other");
+      const snapshot = await adapter.history("local");
+      const replacement = adapter.projectionForTests("local");
+      const after = decodeReplayCursor(snapshot.cursor)!;
+      expect(replacement).not.toBe(original);
+      expect(snapshot.generation).toBe(oldSnapshot.snapshot.generation);
+      expect(after.sequence).toBeGreaterThan(before.sequence);
+      expect(snapshot.items).toEqual([]);
+      const stale = await adapter.subscribe("local", { cursor: oldSnapshot.snapshot.cursor });
+      const iterator = stale.events[Symbol.asyncIterator]();
+      expect((await iterator.next()).value).toMatchObject({ type: "resync", reason: "retention-gap", generation: "g" });
+      expect((await iterator.next()).done).toBe(true);
+      const current = await adapter.subscribe("local", { cursor: snapshot.cursor });
+      replacement.upsert({ id: "new", type: "notice", createdAt: 2, level: "info", message: "After eviction" });
+      expect((await current.events[Symbol.asyncIterator]().next()).value).toMatchObject({ type: "item.upsert", generation: "g", sequence: after.sequence + 1, item: { id: "new" } });
+      current.events.cancel();
+      expect((adapter as unknown as { projections: Map<string, unknown> }).projections.size).toBe(1);
+    } finally { await adapter.dispose(); }
+  });
+
   test("an evicted projection does not cancel a turn that is still running", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local"), fixtureSession("other")];

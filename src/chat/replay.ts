@@ -79,14 +79,26 @@ export class ConversationReplay {
   private sequence = 0;
   private bytes = 0;
 
-  constructor(readonly generation: string, readonly conversationId: string, private readonly byteLimit: number) {}
+  constructor(readonly generation: string, readonly conversationId: string, private readonly byteLimit: number,
+    private readonly clock?: { next: number }) {
+    // An adapter owns one bounded high-water mark, not a per-conversation
+    // tombstone map. A recreated replay starts beyond every prior lifetime;
+    // publications within an existing replay remain contiguous and local.
+    this.sequence = clock ? clock.next++ : 0;
+  }
+
+  private advance(count: number): void {
+    this.sequence += count;
+    if (this.clock) this.clock.next = Math.max(this.clock.next, this.sequence + 1);
+  }
 
   latestCursor(): string {
     return encodeReplayCursor({ generation: this.generation, sequence: this.sequence });
   }
 
   publish(payload: EventPayload): ChatEvent {
-    const event = { ...payload, generation: this.generation, sequence: ++this.sequence, conversationId: this.conversationId } as ChatEvent;
+    this.advance(1);
+    const event = { ...payload, generation: this.generation, sequence: this.sequence, conversationId: this.conversationId } as ChatEvent;
     const bytes = Buffer.byteLength(JSON.stringify(event));
     this.events.push({ event, bytes });
     this.bytes += bytes;
@@ -126,7 +138,7 @@ export class ConversationReplay {
         for (const subscriber of [...this.subscribers]) subscriber.cancel();
         return event;
       }
-      this.sequence += count;
+      this.advance(count);
       this.events.push(...candidates);
       this.bytes += candidates.reduce((total, entry) => total + entry.bytes, 0);
       while (this.bytes > this.byteLimit && this.events.length) this.bytes -= this.events.shift()!.bytes;
