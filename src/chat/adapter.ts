@@ -1737,7 +1737,9 @@ export class ChatAdapter {
       for (let index = items.length - 1; index >= 0; index--) if (excluded.has(items[index]!.id)) items.splice(index, 1);
       for (const itemId of excluded) {
         if (!projection.has(itemId)) continue;
-        if (!historyRemovals.has(itemId)) removed = true;
+        // Current exclusion authority retires this row even when an earlier
+        // decision staged its old incarnation before a native reinsertion.
+        removed = true;
         stageHistoryRemoval(itemId);
       }
       // A visible native result can change presentation when ownership
@@ -5290,13 +5292,18 @@ export class ChatAdapter {
           // Reconcile their canonical views rather than publishing a hidden
           // launcher or terminal result directly from a live update.
           for (const update of updates) if (update.kind === "status") projection.apply(update);
+          const generation = this.backgroundStreamGeneration;
+          const fence = projection.beginHistoryRead();
           try { await this.history(conversationId); }
           catch {
-            if (!signal.aborted && this.projections.get(conversationId) === projection) for (const item of projection.items()) {
-              if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: unverifyWorkerTask(item) });
-            }
+            projection.recover(projection.items().flatMap(item => item.type === "background_task" && item.status === "running"
+              && !fence.changed(item.id) && !fence.workerChanged(item)
+              ? [{ kind: "upsert" as const, item: unverifyWorkerTask(item) }] : []),
+            () => !signal.aborted && !this.disposed && this.projections.get(conversationId) === projection
+              && generation === this.backgroundStreamGeneration && fence.current()
+              && !this.reversibleMutations.has(conversationId) && !this.revertReconciliations.has(conversationId));
             if (this.provider.reconcileBackgroundTasks) this.syncBackgroundState(conversationId);
-          }
+          } finally { fence.release(); }
           return;
         }
         const workerProgress = this.observeBackgroundSource(conversationId, projection, updates);
@@ -5749,13 +5756,7 @@ export class ChatAdapter {
         // A busy source does not invalidate independent facts. Read-lifetime
         // alias fences include rows added and removed entirely during the read.
         const safeTasks = tasks.filter(item => !fence.changed(item.id) && !fence.workerChanged(item));
-        // Re-key high-water marks when history resolves a provisional alias;
-        // renaming the same occurrence is not discovery of a new worker.
         const progressAliases = this.backgroundProgressAliases(recovery, projection);
-        let progress = false;
-        for (const item of safeTasks) {
-          if (this.recordBackgroundProgress(recovery, item, progressAliases, undefined, true)) progress = true;
-        }
         const { byId, supersedes } = indexRecoveredBackgroundTasks(safeTasks);
         const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
         for (const known of projection.items()) {
@@ -5772,6 +5773,12 @@ export class ChatAdapter {
           && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) {
           recovery.dirty = true;
           return;
+        }
+        // Only committed observations may consume progress. A rejected read
+        // must leave an identical successful retry eligible to extend its budget.
+        let progress = false;
+        for (const item of safeTasks) {
+          if (this.recordBackgroundProgress(recovery, item, progressAliases, undefined, true)) progress = true;
         }
         // At most one retained marker per projected worker row, including
         // omitted rows kept uncertain. No growing retired-identity registry.
@@ -5807,9 +5814,12 @@ export class ChatAdapter {
         recovery.inconclusiveReads = recovery.dirty || projection.find(item => item.type === "background_task" && item.status === "running" && item.stateUncertain === true) ? recovery.inconclusiveReads + 1 : 0;
       }, () => {
         if (this.disposed || this.backgroundRecoveries.get(id) !== recovery || generation !== this.backgroundStreamGeneration) return;
-        for (const known of this.projection(id).items()) {
-          if (known.type === "background_task" && known.status === "running" && !fence.changed(known.id)) this.projection(id).apply({ kind: "upsert", item: unverifyWorkerTask(known) });
-        }
+        if (!readProjection.recover(readProjection.items().flatMap(known => known.type === "background_task" && known.status === "running"
+          && !fence.changed(known.id) && !fence.workerChanged(known)
+          ? [{ kind: "upsert" as const, item: unverifyWorkerTask(known) }] : []),
+        () => !this.disposed && this.backgroundRecoveries.get(id) === recovery && generation === this.backgroundStreamGeneration
+          && this.projections.get(id) === readProjection && fence.current()
+          && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) recovery.dirty = true;
         this.syncBackgroundState(id);
         recovery.failures++;
       }).finally(() => {

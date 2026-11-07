@@ -180,8 +180,15 @@ describe("conversation replay", () => {
     expect(delivered.map(event => event.type)).toEqual(["item.upsert", "item.upsert"]);
     const queued = []; for await (const event of slow.subscription) queued.push(event);
     expect(queued.length).toBe(17);
-    expect(queued.at(-1)).toMatchObject({ type: "resync", reason: "conversation-rewritten", sequence: 18 });
+    expect(queued.at(-1)).toMatchObject({ type: "resync", reason: "conversation-rewritten", sequence: 16 });
     expect(queued.filter(event => event.type === "item.upsert" && event.item.id.startsWith("new:"))).toEqual([]);
+    // Native EventSource reconnects using the terminal frame's SSE id, not
+    // necessarily the application's last applied data cursor.
+    const terminal = queued.at(-1)!;
+    const reconnect = replay.handoff(cursor => cursor, encodeReplayCursor(terminal));
+    reconnect.subscription.cancel();
+    const replayed = []; for await (const event of reconnect.subscription) replayed.push(event);
+    expect(replayed.map(event => event.sequence)).toEqual([17, 18]);
   });
 
   test("hook-time snapshots remain complete and revoked admission cannot publish a candidate", () => {

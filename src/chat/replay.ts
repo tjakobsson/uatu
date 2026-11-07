@@ -107,6 +107,7 @@ export class ConversationReplay {
     let candidates: Array<{ event: ChatEvent; bytes: number }> = [];
     let bytes = 0, count = 0, oversized = false;
     for (const payload of payloads) {
+      if (oversized) { count++; continue; }
       const event = { ...payload, generation: this.generation, sequence: boundary + ++count, conversationId: this.conversationId } as ChatEvent;
       const size = Buffer.byteLength(JSON.stringify(event));
       // Reserve SSE framing/cursor overhead even though the subscriber counts
@@ -133,7 +134,8 @@ export class ConversationReplay {
         if (subscriber.canAccept(bytes)) {
           for (const { event } of candidates) subscriber.push(event);
         } else {
-          subscriber.push({ generation: this.generation, sequence: this.sequence, conversationId: this.conversationId,
+          // The terminal SSE id must not acknowledge the unseen batch.
+          subscriber.push({ generation: this.generation, sequence: boundary, conversationId: this.conversationId,
             type: "resync", reason: "conversation-rewritten" });
           subscriber.cancel();
         }
