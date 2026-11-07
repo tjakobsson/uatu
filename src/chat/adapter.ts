@@ -1525,8 +1525,10 @@ export class ChatAdapter {
     // list degrades the snapshot (the next refresh republishes) but must not
     // rewrite the published set — that would erase live questions.
     let questionsReconciled = false;
+    let commitQuestionTracking: (() => void) | undefined;
     try {
       const questionTick = this.interactionClock;
+      const previousTracking = new Map(this.publishedQuestions);
       const pendingNow = await this.pendingQuestions(id);
       coverage?.assertCurrent();
       for (const pending of pendingNow) {
@@ -1551,15 +1553,15 @@ export class ChatAdapter {
           });
         }
       }
+      const tracking = new Map<string, Set<string>>([[id, new Set(pendingNow.map(item => item.id))]]);
       if (pendingNow.length > 0) {
-        this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
         // A recovered child question is ALSO recorded under its owning child:
         // the child's next question-tool update computes removals against
         // that set, and the pump mirrors them into this conversation. Keyed
         // only under the parent, an answer given elsewhere left the parent
         // offering a question OpenCode no longer had — 409 until reload.
         // The sweep is child-inclusive, so each subset is that child's full
-        // current pending set and overwriting is safe.
+        // current pending set, provided no newer refresh owns the tracking.
         const byChild = new Map<string, Set<string>>();
         for (const item of pendingNow) {
           if (item.type !== "question") continue;
@@ -1569,8 +1571,35 @@ export class ChatAdapter {
           set.add(item.id);
           byChild.set(owner, set);
         }
-        for (const [owner, ids] of byChild) this.publishedQuestions.set(owner, ids);
-      } else this.publishedQuestions.delete(id);
+        for (const [owner, ids] of byChild) tracking.set(owner, ids);
+      }
+      commitQuestionTracking = () => {
+        // Tracking is removal authority for the next tool refresh. Publish it
+        // only with these rows, retaining later native announcements under the
+        // same questionTick fence as removals. An unrelated permission update
+        // must not prevent newly recovered questions from being tracked.
+        for (const item of projection.items()) {
+          if (item.type !== "question" || item.status !== "pending"
+            || (this.announced.get(item.id)?.tick ?? 0) <= questionTick) continue;
+          tracking.get(id)!.add(item.id);
+          const owner = item.conversationId ?? id;
+          if (owner !== id) {
+            const ids = tracking.get(owner) ?? new Set<string>();
+            ids.add(item.id);
+            tracking.set(owner, ids);
+          }
+        }
+        for (const [owner, ids] of tracking) {
+          // A concurrent parent/child refresh or history owns its newer set.
+          if (this.publishedQuestions.get(owner) !== previousTracking.get(owner)) continue;
+          const pending = new Set([...ids].filter(itemId => {
+            const item = projection.get(itemId);
+            return item?.type === "question" && item.status === "pending";
+          }));
+          if (pending.size > 0) this.publishedQuestions.set(owner, pending);
+          else this.publishedQuestions.delete(owner);
+        }
+      };
     } catch { /* unknown, not empty */ }
     // A permission is otherwise knowable only from a live event: it has no
     // history representation, so one raised while the pump was restarting
@@ -1847,6 +1876,7 @@ export class ChatAdapter {
         .map(([itemId]) => ({ kind: "remove" as const, itemId })));
     }
     for (const [itemId, removal] of historyRemovals) if (!projection.has(itemId)) removal.retired?.();
+    commitQuestionTracking?.();
     for (let index = 0; index < items.length; index++) {
       const item = items[index]!;
       this.syncRecoveredPermission(item);

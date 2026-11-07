@@ -8248,6 +8248,168 @@ describe("pending permission recovery", () => {
     expect(adapter.projectionForTests("parent").has("question:que_child")).toBe(false);
   });
 
+  for (const owner of ["parent", "child"] as const) test(`failed legacy history preserves ${owner} question tracking for ordinary refresh`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.agent.capabilities.push("reversible-history");
+    const state: ReversibleHistoryState = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+    let failHistory = false;
+    provider.getReversibleHistoryState = async () => {
+      if (failHistory) throw new Error("history state unavailable");
+      return state;
+    };
+    provider.undo = provider.redo = provider.revert = provider.restore = async () => ({ outcome: "nothing-to-undo", state });
+    const question = (requestId: string) => ({ requestId, conversationId: owner,
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] });
+    let pending = [question("old")];
+    let lists = 0;
+    provider.listQuestions = async () => { lists++; return pending; };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    try {
+      await adapter.history("parent");
+      expect(adapter.activity().awaiting).toBe(true);
+      // A nonempty list would overwrite both the parent and child sets; an
+      // empty list would delete the parent's. Neither may survive failure.
+      pending = owner === "child" ? [question("uncommitted")] : [];
+      failHistory = true;
+      await expect(adapter.history("parent")).rejects.toThrow("history state unavailable");
+      expect(adapter.projectionForTests("parent").has("question:old")).toBe(true);
+      expect(adapter.projectionForTests("parent").has("question:uncommitted")).toBe(false);
+      expect(adapter.activity().awaiting).toBe(true);
+      failHistory = false;
+      pending = [];
+      const before = lists;
+      provider.eventQueue.push({ id: "refresh", type: "session.next.tool.success",
+        data: { sessionID: owner, callID: "refresh", tool: "question" } } as never);
+      await waitUntil(() => lists > before);
+      await liveEventsApplied(adapter, provider);
+      await waitUntil(() => !adapter.projectionForTests("parent").has("question:old"));
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally {
+      await adapter.stopEventPump();
+      await pump;
+      await adapter.dispose();
+    }
+  });
+
+  for (const owner of ["parent", "child"] as const) test(`successful legacy history commits empty and nonempty ${owner} question tracking`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const question = (requestId: string) => ({ requestId, conversationId: owner,
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] });
+    let pending = [question("old")];
+    provider.listQuestions = async () => pending;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    try {
+      await adapter.history("parent");
+      pending = [];
+      await adapter.history("parent");
+      expect(adapter.projectionForTests("parent").has("question:old")).toBe(false);
+      expect(adapter.activity().awaiting).toBe(false);
+      pending = [question("new")];
+      await adapter.history("parent");
+      expect(adapter.projectionForTests("parent").has("question:new")).toBe(true);
+      expect(adapter.activity().awaiting).toBe(true);
+      pending = [];
+      provider.eventQueue.push({ id: "refresh", type: "session.next.tool.success",
+        data: { sessionID: owner, callID: "refresh", tool: "question" } } as never);
+      await waitUntil(() => !adapter.projectionForTests("parent").has("question:new"));
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally {
+      await adapter.stopEventPump();
+      await pump;
+      await adapter.dispose();
+    }
+  });
+
+  for (const owner of ["parent", "child"] as const) test(`legacy history cannot overwrite newer ${owner} question refresh tracking`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.agent.capabilities.push("reversible-history");
+    const state: ReversibleHistoryState = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+    let holdHistory = false, entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    provider.getReversibleHistoryState = async () => {
+      if (holdHistory) { entered = true; await gate; }
+      return state;
+    };
+    provider.undo = provider.redo = provider.revert = provider.restore = async () => ({ outcome: "nothing-to-undo", state });
+    const question = (requestId: string) => ({ requestId, conversationId: owner,
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] });
+    let pending = [question("old")];
+    provider.listQuestions = async () => pending;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    let load: Promise<unknown> | undefined;
+    const refresh = (callID: string) => provider.eventQueue.push({ id: callID, type: "session.next.tool.success",
+      data: { sessionID: owner, callID, tool: "question" } } as never);
+    try {
+      await adapter.history("parent");
+      pending = [];
+      holdHistory = true;
+      load = adapter.history("parent");
+      await waitUntil(() => entered);
+      pending = [question("old"), question("new")];
+      refresh("newer");
+      await waitUntil(() => adapter.projectionForTests("parent").has("question:new"));
+      release();
+      await load;
+      pending = [];
+      refresh("answered");
+      await waitUntil(() => !adapter.projectionForTests("parent").has("question:new")
+        && !adapter.projectionForTests("parent").has("question:old"));
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally {
+      release();
+      await load;
+      await adapter.stopEventPump();
+      await pump;
+      await adapter.dispose();
+    }
+  });
+
+  test("legacy history tracks recovered questions and later native announcements together", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent")];
+    provider.agent.capabilities.push("reversible-history");
+    const state: ReversibleHistoryState = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+    let entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    provider.getReversibleHistoryState = async () => { entered = true; await gate; return state; };
+    provider.undo = provider.redo = provider.revert = provider.restore = async () => ({ outcome: "nothing-to-undo", state });
+    let pending = [{ requestId: "recovered", conversationId: "parent",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }];
+    provider.listQuestions = async () => pending;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    const load = adapter.history("parent");
+    try {
+      await waitUntil(() => entered);
+      provider.eventQueue.push({ type: "question.asked", data: { sessionID: "parent", id: "native", timestamp: Date.now(),
+        questions: [{ question: "Pick", options: [{ label: "A" }] }] } });
+      await waitUntil(() => adapter.projectionForTests("parent").has("question:native"));
+      release();
+      await load;
+      expect(adapter.projectionForTests("parent").has("question:recovered")).toBe(true);
+      expect(adapter.projectionForTests("parent").has("question:native")).toBe(true);
+      pending = [];
+      provider.eventQueue.push({ id: "refresh", type: "session.next.tool.success",
+        data: { sessionID: "parent", callID: "refresh", tool: "question" } } as never);
+      await waitUntil(() => !adapter.projectionForTests("parent").has("question:recovered")
+        && !adapter.projectionForTests("parent").has("question:native"));
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally {
+      release();
+      await load;
+      await adapter.stopEventPump();
+      await pump;
+      await adapter.dispose();
+    }
+  });
+
   test("a recovered child question answered elsewhere clears live, not just on reload", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
