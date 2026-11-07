@@ -1136,6 +1136,37 @@ describe("workspace chat routes", () => {
     expect(await refused.json()).toEqual({ error: "count: enter a whole number" });
   });
 
+  test("oversized recovery emits open then one terminal qualified resync; its cursor resumes a racing native update", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const open = async (cursor?: string) => handler.GET(request(`/api/chat/conversations/opencode:local/events${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, {}, { conversationId: "opencode:local" }) as never);
+    const reader = (await open()).body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
+    service.replay.prepareBatch(Array.from({ length: 318 }, (_, index) => ({
+      type: "item.upsert" as const,
+      item: { type: "assistant_message" as const, id: `result:${index}`, createdAt: index, markdown: "x".repeat(4096), completedAt: index + 1 },
+    })))();
+    const frame = new TextDecoder().decode((await reader.read()).value);
+    expect(frame).toContain("event: resync\n");
+    expect(frame).not.toContain("event: chat\n");
+    const event = JSON.parse(frame.match(/data: (.+)\n/)![1]!);
+    expect(event).toMatchObject({ type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local" });
+    expect((await reader.read()).done).toBe(true);
+    const cursor = frame.match(/id: (.+)\n/)![1]!;
+    expect(service.replay.latestCursor()).toBe(cursor);
+    // The snapshot cursor is captured before this live update and reattachment.
+    service.replay.publish({ type: "conversation.status", status: "idle" });
+    const resumed = (await open(cursor)).body!.getReader();
+    expect(new TextDecoder().decode((await resumed.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
+    const followup = new TextDecoder().decode((await resumed.read()).value);
+    expect(followup).toContain("event: chat\n");
+    expect(JSON.parse(followup.match(/data: (.+)\n/)![1]!)).toMatchObject({ type: "conversation.status", sequence: event.sequence + 1, status: "idle" });
+    expect(service.prompts).toBe(0);
+    expect(service.reversibleMutations).toEqual({ undo: 0, redo: 0, revert: 0, restore: 0 });
+    await resumed.cancel();
+    expect(service.replay.subscriberCount()).toBe(0);
+  });
+
   test("streams retained events immediately with replay IDs and no-buffering headers", async () => {
     const service = new FakeChatService();
     const cursor = encodeReplayCursor({ generation: "generation", sequence: 0 });

@@ -1069,6 +1069,14 @@ export class ChatAdapter {
       .map(item => this.correlateSteerMessage(id, item, coverage?.steerCorrelations));
     if (options.workers && items.length > WORKER_EVIDENCE_LIMIT) throw new WorkerEvidenceError("capacity", "worker dismissal source capacity reached");
     const sourceProjection = this.projection(id);
+    // Reads can still fail or lose admission after these decisions. Keep
+    // their removals (and request retirement effects) private until the same
+    // validated commit as the recovered rows. An early decision cannot remove
+    // a newer native replacement that arrived during a subsequent await.
+    const historyRemovals = new Map<string, { expected: ConversationItem | undefined; retired?: () => void }>();
+    const stageHistoryRemoval = (itemId: string, retired?: () => void) => {
+      historyRemovals.set(itemId, { expected: this.projection(id).get(itemId), retired: retired ?? historyRemovals.get(itemId)?.retired });
+    };
     const revokedChildren = new Set(page.workerAssociationContradictions);
     const fallbackRelations = [...(page.workerResultFallbacks ?? [])];
     const positiveFallbacks = new Set<string>();
@@ -1329,7 +1337,7 @@ export class ChatAdapter {
             // source row, even before the final non-weakening assertion runs.
             throw new WorkerEvidenceError("unavailable", "authoritative worker source was weakened without newer evidence");
           }
-          this.projection(id).apply({ kind: "remove", itemId: known.id });
+          stageHistoryRemoval(known.id);
           const index = items.findIndex(item => item.id === known.id);
           if (index >= 0) items.splice(index, 1);
           continue;
@@ -1537,9 +1545,10 @@ export class ChatAdapter {
           // Announced after the read began: the snapshot predates it, so it
           // stays on the timeline and its notification stays pending.
           if ((this.announced.get(existing.id)?.tick ?? 0) > questionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
-          projection.apply({ kind: "remove", itemId: existing.id });
-          this.questionCreatedAt.delete(existing.id);
-          this.resolveAnnounced(existing.id);
+          stageHistoryRemoval(existing.id, () => {
+            this.questionCreatedAt.delete(existing.id);
+            this.resolveAnnounced(existing.id);
+          });
         }
       }
       if (pendingNow.length > 0) {
@@ -1590,8 +1599,7 @@ export class ChatAdapter {
         for (const existing of projection.items()) {
           if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id) || coverage?.changed(existing.id)) continue;
           if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
-          projection.apply({ kind: "remove", itemId: existing.id });
-          this.retireRecoveredPermission(existing, id);
+          stageHistoryRemoval(existing.id, () => this.retireRecoveredPermission(existing, id));
         }
       }
     } catch {
@@ -1638,7 +1646,10 @@ export class ChatAdapter {
     // A newer native row can replace its correlated history copy in the
     // change fence. Reapply only the read-owned native-ID correlation, keeping
     // that row's newer contents even after its old cache/projection departed.
-    if (coverage) items.splice(0, items.length, ...coverage.merge(items).map(item => this.correlateSteerMessage(id, item, coverage.steerCorrelations)));
+    if (coverage) items.splice(0, items.length, ...coverage.merge(items).filter(item => {
+      const removal = historyRemovals.get(item.id);
+      return !removal || projection.get(item.id) !== removal.expected;
+    }).map(item => this.correlateSteerMessage(id, item, coverage.steerCorrelations)));
     // The live-task snapshot above was taken before several awaits; a task
     // that settled in the projection meanwhile keeps its settled row.
     for (let index = 0; index < items.length; index += 1) {
@@ -1691,8 +1702,8 @@ export class ChatAdapter {
       for (let index = items.length - 1; index >= 0; index--) if (excluded.has(items[index]!.id)) items.splice(index, 1);
       for (const itemId of excluded) {
         if (!projection.has(itemId)) continue;
-        projection.apply({ kind: "remove", itemId });
-        removed = true;
+        if (!historyRemovals.has(itemId)) removed = true;
+        stageHistoryRemoval(itemId);
       }
       // A visible native result can change presentation when ownership
       // enrichment recovers. Neither page absence nor a notice-shaped id is
@@ -1706,7 +1717,7 @@ export class ChatAdapter {
         const index = items.findIndex(item => item.id === fallback.id && projection.matchesWorkerFallback(item, relation));
         if (index >= 0) items.splice(index, 1);
         const current = projection.get(fallback.id);
-        if (current && projection.matchesWorkerFallback(current, relation)) projection.apply({ kind: "remove", itemId: fallback.id });
+        if (current && projection.matchesWorkerFallback(current, relation)) stageHistoryRemoval(fallback.id);
       }
       const allocationCommits: Array<{ owner: AttributionOwner; floor: number | undefined; occurrences?: string }> = [];
       if (coverage && !cursor && accountingItems) for (const [child, publication] of allocationPublications) {
@@ -1781,7 +1792,11 @@ export class ChatAdapter {
       }
       // Ordinary upserts intentionally preserve terminal/sparse data. Exact
       // source revocation must replace it instead of merging hidden fields back.
-      if (!replace) for (const itemId of new Set([...resetReports, ...revokedRows])) if (projection.has(itemId)) projection.apply({ kind: "remove", itemId });
+      const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
+      for (const [itemId, removal] of historyRemovals) {
+        if (projection.get(itemId) === removal.expected) recoveryUpdates.push({ kind: "remove", itemId });
+      }
+      if (!replace) for (const itemId of new Set([...resetReports, ...revokedRows])) if (projection.has(itemId)) recoveryUpdates.push({ kind: "remove", itemId });
       if (page.workerOriginCoverage) projection.rememberWorkerOrigins(items, page.workerOriginCoverage, coverage?.changed);
       projection.rememberWorkerFallbacks(items, fallbackRelations, coverage?.changed, page.workerOriginCoverage);
       workerStrength?.(items);
@@ -1789,18 +1804,27 @@ export class ChatAdapter {
         // Worker retention, exact exclusions and result supersession above
         // apply equally to replacement. Ordinary transcript rows get no such
         // retention. Commit only after the covered read's final validation.
+        projection.replace(items, recoveryUpdates.flatMap(update => update.kind === "remove" ? [update.itemId] : []), () => {
+          coverage?.assertCurrent(); coverage?.workerSources.assertCurrent();
+          return !this.disposed && this.projections.get(id) === projection;
+        });
+        // Replacement preparation/admission may fail. Do not discard buffered
+        // native events until the complete replacement has actually committed.
         this.eventCoalescer?.discard(id);
-        projection.replace(items);
       } else {
         // Recovery is also for clients already listening when V2 reconnects.
         // Publish recovered values, not just a silent seed of the next snapshot.
         for (const item of items) {
           const current = projection.get(item.id);
-          if (!current || !sameConversationItems([current], [item])) projection.apply({ kind: "upsert", item });
+          if (!current || !sameConversationItems([current], [item]) || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
           else if (current.type === "tool" && item.type === "tool" && coverage?.projection === projection && !coverage.changed(item.id)) {
             this.refreshEquivalentDescendantBindings(projection, current, item);
           }
         }
+        if (!projection.recover(recoveryUpdates, () => {
+          coverage?.assertCurrent(); coverage?.workerSources.assertCurrent();
+          return !this.disposed && this.projections.get(id) === projection;
+        }, removed || !!visibilityChanged)) throw new HistoryReadChangedError();
       }
       // Publication and eligibility share the covering read's final fence.
       // Session lookups and child usage/model frames never clear this marker.
@@ -1814,8 +1838,15 @@ export class ChatAdapter {
         projection.reconciledHistoryVisibility = { state: reversibleHistory, ...(visibility ? { boundaryId: visibility.boundaryId } : {}) };
         this.rememberReversibleHistory(id, reversibleHistory);
       }
-      if (!replace && (removed || visibilityChanged)) projection.replay.publish({ type: "resync", reason: "conversation-rewritten" });
-    } else { workerStrength?.(items); projection.seed(items); }
+    } else {
+      workerStrength?.(items);
+      // Preserve legacy snapshot seeding (no incremental upsert fan-out).
+      // Complete its fallible preparation before publishing retired rows.
+      projection.seed(items);
+      projection.recover([...historyRemovals].filter(([itemId, removal]) => projection.get(itemId) === removal.expected)
+        .map(([itemId]) => ({ kind: "remove" as const, itemId })));
+    }
+    for (const [itemId, removal] of historyRemovals) if (!projection.has(itemId)) removal.retired?.();
     for (let index = 0; index < items.length; index++) {
       const item = items[index]!;
       this.syncRecoveredPermission(item);
@@ -5690,15 +5721,22 @@ export class ChatAdapter {
           if (this.recordBackgroundProgress(recovery, item, progressAliases, undefined, true)) progress = true;
         }
         const { byId, supersedes } = indexRecoveredBackgroundTasks(safeTasks);
+        const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
         for (const known of projection.items()) {
           if (fence.changed(known.id)) continue;
           if (known.type === "background_task" && supersedes(known)) {
-            projection.apply({ kind: "remove", itemId: known.id });
+            recoveryUpdates.push({ kind: "remove", itemId: known.id });
             continue;
           }
-          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) projection.apply({ kind: "upsert", item: unverifyWorkerTask(known) });
+          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) recoveryUpdates.push({ kind: "upsert", item: unverifyWorkerTask(known) });
         }
-        for (const item of safeTasks) projection.apply({ kind: "upsert", item });
+        for (const item of safeTasks) recoveryUpdates.push({ kind: "upsert", item });
+        if (!projection.recover(recoveryUpdates, () => !this.disposed && this.backgroundRecoveries.get(id) === recovery
+          && generation === this.backgroundStreamGeneration && this.projections.get(id) === projection && fence.current()
+          && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) {
+          recovery.dirty = true;
+          return;
+        }
         // At most one retained marker per projected worker row, including
         // omitted rows kept uncertain. No growing retired-identity registry.
         for (const id of recovery.progress.keys()) if (!projection.has(id)) recovery.progress.delete(id);
@@ -6493,12 +6531,13 @@ export class ConversationProjection {
   // Last boundary whose timeline was reconciled, not merely read for queue
   // policy. Projection eviction naturally retires this view's authority.
   reconciledHistoryVisibility?: { state: ReversibleHistoryState; boundaryId?: string | null };
-  private readonly timeline = new Map<string, ConversationItem>();
-  private readonly text = new ProviderTextReconciler();
+  private timeline = new Map<string, ConversationItem>();
+  private text = new ProviderTextReconciler();
   // Only concurrent covered reads retain change fences. No permanent removal
   // tombstones: each owner releases its set on completion, abort or deadline.
   private readonly historyReads = new Set<{ changed: Set<string>; workerAliases: Set<string>; conversation?: ConversationSummary }>();
   private replacementRevision = 0;
+  private mutationRevision = 0;
 
   beginHistoryRead() {
     const changed = new Set<string>();
@@ -6524,6 +6563,7 @@ export class ConversationProjection {
   }
 
   private historyChanged(id: string): void {
+    this.mutationRevision++;
     for (const read of this.historyReads) read.changed.add(id);
   }
 
@@ -6576,6 +6616,7 @@ export class ConversationProjection {
       || current.activity && !["checking", "unavailable", "session-active"].includes(current.activity.kind)
       || !current.activity && !current.stateUncertain) return undefined;
     const item: BackgroundTaskItem = { ...current, activity: { ...current.activity, kind } };
+    this.mutationRevision++;
     this.timeline.set(item.id, item);
     this.replay.publish({ type: "item.upsert", item });
     return item;
@@ -6599,6 +6640,7 @@ export class ConversationProjection {
   }
 
   seed(items: ConversationItem[]): void {
+    this.mutationRevision++;
     for (const item of items) {
       const current = this.timeline.get(item.id);
       const interaction = mergeInteraction(current, item);
@@ -6615,18 +6657,119 @@ export class ConversationProjection {
     }
   }
 
-  replace(items: ConversationItem[]): ChatEvent {
-    const retained = new Set(items.map(item => item.id));
+  /** A synchronous, validated row recovery. Fallible merge/provenance hooks
+   * run against the old view; a reentrant mutation or revoked admission aborts
+   * the candidate. Only then swap the complete map and publish its bounded
+   * effective change set. Interaction notifications observe the complete new
+   * view and an already committed replay boundary, never a row-by-row prefix. */
+  recover(updates: readonly Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>[], admit: () => boolean = () => true, invalidate = false): boolean {
+    if (!admit()) return false;
+    const revision = this.mutationRevision, cursor = this.replay.latestCursor();
+    const prior = this.timeline, staged = new Map(prior);
+    const touched = new Set<string>(), settled = new Set<string>();
+    const firstRemoval = new Map<string, number>(), lastUpsert = new Map<string, number>();
+    for (const [index, update] of updates.entries()) {
+      if (update.kind === "remove") {
+        if (!firstRemoval.has(update.itemId)) firstRemoval.set(update.itemId, index);
+        staged.delete(update.itemId); touched.add(update.itemId); settled.add(update.itemId);
+        continue;
+      }
+      const incoming = update.item, current = staged.get(incoming.id);
+      const interaction = mergeInteraction(current, incoming);
+      const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
+      if ((merged.type === "permission" || merged.type === "question") && merged.status !== "pending") settled.add(merged.id);
+      if (merged.type === "question" && !merged.questions.length
+        || merged.type === "permission" && !merged.resources.length && merged.plan === undefined) continue;
+      this.beforePublish?.(merged, current, incoming);
+      staged.set(merged.id, merged); touched.add(merged.id);
+      lastUpsert.set(merged.id, index);
+    }
+    const publication = this.replay.prepareBatch((function* () {
+      // A deliberate remove/reinsert is a replacement, not a sparse upsert.
+      // Folding it to its final row would let browser merges retain revoked
+      // child/usage/control fields. Preserve its ordered reset pair when the
+      // complete batch fits; oversized batches still become one resync.
+      for (const [index, update] of updates.entries()) {
+        const id = update.kind === "remove" ? update.itemId : update.item.id;
+        const before = prior.get(id), item = staged.get(id);
+        if (update.kind === "remove") {
+          if (before && firstRemoval.get(id) === index) yield { type: "item.remove" as const, itemId: id };
+        } else if (item && lastUpsert.get(id) === index
+          && (!before || firstRemoval.has(id) || !sameConversationItems([before], [item]))) {
+          yield { type: "item.upsert" as const, item };
+        }
+      }
+      // A fitting visibility change keeps its existing ordered row events and
+      // terminal invalidation. An oversized plan collapses the entire batch,
+      // including this marker, to the single resync chosen by prepareBatch.
+      if (invalidate) yield { type: "resync" as const, reason: "conversation-rewritten" as const };
+    })());
+    if (!admit() || this.mutationRevision !== revision || this.replay.latestCursor() !== cursor) return false;
+    // No callback or await between the last admission check and publication.
+    this.timeline = staged;
+    for (const id of touched) {
+      const before = prior.get(id), item = staged.get(id);
+      this.touchWorker(before); this.touchWorker(item); this.historyChanged(id);
+      if (item) {
+        this.pruneWorkerFallback(item);
+        if (item.type === "assistant_message") this.text.seed(item.id.replace(/^part:/, ""), item.markdown);
+        else if (item.type === "reasoning") this.text.seed(item.id.replace(/^part:|^reasoning:/, ""), item.text);
+      } else {
+        this.workerOrigins.delete(id); this.workerFallbacks.delete(id);
+        this.text.forget(id); this.text.forget(id.replace(/^part:|^reasoning:/, ""));
+      }
+    }
+    publication();
+    for (const id of settled) this.interactions?.settled(id);
+    for (const id of touched) {
+      const item = staged.get(id);
+      if ((item?.type === "permission" || item?.type === "question") && item.status === "pending") this.interactions?.pending(id);
+    }
+    return true;
+  }
+
+  /** Replace the complete visible state, preserving seed (not sparse upsert)
+   * semantics. Required source removals and the terminal rewrite marker share
+   * one prepared publication. All fallible hooks/text preparation run against
+   * the old view, before the admission check and state swap. */
+  replace(items: ConversationItem[], removals: readonly string[] = [], admit: () => boolean = () => true): ChatEvent {
+    if (!admit()) throw new HistoryReadChangedError();
+    const revision = this.mutationRevision, cursor = this.replay.latestCursor(), prior = this.timeline;
+    const staged = new Map<string, ConversationItem>(), text = new ProviderTextReconciler();
+    const notifications: ConversationItem[] = [], prunedFallbacks = new Set<string>();
+    for (const item of items) {
+      const current = staged.get(item.id), interaction = mergeInteraction(current, item);
+      const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
+      const fallback = this.workerFallbacks.get(merged.id);
+      if (fallback && !sameConversationItems([merged], [fallback.fallback])) prunedFallbacks.add(merged.id);
+      this.beforePublish?.(merged, current, item);
+      staged.set(item.id, merged); notifications.push(merged);
+      if (item.type === "assistant_message") text.seed(item.id.replace(/^part:/, ""), item.markdown);
+      else if (item.type === "reasoning") text.seed(item.id.replace(/^part:|^reasoning:/, ""), item.text);
+    }
+    const publication = this.replay.prepareBatch((function* () {
+      for (const itemId of new Set(removals)) if (prior.has(itemId)) yield { type: "item.remove" as const, itemId };
+      yield { type: "resync" as const, reason: "conversation-rewritten" as const };
+    })());
+    if (!admit() || this.mutationRevision !== revision || this.replay.latestCursor() !== cursor) throw new HistoryReadChangedError();
+    // No callback or await between final admission, complete state swap and
+    // publication. A queued coalescer flush cannot run inside this commit.
+    this.timeline = staged; this.text = text;
+    const retained = new Set(staged.keys());
     for (const id of this.workerOrigins.keys()) if (!retained.has(id)) this.workerOrigins.delete(id);
-    for (const id of this.workerFallbacks.keys()) if (!retained.has(id)) this.workerFallbacks.delete(id);
+    for (const id of this.workerFallbacks.keys()) if (!retained.has(id) || prunedFallbacks.has(id)) this.workerFallbacks.delete(id);
     this.replacementRevision++;
-    for (const id of this.timeline.keys()) this.historyChanged(id);
-    for (const item of items) this.historyChanged(item.id);
-    this.timeline.clear();
-    this.text.clear();
+    for (const id of prior.keys()) this.historyChanged(id);
+    for (const id of staged.keys()) this.historyChanged(id);
+    const event = publication()!; // Every replacement includes its marker.
     this.interactions?.cleared();
-    this.seed(items);
-    return this.replay.publish({ type: "resync", reason: "conversation-rewritten" });
+    for (const item of notifications) {
+      if (item.type === "permission" || item.type === "question") {
+        if (item.status === "pending") this.interactions?.pending(item.id);
+        else this.interactions?.settled(item.id);
+      }
+    }
+    return event;
   }
 
   apply(update: NormalizedProviderUpdate): ChatEvent | undefined {

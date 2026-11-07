@@ -25,6 +25,7 @@ import { childChatControl, expect, openEventSources, openSessionTab, test } from
 import { openChatPanel } from "./chat-helpers";
 import { treeRow } from "./tree-helpers";
 import type { ConversationItem } from "../../src/chat/types";
+import { saveEvidence } from "./evidence";
 
 const TAB_COUNT = 6;
 // The pass criterion is deterministic: hidden tabs hold no stream, the
@@ -40,6 +41,88 @@ const DOCUMENT_LOAD_GUARD_MS = 2 * DOCUMENT_LOAD_BUDGET_MS;
 const DOCUMENT_LOAD_CEILING_MS = 20_000;
 
 test.use({ hubWorkspaces: ["alpha"] });
+
+test("oversized recovery refreshes only the conversation, retaining completed content, draft and reading position on one EventSource", async ({ hub, hubContext }) => {
+  const workspace = hub.workspaces[0]!;
+  const items: ConversationItem[] = Array.from({ length: 60 }, (_, index) => ({
+    id: `completed:${index}`, type: "assistant_message", createdAt: index + 1, completedAt: index + 2,
+    markdown: `Completed answer ${index}\n\n${"Retained reading material. ".repeat(12)}`,
+  }));
+  const seeded = await childChatControl(workspace, { action: "seed", title: "Bulk recovery", items }) as { conversation: { id: string } };
+  const page = await hubContext.newPage();
+  let liveOpens = 0;
+  const mutations: string[] = [];
+  page.on("request", request => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === "/api/hub/live") liveOpens += 1;
+    if (pathname.includes("/api/chat/") && request.method() !== "GET") mutations.push(pathname);
+  });
+  await page.goto(workspace.sessionUrl);
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await openChatPanel(page);
+  await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+  await expect(page.locator("#chat-items")).toContainText("Completed answer 59");
+  await page.locator("#chat-input").fill("a draft that recovery must never submit");
+  const scroller = page.locator("#chat-timeline");
+  await page.evaluate(() => document.fonts.ready);
+  await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
+  // Establish real reader intent after the initial bottom-follow settles.
+  // A script assignment during that pending follow can be overwritten by it.
+  await scroller.hover();
+  await page.mouse.wheel(0, -800);
+  await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(600);
+  await page.evaluate(() => new Promise<void>(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  const top = await scroller.evaluate(el => el.scrollTop);
+  expect(top).toBeGreaterThan(100);
+  const sourceUrls = await openEventSources(page);
+  expect(sourceUrls).toHaveLength(1);
+  const opensBefore = liveOpens;
+
+  let reads = 0;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const snapshotPath = `/s/${encodeURIComponent(workspace.id)}/api/chat/conversations/${encodeURIComponent(seeded.conversation.id)}`;
+  await page.route(url => url.pathname === snapshotPath, async route => {
+    reads += 1;
+    await held;
+    await route.continue();
+  });
+  const updates: ConversationItem[] = Array.from({ length: 318 }, (_, index) => ({
+    type: "background_task", id: `worker:${index}`, taskId: `worker:${index}`, createdAt: 100 + index,
+    description: `Recovered worker ${index}`, status: "completed", summary: "x".repeat(4096),
+  }));
+  await childChatControl(workspace, { action: "recoverItems", conversationId: seeded.conversation.id, items: updates });
+  await expect.poll(() => reads).toBe(1);
+  // The authoritative read is intentionally pending: retained presentation
+  // must not be replaced by an empty/loading transcript in the meantime.
+  await expect(page.locator("#chat-items")).toContainText("Completed answer 59");
+  await expect(page.locator("#chat-input")).toHaveValue("a draft that recovery must never submit");
+  expect(Math.abs(await scroller.evaluate(el => el.scrollTop) - top)).toBeLessThan(2);
+  const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === snapshotPath);
+  release();
+  const snapshot = await (await refreshed).json() as { items: ConversationItem[] };
+  expect(snapshot.items.filter(item => item.type === "background_task")).toHaveLength(318);
+  // A later native event proves fresh cursor attachment completed; no sleeps
+  // or socket-open heuristics stand in for topic readiness.
+  await childChatControl(workspace, { action: "item", conversationId: seeded.conversation.id, item: {
+    id: "native:after", type: "assistant_message", createdAt: 1000, completedAt: 1001, markdown: "Native follow-up after recovery",
+  } });
+  await expect(page.locator("#chat-items")).toContainText("Native follow-up after recovery");
+  await expect(page.locator('[data-chat-item-id="native:after"]')).toHaveCount(1);
+  await expect(page.locator("#chat-items")).toContainText("Completed answer 59");
+  await expect(page.locator("#chat-input")).toHaveValue("a draft that recovery must never submit");
+  await expect.poll(async () => Math.abs(await scroller.evaluate(el => el.scrollTop) - top)).toBeLessThan(2);
+  expect(reads).toBe(1);
+  expect(mutations).toEqual([]);
+  expect(liveOpens).toBe(opensBefore);
+  expect(await openEventSources(page)).toEqual(sourceUrls);
+  await fs.writeFile(path.join(workspace.path, "bulk-recovery.md"), "# Unrelated topic still live\n");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "19 files", { timeout: 15_000 });
+  await expect(page.locator("#chat-state")).not.toContainText("interrupted");
+  await saveEvidence(test.info(), "bulk-recovery.json", JSON.stringify({ recoveredWorkers: 318, snapshotReads: reads, liveOpensBefore: opensBefore, liveOpensAfter: liveOpens, readingTopBefore: top, readingTopAfter: await scroller.evaluate(el => el.scrollTop), chatMutations: mutations }, null, 2));
+});
 
 async function setVisibility(page: Page, state: "hidden" | "visible"): Promise<void> {
   await page.evaluate(value => {

@@ -31,6 +31,294 @@ import { addAcceptedDraft, applyChatEvent, projectionFromSnapshot } from "./proj
 import { LiveBroker } from "../hub/live-broker";
 import { activeInteractionRequests } from "./interaction-order";
 import type { LiveEnvelope } from "../shared/live-protocol";
+import { buildRoutes } from "../server/routes";
+import { ConversationProjection } from "./adapter";
+import { ConversationReplay, decodeReplayCursor } from "./replay";
+
+test("real V2 history replacement commits its required removals and one terminal marker together", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Replacement publication")).id;
+    await adapter.prompt(parent, "first", "Retain the first turn"); fake.finish(parent);
+    await adapter.prompt(parent, "second", "Replace the second turn"); fake.finish(parent);
+    await adapter.history(parent);
+    const projection = adapter.projectionForTests(parent);
+    projection.upsert({ id: "notice:cold-fallback", type: "notice", level: "info", message: "Retire this source representation", createdAt: 1 });
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (...args) => {
+      const page = await listMessages(...args);
+      return args[0] === parent && page.revertVisibility?.state.staged ? { ...page, revertVisibility: {
+        ...page.revertVisibility, excludedItemIds: [...page.revertVisibility.excludedItemIds, "notice:cold-fallback"],
+      } } : page;
+    };
+    const existing = await adapter.subscribe(parent);
+    try {
+      await adapter.undo(parent, "replace-latest-turn");
+      const current = await adapter.subscribe(parent); current.events.cancel(); existing.events.cancel();
+      const announced: ChatEvent[] = []; for await (const event of existing.events) announced.push(event);
+      const removal = announced.findIndex(event => event.type === "item.remove" && event.itemId === "notice:cold-fallback");
+      const marker = announced.findIndex(event => event.type === "resync");
+      expect(removal).toBeGreaterThanOrEqual(0);
+      expect(marker).toBeGreaterThan(removal);
+      expect(announced.filter(event => event.type === "resync")).toHaveLength(1);
+      expect(current.snapshot.items.some(item => item.id === "notice:cold-fallback")).toBe(false);
+      expect(current.snapshot.reversibleHistory?.staged).toBe(true);
+      for (let i = 0; i < 3; i++) {
+        const reread = await adapter.history(parent);
+        expect(reread.cursor).toBe(current.snapshot.cursor);
+        expect(reread.items).toEqual(current.snapshot.items);
+      }
+    } finally { existing.events.cancel(); }
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 15_000);
+
+for (const failure of ["preparation", "admission"] as const) test(`real V2 mixed history removal and upsert publishes no prefix on ${failure} failure`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let retried!: () => void;
+  const retry = new Promise<void>(resolve => { retried = resolve; });
+  let reading: ReturnType<ChatAdapter["history"]> | undefined;
+  try {
+    const parent = (await provider.createSession("History publication failure")).id;
+    await adapter.history(parent);
+    const projection = adapter.projectionForTests(parent);
+    const old = { id: "old", type: "notice" as const, level: "info" as const, message: "Keep until admission", createdAt: 1 };
+    projection.upsert(old);
+    const cursor = projection.replay.latestCursor();
+    let armed = true, reads = 0;
+    const newer = { ...old, id: "native", message: "Newer native fact" };
+    const incoming = { ...old, id: "incoming", get message() {
+      if (armed) {
+        armed = false;
+        if (failure === "preparation") throw new Error("synthetic history preparation failure");
+        projection.upsert(newer);
+      }
+      return "Recovered value";
+    } };
+    provider.listMessages = async () => {
+      if (++reads > 1 && failure === "admission") { retried(); await gate; }
+      return { items: [incoming], completeItems: [incoming], accounting: [], revertVisibility: {
+        boundaryId: null, state: { staged: false, canUndo: false, canRedo: false, revertedMessages: [] }, excludedItemIds: [old.id],
+      } };
+    };
+    const client = await adapter.subscribe(parent);
+    try {
+      reading = adapter.history(parent);
+      if (failure === "preparation") await expect(reading).rejects.toThrow("synthetic history preparation failure");
+      else await retry;
+      expect(projection.get(old.id)).toEqual(old);
+      expect(projection.has(incoming.id)).toBe(false);
+      expect(decodeReplayCursor(projection.replay.latestCursor())!.sequence).toBe(decodeReplayCursor(cursor)!.sequence + (failure === "admission" ? 1 : 0));
+      client.events.cancel();
+      const announced: ChatEvent[] = []; for await (const event of client.events) announced.push(event);
+      expect(announced.map(event => event.type === "item.upsert" ? event.item.id : event.type)).toEqual(failure === "admission" ? [newer.id] : []);
+      release();
+      const recovered = failure === "preparation" ? await adapter.history(parent) : await reading;
+      expect(recovered.items.some(item => item.id === old.id)).toBe(false);
+      expect(recovered.items).toContainEqual(expect.objectContaining({ id: incoming.id, message: "Recovered value" }));
+    } finally { client.events.cancel(); }
+  } finally { release(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 15_000);
+
+for (const invalidation of ["exclusion", "visibility boundary"] as const) test(`real V2 oversized history ${invalidation} and upserts commit with one invalidation and converge`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  try {
+    const parent = (await provider.createSession("Oversized history commit")).id;
+    await adapter.history(parent);
+    const projection = adapter.projectionForTests(parent);
+    if (invalidation === "exclusion") projection.upsert({ id: "excluded", type: "notice", level: "info", message: "Excluded source row", createdAt: 1 });
+    const before = decodeReplayCursor(projection.replay.latestCursor())!;
+    const items: BackgroundTaskItem[] = Array.from({ length: 318 }, (_, i) => ({ id: `task:history:${i}`, type: "background_task", taskId: `history:${i}`,
+      description: "Recovered worker", createdAt: i + 2, status: "completed", summary: "x".repeat(4096) }));
+    const boundaryId = invalidation === "visibility boundary" ? "fixture-boundary" : null;
+    provider.getHistoryRevertBoundary = async () => boundaryId;
+    provider.listMessages = async () => ({ items, completeItems: items, accounting: [], revertVisibility: {
+      boundaryId, state: { staged: boundaryId !== null, canUndo: false, canRedo: boundaryId !== null, revertedMessages: [] }, excludedItemIds: ["excluded"],
+    } });
+    const client = await adapter.subscribe(parent);
+    const snapshot = await adapter.history(parent);
+    client.events.cancel();
+    const announced: ChatEvent[] = []; for await (const event of client.events) announced.push(event);
+    expect(announced).toMatchObject([{ type: "resync", reason: "conversation-rewritten" }]);
+    expect(decodeReplayCursor(snapshot.cursor)!.sequence).toBe(before.sequence + 1);
+    expect(snapshot.items).toHaveLength(318);
+    expect(projection.has("excluded")).toBe(false);
+    const attached = await adapter.subscribe(parent, { cursor: snapshot.cursor });
+    try {
+      for (let i = 0; i < 3; i++) {
+        const reread = await adapter.history(parent);
+        expect(reread.cursor).toBe(snapshot.cursor);
+        expect(reread.items).toEqual(snapshot.items);
+      }
+      attached.events.cancel();
+      const subsequent = []; for await (const event of attached.events) subsequent.push(event);
+      expect(subsequent).toEqual([]);
+    } finally { attached.events.cancel(); }
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 15_000);
+
+test("bulk recovery refreshes private worker proof without republishing equal activity and preserves native terminal order", async () => {
+  const replay = new ConversationReplay("g", "parent", 256 * 1024);
+  const proof = new WeakMap<object, string>();
+  const projection = new ConversationProjection(replay, undefined, undefined, (item, _current, incoming) => {
+    const source = incoming && proof.get(incoming); if (source) proof.set(item, source);
+  });
+  const worker: BackgroundTaskItem = { type: "background_task", id: "task:worker", taskId: "worker", createdAt: 1, description: "Worker",
+    status: "running", stateUncertain: true, activity: { kind: "working", executionId: "execution", generation: 1, observedAt: 10 },
+    control: { available: false, reason: "No retained Stop proof" } };
+  projection.recover([{ kind: "upsert", item: worker }]);
+  const before = replay.latestCursor();
+  const client = replay.handoff(cursor => cursor);
+  const refreshed = { ...worker }; proof.set(refreshed, "current owned proof");
+  projection.recover([{ kind: "upsert", item: refreshed }]);
+  expect(replay.latestCursor()).toBe(before);
+  expect(proof.get(projection.get(worker.id)!)).toBe("current owned proof");
+  expect(projection.get(worker.id)).toEqual(worker);
+  projection.apply({ kind: "upsert", item: { ...worker, activity: { kind: "working", executionId: "execution", generation: 1, observedAt: 20 } } });
+  projection.apply({ kind: "upsert", item: { ...worker, status: "completed", activity: { kind: "ended", executionId: "execution", generation: 1, observedAt: 30 }, summary: "Done" } });
+  client.subscription.cancel();
+  const delivered: ChatEvent[] = []; for await (const event of client.subscription) delivered.push(event);
+  expect(delivered).toMatchObject([
+    { type: "item.upsert", sequence: 2, item: { status: "running", activity: { kind: "working", observedAt: 20 }, control: { available: false } } },
+    { type: "item.upsert", sequence: 3, item: { status: "completed", activity: { kind: "ended", observedAt: 30 }, summary: "Done" } },
+  ]);
+});
+
+for (const scenario of ["4 KiB settlement", "2 KiB settlement", "ordinary reports"] as const) test(`real V2 clustered worker recovery keeps an actively draining child HTTP stream available (${scenario})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let parent = "", consumedSettlements = 0, consumedReports = 0;
+  const events = provider.events.bind(provider);
+  provider.events = async function* (signal) {
+    for await (const event of events(signal)) {
+      yield event;
+      if (event.conversationId === parent && event.eventType === "session.inbox.enqueued") consumedSettlements++;
+      if (event.eventType === "session.usage.updated") consumedReports++;
+    }
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory });
+  const envelopes: LiveEnvelope[] = [];
+  const asset = "src/assets/uatu-logo.svg";
+  const routes = buildRoutes({ mode: "prod", assets: {
+    mermaid: asset, logo: asset, icon192: asset, icon512: asset, manifest: asset,
+    fonts: { hackMono: asset, hackLicense: asset, nerdFontsLicense: asset, notices: asset },
+  }, getSession: () => { throw new Error("Unexpected document access"); }, chatService: adapter as never,
+  getWorkspaceCredential: () => "fixture-only", debug: false, getMetricsSnapshot: () => ({}) });
+  const child = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, routes });
+  const broker = new LiveBroker({ isRunning: () => true, workspaceIds: () => [], open({ path, signal }) {
+    const url = new URL(path, child.url); url.searchParams.set("t", "fixture-only");
+    return fetch(url, { signal });
+  } }, { retryMinMs: 100, retryMaxMs: 100 });
+  try {
+    parent = (await provider.createSession("Clustered recovery")).id;
+    const workers = Array.from({ length: 318 }, () => fake.launchWorker(parent, true));
+    if (scenario === "ordinary reports") for (const worker of workers) fake.settleWorker(worker.childId, "completed", "x".repeat(4096));
+    await adapter.history(parent);
+    let subscription = broker.subscribe({ write: event => envelopes.push(event) }, "workspace", { topic: "conversation", key: parent });
+    await waitUntil(() => envelopes.some(e => e.event.kind === "ready"));
+    fake.workerReport(workers[0]!.childId, "Warmup", "high", 0.001);
+    await waitUntil(() => envelopes.some(e => e.event.kind === "data"));
+    if (scenario === "ordinary reports") for (const worker of workers) fake.workerReport(worker.childId, "Concurrent report", "high", 0.001);
+    else for (const worker of workers) fake.settleWorker(worker.childId, "completed", "x".repeat(scenario === "4 KiB settlement" ? 4096 : 2048));
+    // Thousands of native frames must cross the real provider's serialized
+    // pump before checking unchanged rereads, not merely the first recovery.
+    for (let attempt = 0; attempt < 2_000 && (scenario === "ordinary reports" ? consumedReports < 319 : consumedSettlements < 318); attempt++) await Bun.sleep(5);
+    expect(scenario === "ordinary reports" ? consumedReports >= 319 : consumedSettlements >= 318).toBe(true);
+    await waitUntil(() => adapter.projectionForTests(parent).items().filter(i => i.type === "background_task" && i.status === "completed").length === 318);
+    const cursor = adapter.projectionForTests(parent).replay.latestCursor();
+    await waitUntil(() => envelopes.some(e => e.event.kind === "resync" || e.event.kind === "unavailable" || e.cursor === cursor));
+    expect(envelopes.filter(e => e.event.kind === "unavailable")).toEqual([]);
+    const resyncs = envelopes.filter(e => e.event.kind === "resync");
+    if (scenario === "4 KiB settlement") expect(resyncs.map(e => e.event)).toMatchObject([{ kind: "resync", data: { reason: "conversation-rewritten" } }]);
+    else expect(resyncs).toEqual([]);
+
+    const snapshot = await adapter.history(parent);
+    let browser = projectionFromSnapshot(snapshot);
+    subscription.detach();
+    const reattachedAt = envelopes.length;
+    const laterEvents: ChatEvent[] = [];
+    subscription = broker.subscribe({ write: envelope => {
+      envelopes.push(envelope);
+      if (envelope.event.kind === "data") {
+        const event = envelope.event.data as ChatEvent;
+        laterEvents.push(event);
+        const applied = applyChatEvent(browser, event);
+        expect(applied.outcome).not.toBe("gap"); browser = applied.projection;
+      }
+    } }, "workspace", { topic: "conversation", key: parent, cursor: snapshot.cursor });
+    await waitUntil(() => envelopes.slice(reattachedAt).some(e => e.event.kind === "ready"));
+    for (let i = 0; i < 3; i++) {
+      const reread = await adapter.history(parent);
+      expect(reread.cursor).toBe(snapshot.cursor);
+      expect(new Map(reread.items.map(item => [item.id, item]))).toEqual(new Map(snapshot.items.map(item => [item.id, item])));
+    }
+    expect(envelopes.slice(reattachedAt).filter(e => e.event.kind === "resync" || e.event.kind === "unavailable")).toEqual([]);
+    const finalCost = scenario === "ordinary reports" ? 0.004 : 0.003;
+    fake.workerReport(workers[0]!.childId, "After recovery", "high", 0.002);
+    const finalReport = (item: ConversationItem) => item.type === "background_task" && item.childConversationId === workers[0]!.childId
+      && item.workerSession?.model === "After recovery" && item.workerSession.costUsd === finalCost;
+    await waitUntil(() => browser.items.some(finalReport));
+    expect(laterEvents.filter(event => event.type === "item.upsert" && finalReport(event.item))).toHaveLength(1);
+    subscription.detach();
+  } finally { broker.dispose(); child.stop(true); await adapter.dispose(); await fake.stop(); }
+}, 30_000);
+
+for (const preemption of ["native update", "native removal", "rewrite", "eviction", "generation", "mutation", "dispose"] as const) test(`bulk worker recovery cannot publish an obsolete async result after ${preemption}`, async () => {
+  const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent"), fixtureSession("other")];
+  let release!: () => void, mutationRelease!: () => void, mutationEntered = false, reads = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const mutationGate = new Promise<void>(resolve => { mutationRelease = resolve; });
+  const rows: BackgroundTaskItem[] = Array.from({ length: 318 }, (_, i) => ({ type: "background_task", id: `task:${i}`, taskId: String(i),
+    createdAt: i, description: "Fixture", status: "completed", summary: "obsolete".repeat(512) }));
+  Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => {
+    if (id === "parent" && ++reads === 1) { await gate; return rows; } return [];
+  } });
+  if (preemption === "mutation") {
+    provider.agent.capabilities.push("reversible-history");
+    const state: ReversibleHistoryState = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+    provider.getReversibleHistoryState = async () => state;
+    provider.undo = async () => { mutationEntered = true; await mutationGate; return { outcome: "nothing-to-undo", state }; };
+    provider.redo = provider.revert = provider.restore = async () => ({ outcome: "nothing-to-redo", state });
+  }
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0, maxProjections: 1 });
+  const projection = adapter.projectionForTests("parent");
+  let pump = adapter.startEventPump(), mutation: Promise<unknown> | undefined, disposal: Promise<void> | undefined;
+  try {
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => reads === 1);
+    // Observe completion of the admitted async read, not an arbitrary delay;
+    // all assertions below cross projection/replay's ordinary interfaces.
+    const admitted = [...(adapter as unknown as { backgroundPending: Set<Promise<unknown>> }).backgroundPending];
+    if (preemption === "native update" || preemption === "native removal") {
+      const updates = rows.map(item => preemption === "native removal" ? { kind: "remove" as const, itemId: item.id }
+        : { kind: "upsert" as const, item: { ...item, summary: "New native result" } });
+      provider.eventQueue.push({ normalized: { conversationId: "parent", eventType: "fixture.native", outcome: "handled", updates } } as unknown as ProviderEvent);
+      await liveEventsApplied(adapter, provider);
+    } else if (preemption === "rewrite") projection.replace([]);
+    else if (preemption === "eviction") { await adapter.history("other"); expect(adapter.projectionForTests("parent")).not.toBe(projection); }
+    else if (preemption === "generation") {
+      provider.eventQueue.close(); await pump;
+      provider.eventQueue = new EventQueue(); pump = adapter.startEventPump();
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await liveEventsApplied(adapter, provider);
+    } else if (preemption === "mutation") { mutation = adapter.undo("parent", "hold-mutation"); await waitUntil(() => mutationEntered); }
+    else disposal = adapter.dispose();
+    const cursor = projection.replay.latestCursor();
+    const before = projection.items();
+    release(); await Promise.all(admitted);
+    expect(projection.replay.latestCursor()).toBe(cursor);
+    expect(projection.items()).toEqual(before);
+    expect(projection.items().some(item => item.type === "background_task" && item.summary?.startsWith("obsolete"))).toBe(false);
+    expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+  } finally { release(); mutationRelease(); await mutation; await (disposal ?? adapter.dispose()); await pump; }
+}, 15_000);
 
 test("compact worker evidence reads a complete large source once without display pagination or output", async () => {
   const provider = new FakeProvider(); provider.sessions = [fixtureSession("parent")];

@@ -571,6 +571,47 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     expect(child.opened[1]!.path).toContain(encodeURIComponent(cursorOf("g2", 0)));
   });
 
+  test("bulk recovery terminates only its topic, ignores a stale tail, and hands a fresh cursor to ordered native replay", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const page = sink();
+    const old = live.subscribe(page, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 0) });
+    live.subscribe(page, "ws", { topic: "inventory" });
+    await waitFor(() => child.opened.length === 2, "both topics");
+    const conversation = child.byPath("/conversations/c/events")[0]!;
+    const inventory = child.byPath("/conversations/events")[0]!;
+    conversation.push(`event: open\ndata: {"cursor":"${cursorOf("g1", 0)}"}\n\n`);
+    inventory.push(': open\n\nevent: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+    await waitFor(() => page.envelopes.some(e => e.topic === "conversation" && e.event.kind === "ready"), "conversation ready");
+    // Even a tail in the very same read cannot turn terminal resync into data
+    // or an EOF outage. The snapshot boundary stays in this generation.
+    conversation.push(`id: ${cursorOf("g1", 1)}\nevent: resync\ndata: {"type":"resync","generation":"g1","sequence":1,"conversationId":"c","reason":"conversation-rewritten"}\n\n${chatFrame("g1", 2)}`);
+    await waitFor(() => page.envelopes.some(e => e.event.kind === "resync"), "snapshot recovery");
+    expect(conversation.cancelled).toBe(true);
+    const retired = page.envelopes.filter(e => e.topic === "conversation");
+    expect(kinds(retired)).toEqual(["ready", "resync"]);
+    // A resync is not acknowledged as applied data: the envelope retains the
+    // last delivered cursor. Only the authoritative snapshot supplies the new
+    // attachment boundary, not this invalidation's cursor.
+    expect(retired[1]!.cursor).toBe(cursorOf("g1", 0));
+    expect(retired[1]!.event).toMatchObject({ kind: "resync", data: { reason: "conversation-rewritten", sequence: 1 } });
+    expect(live.upstreamCount("conversation")).toBe(0);
+    const ticks = page.envelopes.filter(e => e.topic === "inventory" && e.event.kind === "data").length;
+    inventory.push('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+    await waitFor(() => page.envelopes.filter(e => e.topic === "inventory" && e.event.kind === "data").length > ticks, "unrelated inventory continues");
+
+    live.subscribe(page, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 1) });
+    await waitFor(() => child.byPath("/conversations/c/events").length === 2, "fresh attach");
+    const fresh = child.byPath("/conversations/c/events")[1]!;
+    expect(fresh.path).toContain(`cursor=${encodeURIComponent(cursorOf("g1", 1))}`);
+    old.detach(); // Obsolete ownership cannot detach the replacement.
+    fresh.push(`event: open\ndata: {"cursor":"${cursorOf("g1", 1)}"}\n\n${chatFrame("g1", 2)}${chatFrame("g1", 3)}`);
+    await waitFor(() => page.envelopes.some(e => e.cursor === cursorOf("g1", 3)), "native tail");
+    expect(page.envelopes.filter(e => e.topic === "conversation" && e.event.kind === "data").map(e => e.cursor)).toEqual([2, 3].map(n => cursorOf("g1", n)));
+    expect(page.envelopes.some(e => e.event.kind === "unavailable")).toBe(false);
+    expect(fresh.cancelled).toBe(false);
+  });
+
   test("document: no cursor gets the retained snapshot; the head cursor gets nothing; inventory replays as one tick", async () => {
     const child = fakeSource();
     const live = broker(child.source);
