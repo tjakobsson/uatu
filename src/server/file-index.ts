@@ -180,6 +180,24 @@ export class FileIndex {
     return true;
   }
 
+  // A folder Git now ignores that was already read (polling cannot ask Git
+  // before walking): it becomes an ignored folder in place. Every level that
+  // holds known files stays listed and current; nothing is re-indexed.
+  adoptIgnoredFolder(relative: string): void {
+    if (this.entry.kind !== "dir" || this.ignoredFolders.isInside(relative)) return;
+    this.ignoredFolders.addTop(relative);
+    const levels = new Set<string>();
+    for (const doc of this.documents.values()) {
+      if (!doc.relativePath.startsWith(`${relative}/`)) continue;
+      for (let level = path.posix.dirname(doc.relativePath); level.length >= relative.length; level = path.posix.dirname(level)) levels.add(level);
+    }
+    const id = path.join(this.entry.absolutePath, ...relative.split("/"));
+    if (!levels.size) { if (this.policy.accepts(id, DIRECTORY)) this.queueFolder(id, relative); return; }
+    for (const level of [...levels].sort((a, b) => a.length - b.length)) {
+      this.markListed(path.join(this.entry.absolutePath, ...level.split("/")));
+    }
+  }
+
   // Lists one level of an ignored folder: its subfolders become folder
   // entries, its files are admitted by the caller, and live writes directly
   // inside it leave the window.

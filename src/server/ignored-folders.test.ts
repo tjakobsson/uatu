@@ -430,3 +430,29 @@ test("opening a file succeeds even when the live-write window is full of opened 
     expect(session.findDocument(path.join(cwd, "build/a.md"))).toBeDefined();
   } finally { await session.stop(); }
 });
+
+test("polling: an ignored folder created at runtime is adopted in place without re-indexing", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { usePolling: true });
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  const render = path.join(cwd, "build/renders/take.wav");
+  try {
+    await session.start();
+    reader = session.eventsResponse().body!.getReader();
+    await files(cwd, ["build/renders/take.wav"]);
+    await wait(() => !!session.findDocument(render), "render indexed while polling");
+    const revision = session.findDocument(render)!.revision;
+    const watcher = session._internalWatcher();
+    // A poll (every 5 s while a client is subscribed) reconciles the inventory.
+    const end = Date.now() + 15_000;
+    while (!folders(rootOf(session)).includes("build/ listed")) { if (Date.now() > end) throw new Error("not adopted"); await Bun.sleep(100); }
+    expect(folders(rootOf(session))).toEqual(["build/ listed", "build/renders/ listed"]);
+    expect(session.findDocument(render)?.revision).toBe(revision);
+    expect(session._internalWatcher()).toBe(watcher);
+    // The adopted level stays current.
+    await writeFile(render, "longer audio bytes");
+    await wait(() => (session.findDocument(render)?.revision ?? 0) > revision!, "write after adoption");
+  } finally { await reader?.cancel(); await session.stop(); }
+}, 30_000);

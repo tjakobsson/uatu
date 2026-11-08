@@ -531,9 +531,12 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const root = roots.get(entry.absolutePath);
     if (stopped || !root) return;
     const current = new Set(root.index.ignoredFolders.topFolders);
-    const next = inventory?.folders ?? [];
-    if (next.length === current.size && next.every(folder => current.has(folder))) return;
-    await recover(entry, true).catch(() => {});
+    const next = new Set(inventory?.folders ?? []);
+    // A folder that stopped being ignored must be read: rebuild the root.
+    if ([...current].some(folder => !next.has(folder))) { await recover(entry, true).catch(() => {}); return; }
+    // A newly ignored folder is adopted in place; a rebuild would give every
+    // file a new revision (reloading previews and playing media).
+    for (const folder of next) if (!current.has(folder)) root.index.adoptIgnoredFolder(folder);
   }
 
   // Lists one level of an ignored folder into the shared index: subfolders
