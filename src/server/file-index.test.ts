@@ -527,3 +527,14 @@ test("inside a listed ignored folder, a file replacing a folder of the same path
   expect(removal).toBeGreaterThanOrEqual(0);
   expect(upsert).toBeGreaterThan(removal);
 });
+
+test("a requested file replacing a folder inside a listed ignored folder is published before the request resolves", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  index.admitFolder("/docs/build/out.md");
+  await index.idle();
+  index.observe("unlinkDir", "/docs/build/out.md");
+  await index.request("/docs/build/out.md", stat());
+  expect(index.documents.has("/docs/build/out.md")).toBe(true);
+});

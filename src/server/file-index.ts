@@ -322,9 +322,9 @@ export class FileIndex {
     if (this.lanePending.has(id)) this.flushLane(id); else this.flush(id);
     // A file replacing a folder of the same path waits for that folder's
     // removal; the caller is waiting for the file itself.
-    while (!this.stopped && this.pending.get(id)?.doc) {
+    while (!this.stopped && (this.pending.get(id)?.doc || this.lanePending.get(id)?.doc)) {
       await new Promise(resolve => setTimeout(resolve, 0));
-      this.flushLane();
+      this.flushLane(id);
       this.flush(id);
     }
   }
