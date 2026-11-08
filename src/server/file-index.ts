@@ -318,7 +318,11 @@ export class FileIndex {
       if (preferred && preferredId) yield [preferredId, preferred] as const;
       yield* pending;
     };
+    let blocked = false;
     for (const [id, value] of entries()) {
+      // A file replacing a folder of the same path waits until that folder's
+      // removal is published; clients cannot hold both at once.
+      if (value.doc && this.folderPending.has(id) && this.folderPending.get(id) === null) { blocked = true; continue; }
       this.pending.delete(id);
       if (value.doc) {
         this.documents.set(id, value.doc);
@@ -341,7 +345,8 @@ export class FileIndex {
     if (!this.unpublished && this.initialComplete) this.initialPublished = true;
     this.options.onWork?.("batch");
     this.options.publish({ upserts, removals, changedId, changedOrder, followCandidates: followCandidates.sort((a, b) => b.order - a.order), discovery: this.discovery });
-    if (this.pending.size) this.drainTimer = setTimeout(() => this.flush(), 0);
+    if (blocked) { this.flushLane(); this.schedule(); }
+    else if (this.pending.size) this.drainTimer = setTimeout(() => this.flush(), 0);
     else this.resolvePublication();
   }
 

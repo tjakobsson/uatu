@@ -415,3 +415,17 @@ test("the live-write window evicts by write order, not by when classification fi
   await index.idle();
   expect(documentIds(index, "/docs/build/").sort()).toEqual(["/docs/build/renders/newer.md", "/docs/build/renders/newest.md"]);
 });
+
+test("a file replacing an ignored folder of the same path arrives after the folder's removal", async () => {
+  const { index, batches } = ignoredFixture({ ignored: { folders: ["output"], files: [] } });
+  index.markReady();
+  await index.idle();
+  batches.length = 0;
+  index.observe("unlinkDir", "/docs/output");
+  index.observe("add", "/docs/output", stat());
+  await index.idle();
+  const removal = batches.findIndex(batch => (batch.folderRemovals ?? []).some(entry => entry.id === "/docs/output"));
+  const upsert = batches.findIndex(batch => batch.upserts.some(doc => doc.id === "/docs/output"));
+  expect(removal).toBeGreaterThanOrEqual(0);
+  expect(upsert).toBeGreaterThan(removal);
+});

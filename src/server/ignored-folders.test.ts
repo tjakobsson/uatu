@@ -417,3 +417,16 @@ test("polling: a file opened inside an unlisted ignored folder sees its edits an
     await wait(() => !session.findDocument(opened), "deletion observed");
   } finally { await session.stop(); }
 }, 20_000);
+
+test("opening a file succeeds even when the live-write window is full of opened files", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/a.md", "build/b.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { ignoredWindowLimit: 1 });
+  try {
+    await session.start();
+    expect(await session.ensureDocument(path.join(cwd, "build/a.md"))).toBeDefined();
+    expect(await session.ensureDocument(path.join(cwd, "build/b.md"))).toBeDefined();
+    expect(session.findDocument(path.join(cwd, "build/a.md"))).toBeDefined();
+  } finally { await session.stop(); }
+});

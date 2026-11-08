@@ -636,8 +636,10 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         if (entry.kind === "dir" && matcher.shouldIgnore(relative)) continue;
         const leafStats = await containedFile(entry, relative, id);
         if (!leafStats) continue;
-        await root.index.request(id, leafStats);
+        // Pinned before admission, so a full live-write window cannot evict
+        // the very file being opened.
         root.index.pin(id);
+        await root.index.request(id, leafStats);
         trackAdmitted(root, id);
         return find(id);
       }
