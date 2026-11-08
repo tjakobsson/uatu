@@ -46,7 +46,7 @@ describe("API contract structure", () => {
   test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([36, 14, 3]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([37, 14, 4]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -401,6 +401,31 @@ describe("streaming protocol is closed", () => {
 });
 
 describe("conversation configuration", () => {
+  test("assistant visuals agree with runtime validation", async () => {
+    const { parseConversationItem } = await import("../src/chat/validation");
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationItem, openapi.components.schemas));
+    const item = { id: "a", type: "assistant_message", createdAt: 1, markdown: "![image](image.svg)" };
+    for (const visual of [
+      { index: 0, status: "pending" },
+      { index: 0, status: "unavailable", message: "Image is unavailable" },
+      { index: 0, status: "unavailable", id: "a".repeat(64), mimeType: "image/svg+xml", message: "SVG preview is unavailable" },
+      { index: 0, status: "ready", id: "a".repeat(64), mimeType: "image/svg+xml" },
+      { index: 80, status: "ready", id: "a".repeat(64), mimeType: "image/png" },
+    ]) {
+      const wire = { ...item, visuals: [visual] };
+      expect(validate(wire)).toBe(true);
+      expect(parseConversationItem(wire)).toEqual(wire);
+    }
+    for (const visual of [{ index: Number.MAX_SAFE_INTEGER + 1, status: "pending" }, { index: -1, status: "pending" }, { index: 0, status: "ready" }, { index: 0, status: "ready", id: "../secret", mimeType: "text/html" }]) {
+      const wire = { ...item, visuals: [visual] };
+      expect(validate(wire)).toBe(false);
+      expect(() => parseConversationItem(wire)).toThrow();
+    }
+    const excess = { ...item, visuals: Array.from({ length: 9 }, (_, index) => ({ index, status: "pending" })) };
+    expect(validate(excess)).toBe(false);
+    expect(() => parseConversationItem(excess)).toThrow();
+  });
   test("window-only observations and execution keys agree with runtime validation", async () => {
     const { parseConversationItem } = await import("../src/chat/validation");
     const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");

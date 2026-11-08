@@ -15,6 +15,7 @@ import path from "node:path";
 import { ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { OperationOutcomeUnknownError, BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
+import { createWatchedVisualReader, VISUAL_CSP } from "../chat/visual-store";
 import { encodeReplayCursor } from "../chat/replay";
 import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
 import { WorkerEvidenceError } from "../chat/worker-dismissal-evidence";
@@ -140,6 +141,10 @@ export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
 // the result is spread at the call sites.
 export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string> {
   const { assets, getSession } = deps;
+  deps.chatService.configureVisualReader?.((source, workspacePath) => {
+    const policy = getSession().getStaticFilePolicy();
+    return createWatchedVisualReader(policy.entries, policy.respectGitignore)(source, workspacePath);
+  });
   const basePath = deps.basePath ?? "/";
   const manifestScope = deps.manifestScope ?? "base-path";
   // Static route keys are data to Bun.serve, so prefixing them is enough to
@@ -560,6 +565,23 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       ? null
       : chatError(401, "authentication required");
   };
+  const visualResponse = async (request: RouteRequest, source: boolean): Promise<Response> => {
+    const rejected = authenticated(request);
+    if (rejected) return rejected;
+    const id = routeIdentity(request, "visualId");
+    if (id instanceof Response) return id;
+    try {
+      const stored = await deps.chatService.resolveVisual?.(id);
+      const bytes = source && stored?.mimeType === "image/svg+xml" ? stored.sourceBytes : source ? undefined : stored?.bytes;
+      if (!stored || !bytes) return chatError(404, "visual not found");
+      return new Response(new Uint8Array(bytes), { headers: {
+        "content-type": source ? "text/plain; charset=utf-8" : stored.mimeType,
+        "content-security-policy": VISUAL_CSP,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, max-age=31536000, immutable",
+      } });
+    } catch (error) { return normalizedChatError(error); }
+  };
   const mutationGate = (request: Request): Response | null => {
     const auth = authenticated(request);
     if (auth) return auth;
@@ -946,8 +968,10 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
             if (finished) return;
             finished = true;
             streamMetrics.closed("chat-conversation", outcome);
-            await iterator.return?.().catch(() => undefined);
+            // A prefetched next() may still await provider traffic. Cancel the
+            // source first so generator return() cannot deadlock after resync.
             events.cancel();
+            await iterator.return?.().catch(() => undefined);
             request.signal.removeEventListener("abort", onAbort);
           };
           // Pull-driven, one frame per pull: a slow or stalled client stops
@@ -1095,6 +1119,13 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         return run(() => deps.chatService.saveAttachment(bytes), 201);
       },
+    },
+    // Visual ids name immutable workspace captures, not arbitrary file paths.
+    [p("/api/chat/visuals/:visualId")]: {
+      GET: (request: RouteRequest) => visualResponse(request, false),
+    },
+    [p("/api/chat/visuals/:visualId/source")]: {
+      GET: (request: RouteRequest) => visualResponse(request, true),
     },
     // Not conversation-scoped: the id is a workspace-issued uuid and the
     // authorization boundary is the workspace, same as every chat route.

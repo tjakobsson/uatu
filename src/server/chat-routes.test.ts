@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
+import os from "node:os";
+import { promises as fs } from "node:fs";
 
 import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
-import { isLiveConversationStatus, type ChatAccountChange, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
+import { isLiveConversationStatus, type ChatAccountChange, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationItem, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { CommandSteeringError, ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError } from "../chat/adapter";
 import { OperationOutcomeUnknownError, ReversibleHistoryTargetError, InvalidQuestionAnswerError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../chat/provider";
@@ -15,6 +17,7 @@ import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
 import type { ChatActionContext } from "../chat/types";
+import { createWatchedVisualReader, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
 
 const TOKEN = "chat-test-token";
 // The conversation route opens with an `open` event naming the cursor its
@@ -22,6 +25,8 @@ const TOKEN = "chat-test-token";
 const CONVERSATION_OPEN_FRAME = /^event: open\ndata: \{"cursor":"[^"]+"\}\n\n$/;
 
 class FakeChatService implements WorkspaceChatService {
+  items: ConversationItem[] = [];
+  readonly visuals = new Map<string, StoredVisual>();
   readonly conversation: ConversationSummary = { id: "local", title: "Local", createdAt: 1, updatedAt: 1, status: "idle" };
   readonly replay = new ConversationReplay("generation", "local", 10_000);
   readonly inventory = new ConversationInventoryBroadcaster();
@@ -219,7 +224,7 @@ class FakeChatService implements WorkspaceChatService {
   settlePermission(requestId: string) { this.pendingPermissions.delete(requestId); this.activityChanges.invalidate(); }
 
   private snapshot(): ConversationSnapshot {
-    return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: [] };
+    return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: this.items };
   }
   async stopTask(id: string, taskId: string) {
     this.require(id);
@@ -248,13 +253,14 @@ class FakeChatService implements WorkspaceChatService {
   private require(id: string) { if (id !== "local") throw new ConversationNotFoundError(); }
 }
 
-function routes(chatService = new FakeChatService(), basePath = "/", chatKeepaliveMs?: number, metrics?: MetricsRegistry, childPolicy?: ReturnType<typeof readChildPolicyBootstrap>) {
+function routes(chatService = new FakeChatService(), basePath = "/", chatKeepaliveMs?: number, metrics?: MetricsRegistry, childPolicy?: ReturnType<typeof readChildPolicyBootstrap>, visualStore?: VisualStore) {
   const repo = path.resolve(import.meta.dir, "..", "..");
   // The real router over the single-agent fake: route tests exercise the
   // qualifying seam exactly as production does. The fake keeps owning the
   // attachment behavior through the store adapter.
   const routed = new MultiAgentChatService({
     workspacePath: repo,
+    ...(visualStore ? { visualStore } : {}),
     agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: chatService }],
     attachmentStore: {
       directory: '/dev/null',
@@ -265,6 +271,7 @@ function routes(chatService = new FakeChatService(), basePath = "/", chatKeepali
       resolve: id => chatService.resolveAttachment(id),
     },
   });
+  routed.resolveVisual = async id => chatService.visuals.get(id) ?? null;
   return buildRoutes({
     mode: "prod",
     basePath,
@@ -356,6 +363,61 @@ describe("workspace chat routes", () => {
     expect(service.actionContexts).toHaveLength(1);
     const untrusted = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/prompts"] as typeof handler;
     expect((await untrusted.POST(request(path, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json", [CHILD_POLICY_HEADER]: policy }, body }, { conversationId: "opencode:local" }))).status).toBe(403);
+  });
+  test("visual previews and SVG source are authenticated, inert, private and base-path aware", async () => {
+    const service = new FakeChatService();
+    const id = "a".repeat(64);
+    const original = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1"/></svg>';
+    service.visuals.set(id, { bytes: new TextEncoder().encode(original), sourceBytes: new TextEncoder().encode(original), mimeType: "image/svg+xml" });
+    const table = routes(service, "/s/project/");
+    for (const source of [false, true]) {
+      const key = `/s/project/api/chat/visuals/:visualId${source ? "/source" : ""}`;
+      const handler = table[key] as { GET(request: Request): Promise<Response> };
+      expect((await handler.GET(new Request("http://127.0.0.1:4711/no-auth"))).status).toBe(401);
+      const response = await handler.GET(request(key, {}, { visualId: id }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe(source ? "text/plain; charset=utf-8" : "image/svg+xml");
+      expect(response.headers.get("content-security-policy")).toBe(VISUAL_CSP);
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+      expect(await response.text()).toBe(original);
+      expect((await handler.GET(request(key, {}, { visualId: "missing" }))).status).toBe(404);
+    }
+    service.visuals.set(id, { bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" });
+    const source = table["/s/project/api/chat/visuals/:visualId/source"] as { GET(request: Request): Promise<Response> };
+    expect((await source.GET(request("/source", {}, { visualId: id }))).status).toBe(404);
+  });
+  test("refused local SVG original remains authenticated inert source after deletion; preview returns 404", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-routes-"));
+    try {
+      const root = path.join(directory, "workspace");
+      await fs.mkdir(root);
+      const original = '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><foreignObject/></svg>';
+      const pathname = path.join(root, "unsafe.svg");
+      await fs.writeFile(pathname, original);
+      const store = new VisualStore(root, path.join(directory, "state"));
+      store.setReader(createWatchedVisualReader([{ kind: "dir", absolutePath: root } as never]));
+      const snapshot = await store.capture("opencode:local", "unsafe", { index: 0, kind: "file", source: "unsafe.svg", alt: "unsafe", complete: true }, false);
+      expect(snapshot.status).toBe("unavailable");
+      await fs.writeFile(pathname, "changed");
+      await fs.unlink(pathname);
+      const restarted = new VisualStore(root, path.join(directory, "state"));
+      const service = new FakeChatService();
+      service.visuals.set(snapshot.id!, (await restarted.resolve(snapshot.id!))!);
+      const table = routes(service);
+      const preview = table["/api/chat/visuals/:visualId"] as { GET(request: Request): Promise<Response> };
+      const source = table["/api/chat/visuals/:visualId/source"] as { GET(request: Request): Promise<Response> };
+      expect((await preview.GET(request("/preview", {}, { visualId: snapshot.id! }))).status).toBe(404);
+      expect((await source.GET(new Request("http://127.0.0.1:4711/source"))).status).toBe(401);
+      const response = await source.GET(request("/source", {}, { visualId: snapshot.id! }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(response.headers.get("content-security-policy")).toBe(VISUAL_CSP);
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(await response.text()).toBe(original);
+    } finally { await fs.rm(directory, { recursive: true, force: true }); }
   });
   test("requires the child credential for every read without starting chat", async () => {
     let calls = 0;
@@ -1187,6 +1249,45 @@ describe("workspace chat routes", () => {
     expect(frame).toContain("id: ");
     expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual(expect.objectContaining({ type: "conversation.status", sequence: 1 }));
     await reader.cancel();
+  });
+  test("HTTP cursor-only reconnect finishes terminal visual replay with a boundary resync and no resubscribe loop", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-replay-route-"));
+    try {
+      const service = new FakeChatService();
+      const cursor = service.replay.latestCursor();
+      const markdown = "```svg\n<svg><rect width=\"1\"/></svg>\n```";
+      const rawDelta = service.replay.publish({ type: "item.text_delta", itemId: "m", delta: markdown });
+      const terminal = service.replay.publish({ type: "conversation.status", status: "completed" });
+      service.conversation.status = "completed";
+      service.items = [{ id: "m", type: "assistant_message", createdAt: 1, markdown }];
+      const table = routes(service, "/", undefined, undefined, undefined, new VisualStore("/workspace", directory));
+      const handler = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+      const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
+      const reader = response.body!.getReader();
+      const opening = new TextDecoder().decode((await reader.read()).value);
+      expect(opening).toMatch(CONVERSATION_OPEN_FRAME);
+      expect(opening).not.toContain("visuals");
+      const boundaryCursor = service.replay.latestCursor();
+      expect(opening).toContain(boundaryCursor);
+      const replayed = new TextDecoder().decode((await reader.read()).value);
+      expect(JSON.parse(replayed.match(/data: (.+)\n/)![1]!)).toEqual({ ...rawDelta, conversationId: "opencode:local" });
+      const ending = new TextDecoder().decode((await reader.read()).value);
+      expect(ending).toContain(`id: ${boundaryCursor}\nevent: resync\n`);
+      expect(JSON.parse(ending.match(/data: (.+)\n/)![1]!)).toEqual({ type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local", generation: "generation", sequence: terminal.sequence });
+      expect((await reader.read()).done).toBe(true);
+      const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+      const snapshot = await (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+      expect(snapshot.items[0].visuals[0].status).toBe("ready");
+      const resumed = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": boundaryCursor } }, { conversationId: "opencode:local" }));
+      const resumedReader = resumed.body!.getReader();
+      await resumedReader.read();
+      service.replay.publish({ type: "conversation.status", status: "completed" });
+      expect(new TextDecoder().decode((await resumedReader.read()).value)).toContain("event: chat\n");
+      await resumedReader.cancel();
+      expect(service.replay.subscriberCount()).toBe(0);
+    } finally { await fs.rm(directory, { recursive: true, force: true }); }
   });
 });
 

@@ -421,7 +421,22 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "user message attachment");
       break;
     case "assistant_message":
-      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model", "agent", "contextKey"], type);
+      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model", "agent", "contextKey", "visuals"], type);
+      if (record.visuals !== undefined) {
+        if (!Array.isArray(record.visuals) || record.visuals.length > VISUAL_MAX_COUNT) throw new Error("invalid assistant visuals");
+        const indices = new Set<number>();
+        for (const value of record.visuals) {
+          const visual = expectRecord(value, "assistant visual");
+          expectKeys(visual, ["index", "status", "id", "mimeType", "message"], "assistant visual");
+          if (!Number.isSafeInteger(visual.index) || (visual.index as number) < 0 || indices.has(visual.index as number)) throw new Error("invalid assistant visual index");
+          indices.add(visual.index as number);
+          expectOneOf(visual.status, ["ready", "pending", "unavailable"], "assistant visual status");
+          if (visual.id !== undefined && (typeof visual.id !== "string" || !/^[a-f\d]{64}$/.test(visual.id))) throw new Error("invalid assistant visual id");
+          if (visual.mimeType !== undefined) expectOneOf(visual.mimeType, ["image/png", "image/jpeg", "image/svg+xml"], "assistant visual mime type");
+          if (visual.message !== undefined) expectString(visual.message, "assistant visual message");
+          if (visual.status === "ready" && (visual.id === undefined || visual.mimeType === undefined)) throw new Error("ready assistant visual requires id and MIME type");
+        }
+      }
       expectOptionalIdentity(record.contextKey, "assistant contextKey");
       expectString(record.markdown, "assistant markdown");
       expectOptionalTimestamp(record.completedAt, "completedAt");
@@ -965,3 +980,4 @@ function expectOneOf<T extends string>(value: unknown, values: readonly T[], fie
   if (typeof value !== "string" || !values.includes(value as T)) throw new Error(`invalid ${field}`);
   return value as T;
 }
+import { VISUAL_MAX_COUNT } from "./visual-types";

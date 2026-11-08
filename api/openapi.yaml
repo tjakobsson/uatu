@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 14.36.0-experimental
+  version: 14.37.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 14 and workspace revision 36
+  summary: Hub revision 14 and workspace revision 37
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -22,7 +22,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 14
-    workspaceApiRevision: 36
+    workspaceApiRevision: 37
 servers:
   - url: https://{hubHost}
     variables:
@@ -2389,10 +2389,33 @@ components:
       minimum: 0
       description: "Provider-reported terminal timestamp in Unix epoch milliseconds. Omitted when unknown; never inferred from creation time, duration, receive time, or silence. Display only for a terminal item status, not pending or running."
     TimelineBase: { type: object, required: [id, type, createdAt], properties: { id: { type: string }, type: { type: string }, createdAt: { type: number, minimum: 0 } } }
+    ChatVisualSnapshot:
+      type: object
+      description: |
+        Immutable snapshot of a permanently admitted agent-authored visual in
+        current rendered occurrence order. At most eight logical occurrences
+        per native assistant message, including refusals, and 10 MiB per image.
+        Removing or reordering markup does not free admissions. Only currently
+        present admitted occurrences have entries; omitted occurrences are limit
+        refusals, even at low rendered indexes. Missing files are retried at turn completion. Authenticated
+        internal GET /api/chat/visuals/{id} serves preview bytes. For SVG,
+        /api/chat/visuals/{id}/source serves the exact original as text/plain;
+        the image endpoint uses a restrictive sandbox CSP. These child routes
+        are internal workspace protocol, not public Hub API operations.
+      required: [index, status]
+      properties:
+        index: { type: integer, minimum: 0, maximum: 9007199254740991, description: "Current rendered occurrence index, not an admission slot. It may exceed seven after HTML repair or late reference resolution; only the at-most-eight permanently admitted occurrences have entries." }
+        status: { type: string, enum: [ready, pending, unavailable] }
+        id: { type: string, pattern: '^[a-f0-9]{64}$' }
+        mimeType: { type: string, enum: [image/png, image/jpeg, image/svg+xml] }
+        message: { type: string }
+      if: { properties: { status: { const: ready } }, required: [status] }
+      then: { properties: { id: {}, mimeType: {} }, required: [id, mimeType] }
+      additionalProperties: false
     ConversationItem:
       oneOf:
         - { type: object, required: [id, type, createdAt, text], properties: { id: { type: string }, type: { const: user_message }, createdAt: { type: number }, text: { type: string }, requestId: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } }, origin: { const: wakeup, description: "Present when the user did not type this prompt: `wakeup` is a scheduled wakeup firing, and the item opens that wakeup's turn. Clients present it as a wakeup, never as the user's message. Absent means the user typed it." }, wakeupId: { type: string, minLength: 1, maxLength: 512, description: "With `origin: wakeup`: the `scheduled_wakeup` item that fired, when known." } }, additionalProperties: false }
-        - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, completedAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512, description: "Execution identity joining usage to its window observation, including the selected window variant." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "Message-level tokens. Normalization emits exactly one dedicated carrier per reported provider message: its id is `usage:<provider-message-id>` and its markdown is empty, so clients MUST treat it as data rather than render it as a message bubble. Present only where the agent declares the context capability and reported usage." }, model: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "The model that reported this usage carrier, when known. Context percentages MUST use this model's context limit rather than a newly selected model that has not produced usage yet." }, agent: { type: string, minLength: 1, description: "The agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind). Rides the usage carrier so a cost receipt can name the main agent's lines. Absent where the provider names none." } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, visuals: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/ChatVisualSnapshot' } }, completedAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512, description: "Execution identity joining usage to its window observation, including the selected window variant." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "Message-level tokens. Normalization emits exactly one dedicated carrier per reported provider message: its id is `usage:<provider-message-id>` and its markdown is empty, so clients MUST treat it as data rather than render it as a message bubble. Present only where the agent declares the context capability and reported usage." }, model: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "The model that reported this usage carrier, when known. Context percentages MUST use this model's context limit rather than a newly selected model that has not produced usage yet." }, agent: { type: string, minLength: 1, description: "The agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind). Rides the usage carrier so a cost receipt can name the main agent's lines. Absent where the provider names none." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, text, status], properties: { id: { type: string }, type: { const: reasoning }, createdAt: { type: number }, text: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, durationMs: { type: number }, label: { type: string, minLength: 1, description: "The row's label when it is recalled context rather than the model's own thinking (\"Recalled from memory\"). Absent for ordinary reasoning." } }, additionalProperties: false }
         - type: object
           required: [id, type, createdAt, name, status]

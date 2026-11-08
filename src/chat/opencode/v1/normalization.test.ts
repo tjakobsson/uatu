@@ -5,6 +5,34 @@ import { ConversationReplay } from "../../replay";
 import { ProviderTextReconciler } from "../../text-reconciler";
 import { ConversationProjection } from "../../adapter";
 import { parseConversationItem } from "../../validation";
+import { visualAdmissionIdentity } from "../../visual-identity";
+
+test("native and classic text events plus both history shapes retain the parent admission identity outside JSON", () => {
+  const messageId = "native:api:id";
+  const partId = "opaque-independent-part";
+  const native = ["started", "delta", "ended"].map(phase => normalizeProviderEvent({
+    type: `session.next.text.${phase}`, properties: { timestamp: 10, sessionID: "s", assistantMessageID: messageId, textID: partId, delta: "text", text: "text" },
+  }));
+  const classic = [
+    normalizeProviderEvent({ type: "message.part.delta", properties: { timestamp: 10, sessionID: "s", messageID: messageId, partID: partId, field: "text", delta: "text" } }),
+    normalizeProviderEvent({ type: "message.part.updated", properties: { timestamp: 10, sessionID: "s", part: { id: partId, messageID: messageId, type: "text", text: "text" } } }),
+  ];
+  const live = [...native, ...classic].flatMap(event => event.updates.flatMap(update => update.kind === "text" && update.item ? [update.item] : []));
+  expect(live).toHaveLength(5);
+  const part = { id: partId, type: "text", text: "text" };
+  const history = [
+    ...normalizeProviderMessage({ info: { id: messageId, role: "assistant", time: { created: 10 } }, parts: [part] }),
+    ...normalizeProviderMessage({ id: messageId, type: "assistant", time: { created: 10 }, content: [part] }),
+  ];
+  expect(history).toHaveLength(2);
+  for (const item of [...live, ...history]) {
+    expect(item.id).toBe(`part:${partId}`);
+    expect(visualAdmissionIdentity({ ...item })).toBe("opencode:message:native:api:id");
+    const json = JSON.parse(JSON.stringify(item));
+    expect(Object.keys(json).sort()).toEqual(["createdAt", "id", "markdown", "type"]);
+    expect(parseConversationItem(json)).toEqual(json);
+  }
+});
 
 describe("OpenCode provider completion timestamps", () => {
   test("classic live parts and history preserve each tool's terminal time, not the message completion", () => {

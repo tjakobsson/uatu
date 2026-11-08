@@ -9,6 +9,7 @@ import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
+import { visualAdmissionIdentity } from "../../visual-identity";
 
 test("native shell exit evidence uses the typed identity and terminal process status", () => {
   const normalize = createOpenCodeV2Normalizer("/ws");
@@ -58,6 +59,24 @@ const FIXTURES = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../..
   storedMessages: { data: Array<Record<string, unknown>> };
 };
 const WORKSPACE = "/tmp/oc-v2-ws";
+
+test("text phases, content restatement and stored messages supply the same non-wire native admission identity", () => {
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+  const messageId = "native:api:id";
+  const events = ["started", "delta", "ended"].map(phase => normalize({ id: `e-${phase}`, created: 10, type: `session.text.${phase}`, location: { directory: WORKSPACE }, data: { sessionID: "s", assistantMessageID: messageId, ordinal: 1, text: "text", delta: "text" } }));
+  events.push(normalize({ id: "restated", created: 10, type: "session.message.content.updated", location: { directory: WORKSPACE }, data: { sessionID: "s", messageID: messageId, content: [{ type: "text", text: "first" }, { type: "text", text: "text" }] } }));
+  const live = events.flatMap(event => event.updates.flatMap(update => update.kind === "text" && update.item ? [update.item] : []));
+  expect(live).toHaveLength(5);
+  const history = normalizeStoredMessage({ id: messageId, type: "assistant", time: { created: 10 }, content: [{ type: "text", text: "first" }, { type: "text", text: "text" }] });
+  expect(history).toHaveLength(2);
+  for (const item of [...live, ...history]) {
+    expect(item.id).toMatch(/^part:native:api:id:text:[01]$/);
+    expect(visualAdmissionIdentity({ ...item })).toBe("opencode:message:native:api:id");
+    const json = JSON.parse(JSON.stringify(item));
+    expect(Object.keys(json).sort()).toEqual(["createdAt", "id", "markdown", "type"]);
+    expect(parseConversationItem(json)).toEqual(json);
+  }
+});
 
 function run(events: Array<Record<string, unknown>>, memory: OpenCodeV2Memory = createOpenCodeV2Memory()) {
   const normalize = createOpenCodeV2Normalizer(WORKSPACE);

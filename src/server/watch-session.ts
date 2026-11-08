@@ -585,6 +585,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   }
 
   return {
+    getStaticFilePolicy: () => ({ entries, respectGitignore: options.respectGitignore }),
     start() {
       startPromise ??= Promise.all(entries.map(entry => observe(entry).catch(error => {
         prepared.get(entry.absolutePath)?.resolve(null);

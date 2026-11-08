@@ -1,12 +1,42 @@
 import { describe, expect, test } from "bun:test";
 
 import { createClaudeEventMemory, describeSessionScopedUpdates, normalizeClaudeMessage, normalizeTranscriptEntries, sessionScopedSuggestions } from "./normalization";
+import { CLAUDE_TEXT_BLOCKS, claudeVisualIdentity, type ClaudeTextIdentity } from "./normalization-types";
+import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "../visual-identity";
 import { parseConversationItem } from "../validation";
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { readSessionTranscript } from "./transcript";
+
+describe("Claude native text-block capture identity", () => {
+  test("joined completion blocks retain per-block offsets, replay idempotently and reconstruct from stored frames", () => {
+    const memory = createClaudeEventMemory();
+    const frame = (uuid: string, content: unknown[]) => ({ type: "assistant", uuid, timestamp: 1, message: { id: "msg_api", content } });
+    const normalize = (value: unknown) => normalizeClaudeMessage(value, memory, "live").updates.flatMap(update => update.kind === "upsert" ? [update.item] : []).find(item => item.type === "assistant_message")!;
+    const first = frame("first", [{ type: "text", text: "Before." }]);
+    normalize(first);
+    const joined = frame("joined", [{ type: "thinking", thinking: "Planning" }, { type: "text", text: "![one](one.png)" }, { type: "text", text: "![two](two.svg)" }]);
+    const item = normalize(joined);
+    const identity = item as typeof item & ClaudeTextIdentity;
+    expect(identity[CLAUDE_TEXT_BLOCKS]).toEqual([
+      { id: "claude:text:msg_api:1", offset: 0 },
+      { id: "claude:text:msg_api:2", offset: "![one](one.png)".length + 2 },
+    ]);
+    expect(claudeVisualIdentity({ ...item }, "offset:0")).toEqual({ messageId: "claude:text:msg_api:1", key: "offset:0" });
+    expect(claudeVisualIdentity({ ...item }, `offset:${"![one](one.png)".length + 2}`)).toEqual({ messageId: "claude:text:msg_api:2", key: "offset:0" });
+    expect(identity[CHAT_VISUAL_MESSAGE]).toBe("claude:message:msg_api");
+    expect(visualAdmissionIdentity({ ...item })).toBe("claude:message:msg_api");
+    expect(normalize(joined)).toEqual(item);
+    const later = normalize(frame("later", [{ type: "text", text: "After." }]));
+    expect(claudeVisualIdentity(later, "offset:0").messageId).toBe("claude:text:msg_api:3");
+    const history = normalizeTranscriptEntries([first, joined].map(value => ({ kind: "assistant", uuid: value.uuid, timestamp: 1, message: value.message, parentUuid: null, isSidechain: false, parentToolUseId: null })));
+    expect(history.items.find(item => item.id === "message:joined")).toEqual(item);
+    // The JSON contract keeps native timeline IDs and carries no internal identity.
+    expect(JSON.parse(JSON.stringify(item))).toEqual({ id: "message:joined", type: "assistant_message", createdAt: 1, markdown: "![one](one.png)\n\n![two](two.svg)", completedAt: 1 });
+  });
+});
 
 describe("Claude tool result completion timestamps", () => {
   const call = { type: "assistant", uuid: "call-frame", timestamp: "2026-09-15T10:00:00Z", message: { content: [

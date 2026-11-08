@@ -32,6 +32,7 @@ import type { ConversationItem, MessageAttachment, MessageDelivery, StructuredQu
 import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
 import type { InboxDelta, PendingInboxEntry } from "../../provider";
 import { BackgroundWorkers, nativeProof, prepareNotification, prepareTool, shellBirthIdentity, shellCommandFingerprint, type ShellBirthIdentity, type BackgroundControls, type LauncherEvidence, type NativeProof, type PreparedTool, type PreparedNotification } from "./background";
+import { nativeVisualMessageIdentity } from "../../visual-identity";
 
 export type { NormalizedProviderEvent };
 
@@ -566,7 +567,7 @@ export function assistantContentUpdates(messageId: string, content: unknown[], c
     if (part.type === "text") {
       const identity = `${messageId}:text:${ordinals.text++}`;
       const itemId = `part:${identity}`;
-      const item: ConversationItem = { id: itemId, type: "assistant_message", createdAt, markdown: text(part.text) };
+      const item: ConversationItem = { id: itemId, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId) };
       return [{ kind: "text", itemId, identity, mode: "cumulative", text: text(part.text), item }];
     }
     if (part.type === "reasoning") {

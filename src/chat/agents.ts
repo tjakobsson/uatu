@@ -1,4 +1,11 @@
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
+import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-store";
+import { getChatVisuals } from "./visual-markdown";
+import { VISUAL_MAX_COUNT } from "./visual-types";
+import { claudeVisualIdentity } from "./claude/normalization-types";
+import { visualAdmissionIdentity } from "./visual-identity";
+import { decodeReplayCursor } from "./replay";
+import { isLiveConversationStatus } from "./types";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import { NotificationFeed } from "./notification-feed";
 import type { ChatActionContext, AutomaticBackgroundFeedback } from "./types";
@@ -71,6 +78,7 @@ export type MultiAgentChatServiceOptions = {
   // Presentation order; the first entry is the server's default agent.
   agents: RegisteredChatAgent[];
   attachmentStore?: AttachmentStore;
+  visualStore?: VisualStore;
   // How long one agent's enumeration may hold up the merged list before
   // the others are served without it (its late arrival ticks the
   // inventory so clients re-fetch). Tests shorten it.
@@ -119,6 +127,8 @@ export interface MultiAgentWorkspaceChatService {
   sendNow(id: string, messageId: string, requestId: string, context?: ChatActionContext, operationReceipt?: string): Promise<{ messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback>;
   saveAttachment(bytes: Uint8Array): Promise<{ id: string; mimeType: string; sizeBytes: number }>;
   resolveAttachment(id: string): Promise<StoredAttachment | null>;
+  configureVisualReader?(reader: VisualFileReader): void;
+  resolveVisual?(id: string): Promise<StoredVisual | null>;
   renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: AgentConversationSummary }>;
   cancel(id: string, requestId: string): Promise<{ cancelled: true }>;
   undo(id: string, requestId: string): Promise<ReversibleHistoryResult>;
@@ -151,6 +161,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   private readonly agentsById = new Map<string, RegisteredChatAgent>();
   private readonly order: RegisteredChatAgent[];
   private readonly attachmentStore: AttachmentStore;
+  private readonly visualStore: VisualStore;
   private readonly inventoryHub = new MergedInventoryHub(async () =>
     (await Promise.all(this.order.map(agent => {
       const subscribe = agent.service.subscribeInventory().catch(() => null);
@@ -196,6 +207,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // The store is workspace state shared across agents — same backing
     // directory the per-agent stacks resolve, one authority for routes.
     this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
+    this.visualStore = options.visualStore ?? new VisualStore(options.workspacePath);
     this.inventoryContributionTimeoutMs = options.inventoryContributionTimeoutMs ?? 4_000;
   }
 
@@ -329,7 +341,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   async history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot> {
     const { agent, conversationId } = this.resolve(id);
-    return this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId, options));
+    return this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId, options)));
   }
 
   async workerEvidence(id: string): Promise<import("./worker-dismissal-evidence").WorkerEvidenceSnapshot> {
@@ -346,9 +358,73 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   }> {
     const { agent, conversationId } = this.resolve(id);
     const { snapshot, events } = await agent.service.subscribe(conversationId, options);
+    let qualified: AgentConversationSnapshot;
+    try {
+      qualified = await this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot));
+    } catch (error) {
+      events.cancel();
+      throw error;
+    }
+    if (options?.signal?.aborted) events.cancel();
+    const boundary = decodeReplayCursor(snapshot.cursor);
+    const requestedCursor = options?.cursor ? decodeReplayCursor(options.cursor) : null;
+    let replayNeedsVisualResync = Boolean(boundary && requestedCursor
+      && boundary.generation === requestedCursor.generation && requestedCursor.sequence < boundary.sequence
+      && qualified.items.some(item => item.type === "assistant_message" && item.visuals?.length));
+    const items = new Map(qualified.items.map(item => [item.id, item]));
+    let streaming = isLiveConversationStatus(snapshot.conversation.status);
     return {
-      snapshot: this.qualifySnapshot(agent.descriptor, snapshot),
-      events: new QualifyingEventSubscription(events, event => this.qualifyEvent(agent.descriptor, event)),
+      snapshot: qualified,
+      events: new QualifyingEventSubscription(events, async raw => {
+        const event = this.qualifyEvent(agent.descriptor, raw);
+        // The handoff snapshot is current, while a reconnect may replay older
+        // events. Never apply history again to snapshot-seeded state. The HTTP
+        // reconnect handshake sends only a cursor, so finish visual-bearing
+        // replay with a resync at its existing boundary event: the client must
+        // fetch the enriched snapshot even when no later live event arrives.
+        if (boundary && event.generation === boundary.generation && event.sequence <= boundary.sequence) {
+          if (event.type === "resync") { replayNeedsVisualResync = false; return event; }
+          if (replayNeedsVisualResync && event.sequence === boundary.sequence) {
+            replayNeedsVisualResync = false;
+            return { generation: event.generation, sequence: event.sequence, conversationId: event.conversationId, type: "resync", reason: "conversation-rewritten" };
+          }
+          return event;
+        }
+        const base = { generation: event.generation, sequence: event.sequence, conversationId: event.conversationId };
+        if (event.type === "item.remove") items.delete(event.itemId);
+        if (event.type === "conversation.status" || event.type === "conversation.updated") {
+          streaming = isLiveConversationStatus(event.type === "conversation.status" ? event.status : event.conversation.status);
+          if (!streaming) {
+            let refresh = false;
+            for (const item of items.values()) {
+              if (item.type !== "assistant_message") continue;
+              const enriched = await this.enrichItem(id, item, false);
+              if (JSON.stringify(enriched) !== JSON.stringify(item)) refresh = true;
+              items.set(item.id, enriched);
+            }
+            // Preserve the provider's sequence/cursor. A resync re-reads the
+            // terminal status and newly resolved visuals without inventing SSE IDs.
+            if (refresh) return { ...base, type: "resync", reason: "conversation-rewritten" };
+          }
+        }
+        if (event.type === "item.upsert") {
+          const item = await this.enrichItem(id, event.item, streaming);
+          items.set(item.id, item);
+          return { ...event, item };
+        }
+        if (event.type === "item.text_delta") {
+          const previous = items.get(event.itemId);
+          if (previous?.type === "assistant_message") {
+            const item = await this.enrichItem(id, { ...previous, markdown: previous.markdown + event.delta }, streaming);
+            items.set(item.id, item);
+            // Native deltas already update Markdown without retransmitting the
+            // growing reply. A full item is needed only to deliver changed
+            // snapshot references (new, completed, shifted or refused visuals).
+            if (item.type === "assistant_message" && JSON.stringify(item.visuals) !== JSON.stringify(previous.visuals)) return { ...base, type: "item.upsert", item };
+          }
+        }
+        return event;
+      }),
     };
   }
 
@@ -388,6 +464,41 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   async resolveAttachment(id: string): Promise<StoredAttachment | null> {
     return this.attachmentStore.resolve(id);
+  }
+
+  configureVisualReader(reader: VisualFileReader): void { this.visualStore.setReader(reader); }
+  resolveVisual(id: string): Promise<StoredVisual | null> { return this.visualStore.resolve(id); }
+
+  private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean): Promise<ConversationItem> {
+    if (item.type !== "assistant_message") return item;
+    const live = streaming && item.completedAt === undefined;
+    // Deliberately overinclusive: any image opener or Markdown fence may
+    // produce a visual, including reference syntax, raw HTML, nested/indented
+    // fences and whitespace before the SVG info string. Plain prose needs no
+    // Markdown parse/highlight on every streamed token.
+    const inputs = /!\[|<(?:img|image|pre)\b|`{3}|~{3}/i.test(item.markdown) ? getChatVisuals(item.markdown, live) : [];
+    if (!inputs.length) {
+      const { visuals: _visuals, ...rest } = item;
+      return rest;
+    }
+    const requests = function* () {
+      for (const input of inputs) {
+        const identity = claudeVisualIdentity(item, input.key);
+        yield { messageId: identity.messageId, input: { ...input, key: identity.key } };
+      }
+    };
+    const visuals = await this.visualStore.captureMany(conversationId, visualAdmissionIdentity(item), requests(), live)
+      .catch(() => inputs.slice(0, VISUAL_MAX_COUNT).map(input => ({ index: input.index, status: "unavailable" as const, message: "Image snapshot could not be stored" })));
+    return { ...item, visuals };
+  }
+
+  private async enrichSnapshot(snapshot: AgentConversationSnapshot): Promise<AgentConversationSnapshot> {
+    const lastUser = snapshot.items.findLastIndex(item => item.type === "user_message");
+    const items: ConversationItem[] = [];
+    for (const [index, item] of snapshot.items.entries()) {
+      items.push(await this.enrichItem(snapshot.conversation.id, item, index > lastUser && isLiveConversationStatus(snapshot.conversation.status)));
+    }
+    return { ...snapshot, items };
   }
 
   async renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: AgentConversationSummary }> {
@@ -536,7 +647,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
   constructor(
     private readonly source: ChatEventSubscription,
-    private readonly map: (event: ChatEvent) => ChatEvent,
+    private readonly map: (event: ChatEvent) => ChatEvent | Promise<ChatEvent>,
   ) {}
 
   cancel(): void {
@@ -547,7 +658,7 @@ class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
     // Consumer return()/throw() unwinds this generator's for-await, which
     // returns the source iterator — cancellation propagates without a
     // separate teardown path.
-    for await (const event of this.source) yield this.map(event);
+    for await (const event of this.source) yield await this.map(event);
   }
 }
 

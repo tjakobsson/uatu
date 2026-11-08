@@ -2,6 +2,7 @@ import { boundedSet } from "../../shared/bounded-map";
 import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-store";
 import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, LOGIN_FAILED_NOTICE_CODE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
 import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
+import { nativeVisualMessageIdentity } from "../visual-identity";
 
 /**
  * The normalization core both OpenCode generations share.
@@ -661,7 +662,7 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
 }
 
 export function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number, mintUsageCarrier: boolean): ConversationItem[] {
-  const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt)).flatMap(update => {
+  const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt, undefined, messageId)).flatMap(update => {
     if (update.kind === "upsert") return [update.item];
     if (update.kind === "text" && update.item) return [update.item];
     return [];
@@ -695,10 +696,10 @@ export const IGNORED_PARTS: ReadonlySet<string> = new Set(["step-start", "step-f
 
 // `skipped` collects the type of a part no case reads, so a caller on the
 // live path can report it the way an unrecognized event is reported.
-export function normalizePart(part: RecordValue, createdAt: number, skipped?: string[]): NormalizedProviderUpdate[] {
+export function normalizePart(part: RecordValue, createdAt: number, skipped?: string[], messageId?: string): NormalizedProviderUpdate[] {
   const id = string(part.id, "part id");
   if (part.type === "text") {
-    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text) };
+    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId ?? optionalString(part.messageID)) };
     return [{ kind: "text", itemId: item.id, identity: id, mode: "cumulative", text: text(part.text), item }];
   }
   if (part.type === "reasoning") {
@@ -828,7 +829,7 @@ export function textUpdate(data: RecordValue, fallbackId: string, createdAt: num
       identity: partId,
       mode,
       text: value,
-      item: { id: itemId, type: "assistant_message" as const, createdAt, markdown: "" },
+      item: { id: itemId, type: "assistant_message" as const, createdAt, markdown: "", ...nativeVisualMessageIdentity("opencode", optionalString(data.messageID) ?? optionalString(data.assistantMessageID)) },
     }],
   };
 }

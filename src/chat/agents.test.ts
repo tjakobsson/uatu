@@ -1,11 +1,301 @@
 import { describe, expect, test } from "bun:test";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId, UnknownAgentError, type RegisteredChatAgent } from "./agents";
+import { ConversationProjection } from "./adapter";
+import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
+import { readSessionTranscript } from "./claude/transcript";
+import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
-import { ReplaySubscription } from "./replay";
+import { ConversationReplay, ReplaySubscription } from "./replay";
+import { createWatchedVisualReader, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
-import type { ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary, MessageDelivery, UsageReadMode } from "./types";
+import type { AssistantMessageItem, ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary, MessageDelivery, UsageReadMode } from "./types";
+
+test("raw HTML image aliases pass the visual-capture precheck", async () => {
+  const scratch = path.join(os.tmpdir(), "opencode");
+  await fs.mkdir(scratch, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(scratch, "chat-visual-alias-"));
+  const workspace = path.join(directory, "workspace");
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const provider = {
+    history: async () => ({ ...snapshot("c"), items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown: '<IMAGE src="result.png" alt="Result">' }] }),
+    dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: workspace, visualStore: new VisualStore(workspace, path.join(directory, "state")), agents: [{ descriptor: { id: "test", name: "Test" }, service: provider }] });
+  let reads = 0;
+  service.configureVisualReader(async source => { expect(source).toBe("result.png"); reads++; return png; });
+  try {
+    const history = await service.history("test:c");
+    const item = history.items[0] as AssistantMessageItem;
+    expect(item.visuals).toHaveLength(1);
+    expect(item.visuals![0]!.status).toBe("ready");
+    expect((await service.resolveVisual(item.visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(reads).toBe(1);
+  } finally {
+    await service.dispose();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude native message admissions span text blocks, joined completion and fresh transcript normalization", async () => {
+  const root = path.join(os.homedir(), ".cache/opencode/scratch/uatu-544-review-resume-20261030/admission");
+  await fs.mkdir(root, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(root, "claude-budget-"));
+  const memory = createClaudeEventMemory();
+  const replay = new ConversationReplay("g", "c", 100_000);
+  const projection = new ConversationProjection(replay);
+  const emit = (frame: unknown) => {
+    for (const update of normalizeClaudeMessage(frame, memory, "live").updates) projection.apply(update);
+  };
+  let sequence = 0;
+  const stream = (event: Record<string, unknown>) => emit({ type: "stream_event", uuid: `s${++sequence}`, timestamp: 1, event });
+  let items = () => projection.items();
+  const provider = { history: async () => ({ ...snapshot("c"), items: items() }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const reads: string[] = [];
+  const makeService = () => {
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async source => { reads.push(source); return png; });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude Code" }, service: provider }] });
+  };
+  const service = makeService();
+  const firstText = Array.from({ length: 8 }, (_, i) => `![${i}](old-${i}.png)`).join("\n");
+  const lastText = "![ninth](new.png)";
+  try {
+    stream({ type: "message_start", message: { id: "native:api:id" } });
+    stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: firstText } });
+    const first = (await service.history("claude:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+    expect(first.visuals).toHaveLength(8);
+    stream({ type: "content_block_start", index: 2, content_block: { type: "text", text: "" } });
+    stream({ type: "content_block_delta", index: 2, delta: { type: "text_delta", text: lastText } });
+    const streamed = await service.history("claude:c");
+    expect(reads).toHaveLength(8);
+    expect((streamed.items.find(item => item.id === "message:stream:native:api:id:2") as AssistantMessageItem).visuals).toEqual([]);
+    const frame = { type: "assistant", uuid: "joined", timestamp: 1, message: { id: "native:api:id", content: [{ type: "text", text: firstText }, { type: "text", text: lastText }] } };
+    emit(frame);
+    const completed = (await service.history("claude:c")).items.find(item => item.id === "message:joined") as AssistantMessageItem;
+    expect(completed.visuals).toEqual(first.visuals);
+    items = () => normalizeTranscriptEntries([{ kind: "assistant", uuid: frame.uuid, timestamp: 1, message: frame.message, parentUuid: null, isSidechain: false, parentToolUseId: null }]).items;
+    const restarted = makeService();
+    try {
+      const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:joined") as AssistantMessageItem;
+      expect(reloaded.visuals).toEqual(first.visuals);
+      expect(reads).toHaveLength(8);
+    } finally { await restarted.dispose(); }
+  } finally { await service.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test.each([
+  { generation: "v1", arrival: "started" }, { generation: "v2", arrival: "started" },
+  { generation: "v1", arrival: "delta" }, { generation: "v2", arrival: "delta" },
+  { generation: "v1", arrival: "restatement" }, { generation: "v2", arrival: "restatement" },
+] as const)("OpenCode $generation $arrival arrivals share native-message admissions through restatement and reload", async ({ generation, arrival }) => {
+  const root = path.join(os.homedir(), ".cache/opencode/scratch/uatu-544-review-resume-20261030/admission");
+  await fs.mkdir(root, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(root, `opencode-${generation}-budget-`));
+  const replay = new ConversationReplay("g", "c", 100_000);
+  const projection = new ConversationProjection(replay);
+  projection.status = "running";
+  const v1Memory = createProviderEventMemory();
+  const v2Memory = createOpenCodeV2Memory();
+  const normalizeV2 = createOpenCodeV2Normalizer("/workspace");
+  let eventSequence = 0;
+  const emit = (type: string, data: Record<string, unknown>) => {
+    const id = `e-${++eventSequence}`;
+    const normalized = generation === "v1"
+      ? normalizeOpenCodeV1({ id, type, properties: { sessionID: "c", timestamp: 1, ...data } }, v1Memory)
+      : normalizeV2({ id, type, created: 1, location: { directory: "/workspace" }, data: { sessionID: "c", ...data } }, v2Memory);
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+  };
+  const partId = (messageId: string, ordinal: number) => `${messageId}:text:${ordinal}`;
+  const stream = (phase: "started" | "delta" | "ended", messageId: string, ordinal: number, text: string) => {
+    const payload = phase === "delta" ? { delta: text } : { text };
+    return emit(generation === "v1" ? `session.next.text.${phase}` : `session.text.${phase}`, generation === "v1"
+      ? { assistantMessageID: messageId, textID: partId(messageId, ordinal), ...payload }
+      : { assistantMessageID: messageId, ordinal, ...payload });
+  };
+  const restate = (messageId: string, texts: string[]) => {
+    if (generation === "v1") {
+      return texts.flatMap((text, ordinal) => emit("message.part.updated", { part: { id: partId(messageId, ordinal), messageID: messageId, type: "text", text } }));
+    }
+    return emit("session.message.content.updated", { messageID: messageId, content: texts.map(text => ({ type: "text", text })) });
+  };
+  const stored = (messageId: string, texts: string[]) => generation === "v1"
+    ? { info: { id: messageId, role: "assistant", time: { created: 1 } }, parts: texts.map((text, ordinal) => ({ id: partId(messageId, ordinal), messageID: messageId, type: "text", text })) }
+    : { id: messageId, type: "assistant", time: { created: 1 }, content: texts.map(text => ({ type: "text", text })) };
+  let items = () => projection.items();
+  const current = (): ConversationSnapshot => ({ ...snapshot("c"), generation: "g", conversation: { ...summary("c"), status: projection.status }, cursor: replay.latestCursor(), items: items() });
+  const provider = {
+    history: async () => current(),
+    subscribe: async () => { const handoff = replay.handoff(cursor => ({ ...current(), cursor })); return { snapshot: handoff.snapshot, events: handoff.subscription }; },
+    dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  const reads: string[] = [];
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const makeService = () => {
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async source => { reads.push(source); return png; });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+  };
+  const service = makeService();
+  const messageId = "native:api:same";
+  const firstText = Array.from({ length: 8 }, (_, i) => `![${i}](old-${i}.png)`).join("\n");
+  const ninthText = "![ninth](new.png)";
+  try {
+    if (arrival === "restatement") restate(messageId, [firstText]);
+    else {
+      if (arrival === "started") stream("started", messageId, 0, "");
+      stream("delta", messageId, 0, firstText);
+    }
+    const first = (await service.history("opencode:c")).items.find(item => item.id === `part:${partId(messageId, 0)}`) as AssistantMessageItem;
+    expect(first.visuals).toHaveLength(8);
+    const subscription = await service.subscribe("opencode:c");
+    try {
+      const emitted = arrival === "restatement" ? restate(messageId, [firstText, ninthText]) : [
+        ...(arrival === "started" ? stream("started", messageId, 1, "") : []),
+        ...stream("delta", messageId, 1, ninthText),
+      ];
+      const iterator = subscription.events[Symbol.asyncIterator]();
+      const delivered: ChatEvent[] = [];
+      for (const _event of emitted) delivered.push((await iterator.next()).value as ChatEvent);
+      const ninth = delivered.findLast(event => event.type === "item.upsert" && event.item.id === `part:${partId(messageId, 1)}`);
+      if (ninth?.type !== "item.upsert" || ninth.item.type !== "assistant_message") throw new Error("expected refused ninth occurrence on the live stream");
+      expect(ninth.item.visuals).toEqual([]);
+    } finally { subscription.events.cancel(); }
+    const second = (await service.history("opencode:c")).items.find(item => item.id === `part:${partId(messageId, 1)}`) as AssistantMessageItem;
+    expect(second.visuals).toEqual([]);
+    expect(reads).toHaveLength(8);
+    stream("ended", messageId, 0, firstText);
+    stream("ended", messageId, 1, ninthText);
+    restate(messageId, [firstText, ninthText]);
+    const restated = (await service.history("opencode:c")).items.filter(item => item.type === "assistant_message") as AssistantMessageItem[];
+    expect(restated.map(item => item.visuals)).toEqual([first.visuals, []]);
+    expect(reads).toHaveLength(8);
+    // A distinct native API message must have its own budget, not a session quota.
+    restate("native:api:other", [ninthText]);
+    const distinct = (await service.history("opencode:c")).items.find(item => item.id === `part:${partId("native:api:other", 0)}`) as AssistantMessageItem;
+    expect(distinct.visuals?.[0]?.status).toBe("ready");
+    expect(reads).toHaveLength(9);
+    const historyRecords: unknown[] = JSON.parse(JSON.stringify([stored(messageId, [firstText, ninthText]), stored("native:api:other", [ninthText])]));
+    items = () => historyRecords.flatMap(record => generation === "v1" ? normalizeProviderMessage(record) : normalizeOpenCodeV2History(record));
+    const restarted = makeService();
+    try {
+      const reloaded = (await restarted.history("opencode:c")).items.filter(item => item.type === "assistant_message") as AssistantMessageItem[];
+      expect(reloaded.map(item => item.visuals)).toEqual([first.visuals, [], distinct.visuals]);
+      expect(reads).toHaveLength(9);
+      expect((await restarted.resolveVisual(first.visuals![0]!.id!))?.bytes).toEqual(png);
+    } finally { await restarted.dispose(); }
+  } finally { await service.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test("Claude visual captures survive native stream completion and transcript history reload without rereading files", async () => {
+  const scratch = path.join(os.tmpdir(), "opencode");
+  await fs.mkdir(scratch, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(scratch, "claude-visual-identity-"));
+  const workspace = path.join(directory, "workspace");
+  const state = path.join(directory, "state");
+  await fs.mkdir(workspace);
+  const originals = {
+    "image.png": Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]),
+    "image.svg": new TextEncoder().encode('<svg><rect width="10"/></svg>'),
+    "unsafe.svg": new TextEncoder().encode('<svg onload="alert(1)"/>'),
+  };
+  for (const [name, bytes] of Object.entries(originals)) await fs.writeFile(path.join(workspace, name), bytes);
+  const replay = new ConversationReplay("g", "c", 100_000);
+  const projection = new ConversationProjection(replay);
+  projection.status = "running";
+  const memory = createClaudeEventMemory();
+  const at = "2026-10-01T10:00:00Z";
+  const completedFrames: Array<Record<string, unknown>> = [];
+  const emit = (frame: Record<string, unknown>): ChatEvent[] => {
+    if (frame.type === "assistant") completedFrames.push(frame);
+    const normalized = normalizeClaudeMessage({ timestamp: at, ...frame }, memory, "live");
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+  };
+  let streamSequence = 0;
+  const stream = (event: Record<string, unknown>) => emit({ type: "stream_event", uuid: `s${++streamSequence}`, event });
+  const complete = (uuid: string, content: unknown[]) => emit({ type: "assistant", uuid, message: { id: "msg_api", role: "assistant", content } });
+  let current = (): ConversationSnapshot => ({ ...snapshot("c"), conversation: { ...summary("c"), status: projection.status }, generation: "g", cursor: replay.latestCursor(), items: projection.items() });
+  const provider = {
+    history: async () => current(),
+    subscribe: async () => { const handoff = replay.handoff(cursor => ({ ...current(), cursor })); return { snapshot: handoff.snapshot, events: handoff.subscription }; },
+    dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  const agents: RegisteredChatAgent[] = [{ descriptor: { id: "claude", name: "Claude Code" }, service: provider }];
+  let reads = 0;
+  const reader = createWatchedVisualReader([{ kind: "dir", absolutePath: workspace } as never]);
+  const makeService = () => {
+    const service = new MultiAgentChatService({ workspacePath: workspace, visualStore: new VisualStore(workspace, state), agents });
+    service.configureVisualReader(async (...args) => { reads++; return reader(...args); });
+    return service;
+  };
+  const service = makeService();
+  let restarted: MultiAgentChatService | undefined;
+  let cancel: (() => void) | undefined;
+  try {
+    stream({ type: "message_start", message: { id: "msg_api" } });
+    // Native frames complete per block. Non-text blocks and an earlier text
+    // block make the final block's wire index differ from its text ordinal.
+    complete("thinking", [{ type: "thinking", thinking: "Planning" }]);
+    stream({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
+    stream({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Context." } });
+    complete("first", [{ type: "text", text: "Context." }]);
+    complete("tool", [{ type: "tool_use", id: "tool1", name: "Bash", input: { command: "true" } }]);
+    stream({ type: "content_block_start", index: 4, content_block: { type: "text", text: "" } });
+    const subscription = await service.subscribe("claude:c");
+    cancel = () => subscription.events.cancel();
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    const markdown = Object.keys(originals).map(name => `![${name}](${name})`).join("\n");
+    stream({ type: "content_block_delta", index: 4, delta: { type: "text_delta", text: markdown } });
+    const first = (await iterator.next()).value as ChatEvent;
+    if (first.type !== "item.upsert" || first.item.type !== "assistant_message") throw new Error("expected captured stream item");
+    expect(first.item.id).toBe("message:stream:msg_api:4");
+    const captures = first.item.visuals!;
+    expect(captures.map(visual => visual.status)).toEqual(["ready", "ready", "unavailable"]);
+    expect(reads).toBe(3);
+    const stored = await Promise.all(captures.map(visual => service.resolveVisual(visual.id!)));
+    expect(stored[0]?.bytes).toEqual(originals["image.png"]);
+    expect(stored[1]?.sourceBytes).toEqual(originals["image.svg"]);
+    expect(stored[2]?.sourceBytes).toEqual(originals["unsafe.svg"]);
+    expect(stored[2]?.bytes).toBeUndefined();
+    for (const name of Object.keys(originals)) await fs.writeFile(path.join(workspace, name), '<svg><circle r="99"/></svg>');
+    await fs.unlink(path.join(workspace, "image.png"));
+    const completionEvents = complete("visual", [{ type: "text", text: markdown }]);
+    const delivered: ChatEvent[] = [];
+    for (const _event of completionEvents) delivered.push((await iterator.next()).value as ChatEvent);
+    expect(delivered[0]).toMatchObject({ type: "item.remove", itemId: "message:stream:msg_api:4" });
+    const final = delivered.find(event => event.type === "item.upsert" && event.item.id === "message:visual");
+    if (final?.type !== "item.upsert" || final.item.type !== "assistant_message") throw new Error("expected durable message");
+    expect(final.item.visuals).toEqual(captures);
+    expect(reads).toBe(3);
+    expect(await Promise.all(captures.map(visual => service.resolveVisual(visual.id!)))).toEqual(stored);
+    // Reload only native JSONL, never our live objects/metadata or an ID alias.
+    for (const name of ["image.svg", "unsafe.svg"]) await fs.unlink(path.join(workspace, name));
+    const transcriptPath = path.join(directory, "transcript.jsonl");
+    await fs.writeFile(transcriptPath, completedFrames.map(frame => JSON.stringify({ timestamp: at, ...frame })).join("\n"));
+    const transcript = await readSessionTranscript(transcriptPath);
+    expect(transcript.entries).toHaveLength(4);
+    current = () => ({ ...snapshot("c"), conversation: { ...summary("c"), status: "completed" }, items: normalizeTranscriptEntries(transcript.entries).items });
+    restarted = makeService();
+    const history = await restarted.history("claude:c");
+    expect((history.items.find(item => item.id === "message:visual") as AssistantMessageItem).visuals).toEqual(captures);
+    expect(await Promise.all(captures.map(visual => restarted!.resolveVisual(visual.id!)))).toEqual(stored);
+    expect(reads).toBe(3);
+  } finally {
+    cancel?.();
+    await service.dispose();
+    await restarted?.dispose();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 function summary(id: string, updatedAt = 1): ConversationSummary {
   return { id, title: `Conversation ${id}`, createdAt: updatedAt, updatedAt, status: "idle" };

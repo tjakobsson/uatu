@@ -1,6 +1,8 @@
 import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import { claudeWindowAnswer } from "./context-window";
+import { CLAUDE_TEXT_BLOCKS, claudeTextBlockId, type ClaudeTextBlock } from "./normalization-types";
+import { nativeVisualMessageIdentity } from "../visual-identity";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import { LOGIN_FAILED_NOTICE_CODE as LOGIN_FAILED_CODE, RATE_LIMIT_ITEM_ID, REAUTHENTICATING_NOTICE_CODE as REAUTHENTICATING_CODE, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
 import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, readsAsWakeupPrompt, scheduledWakeupPrompt, type TranscriptEntry } from "./transcript";
@@ -56,6 +58,12 @@ export type ClaudeEventMemory = {
   // completed per-block assistant messages have consumed, so the completed
   // block replaces exactly the streamed item it grew in (D10).
   streams: Map<string, { createdAt: number; textBlocks: number[]; consumed: number }>;
+  // Native completion and transcript frames each carry one API content block.
+  // Counting only text blocks reproduces the stream's text ordinal on reload,
+  // even though thinking/tool blocks occupy other wire indexes. Frame UUIDs
+  // make repeated completion frames idempotent.
+  textCounts: Map<string, number>;
+  textFrames: Map<string, number>;
   // Every timeline item a wire frame minted, by the frame's uuid, so a
   // retraction naming the frame (a refusal fallback's supersede) removes
   // the tool and reasoning rows it produced and not only its text.
@@ -125,7 +133,7 @@ export type AmbientRunMemory = {
 };
 
 export function createClaudeEventMemory(): ClaudeEventMemory {
-  return { tools: new Map(), todoTools: new Set(), tasks: new Map(), ambientTasks: new Set(), ambientRuns: new Map(), streams: new Map(), frameItems: new Map() };
+  return { tools: new Map(), todoTools: new Set(), tasks: new Map(), ambientTasks: new Set(), ambientRuns: new Map(), streams: new Map(), textCounts: new Map(), textFrames: new Map(), frameItems: new Map() };
 }
 
 /**
@@ -506,14 +514,14 @@ function normalizeMessage(
     const itemId = `message:stream:${memory.currentStream}:${index}`;
     if (event.type === "content_block_start" && asRecord(event.content_block).type === "text") {
       stream.textBlocks.push(index);
-      return { ...base, outcome: "handled", updates: [...resumed, { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt: envelope.createdAt, markdown: "" } }] };
+      return { ...base, outcome: "handled", updates: [...resumed, { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt: envelope.createdAt, markdown: "", ...streamTextIdentity(memory.currentStream!, stream, index) } }] };
     }
     if (event.type === "content_block_delta" && asRecord(event.delta).type === "text_delta" && typeof asRecord(event.delta).text === "string" && stream.textBlocks.includes(index)) {
       const text = asRecord(event.delta).text as string;
       if (!text) return { ...base, outcome: "ignored", updates: resumed };
       return { ...base, outcome: "handled", updates: [...resumed, {
         kind: "text", itemId, identity: itemId, mode: "incremental", text,
-        item: { id: itemId, type: "assistant_message", createdAt: stream.createdAt, markdown: "" },
+        item: { id: itemId, type: "assistant_message", createdAt: stream.createdAt, markdown: "", ...streamTextIdentity(memory.currentStream!, stream, index) },
       }] };
     }
     return { ...base, outcome: resumed.length ? "handled" : "ignored", updates: resumed };
@@ -659,7 +667,17 @@ function normalizeMessage(
       ? content.filter(block => asRecord(block).type === "tool_use")
       : content;
     const skippedBlocks: string[] = subagentFrame ? skippedBlockTypes(content, ASSISTANT_BLOCKS) : [];
-    updates.push(...contentBlockUpdates(blocks, envelope, memory, skippedBlocks));
+    const apiMessageId = !synthetic && typeof message.id === "string" && message.id ? message.id : undefined;
+    const textCount = blocks.filter(block => asRecord(block).type === "text" && typeof asRecord(block).text === "string").length;
+    let firstText = 0;
+    if (apiMessageId && textCount) {
+      firstText = memory.textFrames.get(envelope.uuid) ?? memory.textCounts.get(apiMessageId) ?? 0;
+      if (!memory.textFrames.has(envelope.uuid)) {
+        boundedSet(memory.textFrames, envelope.uuid, firstText, MEMORY_LIMIT);
+        boundedSet(memory.textCounts, apiMessageId, firstText + textCount, MEMORY_LIMIT);
+      }
+    }
+    updates.push(...contentBlockUpdates(blocks, envelope, memory, skippedBlocks, apiMessageId ? { apiMessageId, firstText } : undefined));
     const usage = subagentFrame || synthetic ? undefined : tokensToUsage(message.usage);
     // Each assistant message's usage is ONE API call's accounting, and its
     // input + cache read + cache write is the window occupancy after that
@@ -906,15 +924,23 @@ function skippedBlockTypes(blocks: unknown[], known: ReadonlySet<string>): strin
   });
 }
 
-function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: ClaudeEventMemory, skipped: string[]): NormalizedProviderUpdate[] {
+function streamTextIdentity(apiMessageId: string, stream: { textBlocks: number[] }, index: number) {
+  return { [CLAUDE_TEXT_BLOCKS]: [{ id: claudeTextBlockId(apiMessageId, stream.textBlocks.indexOf(index)), offset: 0 }], ...nativeVisualMessageIdentity("claude", apiMessageId) };
+}
+
+function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: ClaudeEventMemory, skipped: string[], identity?: { apiMessageId: string; firstText: number }): NormalizedProviderUpdate[] {
   const updates: NormalizedProviderUpdate[] = [];
   const texts: string[] = [];
+  const textBlocks: ClaudeTextBlock[] = [];
+  let textOffset = 0;
   let reasoningIndex = 0;
   skipped.push(...skippedBlockTypes(content, ASSISTANT_BLOCKS));
   for (const value of content) {
     const block = asRecord(value);
     if (block.type === "text" && typeof block.text === "string") {
+      if (identity) textBlocks.push({ id: claudeTextBlockId(identity.apiMessageId, identity.firstText + texts.length), offset: textOffset });
       texts.push(block.text);
+      textOffset += block.text.length + 2; // The joined Markdown's separating blank line.
       continue;
     }
     if (block.type === "thinking" && typeof block.thinking === "string") {
@@ -971,6 +997,8 @@ function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: Cla
       createdAt: envelope.createdAt,
       markdown: texts.join("\n\n"),
       completedAt: envelope.createdAt,
+      ...(textBlocks.length ? { [CLAUDE_TEXT_BLOCKS]: textBlocks } : {}),
+      ...nativeVisualMessageIdentity("claude", identity?.apiMessageId),
     } });
   }
   return updates;

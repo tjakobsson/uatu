@@ -8,7 +8,7 @@
     "event": {
       "kind": "data",
       "data": {
-        "workspaceApiRevision": 31,
+        "workspaceApiRevision": 36,
         "kind": "snapshot",
         "epoch": "example-session",
         "revision": 4,
@@ -28,7 +28,7 @@
           "commitShort": "abcdef",
           "release": false,
           "identifier": "0.5.1",
-          "bundledWebRevision": 2
+          "bundledWebRevision": 4
         },
         "scope": {
           "kind": "folder"

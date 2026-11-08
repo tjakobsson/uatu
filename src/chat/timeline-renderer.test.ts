@@ -183,6 +183,23 @@ for (const name of ["subagent", "shell"]) test(`${name} result follows its launc
   expect(host.textContent!.match(/Canonical report/g)).toHaveLength(1);
 });
 
+test("streaming prose retains a captured visual and its selected source view", () => {
+  const renderer = new TimelineRenderer();
+  const target = dom.document.createElement("div") as unknown as HTMLElement;
+  const item: ConversationItem = { id: "visual-answer", type: "assistant_message", createdAt: 1, markdown: "![Diagram](./diagram.svg)", visuals: [{ index: 0, status: "ready", id: "a".repeat(64), mimeType: "image/svg+xml" }] };
+  renderer.render(target, projectionWith([item]), new Set());
+  const visual = target.querySelector<HTMLElement>(".chat-visual")!;
+  const code = visual.querySelector("code")!;
+  code.textContent = "<svg>frozen source</svg>";
+  visual.dataset.visualSourceLoaded = "true";
+  visual.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+  renderer.render(target, projectionWith([{ ...item, markdown: `${item.markdown}\n\nMore explanation.` }]), new Set());
+  expect(target.querySelector(".chat-visual")).toBe(visual);
+  expect(visual.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+  expect(code.textContent).toBe("<svg>frozen source</svg>");
+  renderer.reset();
+});
+
 describe("persistent shell rendering", () => {
   for (const input of ["wheel", "touch", "keyboard", "scrollbar", "untouched", "closed"]) test(`${input} inspection controls row and group completion`, () => {
     const oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;

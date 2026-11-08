@@ -335,6 +335,7 @@ export type TokenUsage = {
 export type AssistantMessageItem = TimelineItemBase & {
   type: "assistant_message";
   markdown: string;
+  visuals?: import("./visual-types").ChatVisualSnapshot[];
   completedAt?: number;
   // Message-level accounting rides a dedicated empty-markdown carrier.
   usage?: TokenUsage;

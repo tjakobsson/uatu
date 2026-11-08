@@ -3820,6 +3820,12 @@ export function initChat(api = new ChatApiClient()): void {
   latestButton.addEventListener("click", () => {
     parentScroll.latest();
   });
+  for (const button of [latestButton, childLatest]) button?.addEventListener("mousedown", event => {
+    // Blurring the touch composer reveals the tab bar and moves Latest before
+    // mouseup. Keep focus, but let the pointer sequence produce its click
+    // (cancelling touch pointerdown can suppress that click in WebKit).
+    if (document.documentElement.getAttribute("data-ui-mode") === "touch" && document.activeElement === input) event.preventDefault();
+  });
 
   /**
    * Expanding an activity group inside a transcript, for whichever timeline

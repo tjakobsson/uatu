@@ -9,11 +9,27 @@ import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
+import { CLAUDE_TEXT_BLOCKS } from "./normalization-types";
+import { CHAT_VISUAL_MESSAGE } from "../visual-identity";
 import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
 import { contextReadout } from "../context-readout";
+import { CHAT_PRESENTATION_GUIDANCE } from "../presentation-guidance";
+import type { SessionStartHookInput, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
+
+async function presentationContext(query: FakeQuery, source: SessionStartHookInput["source"]): Promise<void> {
+  const options = query.input.options;
+  // Imported sessions may carry a recorded custom prompt and appends unknown
+  // to Uatu. Leave their selection and snapshot policy entirely to the CLI.
+  for (const field of ["systemPrompt", "appendSystemPrompt", "systemPromptSnapshot"]) {
+    expect(options).not.toHaveProperty(field);
+  }
+  const input: SessionStartHookInput = { hook_event_name: "SessionStart", source, session_id: "native-custom-session", transcript_path: "/native/transcript", cwd: "/workspace" };
+  const output: SyncHookJSONOutput = await options.hooks!.SessionStart![0]!.hooks[0]!(input, undefined, { signal: new AbortController().signal });
+  expect(output).toEqual({ continue: true, hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CHAT_PRESENTATION_GUIDANCE } });
+}
 
 class FakeQuery implements ClaudeQueryHandle {
   readonly emitted: unknown[] = [];
@@ -540,11 +556,12 @@ describe("streaming and session signals (D10, D11)", () => {
     const memory = createClaudeEventMemory();
     const started = normalizeClaudeMessage(stream("s1", 0, { type: "message_start", message: { id: "msg_1" } }), memory, "live");
     expect(started.outcome).toBe("ignored");
+    const textIdentity = { [CLAUDE_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1" };
     const opened = normalizeClaudeMessage(stream("s2", 0, { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }), memory, "live");
-    expect(opened.updates).toEqual([{ kind: "upsert", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "" } }]);
+    expect(opened.updates).toEqual([{ kind: "upsert", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     const first = normalizeClaudeMessage(stream("s3", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Autumn brings" } }), memory, "live");
     const second = normalizeClaudeMessage(stream("s4", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " a crisp chill." } }), memory, "live");
-    expect(first.updates).toEqual([{ kind: "text", itemId: "message:stream:msg_1:0", identity: "message:stream:msg_1:0", mode: "incremental", text: "Autumn brings", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "" } }]);
+    expect(first.updates).toEqual([{ kind: "text", itemId: "message:stream:msg_1:0", identity: "message:stream:msg_1:0", mode: "incremental", text: "Autumn brings", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     expect(second.updates[0]).toEqual(expect.objectContaining({ kind: "text", itemId: "message:stream:msg_1:0", text: " a crisp chill." }));
     // Thinking deltas and a subagent's stream stay out.
     expect(normalizeClaudeMessage(stream("s5", 1, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }), memory, "live").outcome).toBe("ignored");
@@ -834,6 +851,22 @@ describe("catalog hydration probe", () => {
 });
 
 describe("ClaudeProvider sessions", () => {
+  test("adds presentation context through SessionStart without changing native prompts, user text, or permissions", async () => {
+    const { provider, queries } = fixture();
+    try {
+      const session = await provider.createSession("visuals");
+      const text = "  Show ![plot](plots/result.svg)\nexactly as requested.  ";
+      await provider.prompt(session.id, { id: "visual-prompt", text, delivery: "queue" });
+      const input = queries[0]!.input;
+      for (const source of ["startup", "resume", "compact", "clear", "fork"] as const) await presentationContext(queries[0]!, source);
+      expect(input.options.canUseTool).toBeFunction();
+      expect(input.options.permissionMode).toBe("auto");
+      const envelope = await input.prompt[Symbol.asyncIterator]().next();
+      expect(envelope.value?.message.content).toEqual([{ type: "text", text }]);
+      expect(input.options).not.toHaveProperty("settings");
+    } finally { await provider.dispose(); }
+  });
+
   test("creation mints a UUID session, announces it, and lists it as pending", async () => {
     const { provider } = fixture();
     const { events, stop } = collect(provider);
@@ -863,6 +896,7 @@ describe("ClaudeProvider sessions", () => {
     await provider.prompt(storedId, { id: "req-2", text: "continue", delivery: "queue" });
     expect(queries).toHaveLength(2);
     expect(queries[1]!.input.options.resume).toBe(storedId);
+    await presentationContext(queries[1]!, "resume");
     expect(queries[1]!.input.options.sessionId).toBeUndefined();
     await provider.dispose();
   });
@@ -4781,7 +4815,8 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     await provider.release(session.id);
     await provider.prompt(session.id, { id: "r2", text: "keep going", delivery: "queue" });
     const resumed = queries[1]!;
-    await promptHook(resumed, { prompt: "keep going", prompt_id: "typed-2" });
+    await presentationContext(resumed, "resume");
+    expect(await promptHook(resumed, { prompt: "keep going", prompt_id: "typed-2" })).toEqual({ continue: true });
     // Another wakeup keeps this session up, so the cancelled cron can fire in it.
     const other = { id: "o1", schedule: "*/10 * * * *", recurring: true, prompt: "OTHER check" };
     await stopHook(resumed, { session_crons: [recurring, other] });
@@ -4796,7 +4831,7 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     resumed.push({ type: "system", subtype: "informational", uuid: "n9", session_id: session.id, content: "UserPromptSubmit operation blocked by hook" });
     resumed.push(result(session.id, "res9"));
     // The next real turn still reads normally: the other wakeup fires.
-    await promptHook(resumed, { prompt: other.prompt, prompt_id: "fired-10" });
+    expect(await promptHook(resumed, { prompt: other.prompt, prompt_id: "fired-10" })).toEqual({ continue: true });
     resumed.push({ type: "system", subtype: "init", uuid: "i10", session_id: session.id, model: "claude-haiku-4-5-20251001" });
     await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
     const after = events.slice(before);
