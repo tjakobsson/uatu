@@ -739,9 +739,14 @@ test("split image syntax and whitespace-separated SVG fences deliver metadata on
 test("concurrent history and subscribe enrichment share one store's four-reader admission limit", async () => {
   const store = new VisualStore("/workspace", directory);
   let active = 0, maximum = 0, reads = 0;
+  let release!: () => void;
+  let fourStarted!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { fourStarted = resolve; });
   store.setReader(async () => {
     active++; reads++; maximum = Math.max(maximum, active);
-    try { await Bun.sleep(2); return png; }
+    if (active === VISUAL_CAPTURE_CONCURRENCY) fourStarted();
+    try { await gate; return png; }
     finally { active--; }
   });
   const items: AssistantMessageItem[] = Array.from({ length: 8 }, (_, index) => ({
@@ -752,14 +757,23 @@ test("concurrent history and subscribe enrichment share one store's four-reader 
   const events = new ReplaySubscription(() => undefined);
   const provider = { history: async () => snapshot, subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
   const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
-  const [first, second, subscription] = await Promise.all([service.history("a:c"), service.history("a:c"), service.subscribe("a:c")]);
-  expect(maximum).toBe(VISUAL_CAPTURE_CONCURRENCY);
-  expect(reads).toBe(64);
-  expect(active).toBe(0);
-  expect(first.items).toEqual(second.items);
-  expect(subscription.snapshot.items).toEqual(first.items);
-  subscription.events.cancel();
-  await service.dispose();
+  const pending = Promise.all([service.history("a:c"), service.history("a:c"), service.subscribe("a:c")]);
+  try {
+    await started;
+    expect(active).toBe(VISUAL_CAPTURE_CONCURRENCY);
+    expect(reads).toBe(VISUAL_CAPTURE_CONCURRENCY);
+    release();
+    const [first, second, subscription] = await pending;
+    expect(maximum).toBe(VISUAL_CAPTURE_CONCURRENCY);
+    expect(reads).toBe(64);
+    expect(active).toBe(0);
+    expect(first.items).toEqual(second.items);
+    expect(subscription.snapshot.items).toEqual(first.items);
+  } finally {
+    release();
+    events.cancel();
+    try { await pending; } finally { await service.dispose(); }
+  }
 });
 
 test("subscribe cancels the provider handoff if snapshot enrichment fails or its signal aborts during capture", async () => {

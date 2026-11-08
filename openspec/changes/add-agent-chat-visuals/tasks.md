@@ -42,7 +42,7 @@ and safety stash are preserved; no feature commit or publication is implied.
 - [ ] 5.3 Run final relevant unit/property, browser, build, smoke, license, and dependency checks against the approved dependency/runtime state; distinguish new failures from reproduced baseline failures and report any unrun full-suite/live-agent checks.
 - [ ] 5.4 Synchronize `chat-visuals` into main specs and archive this change only after acceptance; verify strict OpenSpec validation, clean diff whitespace, and preserved demo files before final merge/publication review.
 - [ ] 5.5 After the review loop is clear, fetch and rebase onto latest `upstream/main` as requested on 2026-10-30; preserve feature/demo work, rerun affected checks, and renew affected independent reviews against the new target.
-- [ ] 5.6 Create the draft PR now, as requested on 2026-11-02, before the final rebase/review is finished; review the full target diff and publication metadata, obtain PR-text approval, then push and publish through the approved routes and verify its draft status. Preserve draft status during subsequent updates.
+- [x] 5.6 Create the draft PR before the final rebase/review is finished; review the full target diff and publication metadata, obtain PR-text approval, then push and publish through the approved routes and verify its draft status. Verified draft #622 on 2026-11-08: https://github.com/tjakobsson/uatu/pull/622, head `71f424279fe9211d3c02d0ba93a666baf2542115`. Keep draft status during updates. Issue #544 is confirmed as the intended closing issue once fully resolved; the draft currently uses a non-closing reference.
 
 ## Historical checkpoint evidence (current status is tracked above)
 
