@@ -1527,10 +1527,12 @@ export class ChatAdapter {
     // rewrite the published set — that would erase live questions.
     let questionsReconciled = false;
     let commitQuestionTracking: (() => void) | undefined;
+    let reconcileQuestionFreshness: (() => void) | undefined;
+    let questionTrackingCurrent: (() => boolean) | undefined;
     try {
       const questionTick = this.interactionClock;
       const previousTracking = new Map(this.publishedQuestions);
-      const pendingNow = await this.pendingQuestions(id);
+      const pendingNow = await this.pendingQuestions(id, false);
       coverage?.assertCurrent();
       for (const pending of pendingNow) {
         if (items.some(item => item.id === pending.id)) continue;
@@ -1578,6 +1580,27 @@ export class ChatAdapter {
         }
         for (const [owner, ids] of byChild) tracking.set(owner, ids);
       }
+      const ownsQuestion = (item: QuestionRequest) => this.publishedQuestions.get(id) === previousTracking.get(id)
+        && this.publishedQuestions.get(item.conversationId ?? id) === previousTracking.get(item.conversationId ?? id);
+      reconcileQuestionFreshness = () => {
+        // A tool refresh owns a complete newer set, including absence. An old
+        // read must neither resurrect its unprojected rows nor retire current
+        // ones. Carry current rows for replacement/seed as well as recovery.
+        for (let index = items.length - 1; index >= 0; index--) {
+          const item = items[index]!;
+          if (item.type === "question" && !ownsQuestion(item)) items.splice(index, 1);
+        }
+        for (const [itemId, removal] of historyRemovals) {
+          if (removal.expected?.type === "question" && !ownsQuestion(removal.expected)) historyRemovals.delete(itemId);
+        }
+        for (const item of projection.items()) {
+          if (item.type === "question" && !ownsQuestion(item) && !items.some(candidate => candidate.id === item.id)) items.push(item);
+        }
+        // Hooks may invalidate admission, but cannot admit another stale set.
+        const admittedTracking = new Map(this.publishedQuestions);
+        const owners = new Set([id, ...items.flatMap(item => item.type === "question" ? [item.conversationId ?? id] : []), ...tracking.keys()]);
+        questionTrackingCurrent = () => [...owners].every(owner => this.publishedQuestions.get(owner) === admittedTracking.get(owner));
+      };
       commitQuestionTracking = () => {
         // Tracking is removal authority for the next tool refresh. Publish it
         // only with these rows, retaining later native announcements under the
@@ -1594,15 +1617,24 @@ export class ChatAdapter {
             tracking.set(owner, ids);
           }
         }
+        for (const item of pendingNow) {
+          if (item.type !== "question" || !ownsQuestion(item) || this.questionCreatedAt.has(item.id)) continue;
+          const current = projection.get(item.id);
+          if (current?.type === "question" && current.status === "pending") this.questionCreatedAt.set(item.id, current.createdAt);
+        }
         for (const [owner, ids] of tracking) {
           // A concurrent parent/child refresh or history owns its newer set.
-          if (this.publishedQuestions.get(owner) !== previousTracking.get(owner)) continue;
+          const newer = this.publishedQuestions.get(owner) !== previousTracking.get(owner);
           const pending = new Set([...ids].filter(itemId => {
             const item = projection.get(itemId);
-            return item?.type === "question" && item.status === "pending";
+            return item?.type === "question" && item.status === "pending"
+              && (!newer || (this.announced.get(itemId)?.tick ?? 0) > questionTick);
           }));
-          if (pending.size > 0) this.publishedQuestions.set(owner, pending);
-          else this.publishedQuestions.delete(owner);
+          if (newer) {
+            if (!pending.size) continue;
+            for (const itemId of this.publishedQuestions.get(owner) ?? []) pending.add(itemId);
+          }
+          this.publishedQuestions.set(owner, pending);
         }
       };
     } catch { /* unknown, not empty */ }
@@ -1690,6 +1722,7 @@ export class ChatAdapter {
       const removal = historyRemovals.get(item.id);
       return !removal || projection.get(item.id) !== removal.expected;
     }).map(item => this.correlateSteerMessage(id, item, coverage.steerCorrelations)));
+    reconcileQuestionFreshness?.();
     // The live-task snapshot above was taken before several awaits; a task
     // that settled in the projection meanwhile keeps its settled row.
     for (let index = 0; index < items.length; index += 1) {
@@ -1848,7 +1881,7 @@ export class ChatAdapter {
         // retention. Commit only after the covered read's final validation.
         projection.replace(items, recoveryUpdates.flatMap(update => update.kind === "remove" ? [update.itemId] : []), () => {
           coverage?.assertCurrent(); coverage?.workerSources.assertCurrent();
-          return !this.disposed && this.projections.get(id) === projection;
+          return !this.disposed && this.projections.get(id) === projection && (questionTrackingCurrent?.() ?? true);
         });
         // Replacement preparation/admission may fail. Do not discard buffered
         // native events until the complete replacement has actually committed.
@@ -1865,7 +1898,7 @@ export class ChatAdapter {
         }
         if (!projection.recover(recoveryUpdates, () => {
           coverage?.assertCurrent(); coverage?.workerSources.assertCurrent();
-          return !this.disposed && this.projections.get(id) === projection;
+          return !this.disposed && this.projections.get(id) === projection && (questionTrackingCurrent?.() ?? true);
         }, removed || !!visibilityChanged)) throw new HistoryReadChangedError();
       }
       // Publication and eligibility share the covering read's final fence.
@@ -6093,7 +6126,7 @@ export class ChatAdapter {
   }
 
   /** Throws on provider failure — an errored list is unknown, not empty. */
-  private async pendingQuestions(id: string): Promise<ConversationItem[]> {
+  private async pendingQuestions(id: string, rememberTimestamps = true): Promise<ConversationItem[]> {
     if (!this.provider.listQuestions) return [];
     const pending = await this.provider.listQuestions();
     const items: ConversationItem[] = [];
@@ -6108,7 +6141,7 @@ export class ChatAdapter {
       // fresh Date.now() on every republish would keep moving the question
       // down the timeline as its tool part ticks over.
       const createdAt = this.questionCreatedAt.get(itemId) ?? Date.now();
-      this.questionCreatedAt.set(itemId, createdAt);
+      if (rememberTimestamps) this.questionCreatedAt.set(itemId, createdAt);
       items.push({
         id: itemId,
         type: "question" as const,
@@ -6158,8 +6191,9 @@ export class ChatAdapter {
           updates.push({ kind: "remove", itemId: id });
           this.questionCreatedAt.delete(id);
         }
-        if (live.size > 0) this.publishedQuestions.set(conversationId, live);
-        else this.publishedQuestions.delete(conversationId);
+        // Keep an empty set's identity too: absence supersedes an older read
+        // even when that read started before any questions were tracked.
+        this.publishedQuestions.set(conversationId, live);
         if (updates.length > 0) {
           await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
           coalescer.push(conversationId, updates);

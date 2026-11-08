@@ -8662,6 +8662,82 @@ describe("pending permission recovery", () => {
     }
   });
 
+  for (const mode of ["legacy", "native", "replacement"] as const)
+  for (const owner of ["parent", "child"] as const)
+  for (const superseding of ["none", "new", "empty"] as const)
+  test(`${mode} history fences unprojected ${owner} questions against ${superseding} refresh`, async () => {
+    const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listMessages = async () => ({ items: [], completeItems: [], accounting: [] });
+    const question = (requestId: string) => ({ requestId, conversationId: owner,
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] });
+    let pending: ReturnType<typeof question>[] = [];
+    provider.listQuestions = async () => pending;
+    let hold = false, entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    provider.listPermissions = async () => {
+      if (hold) { hold = false; entered = true; await gate; }
+      return [];
+    };
+    const notifications: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0,
+      onNotification: event => notifications.push(event) });
+    const pump = adapter.startEventPump();
+    let reading: ReturnType<ChatAdapter["history"]> | undefined;
+    const refresh = (callID: string) => provider.eventQueue.push({ id: callID, type: "session.next.tool.success",
+      data: { sessionID: owner, callID, tool: "question" } } as never);
+    const internals = adapter as unknown as {
+      questionRefreshes: Set<string>;
+      questionCreatedAt: Map<string, number>;
+      readCoveredHistory: (id: string, options: {}, recovery: { dirty: boolean }, replacement: {}) => ReturnType<ChatAdapter["history"]>;
+    };
+    try {
+      await adapter.history("parent");
+      pending = [question("old")];
+      hold = true;
+      // Exercise the real complete-replacement reader, not a copied merge.
+      reading = mode === "replacement" ? internals.readCoveredHistory("parent", {}, { dirty: false }, {}) : adapter.history("parent");
+      await waitUntil(() => entered);
+      expect(adapter.projectionForTests("parent").has("question:old")).toBe(false);
+      expect(internals.questionCreatedAt.has("question:old")).toBe(false);
+      if (superseding !== "none") {
+        pending = superseding === "new" ? [question("new")] : [];
+        refresh("newer-set");
+        await liveEventsApplied(adapter, provider);
+        await waitUntil(() => !internals.questionRefreshes.has(owner));
+        if (superseding === "new") {
+          await waitUntil(() => adapter.projectionForTests("parent").has("question:new"));
+          // A genuine announcement after the refresh must survive recovery
+          // and join the next refresh's removal authority, not revive old.
+          provider.eventQueue.push({ type: "question.asked", data: { sessionID: owner, id: "native", timestamp: Date.now(),
+            questions: [{ question: "Pick", options: [{ label: "A" }] }] } });
+          await waitUntil(() => adapter.projectionForTests("parent").has("question:native"));
+        }
+      }
+      release();
+      const snapshot = await reading;
+      const expected = superseding === "none" ? ["question:old"] : superseding === "new" ? ["question:native", "question:new"] : [];
+      expect(snapshot.items.filter(item => item.type === "question").map(item => item.id).sort()).toEqual(expected);
+      expect(adapter.projectionForTests("parent").items().filter(item => item.type === "question").map(item => item.id).sort()).toEqual(expected);
+      expect(internals.questionCreatedAt.has("question:old")).toBe(superseding === "none");
+      expect(adapter.activity().awaiting).toBe(expected.length > 0);
+      pending = [];
+      refresh("answered-set");
+      await liveEventsApplied(adapter, provider);
+      await waitUntil(() => !internals.questionRefreshes.has(owner));
+      await waitUntil(() => !adapter.projectionForTests("parent").items().some(item => item.type === "question"));
+      expect(adapter.activity().awaiting).toBe(false);
+      const announced = notifications.flatMap(event => event.type === "notification" ? [event.notification.id] : []);
+      for (const id of announced) expect(notifications).toContainEqual(expect.objectContaining({ type: "resolved", id }));
+    } finally {
+      release();
+      await reading?.catch(() => undefined);
+      await adapter.stopEventPump();
+      await pump;
+      await adapter.dispose();
+    }
+  });
+
   test("legacy history tracks recovered questions and later native announcements together", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent")];
