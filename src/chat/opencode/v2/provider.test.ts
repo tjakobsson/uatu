@@ -4584,6 +4584,12 @@ test(`cached nested source authority survives expiry before page transfer (${rea
   provider.reconcileBackgroundTasks = (...args) => owner.run(false, () => recover(...args));
   const list = provider.listMessages.bind(provider);
   provider.listMessages = async (...args) => {
+    // Reconnect also starts an automatic parent history read. Undo changes its
+    // boundary while this test holds the requested replacement's final check;
+    // allowing that unrelated parent read to retry/publish would introduce a
+    // second authority writer into the cached-owner assertions below. Isolate
+    // its page, not production retries or the requested read's real deadline.
+    if (read === "undo" && holdChild && args[0] === "ses_parent" && !owner.getStore()) await automaticGate;
     // A reconnect retry can legitimately start a new owner after the first
     // expires, for either unavailable nested target. Keep its current page
     // out of the expired-owner assertions, then verify fresh recovery below.
@@ -4643,11 +4649,11 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     if (outcome !== "cached-foreign") await provider.getSession(target).catch(error => { if (outcome !== "unavailable") throw error; });
     if (outcome === "successor") {
       mode = "healthy"; await provider.getSession(target);
-      assert((await adapter.history("ses_parent", { limit: 98 })).items, false);
+      assert((await owner.run(true, () => adapter.history("ses_parent", { limit: 98 }))).items, false);
     }
     if (outcome === "cancel") {
       await adapter.stopEventPump(); mode = "healthy";
-      assert((await adapter.history("ses_parent", { limit: 98 })).items, false);
+      assert((await owner.run(true, () => adapter.history("ses_parent", { limit: 98 }))).items, false);
     }
     releaseBoundary(); const result = await pending.catch(error => error);
     if (outcome === "cancel") { if (read === "history") expect(result).toBeInstanceOf(Error); }
