@@ -8742,6 +8742,83 @@ describe("pending permission recovery", () => {
     }
   });
 
+  for (const mode of ["legacy", "native"] as const) test(`${mode} three unrelated histories cannot consume a question refresh's retry budget`, async () => {
+    const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("target"), ...Array.from({ length: 3 }, (_, index) => fixtureSession(`unrelated-${index}`))];
+    const pending = [{ requestId: "target-pending", conversationId: "target",
+      questions: [{ prompt: "Answer me", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }];
+    let inUnrelated = false, targetLists = 0, unrelatedCommits = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    provider.listQuestions = async () => {
+      if (inUnrelated) return pending;
+      targetLists++;
+      // Every attempted target list overlaps three younger, successful root
+      // histories. Before scoping, all three fallback attempts exhaust here.
+      for (let index = 0; index < 3; index++) {
+        inUnrelated = true;
+        try { await adapter.history(`unrelated-${index}`); unrelatedCommits++; }
+        finally { inUnrelated = false; }
+      }
+      return pending;
+    };
+    const state = adapter as unknown as { questionRefreshes: Set<string>; questionReads: Set<unknown>; publishedQuestions: Map<string, Set<string>> };
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ id: "discover-target", type: "session.next.tool.success", data: { sessionID: "target", callID: "discover-target", tool: "question" } } as never);
+      await waitUntil(() => targetLists > 0);
+      await waitUntil(() => !state.questionRefreshes.has("target"));
+      await liveEventsApplied(adapter, provider);
+      expect(unrelatedCommits).toBe(3);
+      expect(targetLists).toBe(1);
+      expect(adapter.projectionForTests("target").get("question:target-pending")).toMatchObject({ status: "pending" });
+      expect(adapter.activity().awaiting).toBe(true);
+      expect([...state.publishedQuestions.get("target")!]).toEqual(["question:target-pending"]);
+      expect(state.questionReads.size).toBe(0);
+      provider.listQuestions = async () => [];
+      provider.eventQueue.push({ id: "answer-target", type: "session.next.tool.success", data: { sessionID: "target", callID: "answer-target", tool: "question" } } as never);
+      await waitUntil(() => !adapter.projectionForTests("target").has("question:target-pending"));
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally { await adapter.stopEventPump(); await pump; await adapter.dispose(); }
+  });
+
+  for (const mode of ["legacy", "native"] as const)
+  for (const relevantSource of ["child", "grandchild"] as const)
+  test(`${mode} a newly discovered ${relevantSource}'s empty history still supersedes an older parent refresh`, async () => {
+    const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }];
+    let pending = [{ requestId: "obsolete-child", conversationId: "child",
+      questions: [{ prompt: "Already answered", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }];
+    let inChild = false, targetLists = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    provider.listQuestions = async () => {
+      if (inChild) return pending;
+      targetLists++;
+      const captured = pending;
+      if (targetLists === 1) {
+        pending = [];
+        inChild = true;
+        try { await adapter.history(relevantSource); }
+        finally { inChild = false; }
+      }
+      return captured;
+    };
+    const state = adapter as unknown as { questionRefreshes: Set<string>; questionReads: Set<unknown>; questionCreatedAt: Map<string, number>; publishedQuestions: Map<string, Set<string>> };
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ id: "stale-parent", type: "session.next.tool.success", data: { sessionID: "parent", callID: "stale-parent", tool: "question" } } as never);
+      await waitUntil(() => targetLists > 0);
+      await waitUntil(() => !state.questionRefreshes.has("parent"));
+      await liveEventsApplied(adapter, provider);
+      expect(targetLists).toBe(2);
+      expect(adapter.projectionForTests("parent").has("question:obsolete-child")).toBe(false);
+      expect(adapter.projectionForTests("child").has("question:obsolete-child")).toBe(false);
+      expect(adapter.activity().awaiting).toBe(false);
+      expect(state.questionCreatedAt.has("question:obsolete-child")).toBe(false);
+      expect(state.publishedQuestions.size).toBe(0);
+      expect(state.questionReads.size).toBe(0);
+    } finally { await adapter.stopEventPump(); await pump; await adapter.dispose(); }
+  });
+
   for (const mode of ["legacy", "native"] as const) test(`${mode} older tool refresh cannot overwrite a younger committed history source`, async () => {
     const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
     provider.sessions = [fixtureSession("parent")];

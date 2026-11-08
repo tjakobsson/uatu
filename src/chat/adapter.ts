@@ -512,7 +512,7 @@ export type ChatAdapterOptions = {
   onNotification?: (event: AgentNotificationEvent) => void;
 };
 
-type QuestionSetRead = { sets: Map<string, Set<string>>; ages: Map<string, number>; age: number; conflicted: boolean; revision: number };
+type QuestionSetRead = { conversationId: string; scope: Set<string>; sets: Map<string, Set<string>>; ages: Map<string, number>; age: number; conflicted: boolean; revision: number };
 
 export class ChatAdapter {
   private readonly notifications: AgentNotificationTracker;
@@ -981,7 +981,7 @@ export class ChatAdapter {
   private async readHistory(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage?: HistoryCoverage): Promise<ConversationSnapshot> {
     const questionTick = coverage?.questionTick ?? this.interactionClock;
     for (let attempt = 0; ; attempt++) {
-      const questions: QuestionSetRead = { sets: new Map(), ages: new Map(), age: 0, conflicted: false, revision: 0 };
+      const questions: QuestionSetRead = { conversationId: id, scope: new Set(), sets: new Map(), ages: new Map(), age: 0, conflicted: false, revision: 0 };
       const release = () => { this.questionReads.delete(questions); };
       coverage?.signal.addEventListener("abort", release, { once: true });
       try { return await this.readHistoryWithQuestions(id, options, coverage, questions, questionTick); }
@@ -1560,6 +1560,8 @@ export class ChatAdapter {
     let reconcileQuestionFreshness: (() => void) | undefined;
     let questionTrackingCurrent: (() => boolean) | undefined;
     if (this.provider.listQuestions) try {
+      questionRead.scope = await this.questionReadScope(id, session.parentId);
+      coverage?.assertCurrent();
       questionRead.age = ++this.questionReadClock;
       if (!this.disposed) this.questionReads.add(questionRead);
       const pendingNow = await this.pendingQuestions(id, false);
@@ -5510,8 +5512,9 @@ export class ChatAdapter {
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.
+        let eventSession: ProviderSession;
         try {
-          await this.requireSession(normalized.conversationId);
+          eventSession = await this.requireSession(normalized.conversationId);
         } catch (error) {
           if (error instanceof ConversationNotFoundError) continue;
           throw error;
@@ -5584,7 +5587,7 @@ export class ChatAdapter {
         // publish the difference; without this a question is invisible until
         // the next snapshot, which meant reloading the browser to see it.
         if (normalized.updates.some(isQuestionToolUpdate)) {
-          this.refreshQuestions(normalized.conversationId, coalescer);
+          this.refreshQuestions(normalized.conversationId, coalescer, eventSession.parentId);
         }
         // A subagent's request is otherwise only visible inside the child's
         // transcript — excluded from the picker, reachable solely through the
@@ -6218,13 +6221,26 @@ export class ChatAdapter {
     } catch { /* unknown, not empty — requirePending still decides */ }
   }
 
+  private async questionReadScope(id: string, parentId: string | undefined): Promise<Set<string>> {
+    const scope = new Set([id]);
+    let parent: string | null | undefined = parentId;
+    while (parent && !scope.has(parent)) {
+      scope.add(parent);
+      parent = await this.parentOf(parent);
+    }
+    return scope;
+  }
+
   /** Retain pending removal authority; lend empty-set authority only to reads
    * already in flight. Each read observes the latest set, not a mutation log. */
-  private publishQuestionSet(owner: string, pending: Set<string>, age: number, source?: QuestionSetRead): void {
+  private publishQuestionSet(owner: string, pending: Set<string>, age: number, source: QuestionSetRead): void {
     if (pending.size) this.publishedQuestions.set(owner, pending);
     else this.publishedQuestions.delete(owner);
     for (const read of this.questionReads) {
-      if (read === source) continue;
+      // A source proves its ancestor path before listing. This includes
+      // newly discovered children's empty sets without borrowing authority
+      // from unrelated roots (or requiring a retained tree/revision registry).
+      if (read === source || (owner !== read.conversationId && !source.scope.has(read.conversationId))) continue;
       if (age < read.age) {
         // Older publication is not a newer observation. It can introduce rows
         // after this read's sweep, so revoke its admission and retry instead.
@@ -6245,13 +6261,14 @@ export class ChatAdapter {
    * CLI). Fire-and-forget with one refresh in flight per conversation — a turn
    * emits many `question` tool updates and each must not become a round trip.
    */
-  private refreshQuestions(conversationId: string, coalescer: ProviderUpdateCoalescer): void {
+  private refreshQuestions(conversationId: string, coalescer: ProviderUpdateCoalescer, parentId?: string): void {
     if (!this.provider.listQuestions || this.questionRefreshes.has(conversationId)) return;
     this.questionRefreshes.add(conversationId);
     void (async () => {
       try {
+        const scope = await this.questionReadScope(conversationId, parentId);
         for (let attempt = 0; attempt < 3; attempt++) {
-          const source: QuestionSetRead = { sets: new Map(), ages: new Map(), age: ++this.questionReadClock, conflicted: false, revision: 0 };
+          const source: QuestionSetRead = { conversationId, scope, sets: new Map(), ages: new Map(), age: ++this.questionReadClock, conflicted: false, revision: 0 };
           if (!this.disposed) this.questionReads.add(source);
           try {
             const items = await this.pendingQuestions(conversationId, false);

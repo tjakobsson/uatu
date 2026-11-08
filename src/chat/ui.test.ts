@@ -50,9 +50,13 @@ describe("chat reversible-history composer", () => {
     const { TimelineAnchorController } = await import("./anchor");
     const id = surface === "main" ? "one" : "child", itemsId = surface === "main" ? "chat-items" : "chat-drilldown-items";
     const olderId = surface === "main" ? "chat-load-older" : "chat-drilldown-older";
-    const directory = process.cwd(), freshText = "Fresh native oldest loaded answer";
+    const directory = process.cwd();
     const records = Array.from({ length: 150 }, (_, n) => ({ id: `msg${n}`, type: "assistant", time: { created: n + 1 },
       content: [{ type: "text", text: `Native answer ${n}` }] }));
+    // V2 content.updated is cumulative, not an authoritative text replacement.
+    // Extend the loaded text so the production reconciler confirms this exact
+    // value instead of combining two unrelated versions of the same part.
+    const freshText = `${records[50]!.content[0]!.text} — Fresh native oldest loaded answer`;
     // V2 stored and live text share message + ordinal identities, not the
     // independently named part IDs used by the V1 fixtures. Capture them
     // before the removal case empties a stored message's content.
@@ -127,6 +131,7 @@ describe("chat reversible-history composer", () => {
       document.querySelector<HTMLButtonElement>(`#${olderId}`)!.click();
       await waitUntil(() => document.querySelector(`#${itemsId} [data-chat-item-id="${answerIds[50]}"]`) !== null);
       expect(document.querySelectorAll(`#${itemsId} [data-chat-item-id^="part:"]`)).toHaveLength(100);
+      expect(adapter.projectionForTests(id).get(answerIds[50]!)).toEqual(expect.objectContaining({ markdown: "Native answer 50" }));
       const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
       type(input, "Native frontier draft");
       const reading = { itemId: answerIds[50]!, offset: -12 };
