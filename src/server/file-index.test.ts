@@ -511,3 +511,19 @@ test("a requested ignored file already queued takes a free slot at once", async 
   first.resolve("binary");
   await index.idle();
 });
+
+test("inside a listed ignored folder, a file replacing a folder of the same path follows its removal", async () => {
+  const { index, batches } = ignoredFixture({ classifyDirectory: async () => true });
+  index.markReady();
+  index.markListed("/docs/build");
+  index.admitFolder("/docs/build/out.md");
+  await index.idle();
+  batches.length = 0;
+  index.observe("unlinkDir", "/docs/build/out.md");
+  index.observe("add", "/docs/build/out.md", stat());
+  await index.idle();
+  const removal = batches.findIndex(batch => (batch.folderRemovals ?? []).some(entry => entry.id === "/docs/build/out.md"));
+  const upsert = batches.findIndex(batch => batch.upserts.some(doc => doc.id === "/docs/build/out.md"));
+  expect(removal).toBeGreaterThanOrEqual(0);
+  expect(upsert).toBeGreaterThan(removal);
+});

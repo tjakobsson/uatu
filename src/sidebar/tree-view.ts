@@ -493,6 +493,28 @@ export class TreeView {
           }
         }
       }
+      // Folder rows leave before any file row is added: a file can replace a
+      // folder of the same path.
+      const folderRemovals = [...(patch.folderRemovals ?? [])]
+        .sort((a, b) => (this.folderPathById.get(folderKey(b))?.length ?? 0) - (this.folderPathById.get(folderKey(a))?.length ?? 0));
+      for (const ref of folderRemovals) {
+        const path = this.folderPathById.get(folderKey(ref));
+        if (!path) continue;
+        this.folderPathById.delete(folderKey(ref));
+        this.foldersByPath.delete(path);
+        this.listing.delete(path);
+        removedStatusPaths.push(path);
+        // Recursive: implicit subfolders left empty by this batch's file
+        // removals would block a plain removal.
+        if (this.renderedFolders.delete(path)) this.staleFolderRows.add(path);
+      }
+      for (const path of [...this.staleFolderRows].sort((a, b) => a.length - b.length)) {
+        if (this.renderedFolders.has(path)) { this.staleFolderRows.delete(path); continue; }
+        if ([...this.renderedPaths, ...this.renderedFolders].some(other => other.startsWith(path))) continue;
+        this.staleFolderRows.delete(path);
+        if (operations.some(operation => operation.type === "remove" && operation.recursive && path.startsWith(operation.path))) continue;
+        operations.push({ type: "remove", path, recursive: true });
+      }
       for (const doc of patch.upserts) {
         const prefix = this.rootPrefixById.get(doc.rootId);
         if (prefix === undefined) continue;
@@ -522,19 +544,6 @@ export class TreeView {
         this.renderedLeafCount++;
         if (nextDoc.kind === "binary") this.renderedBinaryLeafCount++;
       }
-      const folderRemovals = [...(patch.folderRemovals ?? [])]
-        .sort((a, b) => (this.folderPathById.get(folderKey(b))?.length ?? 0) - (this.folderPathById.get(folderKey(a))?.length ?? 0));
-      for (const ref of folderRemovals) {
-        const path = this.folderPathById.get(folderKey(ref));
-        if (!path) continue;
-        this.folderPathById.delete(folderKey(ref));
-        this.foldersByPath.delete(path);
-        this.listing.delete(path);
-        removedStatusPaths.push(path);
-        // Recursive: implicit subfolders left empty by this batch's file
-        // removals would block a plain removal.
-        if (this.renderedFolders.delete(path)) this.staleFolderRows.add(path);
-      }
       for (const folder of patch.folderUpserts ?? []) {
         const prefix = this.rootPrefixById.get(folder.rootId);
         if (prefix === undefined) continue;
@@ -547,13 +556,6 @@ export class TreeView {
           if (!tree.getItem(path)) operations.push({ type: "add", path });
         }
         if (this.folderRowsVisible) updatedStatuses.push({ path, status: "ignored" });
-      }
-      for (const path of [...this.staleFolderRows].sort((a, b) => a.length - b.length)) {
-        if (this.renderedFolders.has(path)) { this.staleFolderRows.delete(path); continue; }
-        if ([...this.renderedPaths, ...this.renderedFolders].some(other => other.startsWith(path))) continue;
-        this.staleFolderRows.delete(path);
-        if (operations.some(operation => operation.type === "remove" && operation.recursive && path.startsWith(operation.path))) continue;
-        operations.push({ type: "remove", path, recursive: true });
       }
       if (operations.length) tree.batch(operations);
       if (removedStatusPaths.length || updatedStatuses.length) tree.applyGitStatusPatch({ remove: removedStatusPaths, set: updatedStatuses });

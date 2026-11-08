@@ -410,9 +410,13 @@ export class FileIndex {
       if (preferred && preferredId) yield [preferredId, preferred] as const;
       yield* lanePending;
     };
+    let blocked = false;
     for (const [id, value] of laneEntries()) {
       if (full()) break;
       if (!this.lanePending.has(id)) continue;
+      // A file replacing a folder of the same path follows that folder's
+      // removal, published below; it goes in the next patch.
+      if (value.doc && this.folderPending.has(id) && this.folderPending.get(id) === null) { blocked = true; continue; }
       this.lanePending.delete(id);
       if (value.doc) { this.documents.set(id, value.doc); upserts.push(value.doc); }
       else if (this.documents.delete(id)) { this.newest.remove(id); removals.push({ rootId: this.entry.absolutePath, id }); }
@@ -429,7 +433,7 @@ export class FileIndex {
     if (!this.unpublished && this.initialComplete) this.initialPublished = true;
     this.options.onWork?.("batch");
     this.options.publish({ upserts, removals, folderUpserts, folderRemovals, changedId: null, changedOrder: 0, followCandidates: [], discovery: this.discovery, lane: true });
-    if (this.lanePending.size || this.folderPending.size) this.laneDrainTimer = setTimeout(() => this.flushLane(), 0);
+    if (this.lanePending.size || this.folderPending.size || blocked) this.laneDrainTimer = setTimeout(() => this.flushLane(), 0);
     else this.resolvePublication();
   }
 

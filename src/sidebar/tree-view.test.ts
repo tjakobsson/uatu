@@ -243,6 +243,18 @@ describe("TreeView selection lifecycle with the real library", () => {
     expect(view.hasVisibleFolderRows()).toBe(true);
   });
 
+  it("one patch removing a folder row and adding a file of the same path applies cleanly", () => {
+    view.update([{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0, docs: [],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: true, revision: 0 },
+        { id: "/r1/build/out.md", rootId: "r1", relativePath: "build/out.md/", listed: false, revision: 0 }] }], null);
+    const patch: DocumentPatch = { kind: "patch", epoch: "e", previousRevision: 0, revision: 1, generatedAt: 1,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "1", removals: [], changedId: null,
+      folderRemovals: [{ rootId: "r1", id: "/r1/build/out.md" }],
+      upserts: [{ id: "/r1/build/out.md", name: "out.md", relativePath: "build/out.md", rootId: "r1", mtimeMs: 0, kind: "markdown", gitIgnoreStatus: "ignored", revision: 1 }] };
+    expect(view.applyPatch(patch, null)).toBe(true);
+    expect(tree().getItem("build/out.md")?.isDirectory()).toBe(false);
+  });
+
   it("folder removals are qualified by root when overlapping roots share a folder id", () => {
     const shared = { id: "/repo/sub/build", listed: false, revision: 0 };
     const overlapping: RootGroup[] = [
