@@ -231,6 +231,18 @@ describe("TreeView selection lifecycle with the real library", () => {
     expect(tree().getItem("output")?.isDirectory()).toBe(false);
   });
 
+  it("switching to Audio and back keeps a listed folder that holds audio without re-adding it", () => {
+    const inventory: RootGroup[] = [{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0,
+      docs: [{ id: "/r1/build/a.wav", name: "a.wav", relativePath: "build/a.wav", rootId: "r1", mtimeMs: 0, kind: "binary", gitIgnoreStatus: "ignored", revision: 1 }],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: true, revision: 0 }] }];
+    view.update(inventory, null);
+    view.update(inventory, null, { mediaType: "audio" });
+    expect(tree().getItem("build/a.wav")).not.toBeNull();
+    view.update(inventory, null, { mediaType: "all" });
+    expect(tree().getItem("build/")).not.toBeNull();
+    expect(view.hasVisibleFolderRows()).toBe(true);
+  });
+
   it("folder removals are qualified by root when overlapping roots share a folder id", () => {
     const shared = { id: "/repo/sub/build", listed: false, revision: 0 };
     const overlapping: RootGroup[] = [

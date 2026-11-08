@@ -418,7 +418,10 @@ export class TreeView {
           tree.batch([
             ...[...this.renderedPaths].filter(path => !next.has(path)).map(path => ({ type: "remove" as const, path })),
             ...folderRemovalOperations([...this.renderedFolders].filter(path => !next.has(path)), libraryPaths),
-            ...libraryPaths.filter(path => !this.renderedPaths.has(path) && !this.renderedFolders.has(path)).map(path => ({ type: "add" as const, path })),
+            // A folder row kept because it still held visible rows is already
+            // in the library; adding it again would fail.
+            ...libraryPaths.filter(path => !this.renderedPaths.has(path) && !this.renderedFolders.has(path)
+              && !(path.endsWith("/") && tree.getItem(path))).map(path => ({ type: "add" as const, path })),
           ]);
         } else tree.resetPaths(libraryPaths, { initialExpandedPaths: mergedReveal });
         this.renderedPaths = new Set(renderedPaths);
@@ -541,7 +544,7 @@ export class TreeView {
         if (folder.listed && this.listing.get(path) === "pending") this.listing.delete(path);
         if (this.folderRowsVisible && !this.renderedFolders.has(path)) {
           this.renderedFolders.add(path);
-          operations.push({ type: "add", path });
+          if (!tree.getItem(path)) operations.push({ type: "add", path });
         }
         if (this.folderRowsVisible) updatedStatuses.push({ path, status: "ignored" });
       }
