@@ -348,3 +348,26 @@ test("a folder recreated before its removal is published stays an entry", async 
   expect(index.folders.has("/docs/build")).toBe(true);
   expect(batches.flatMap(batch => batch.folderRemovals ?? []).filter(removal => removal.id === "/docs/build")).toEqual([]);
 });
+
+test("ignored files waiting on content classification never take every slot from an ordinary edit", async () => {
+  const blocked = Promise.withResolvers<"binary">();
+  let started = 0;
+  const { index, batches } = ignoredFixture({ classify: async id => {
+    if (id.endsWith(".sniff")) { started++; return blocked.promise; }
+    return "text";
+  } });
+  index.markReady();
+  index.markListed("/docs/build");
+  // An unfamiliar extension forces a content sniff.
+  for (let i = 0; i < 20; i++) index.observe("add", `/docs/build/obj${i}.sniff`, stat());
+  await Bun.sleep(20);
+  // Half the default eight slots at most.
+  expect(started).toBe(4);
+  index.observe("change", "/docs/notes.unknown", stat(5));
+  const deadline = Date.now() + 2000;
+  while (!batches.some(batch => batch.upserts.some(doc => doc.relativePath === "notes.unknown")) && Date.now() < deadline) await Bun.sleep(20);
+  expect(batches.some(batch => batch.upserts.some(doc => doc.relativePath === "notes.unknown"))).toBe(true);
+  blocked.resolve("binary");
+  await index.idle();
+  expect(documentIds(index, "/docs/build/")).toHaveLength(20);
+});

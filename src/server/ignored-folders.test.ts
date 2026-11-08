@@ -312,3 +312,39 @@ test("a file opened inside an unlisted ignored folder is removed when it is dele
     await wait(() => !session.findDocument(opened), "deleted opened file leaves the index");
   } finally { await session.stop(); }
 }, 15_000);
+
+test("polling: deleting a file in a listed ignored folder removes it", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/a.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { usePolling: true });
+  const file = path.join(cwd, "build/a.md");
+  try {
+    await session.start();
+    await session.listFolder(cwd, "build");
+    expect(session.findDocument(file)).toBeDefined();
+    await writeFile(file, "# edited");
+    await Bun.sleep(1500);
+    await rm(file);
+    await wait(() => !session.findDocument(file), "polled removal");
+  } finally { await session.stop(); }
+}, 20_000);
+
+test("polling: an ancestor .gitignore change outside the root reconciles ignored folders", async () => {
+  const repo = await fixture();
+  const work = path.join(repo, "work");
+  await writeFile(path.join(repo, ".gitignore"), "work/build/\n");
+  await files(repo, ["work/README.md", "work/build/a.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: work }], false, { usePolling: true });
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  try {
+    await session.start();
+    // A subscriber creates demand; polling runs only while someone watches.
+    reader = session.eventsResponse().body!.getReader();
+    expect(folders(rootOf(session))).toEqual(["build/"]);
+    await writeFile(path.join(repo, ".gitignore"), "");
+    const end = Date.now() + 15_000;
+    while (!paths(rootOf(session)).includes("build/a.md")) { if (Date.now() > end) throw new Error("not reconciled"); await Bun.sleep(100); }
+    expect(rootOf(session).folders).toBeUndefined();
+  } finally { await reader?.cancel(); await session.stop(); }
+}, 25_000);

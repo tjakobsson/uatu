@@ -170,7 +170,9 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     onObserverEvent: () => metrics?.inc("git_observer.events_total"),
     // Git's exclude sources decide which folders are ignored as a whole.
     onIgnorePolicyChange: () => { queueAllClassifications(); recoverIgnoredFolders(); },
-    onPoll: () => queueAllClassifications(),
+    // Polling has no Git observer: an ignore change outside the root (an
+    // ancestor .gitignore, info/exclude) is found here instead.
+    onPoll: () => { queueAllClassifications(); recoverIgnoredFolders(); },
     onFallback: () => metrics?.inc("git_observer.fallback_total"),
     publish: (results, freshness) => {
       if (stopped) return;

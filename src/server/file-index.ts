@@ -58,6 +58,10 @@ export class FileIndex {
   readonly newest = new NewestDocument();
   private directories = new Map<string, Set<string>>();
   private jobs = new Map<string, Job>();
+  // Jobs for paths inside ignored folders wait here, and may hold at most
+  // half the slots, so a build or install never starves an ordinary edit.
+  private laneJobs = new Map<string, Job>();
+  private activeLane = 0;
   private requested = new Set<string>();
   private current = new Map<string, number>();
   private pending = new Map<string, { doc: RevisionedDocument | null; live: boolean; order: number }>();
@@ -137,7 +141,11 @@ export class FileIndex {
   // A directory inside the ignored tree that nobody has listed: the watcher
   // knows it but does not read it.
   isUnlistedDirectory(id: string): boolean {
-    const relative = rootRelative(this.entry, path.resolve(id));
+    id = path.resolve(id);
+    const relative = rootRelative(this.entry, id);
+    // Chokidar asks without stats; a path known as a file is not a folder,
+    // so its removal must not be suppressed.
+    if (this.documents.has(id) || this.pending.get(id)?.doc || this.lanePending.get(id)?.doc) return false;
     return !!relative && this.ignoredFolders.isUnlistedDirectory(relative);
   }
 
@@ -238,7 +246,7 @@ export class FileIndex {
       this.run(job);
       return;
     }
-    this.jobs.set(id, job);
+    this.queueJob(job);
     if (priority) this.requested.add(id);
     this.pump();
   }
@@ -255,7 +263,7 @@ export class FileIndex {
   }
 
   async idle(): Promise<void> {
-    if (this.active || this.jobs.size || this.retryTimers.size) await new Promise<void>(resolve => this.waiters.push(resolve));
+    if (this.active || this.queuedJobs || this.retryTimers.size) await new Promise<void>(resolve => this.waiters.push(resolve));
     this.flush();
     this.flushLane();
     if (this.unpublished) await new Promise<void>(resolve => this.publicationWaiters.push(resolve));
@@ -269,9 +277,9 @@ export class FileIndex {
   }
 
   async request(id: string, stats: Stats): Promise<void> {
-    const queued = this.jobs.get(id);
+    const queued = this.jobs.get(id) ?? this.laneJobs.get(id);
     if (queued && classifyFileName(path.basename(id)) !== null) {
-      this.jobs.delete(id); this.requested.delete(id);
+      this.jobs.delete(id); this.laneJobs.delete(id); this.requested.delete(id);
       this.run({ ...queued, stats: queued.stats ?? stats });
     } else if (queued) this.requested.add(id);
     else if (!this.current.has(id) && !this.pending.get(id)?.doc) this.observe("add", id, stats, true);
@@ -399,6 +407,7 @@ export class FileIndex {
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
     this.jobs.clear();
+    this.laneJobs.clear();
     this.requested.clear();
     this.pending.clear();
     this.current.clear();
@@ -431,6 +440,7 @@ export class FileIndex {
     this.current.delete(id);
     this.cancelRetry(id);
     this.jobs.delete(id);
+    this.laneJobs.delete(id);
     this.requested.delete(id);
     this.track(id, false);
     const relative = rootRelative(this.entry, id);
@@ -446,22 +456,41 @@ export class FileIndex {
     this.settle();
   }
 
+  private get queuedJobs(): number { return this.jobs.size + this.laneJobs.size; }
+
+  private queueJob(job: Job): void {
+    const relative = rootRelative(this.entry, job.id);
+    (relative && this.ignoredFolders.isInside(relative) ? this.laneJobs : this.jobs).set(job.id, job);
+  }
+
   private pump(): void {
-    while (!this.stopped && this.active < (this.options.concurrency ?? 8) && this.jobs.size) {
-      const requested = this.requested.values().next().value;
-      const id = requested ?? this.jobs.keys().next().value!;
-      const job = this.jobs.get(id);
+    const limit = this.options.concurrency ?? 8;
+    const laneLimit = Math.max(1, Math.floor(limit / 2));
+    while (!this.stopped && this.active < limit && this.queuedJobs) {
+      // A file a client waits for comes first, then ordinary paths; ignored
+      // paths only take their share of the slots.
+      let id: string | undefined = this.requested.values().next().value;
+      if (id === undefined) {
+        if (this.jobs.size) id = this.jobs.keys().next().value!;
+        else if (this.activeLane < laneLimit) id = this.laneJobs.keys().next().value!;
+        else break;
+      }
+      const lane = !this.jobs.has(id) && this.laneJobs.has(id);
+      const job = this.jobs.get(id) ?? this.laneJobs.get(id);
       this.requested.delete(id);
       this.jobs.delete(id);
+      this.laneJobs.delete(id);
       if (!job || this.current.get(id) !== job.order) continue;
-      this.run(job);
+      this.run(job, lane);
     }
   }
 
-  private run(job: Job): void {
+  private run(job: Job, lane = false): void {
     this.active++;
+    if (lane) this.activeLane++;
     void this.process(job).finally(() => {
       this.active--;
+      if (lane) this.activeLane--;
       if (this.current.get(job.id) === job.order && !this.retryTimers.has(job.id)) this.current.delete(job.id);
       this.pump();
       this.settle();
@@ -505,7 +534,7 @@ export class FileIndex {
         const timer = setTimeout(() => {
           this.retryTimers.delete(job.id);
           if (!this.stopped && this.current.get(job.id) === job.order) {
-            this.jobs.set(job.id, retry);
+            this.queueJob(retry);
             this.pump();
           }
           this.settle();
@@ -525,7 +554,7 @@ export class FileIndex {
       this.pathWaiters.delete(id);
       for (const resolve of waiting) resolve();
     }
-    if (this.active || this.jobs.size || this.retryTimers.size) return;
+    if (this.active || this.queuedJobs || this.retryTimers.size) return;
     if (this.ready && !this.initialComplete) {
       this.initialComplete = true;
       if (!this.stopped) this.schedule();
