@@ -434,6 +434,37 @@ describe("immutable visual snapshots", () => {
 });
 
 describe("watched-root bounded reader", () => {
+  test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("unrelated single-file roots do not mask a later directory root ($name)", async ({ aliased }) => {
+    const workspace = path.join(directory, "workspace");
+    const images = path.join(workspace, "images");
+    await fs.mkdir(images, { recursive: true });
+    await fs.writeFile(path.join(workspace, "a.md"), "Watched document");
+    await fs.writeFile(path.join(images, "diagram.svg"), svg);
+    await fs.writeFile(path.join(images, "blocked.svg"), svg);
+    await fs.writeFile(path.join(images, ".env"), svg);
+    await fs.writeFile(path.join(images, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["blocked.svg"] } }));
+    await fs.writeFile(path.join(directory, "outside.svg"), svg);
+    await fs.symlink(path.join(directory, "outside.svg"), path.join(images, "escape.svg"));
+    const watched = aliased ? path.join(directory, "alias") : workspace;
+    if (aliased) await fs.symlink(workspace, watched);
+    const entries = await resolveWatchRoots([path.join(watched, "a.md"), path.join(watched, "images")], directory);
+    const canonical = await selectCanonicalChatRoot(entries);
+    expect(canonical).toBe(await fs.realpath(workspace));
+    expect(entries[0]!.kind).toBe("file");
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(canonical, "images", "diagram.svg") });
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("images/diagram.svg", canonical))).toBe(svg);
+    expect(new TextDecoder().decode(await createWatchedVisualReader([...entries].reverse())("images/diagram.svg", canonical))).toBe(svg);
+    for (const source of ["images/blocked.svg", "images/.env", "images/escape.svg", path.join(directory, "outside.svg")]) {
+      await expect(reader(source, canonical)).rejects.toMatchObject({ missing: false });
+    }
+    await expect(reader("images/missing.svg", canonical)).rejects.toMatchObject({ missing: true });
+    await expect(createWatchedVisualReader([entries[0]!])("images/diagram.svg", canonical)).rejects.toMatchObject({ missing: false });
+    expect(new TextDecoder().decode(await createWatchedVisualReader([entries[0]!])("a.md", canonical))).toBe("Watched document");
+    const store = new VisualStore(canonical, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    expect(await store.capture("a:c", "mixed-roots", file("images/diagram.svg"), true)).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+  });
   test.each(["root", "parent"])("canonical workspace reads through a symlinked watch %s without bypassing policy", async kind => {
     const parent = path.join(directory, "real");
     const root = path.join(parent, "workspace");
