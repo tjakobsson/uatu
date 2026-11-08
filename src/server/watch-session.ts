@@ -189,6 +189,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     classificationScheduler.schedule();
   }
   function queueAllClassifications() {
+    metrics?.inc("classification.full_total");
     for (const root of roots.values()) queueClassifications(root, root.index.documents.keys());
   }
   function finishClassifications(root: ObservedRoot) {
@@ -359,7 +360,9 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     watcher.on("all", (event, file, stats) => {
       if (stopped || !owned.has(root)) return;
       metrics?.inc(`watcher.events_total.${event}`);
-      if (isPolicyFile(entry, path.resolve(file)) && (root.ready || event === "change" || event === "unlink")) {
+      // Git never reads a .gitignore inside an ignored folder (an installed
+      // package's, say), so it is an ordinary file there, not policy.
+      if (isPolicyFile(entry, path.resolve(file)) && !index.isIgnoredPath(file) && (root.ready || event === "change" || event === "unlink")) {
         if (path.basename(file) === ".gitignore") {
           queueAllClassifications();
           // Policy metadata updates its own row, but is not Follow intent.

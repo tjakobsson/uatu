@@ -218,3 +218,24 @@ test("Follow skips ignored output in every batch, follows tracked output, and th
     expect(followed().some(id => id!.includes(`${path.sep}build${path.sep}`))).toBe(false);
   } finally { await reader?.cancel(); await session.stop(); }
 }, 20_000);
+
+test("a .gitignore written inside an ignored folder is an ordinary file, not an ignore-policy change", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "node_modules/\n");
+  await files(cwd, ["README.md", "node_modules/pkg/index.js"]);
+  const metrics = new MetricsRegistry();
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { metrics });
+  try {
+    await session.start();
+    const watcher = session._internalWatcher();
+    const fullPasses = metrics.get("classification.full_total");
+    await mkdir(path.join(cwd, "node_modules/pkg2"), { recursive: true });
+    await writeFile(path.join(cwd, "node_modules/pkg2/.gitignore"), "*\n");
+    await wait(() => !!session.findDocument(path.join(cwd, "node_modules/pkg2/.gitignore")), "package .gitignore indexed");
+    await Bun.sleep(300);
+    // No reclassification pass and no rebuild of the root.
+    expect(metrics.get("classification.full_total")).toBe(fullPasses);
+    expect(session._internalWatcher()).toBe(watcher);
+    expect(session.getDiscoveryState().status).toBe("ready");
+  } finally { await session.stop(); }
+});
