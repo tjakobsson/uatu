@@ -292,11 +292,10 @@ try {
   }
   await git(["init", "--initial-branch=main"]);
   await fs.writeFile(path.join(worktreeRepo, "README.md"), "# worktree-repo\n");
-  // An ignored generated output admitted by the same narrow policy used in
-  // production. All fixture writes stay inside the throwaway workspace.
+  // Ignored generated output: build/ is listed on demand, and a client opening
+  // the render admits it. All fixture writes stay inside the throwaway workspace.
   const mediaBytes = Uint8Array.from({ length: 1024 * 1024 }, (_, index) => index % 251);
   await fs.writeFile(path.join(worktreeRepo, ".gitignore"), "build/\n");
-  await fs.writeFile(path.join(worktreeRepo, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"] } }));
   await fs.mkdir(path.join(worktreeRepo, "build/renders"), { recursive: true });
   await fs.writeFile(path.join(worktreeRepo, "build/renders/smoke.wav"), mediaBytes);
   await git(["add", "."]);
@@ -315,12 +314,12 @@ try {
     let mediaIdentity: { epoch: string; rootId: string; relativePath: string; revision: number } | undefined;
     const deadline = Date.now() + 10_000;
     while (!mediaIdentity && Date.now() < deadline) {
-      const state = await fetch(`${mediaSession}api/state`, { headers: cookie }).then(response => response.json()) as MediaState;
+      const state = await fetch(`${mediaSession}api/state?documentPath=${encodeURIComponent("build/renders/smoke.wav")}`, { headers: cookie }).then(response => response.json()) as MediaState;
       const doc = state.roots?.flatMap(root => root.docs).find(doc => doc.relativePath === "build/renders/smoke.wav");
       if (doc && state.epoch) mediaIdentity = { ...doc, epoch: state.epoch };
       else await sleep(50);
     }
-    if (!mediaIdentity) throw new BootFailure("compiled child did not index the narrow ignored media output");
+    if (!mediaIdentity) throw new BootFailure("compiled child did not admit the opened ignored media output");
     const mediaUrl = new URL("api/media", mediaSession);
     mediaUrl.search = new URLSearchParams({ rootId: mediaIdentity.rootId, path: mediaIdentity.relativePath, epoch: mediaIdentity.epoch, revision: String(mediaIdentity.revision) }).toString();
     if ((await fetch(mediaUrl)).status !== 401) throw new BootFailure("compiled Hub media route did not enforce authentication");
