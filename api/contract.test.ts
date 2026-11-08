@@ -46,7 +46,7 @@ describe("API contract structure", () => {
   test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([35, 14, 3]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([36, 14, 3]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -311,7 +311,8 @@ describe("API contract structure", () => {
     expect(result.changedDomains).toEqual(["hub"]);
     expect(result.breaking.hub).toContain("POST /s/{workspaceId}/api/personal-worker-dismissals: request schema for application/json: oneOf branch count changed");
     expect(result.breaking.workspace).toEqual([]);
-    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 13, workspaceApiRevision: 35 }, metadata, changelog)).not.toThrow();
+    // The dismissal union shipped at the Hub 14 / Workspace 35 pair.
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 13, workspaceApiRevision: 35 }, { ...metadata, workspaceApiRevision: 35 }, changelog)).not.toThrow();
   });
 
   test("metadata revisions agree with OpenAPI and changelog", async () => {

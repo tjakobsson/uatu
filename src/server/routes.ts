@@ -49,7 +49,7 @@ import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
 import { isDocumentVisible } from "../shared/file-visibility";
-import type { WatchSession } from "./watch-session";
+import { FolderListingError, type WatchSession } from "./watch-session";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
 // terminal WebSockets must never be reaped by an idle timer.
@@ -372,6 +372,26 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
         await getSession().recover();
         return Response.json({ ok: true });
+      },
+    },
+    // Lists one level of a Git-ignored folder into the shared index. Answers
+    // with the document revision that carries the listing, which every client
+    // receives as an ordinary patch.
+    [p("/api/index/folder")]: {
+      POST: async (request: Request) => {
+        if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
+        if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
+        const body = await request.json().catch(() => null) as { rootId?: unknown; path?: unknown } | null;
+        if (!body || typeof body.rootId !== "string" || typeof body.path !== "string") {
+          return Response.json({ error: "rootId and path are required" }, { status: 400 });
+        }
+        try {
+          const listed = await getSession().listFolder(body.rootId, body.path);
+          return Response.json(listed, { status: listed.status === "missing" ? 404 : 200, headers: { "cache-control": "no-store" } });
+        } catch (error) {
+          if (error instanceof FolderListingError) return Response.json({ error: error.message }, { status: error.status });
+          throw error;
+        }
       },
     },
     [p("/api/repositories/refresh")]: {

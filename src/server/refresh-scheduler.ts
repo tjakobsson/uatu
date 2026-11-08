@@ -9,7 +9,8 @@ const realClock: RefreshSchedulerClock = {
   now: () => performance.now(), setTimer: (fn, delay) => setTimeout(fn, delay), clearTimer: clearTimeout,
 };
 
-export function createRefreshScheduler(fire: (changedId: string | null) => void, clock: RefreshSchedulerClock = realClock) {
+export function createRefreshScheduler(fire: (changedId: string | null) => void, clock: RefreshSchedulerClock = realClock,
+  timing: { debounceMs: number; maxWaitMs: number } = { debounceMs: REFRESH_DEBOUNCE_MS, maxWaitMs: REFRESH_MAX_WAIT_MS }) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let started: number | null = null;
   let changed: string | null = null;
@@ -23,7 +24,7 @@ export function createRefreshScheduler(fire: (changedId: string | null) => void,
         timer = null; started = null;
         const next = changed; changed = null;
         fire(next);
-      }, Math.max(0, Math.min(REFRESH_DEBOUNCE_MS, started + REFRESH_MAX_WAIT_MS - now)));
+      }, Math.max(0, Math.min(timing.debounceMs, started + timing.maxWaitMs - now)));
     },
     cancel() {
       if (timer) clock.clearTimer(timer);

@@ -1,6 +1,6 @@
 // Session coordination. File events own the index; Git runs independently.
 import type chokidar from "chokidar";
-import { lstat, realpath, stat } from "node:fs/promises";
+import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import path from "node:path";
 import { loadIgnoreMatcher } from "../ignore/engine";
@@ -16,7 +16,7 @@ import { FileIndex, type FileIndexBatch, type FileIndexOptions } from "./file-in
 import { isPolicyFile, rootRelative } from "./watch-policy";
 import { createRepositoryRefresh, type RepositoryResults } from "./repository-refresh";
 import { observeFiles, type FileObserver } from "./file-observer";
-import { classifyGitIgnored } from "./git-ignore";
+import { classifyGitIgnored, collectIgnoredInventory } from "./git-ignore";
 import { isDocumentVisible } from "../shared/file-visibility";
 import { createRefreshScheduler } from "./refresh-scheduler";
 import { NewestDocument } from "./newest-document";
@@ -65,6 +65,11 @@ async function policyRevision(entry: WatchEntry): Promise<string> {
   }))).join("|");
 }
 
+export class FolderListingError extends Error {
+  constructor(readonly status: 400 | 404, message: string) { super(message); }
+}
+const DIRECTORY = { isDirectory: () => true, isSymbolicLink: () => false };
+
 export type WatchSession = ReturnType<typeof createWatchSession>;
 export function createWatchSession(entries: WatchEntry[], initialFollow: boolean, options: WatchSessionOptions = {}) {
   const epoch = crypto.randomUUID();
@@ -108,6 +113,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const id = path.resolve(entry.kind === "dir" ? entry.absolutePath : entry.parentDir, relativePath);
     const doc = root.index.documents.get(id);
     if (!doc || doc.relativePath !== relativePath || !policies.get(rootId)?.accepts(id)) return undefined;
+    root.index.pin(id);
     return { doc, entry, fingerprint: recovery.has(rootId) ? null : root.index.fingerprint(id, doc.revision) };
   } });
   const find = (id: string) => {
@@ -125,7 +131,10 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const root = roots.get(entry.absolutePath);
     const snapshot = root?.index.snapshot() ?? { ...rootHeader(entry), docs: [] };
     const policy = policies.get(entry.absolutePath);
-    if (root && policy && root.index.policy !== policy) snapshot.docs = snapshot.docs.filter(doc => policy.accepts(doc.id));
+    if (root && policy && root.index.policy !== policy) {
+      snapshot.docs = snapshot.docs.filter(doc => policy.accepts(doc.id));
+      if (snapshot.folders) snapshot.folders = snapshot.folders.filter(folder => policy.accepts(folder.id, DIRECTORY));
+    }
     return snapshot;
   });
   const discovery = (): DiscoveryState => {
@@ -154,7 +163,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   const repositories = createRepositoryRefresh({ entries, roots: unscopedRoots, collect: options.collectRepositories,
     usePolling: options.usePolling,
     onObserverEvent: () => metrics?.inc("git_observer.events_total"),
-    onIgnorePolicyChange: () => queueAllClassifications(),
+    // Git's exclude sources decide which folders are ignored as a whole.
+    onIgnorePolicyChange: () => { queueAllClassifications(); recoverIgnoredFolders(); },
     onPoll: () => queueAllClassifications(),
     onFallback: () => metrics?.inc("git_observer.fallback_total"),
     publish: (results, freshness) => {
@@ -284,15 +294,24 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const policy = policies.get(root.index.entry.absolutePath)!;
     const upserts = batch.upserts.filter(doc => policy.accepts(doc.id));
     const removals = [...batch.removals, ...batch.upserts.filter(doc => !policy.accepts(doc.id)).map(doc => ({ rootId: doc.rootId, id: doc.id }))];
+    const folderUpserts = (batch.folderUpserts ?? []).filter(folder => policy.accepts(folder.id, DIRECTORY));
+    const folderRemovals = [...(batch.folderRemovals ?? []), ...(batch.folderUpserts ?? []).filter(folder => !policy.accepts(folder.id, DIRECTORY)).map(folder => ({ rootId: folder.rootId, id: folder.id }))];
+    const folders = { ...(folderUpserts.length ? { folderUpserts } : {}), ...(folderRemovals.length ? { folderRemovals } : {}) };
     for (const doc of upserts) { if (isDocumentVisible(doc, false)) root.visibleNewest.update(doc); else root.visibleNewest.remove(doc.id); }
     for (const removal of removals) root.visibleNewest.remove(removal.id);
     if (batch.upserts.length || batch.removals.length) {
       corpusRevision++;
-      repositories.request();
+      // Git does not report ignored output, so a build needs no Git refresh.
+      if (!batch.lane) repositories.request();
+    }
+    if (batch.lane) {
+      // Already classified (inside an ignored folder) and never followed.
+      publish({ upserts, removals, ...folders, changedId: null });
+      return;
     }
     const changedId = batch.changedOrder > latestFollowOrder && batch.changedId && policy.accepts(batch.changedId) ? batch.changedId : null;
     if (changedId) latestFollowOrder = batch.changedOrder;
-    publish({ upserts, removals, changedId: null });
+    publish({ upserts, removals, ...folders, changedId: null });
     queueClassifications(root, upserts.map(doc => doc.id));
     const candidates = (batch.followCandidates ?? (changedId ? [{ id: changedId, order: batch.changedOrder }] : [])).filter(candidate => policy.accepts(candidate.id));
     const classified = Promise.all(candidates.map(candidate => new Promise<void>(resolve => {
@@ -314,17 +333,21 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const policyBefore = await policyRevision(entry);
     const matcher = await loadIgnoreMatcher({ rootPath: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
       respectGitignore: options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
+    // Folders Git ignores as a whole are listed, not walked.
+    const ignored = entry.kind === "dir" ? await collectIgnoredInventory(entry.absolutePath, cancellation.signal) : null;
     if (stopped) return null;
     let root!: ObservedRoot;
-    const index = new FileIndex(entry, matcher, { revision: nextRevision, classify: options.classify, publish: batch => fileBatch(root, batch),
+    const index = new FileIndex(entry, matcher, { revision: nextRevision, classify: options.classify, publish: batch => fileBatch(root, batch), ignored,
       onWork: kind => metrics?.inc(`index.${kind}_total`),
       onInvalidate: (id, descendants) => media.invalidate(entry.absolutePath, id, descendants),
     });
     policies.set(entry.absolutePath, index.policy);
-    const watcher = options.watch ? options.watch(entry.absolutePath, {
+    const watcher: FileObserver = options.watch ? options.watch(entry.absolutePath, {
       ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
       usePolling: options.usePolling ?? false, interval: 100, ignored: index.policy.ignored,
     }) : observeFiles(entry, { ignored: index.policy.ignored, usePolling: options.usePolling, renew: staged,
+      unlisted: directory => index.isUnlistedDirectory(directory),
+      classifyNew: directory => index.classifyNewDirectory(directory),
       onWork: kind => metrics?.inc(`index.${kind}_total`),
     });
     const ready = Promise.withResolvers<void>();
@@ -339,6 +362,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
           queueAllClassifications();
           // Policy metadata updates its own row, but is not Follow intent.
           index.observe(event, file, stats, true);
+          // Which folders are ignored as a whole may have changed.
+          if (entry.kind === "dir") void recover(entry, true).catch(() => {});
           return;
         }
         void recover(entry, true).catch(() => {});
@@ -407,6 +432,10 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         const next = await observe(entry, true);
         if (!next || stopped) return;
         roots.set(entry.absolutePath, next);
+        // Listed levels survive while their folder is still ignored.
+        for (const level of old?.index.ignoredFolders.listedFolders ?? []) {
+          if (next.index.ignoredFolders.isInside(level)) await listLevel(next, level).catch(() => {});
+        }
         for (const doc of next.index.documents.values()) if (isDocumentVisible(doc, false)) next.visibleNewest.update(doc);
         queueClassifications(next, next.index.documents.keys());
         rootErrors.delete(entry.absolutePath);
@@ -430,6 +459,45 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     recovery.set(entry.absolutePath, promise);
     publish({ upserts: [], removals: [], changedId: null });
     return promise;
+  }
+
+  function recoverIgnoredFolders() {
+    for (const entry of entries) if (entry.kind === "dir") void recover(entry, true).catch(() => {});
+  }
+
+  // Lists one level of an ignored folder into the shared index: subfolders
+  // become folder entries and files are admitted as documents. The watcher
+  // reads the level from now on. Resolves once the level is published.
+  async function listLevel(root: ObservedRoot, relative: string): Promise<"listed" | "missing"> {
+    const entry = root.index.entry;
+    if (entry.kind !== "dir") throw new FolderListingError(404, "not a directory root");
+    const directory = path.join(entry.absolutePath, ...relative.split("/"));
+    if (!root.index.ignoredFolders.isInside(relative)) throw new FolderListingError(404, "not an ignored folder");
+    if (!root.index.policy.accepts(directory, DIRECTORY)) throw new FolderListingError(404, "folder not found");
+    let current = entry.absolutePath;
+    for (const segment of relative.split("/")) {
+      current = path.join(current, segment);
+      const stats = await lstat(current).catch(() => null);
+      if (!stats) { root.index.forgetFolder(directory); await root.index.idle(); return "missing"; }
+      if (stats.isSymbolicLink() || !stats.isDirectory()) throw new FolderListingError(404, "folder not found");
+    }
+    const contained = path.relative(await realpath(entry.absolutePath), await realpath(directory));
+    if (contained === ".." || contained.startsWith(`..${path.sep}`) || path.isAbsolute(contained)) throw new FolderListingError(404, "folder not found");
+    root.index.markListed(directory);
+    const children = await readdir(directory, { withFileTypes: true }).catch(() => null);
+    if (!children) { root.index.forgetFolder(directory); await root.index.idle(); return "missing"; }
+    for (const child of children) {
+      const file = path.join(directory, child.name);
+      if (child.isSymbolicLink() || !root.index.policy.accepts(file, child)) continue;
+      if (child.isDirectory()) root.index.admitFolder(file);
+      else if (child.isFile()) {
+        const stats = await lstat(file).catch(() => null);
+        if (stats?.isFile()) root.index.observe("add", file, stats, true);
+      }
+    }
+    root.watcher.reveal?.(directory);
+    await root.index.idle();
+    return "listed";
   }
 
   function drop(subscriber: Subscriber, outcome: StreamOutcome) {
@@ -466,8 +534,22 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     },
     async recover() { await Promise.all(entries.map(entry => recover(entry))); },
     requestRepositoryRefresh() { queueAllClassifications(); repositories.request(); },
+    async listFolder(rootId: string, relative: string): Promise<{ status: "listed" | "missing"; revision: number }> {
+      const normalized = relative.replace(/\/+$/, "");
+      if (!normalized || normalized.includes("\0") || normalized.split("/").some(segment => !segment || segment === "." || segment === "..")) {
+        throw new FolderListingError(400, "invalid folder path");
+      }
+      const entry = entries.find(candidate => candidate.absolutePath === rootId);
+      if (!entry) throw new FolderListingError(404, "unknown root");
+      await recovery.get(rootId);
+      const root = roots.get(rootId) ?? await prepared.get(rootId)?.promise;
+      if (!root) throw new FolderListingError(404, "unknown root");
+      const status = await listLevel(root, normalized);
+      return { status, revision };
+    },
     async ensureDocument(id: string) {
       const existing = find(id);
+      if (existing) roots.get(existing.rootId)?.index.pin(id);
       if (existing && !recovery.has(existing.rootId)) return existing;
       for (const entry of entries) {
         const relative = rootRelative(entry, id);
@@ -495,6 +577,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         }
         if (!allowed || !leafStats) continue;
         await root.index.request(id, leafStats);
+        root.index.pin(id);
         return find(id);
       }
       return undefined;

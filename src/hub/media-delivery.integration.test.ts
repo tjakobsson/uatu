@@ -71,6 +71,9 @@ beforeAll(async () => {
   await generatedFile(path.join(first, "build/renders/larger.wav"), 512 * MiB);
   watch = createWatchSession([{ kind: "dir", absolutePath: first }, { kind: "dir", absolutePath: second }], false, { metrics });
   await watch.start();
+  // The first root ignores build/: its existing renders are read once listed.
+  expect((await watch.listFolder(first, "build")).status).toBe("listed");
+  expect((await watch.listFolder(first, "build/renders")).status).toBe("listed");
   await waitFor(() => [path.join(first, "build/renders/larger.wav"), path.join(first, "build/renders/large.wav"),
     ...[first, second].map(root => path.join(root, "build/renders/same.wav"))].every(file => !!watch.findDocument(file)), "media discovery");
   const assets: RouteAssets = {

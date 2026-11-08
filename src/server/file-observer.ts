@@ -9,9 +9,15 @@ import chokidar from "chokidar";
 import type { WatchEntry } from "./roots";
 import type { createWatchPolicy } from "./watch-policy";
 
-export type FileObserver = EventEmitter & { close(): Promise<void> };
+// `reveal` starts reading a directory that was unlisted until now.
+export type FileObserver = EventEmitter & { close(): Promise<void>; reveal?(directory: string): void };
 type Options = {
   ignored: ReturnType<typeof createWatchPolicy>["ignored"];
+  // An ignored folder level nobody has listed: known, never read or walked.
+  unlisted?: (directory: string) => boolean;
+  // A directory that appeared after discovery: true if it is ignored as a
+  // whole (it then becomes unlisted) — decided before it is read.
+  classifyNew?: (directory: string) => Promise<boolean>;
   usePolling?: boolean;
   renew?: boolean;
   // Controlled native notifications with real filesystem reads in tests.
@@ -78,15 +84,19 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
       if (!["ERR_FEATURE_UNAVAILABLE_ON_PLATFORM", "ERR_INVALID_ARG_VALUE", "ENOSYS", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
     }
   }
+  // Chokidar cannot defer a decision, so a folder Git starts ignoring after
+  // discovery is still walked in this mode; known unlisted folders are not.
+  const ignored: Options["ignored"] = (file, stats) => options.ignored(file, stats)
+    || (stats === undefined || stats.isDirectory()) && options.unlisted?.(file) === true;
   const watcher = chokidar.watch(entry.absolutePath, {
-    ignored: options.ignored, usePolling: polling, interval: 100,
+    ignored, usePolling: polling, interval: 100,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
   });
   return polling
-    ? new PolledBaselineCheck(watcher, options.ignored, {
+    ? new PolledBaselineCheck(watcher, ignored, {
       root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
     })
-    : watcher;
+    : Object.assign(watcher, { reveal: (directory: string) => { watcher.add(directory); } });
 }
 
 // Chokidar polls each file and directory with fs.watchFile, which (in Bun, as
@@ -160,6 +170,10 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     watcher.on("raw", (...args: unknown[]) => this.emit("raw", ...args));
     watcher.on("ready", () => this.emit("ready"));
     watcher.on("error", (error: unknown) => this.emit("error", error));
+  }
+
+  reveal(directory: string): void {
+    if (!this.closed) this.watcher.add(directory);
   }
 
   async close(): Promise<void> {
@@ -385,6 +399,10 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
     queueMicrotask(() => this.enqueue(entry.absolutePath, true));
   }
 
+  reveal(directory: string): void {
+    this.enqueue(directory, true);
+  }
+
   async close(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
@@ -452,7 +470,13 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       children.add(file);
     }
     if (directory) {
+      let unlisted = file !== this.entry.absolutePath && this.options.unlisted?.(file) === true;
+      if (!unlisted && !previous && this.ready && file !== this.entry.absolutePath && this.options.classifyNew) {
+        unlisted = await this.options.classifyNew(file);
+        if (this.stopped) return;
+      }
       if (!previous) this.emit("all", "addDir", file, stats);
+      if (unlisted) return;
       if (!discover && previous?.isDirectory() && previous.mtimeMs === stats.mtimeMs && previous.ino === stats.ino) return;
       this.options.onWork?.("directory");
       const entries = await readdir(file, { withFileTypes: true }).catch(error => {

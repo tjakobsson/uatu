@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 14 / Workspace 36 - Unreleased (ignored folders listed on demand)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Uatu hides only VS Code's `files.exclude` defaults (`.git`, `.svn`, `.hg`, `.jj`, `.DS_Store`, `Thumbs.db`). Dependency, build, cache and secret-like paths are no longer excluded by name; Git-ignore visibility and explicit `.uatu.json` exclusions govern them.
+- A folder Git ignores as a whole is published as a `FolderEntry` instead of being read up front. Snapshot roots carry `folders`, and document patches carry `folderUpserts` and `folderRemovals`. A client lists one level of such a folder on demand; the listing reaches every client as an ordinary patch that upserts the level's documents and subfolder entries and marks the entry `listed`.
+- Files written inside unlisted levels during the session are indexed with `gitIgnoreStatus: "ignored"`, at most 2,000 per root, newest first. Files inside ignored folders arrive already classified and are never Follow targets.
+
+### Migration
+
+Workspace revision 36 consumers must regenerate document and live-topic readers for the closed-object `folders` field on snapshot roots and the `folderUpserts` and `folderRemovals` patch fields. Apply folder upserts and removals with the same revision ordering as document upserts and removals. Do not infer that a folder entry is empty: an unlisted entry's contents are unknown until it is listed. Files formerly hidden by name, including secret-like files, now appear unless the project excludes them in `.uatu.json`.
+
 ## Hub 14 / Workspace 35 - Unreleased (atomic worker dismissal groups)
 
 Compatibility: breaking (Hub schema); additive (accepted requests)

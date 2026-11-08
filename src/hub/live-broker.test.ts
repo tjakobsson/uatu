@@ -345,6 +345,44 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     await waitFor(() => child.opened[0]!.cancelled, "gap recovery");
     expect(first.envelopes.at(-1)?.event.kind).toBe("unavailable");
   });
+  test("document joiners receive Git-ignored folder entries and listing patches in the materialized snapshot", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "document", key: "" });
+    await waitFor(() => child.opened.length === 1, "document upstream");
+    const root = { id: "/docs", path: "/docs", label: "docs", hiddenCount: 0 };
+    const initial: DocumentSnapshot = {
+      ...createWatchSession([], true).getStatePayload(), kind: "snapshot", epoch: "child", revision: 0, build: BUILD_SUMMARY,
+      roots: [{ ...root, docs: [], folders: [{ id: "/docs/build", rootId: "/docs", relativePath: "build/", listed: false, revision: 0 }] }],
+      discovery: { status: "ready", discovered: 0 }, repositoryState: { status: "ready", generation: 1 },
+    };
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(initial)}\n\n`);
+    await waitFor(() => first.envelopes.length === 2, "initial snapshot and ready");
+    const listing: DocumentPatch = {
+      kind: "patch", epoch: "child", previousRevision: 0, revision: 1, generatedAt: Date.now() + 1,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "1", changedId: null, removals: [],
+      upserts: [{ id: "/docs/build/CMakeCache.txt", rootId: "/docs", name: "CMakeCache.txt", relativePath: "build/CMakeCache.txt", mtimeMs: 1, revision: 1, kind: "text", gitIgnoreStatus: "ignored" }],
+      folderUpserts: [
+        { id: "/docs/build", rootId: "/docs", relativePath: "build/", listed: true, revision: 1 },
+        { id: "/docs/build/renders", rootId: "/docs", relativePath: "build/renders/", listed: false, revision: 1 },
+      ],
+    };
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(listing)}\n\n`);
+    await waitFor(() => first.envelopes.length === 3, "listing patch");
+    expect(first.envelopes[2]!.event).toEqual({ kind: "data", data: listing });
+    const removal: DocumentPatch = { ...listing, previousRevision: 1, revision: 2, generatedAt: listing.generatedAt + 1, upserts: [], folderUpserts: undefined,
+      folderRemovals: [{ rootId: "/docs", id: "/docs/build/renders" }] };
+    delete removal.folderUpserts;
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(removal)}\n\n`);
+    await waitFor(() => first.envelopes.length === 4, "folder removal");
+    const joiner = sink();
+    live.subscribe(joiner, "ws", { topic: "document", key: "" });
+    await waitFor(() => joiner.envelopes.length === 2, "joined snapshot");
+    expect(joiner.envelopes[0]!.event).toMatchObject({ kind: "data", data: { kind: "snapshot", revision: 2, roots: [{
+      docs: listing.upserts, folders: [{ id: "/docs/build", relativePath: "build/", listed: true, revision: 1 }],
+    }] } });
+  });
   test("a stale conversation cursor resyncs the conversation topic while the document topic replays", async () => {
     const child = fakeSource({
       refuse: path => {
