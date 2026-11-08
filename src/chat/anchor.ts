@@ -1,11 +1,20 @@
-export type TimelineAnchor = { itemId: string; offset: number };
+export type TimelineAnchor = {
+  itemId: string;
+  offset: number;
+  /** Opaque stable block key, never raw message text. Offsets are viewport-relative. */
+  content?: { key: string; offset: number };
+};
 /** Which way a scroll event moved the viewport, judged against the previous event. */
 export type ScrollMovement = "up" | "down" | "none";
 export type AnchorGeometry = {
   scrollTop: number;
   clientHeight: number;
   scrollHeight: number;
-  items: Array<{ id: string; top: number; bottom: number }>;
+  items: Array<{
+    id: string; top: number; bottom: number;
+    /** Block rectangles use the same viewport-relative coordinates as the item. */
+    content?: Array<{ key: string; top: number; bottom: number }>;
+  }>;
 };
 
 export class TimelineAnchorController {
@@ -18,19 +27,15 @@ export class TimelineAnchorController {
   private previous: AnchorGeometry | null = null;
   private restoring = false;
 
-  constructor(private readonly endThreshold = 48) {}
+  constructor(private readonly endThreshold = 0.5) {}
 
   /**
-   * Reads where the reader is after a scroll. Arriving near the end pins —
-   * anything within the threshold counts, so a reader who stops just short
-   * still follows the stream. Leaving is judged differently: `movement`
-   * says which way the scroll went, and any upward step unpins, however
-   * small. The
-   * threshold cannot apply on the way out — while a turn streams, a render
-   * lands every few frames, and each one drags a still-pinned viewport back
-   * to the end, so a reader nudging a trackpad never gets past 48px and
-   * feels every wheel tick reset. A decrease caused by a measured extent
-   * clamp preserves the existing intent, including paused intent.
+   * Reads where the reader is after a scroll. Only arriving at the bottom
+   * pins (allowing subpixel rounding), not stopping in its neighborhood.
+   * Leaving is judged differently: `movement` says which way the scroll
+   * went, and any upward step unpins, however small. Otherwise frequent
+   * streaming renders pull the reader back before their next trackpad tick.
+   * A measured extent clamp preserves existing intent, including paused intent.
    *
    * A scroll that lands where `afterMutation` or `jumpToLatest` just put it
    * is not the reader at all — it is that assignment echoing back, whether
@@ -89,6 +94,11 @@ export class TimelineAnchorController {
     const item = geometry.items.find(candidate => candidate.id === this.anchor!.itemId);
     if (item) {
       this.restoring = false;
+      const content = this.anchor.content;
+      const blocks = content && item.content?.filter(candidate => candidate.key === content.key);
+      if (content && blocks?.length === 1) {
+        return this.handOut(geometry.scrollTop + blocks[0]!.top - content.offset);
+      }
       return this.handOut(geometry.scrollTop + item.top - this.anchor.offset);
     }
     if (!this.restoring) {
@@ -130,5 +140,12 @@ export class TimelineAnchorController {
 
 export function captureAnchor(geometry: AnchorGeometry): TimelineAnchor | null {
   const visible = geometry.items.find(item => item.bottom > 0 && item.top < geometry.clientHeight);
-  return visible ? { itemId: visible.id, offset: visible.top } : null;
+  if (!visible) return null;
+  const anchor: TimelineAnchor = { itemId: visible.id, offset: visible.top };
+  const counts = new Map<string, number>();
+  for (const block of visible.content ?? []) counts.set(block.key, (counts.get(block.key) ?? 0) + 1);
+  const block = visible.content?.find(block => block.bottom > 0 && block.top < geometry.clientHeight
+    && counts.get(block.key) === 1);
+  if (block) anchor.content = { key: block.key, offset: block.top };
+  return anchor;
 }

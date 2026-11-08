@@ -1104,13 +1104,15 @@ Every answered question request SHALL contain exactly one answer array for each 
 - **AND** the request resolves everywhere it is shown under the existing ownership rules
 
 ### Requirement: Timeline position remains stable under streaming and navigation
-The Chat timeline SHALL remain pinned to the latest content only while the user is at or near its end. Once the user scrolls away, streaming, tool updates, image or code layout, and activity expansion MUST NOT steal the reading position; an accessible latest-content affordance SHALL indicate unseen updates and return to the end. Prepending older history SHALL preserve the same visible content and offset. Opening a conversation SHALL restore that client's last reading position when possible, otherwise it SHALL open at the latest turn.
+The Chat timeline SHALL follow the latest content until the reader deliberately scrolls upward. Following SHALL resume only when the reader scrolls back to the bottom or activates the accessible latest-content affordance. Once following is paused, streaming, message submission, tool updates, image or code layout, and activity expansion MUST NOT steal the reading position; the latest-content affordance SHALL indicate unseen updates and return to the end. Prepending older history SHALL preserve the same visible content and offset. During a client session, each conversation and task view SHALL retain its own reading anchor and follow state across navigation: paused views restore their reading position, following views catch up to latest, and first-time views open at latest. Existing client-local restoration across reloads remains supported where possible.
 
 Each shell viewport SHALL have a follow state independent of the outer timeline and other shell items. It SHALL initially follow the bottom. Any upward reader scroll SHALL stop following, including a movement smaller than a near-bottom threshold. Returning to the bottom or activating the viewport's accessible latest-output control SHALL resume following. Incoming output while following SHALL keep the bottom visible without resetting the horizontal offset. While following is paused, incoming output SHALL preserve the visible rendered content and its vertical offset, and the latest-output control SHALL indicate unseen output.
 
 Output updates, layout resize, inline height adjustment, Pop out, Maximize, Restore size, Return to chat, changes between desktop and touch presentation, and completion or failure SHALL preserve the shell item's horizontal position, vertical reading anchor, chosen inline height, and follow state. Position and applied size SHALL be clamped only where the available content or layout cannot accommodate them. A layout change that clamps position to the bottom MUST NOT itself resume paused following. Resizing or popping out shell output SHALL preserve the outer timeline's reading anchor, and returning inline SHALL preserve its current reading anchor, including any deliberate outer scrolling while the nonmodal window was open. Shell scrolling and its latest-output control MUST NOT independently move the outer timeline to its end. Long shell output SHALL preserve long-chat responsiveness, text selection, copying, and find over available rendered output.
 
-Following SHALL be stable in both parent and child outer timelines and in each shell output viewport, whether inline or popped out. While following during passive append-only updates, automatic movement MUST NOT alternate upward and downward when the scroll extent is not shrinking. Activating the relevant latest-content or latest-output control during streaming SHALL settle at the current bottom and continue following without oscillation between smooth movement and snapping. Any upward manual scroll SHALL interrupt automatic movement immediately and pause following, even during movement initiated by a latest control. Resize effects and programmatic scroll echoes MUST NOT change the reader's follow intent. A shrinking layout or content extent MAY cause a legitimate position clamp without being treated as follow jitter or resuming paused following.
+Following SHALL be smooth and stable in both parent and child outer timelines and in each shell output viewport, whether inline or popped out. Brief catch-up behind incoming content is permitted; repeated updates MUST NOT restart native smooth scrolling or introduce competing position writers. While following during passive append-only updates, automatic movement MUST NOT alternate upward and downward when the scroll extent is not shrinking. In controlled regression fixtures, following SHALL settle within 300ms after the final layout update. The reduced-motion preference SHALL disable follow animation. Initial presentation and reading-position restoration SHALL place content directly rather than animate from an unrelated position. Activating the relevant latest-content or latest-output control during streaming SHALL settle at the current bottom and continue following without oscillation between smooth movement and snapping. Any upward manual scroll SHALL interrupt automatic movement immediately and pause following, even during movement initiated by a latest control. Resize effects and programmatic scroll echoes MUST NOT change the reader's follow intent. A shrinking layout or content extent MAY cause a legitimate position clamp without being treated as follow jitter or resuming paused following.
+
+When following is paused, layout changes elsewhere SHALL preserve the unchanged visible reading anchor within a 2px tolerance in controlled regression fixtures, rather than merely preserving a raw scroll offset. Explicitly activated expanding or collapsing controls SHALL remain stable and visible where the available viewport permits.
 
 #### Scenario: Active reader follows streaming output
 - **WHEN** the user is at the end of the timeline as assistant content streams
@@ -1125,9 +1127,11 @@ Following SHALL be stable in both parent and child outer timelines and in each s
 - **WHEN** the user scrolls upward by less than the near-end distance while content continues streaming
 - **THEN** the timeline is no longer pinned and the next update does not return it to the end
 
-#### Scenario: Sending returns the reader to the end
+#### Scenario: Sending preserves a paused reader's position
 - **WHEN** the user submits a message while scrolled above the end
-- **THEN** the timeline moves to the end so the sent message and the reply that follows are in view
+- **THEN** the same visible content remains anchored and following remains paused
+- **AND** the sent message and subsequent reply do not pull the reader to the end
+- **AND** returning to the bottom or activating the latest-content affordance resumes following
 
 #### Scenario: Loading older history preserves the viewport
 - **WHEN** the user requests an older history page at the top of the loaded timeline
@@ -1136,6 +1140,18 @@ Following SHALL be stable in both parent and child outer timelines and in each s
 #### Scenario: Expanding activity does not cause an unrelated jump
 - **WHEN** the user expands or collapses a tool entry away from the timeline end
 - **THEN** the chosen entry remains anchored in the viewport
+
+#### Scenario: Keyboard and accessibility focus remain navigable
+- **WHEN** keyboard or accessibility navigation reveals a control outside the paused viewport
+- **THEN** the control remains visible
+- **AND** an ordinary timeline correction does not undo the requested navigation
+- **AND** a focused button alone is not treated as a temporary shell handoff
+
+#### Scenario: Collapsed activity does not steal the reading anchor
+- **WHEN** a paused reader views a message after a collapsed activity group and the viewport width changes
+- **THEN** unchanged visible text retains its reading position
+- **AND** hidden activity descendants are excluded from reading anchors even if the browser reports placeholder layout boxes
+- **AND** the collapsed group's visible summary remains available as an anchor
 
 #### Scenario: Shell output initially follows independently
 - **WHEN** a shell viewport first shows output and further output arrives

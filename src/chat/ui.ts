@@ -2,7 +2,6 @@ import { boundedSet } from "../shared/bounded-map";
 import { Composer, type PendingQueueAction } from "./composer";
 import { escapeHtml } from "../shared/html";
 import { createLoadingSignal } from "../preview/loading-signal";
-import { measureChatWork } from "./performance";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { onUiModeChange } from "../shell/ui-mode";
@@ -13,6 +12,8 @@ import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
 import { CoordinatedScrollOwner, type RevealOptions } from "./coordinated-scroll";
+import { reducedMotion, scrollFollowMotion } from "./scroll-motion";
+import { timelineGeometry } from "./scroll-geometry";
 import { ChatViewportController } from "./viewport";
 import { notificationAwaiting, notificationConversation } from "./notification-navigation";
 import { setActiveTab } from "../shell/tab-bar";
@@ -240,6 +241,7 @@ export function initChat(api = new ChatApiClient()): void {
   if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !queueDockElement || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDetails || !configurationModeSummary || !configurationVariantSummary || !configurationVariantValue || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
 
   const anchor = new TimelineAnchorController();
+  let parentPositionRestore: TimelineAnchor | null | undefined;
   // Initial renders can run before focus wiring is installed. Later paints
   // reconcile removals too: WebKit does not send focusout for a removed input.
   let reconcileAnswerAfterPaint = () => {};
@@ -421,6 +423,8 @@ export function initChat(api = new ChatApiClient()): void {
   const childRenderer = new TimelineRenderer();
   childRenderer.deferClosedActivity = true;
   const childAnchor = new TimelineAnchorController();
+  const childReadingAnchors = new Map<string, TimelineAnchor | null>();
+  let childPositionRestore: TimelineAnchor | null | undefined;
   const childReadSignal = drilldownTimeline ? createLoadingSignal({ segment: null, barHost: drilldownTimeline, busyHost: drilldownTimeline, visibleLabel: true }) : null;
   const childReadError = document.createElement("div");
   childReadError.className = "chat-read-error";
@@ -861,29 +865,12 @@ export function initChat(api = new ChatApiClient()): void {
   const questionOwnershipKey = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>) =>
     `${item.conversationId ?? source.conversationId}\u0000${item.requestId}`;
 
-  const geometryOf = (scroller: HTMLElement, container: HTMLElement): AnchorGeometry => {
-    const bounds = scroller.getBoundingClientRect();
-    return {
-      scrollTop: scroller.scrollTop,
-      clientHeight: scroller.clientHeight,
-      scrollHeight: scroller.scrollHeight,
-      items: Array.from(container.querySelectorAll<HTMLElement>("[data-chat-item-id]")).map(element => {
-        const finish = measureChatWork("item-geometry");
-        const rect = element.getBoundingClientRect();
-        finish();
-        return { id: element.dataset.chatItemId!, top: rect.top - bounds.top, bottom: rect.bottom - bounds.top };
-      // Members of a collapsed activity group are not rendered and report
-      // zero-size rects; anchoring to one would pin the viewport to nothing.
-      }).filter(entry => entry.bottom > entry.top),
-    };
-  };
-
-  const geometry = (): AnchorGeometry => geometryOf(timeline, items);
+  const geometry = (preserveAnchor = true): AnchorGeometry => timelineGeometry(timeline, items, preserveAnchor ? anchor.currentAnchor() : null);
   // Every caller sits behind a guard on the drill-down elements existing
   // (renderChild and the wiring at the bottom), so the assertions cannot
   // fire — and a fallback to the parent's scroller would anchor the child
   // against the wrong geometry if they somehow did.
-  const childGeometry = (): AnchorGeometry => geometryOf(drilldownTimeline!, drilldownItems!);
+  const childGeometry = (preserveAnchor = true): AnchorGeometry => timelineGeometry(drilldownTimeline!, drilldownItems!, preserveAnchor ? childAnchor.currentAnchor() : null);
   // The pinned fast path. Pinned means "keep the end in view", which needs
   // the scroll extents and nothing per item — and the per-item pass is a
   // forced layout of the whole transcript (a rect per item). During a
@@ -895,7 +882,8 @@ export function initChat(api = new ChatApiClient()): void {
   const extentsOf = (scroller: HTMLElement): AnchorGeometry =>
     ({ scrollTop: scroller.scrollTop, clientHeight: scroller.clientHeight, scrollHeight: scroller.scrollHeight, items: [] });
   const parentScroll = new CoordinatedScrollOwner(timeline, {
-    anchor, measure: includeItems => includeItems ? geometry() : extentsOf(timeline), active: chatSurfaceActive,
+    anchor, measure: (includeItems, preserveAnchor) => includeItems ? geometry(preserveAnchor) : extentsOf(timeline), active: chatSurfaceActive,
+    followMotion: scrollFollowMotion,
     onChange: () => {
       if (projection) {
         const current = anchor.currentAnchor();
@@ -917,8 +905,9 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownTimeline.after(childLatest);
   }
   const childScroll = drilldownTimeline ? new CoordinatedScrollOwner(drilldownTimeline, {
-    anchor: childAnchor, measure: includeItems => includeItems ? childGeometry() : extentsOf(drilldownTimeline),
+    anchor: childAnchor, measure: (includeItems, preserveAnchor) => includeItems ? childGeometry(preserveAnchor) : extentsOf(drilldownTimeline),
     active: () => chatSurfaceActive() && !!child,
+    followMotion: scrollFollowMotion,
     onChange: () => { if (childLatest) childLatest.hidden = !childAnchor.hasUnseen(); },
   }) : null;
   childLatest?.addEventListener("click", () => childScroll?.latest());
@@ -1898,6 +1887,11 @@ export function initChat(api = new ChatApiClient()): void {
     const conversation = conversations.find(value => value.id === projection?.conversationId);
     renderer.conversationTitle = conversation ? displayConversationTitle(conversation) : chatHeading();
     const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
+    if (projection && parentPositionRestore !== undefined) {
+      anchor.restore(parentPositionRestore);
+      if (!parentPositionRestore && !(heldAnswerField && parentScroll.isHolding(heldAnswerField))) parentScroll.latest({ motion: "instant" });
+      parentPositionRestore = undefined;
+    }
     // Reconcile the current snapshot before revealing a retained output window.
     renderer.setShellOutputsHidden(false);
     revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
@@ -2116,7 +2110,6 @@ export function initChat(api = new ChatApiClient()): void {
       if (change === "attachments" || change === "submit" || (change === "edit" || change === "history" || change === "restored") && activeConversationId() === id) renderAttachments();
       if (change === "accepted" && projection?.conversationId === id) renderConfiguration();
       syncControls();
-      if (change === "submit") { parentScroll.latest(); latestButton.hidden = true; }
       if (change === "submit" || change === "accepted" || change === "pending" || change === "projection" || change === "restored") scheduleRender(change === "submit" || change === "accepted");
       if ((change === "edit" || change === "history") && activeConversationId() === id) input.focus();
     },
@@ -2942,7 +2935,9 @@ export function initChat(api = new ChatApiClient()): void {
     renderAttachments();
     announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
     cancelForSnapshot(parentScroll);
-    anchor.restore(presentation.anchors[snapshot.conversation.id] ?? null);
+    const readingAnchor = presentation.anchors[snapshot.conversation.id] ?? null;
+    anchor.restore(readingAnchor);
+    parentPositionRestore = readingAnchor;
     scheduleRender(false, false);
     stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
   };
@@ -4182,11 +4177,16 @@ export function initChat(api = new ChatApiClient()): void {
   const renderChildNow = (newContent: boolean) => {
     lastChildPaint = performance.now();
     if (!drilldownItems || !drilldownTimeline) return;
-    childScroll?.beforeMutation();
+    if (childPositionRestore === undefined) childScroll?.beforeMutation();
     childRenderer.permissionScopeNote = agent?.permissionScopeNote;
     childRenderer.loginAction = contextLoginAction();
     childRenderer.conversationTitle = child?.label;
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"), false, turnStartedAt(child?.projection));
+    if (childPositionRestore !== undefined) {
+      childAnchor.restore(childPositionRestore);
+      if (!childPositionRestore && !(heldAnswerField && childScroll?.isHolding(heldAnswerField))) childScroll?.latest({ motion: "instant" });
+      childPositionRestore = undefined;
+    }
     childRenderer.setShellOutputsHidden(false);
     syncWorkingTimer();
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
@@ -4216,6 +4216,7 @@ export function initChat(api = new ChatApiClient()): void {
    * no-op.
    */
   const closeChildConversation = (popped = false) => {
+    if (child) boundedSet(childReadingAnchors, child.conversationId, childAnchor.currentAnchor(), 200);
     childRenderer.closeShellOutputWindow();
     childScroll?.cancel();
     if (childLatest) childLatest.hidden = true;
@@ -4339,6 +4340,7 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownClosePending = false;
     silentRun.stop();
     const previous = child;
+    if (previous) boundedSet(childReadingAnchors, previous.conversationId, childAnchor.currentAnchor(), 200);
     if (!previous) {
       childInvoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const attribute = ["data-worker-item", "data-inspect-task", "data-open-conversation"].find(name => childInvoker?.hasAttribute(name));
@@ -4348,7 +4350,7 @@ export function initChat(api = new ChatApiClient()): void {
     previous?.stream?.close();
     previous?.read?.controller.abort();
     const retainedProjection = previous?.conversationId === id ? previous.projection : null;
-    const retainedAnchor = retainedProjection ? childAnchor.currentAnchor() : null;
+    const retainedAnchor = childReadingAnchors.get(id) ?? null;
     // The task behind this layer: named by the caller (a composer row), kept
     // from the layer being refreshed, or — for a transcript opened from the
     // subagents track or the launching row — found by the child id on a
@@ -4423,9 +4425,16 @@ export function initChat(api = new ChatApiClient()): void {
       drilldownOlder.hidden = true;
       drilldownOlder.disabled = false;
     }
-    if (automaticRefresh && retainedProjection && childScroll) cancelForSnapshot(childScroll);
-    else childScroll?.cancel();
-    childAnchor.restore(retainedAnchor);
+    if (automaticRefresh && retainedProjection && childScroll) {
+      cancelForSnapshot(childScroll);
+      // A painted transcript has no pending restore: capture its latest
+      // reader position when the response paints. A hidden first paint may
+      // still owe a navigation restore; only that actual paint consumes it.
+    } else {
+      childScroll?.cancel();
+      childAnchor.restore(retainedAnchor);
+      childPositionRestore = retainedAnchor;
+    }
     announceChild("");
     if (!automaticRefresh) drilldownBack?.focus();
     if (outputView) return;
@@ -5594,6 +5603,11 @@ export function initChat(api = new ChatApiClient()): void {
     if (!chatSurfaceActive()) return;
     parentScroll.beforeMutation();
     childScroll?.beforeMutation();
+    // Queue the correction with the capture, before ResizeObserver delivery.
+    // Further divider steps must not recapture already-reflowed text while
+    // the first layout change is still waiting for its correction frame.
+    parentScroll.request();
+    childScroll?.request();
   };
   document.addEventListener("uatu:before-surface-change", captureSurfaceAnchors);
   const handleChatSurfaceState = () => {
@@ -5772,8 +5786,4 @@ function messageOf(error: unknown): string {
 
 function displayConversationTitle(conversation: ConversationSummary): string {
   return /^New session - /.test(conversation.title) ? "New conversation" : conversation.title || "Untitled conversation";
-}
-
-function reducedMotion(): boolean {
-  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 }

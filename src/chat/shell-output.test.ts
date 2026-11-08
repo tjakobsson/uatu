@@ -11,7 +11,7 @@ let id = 0;
 let timestamp = 0;
 let restore: (() => void)[] = [];
 beforeEach(() => {
-  for (const [key, value] of Object.entries({ document: dom.document, requestAnimationFrame: (fn: FrameRequestCallback) => { frames.set(++id, fn); return id; }, cancelAnimationFrame: (id: number) => frames.delete(id) })) {
+  for (const [key, value] of Object.entries({ document: dom.document, matchMedia: () => ({ matches: true }), requestAnimationFrame: (fn: FrameRequestCallback) => { frames.set(++id, fn); return id; }, cancelAnimationFrame: (id: number) => frames.delete(id) })) {
     const old = Reflect.get(globalThis, key); Reflect.set(globalThis, key, value);
     restore.push(() => Reflect.set(globalThis, key, old));
   }
@@ -24,6 +24,28 @@ function view(): HTMLElement {
   return element;
 }
 const metadata: ShellOutputMetadata = { command: "bun test", conversation: "Test conversation", status: "running" };
+
+test("rendered shell follows smoothly, settles within 300ms and responds to reduced motion", () => {
+  let reduced = false;
+  Reflect.set(globalThis, "matchMedia", () => ({ matches: reduced }));
+  const shell = new ShellOutputController("c1", "motion", metadata);
+  Object.assign(shell.viewport, { scrollTop: 0, scrollLeft: 0, scrollHeight: 2000, clientHeight: 240 });
+  shell.update("first", metadata); frame();
+  expect(shell.viewport.scrollTop).toBe(1760);
+  Object.assign(shell.viewport, { scrollHeight: 2500 });
+  shell.update("first\nsecond", metadata); frame(); frame();
+  expect(shell.viewport.scrollTop).toBeGreaterThan(1760);
+  expect(shell.viewport.scrollTop).toBeLessThan(2260);
+  for (let step = 0; step < 18; step++) frame();
+  expect(shell.viewport.scrollTop).toBe(2260);
+  Object.assign(shell.viewport, { scrollHeight: 3000 });
+  shell.update("first\nsecond\nthird", metadata); frame(); frame();
+  expect(shell.viewport.scrollTop).toBeLessThan(2760);
+  reduced = true;
+  frame();
+  expect(shell.viewport.scrollTop).toBe(2760);
+  shell.dispose();
+});
 
 describe("shell scroll owner", () => {
   test("one frame correction initializes completed output at bottom and coalesces appends", () => {

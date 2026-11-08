@@ -6,10 +6,13 @@ export type CoordinatedScrollAnchor = Pick<TimelineAnchorController,
 
 export interface CoordinatedScrollOptions {
   anchor: CoordinatedScrollAnchor;
-  /** Include semantic items when requested, even if the anchor is still pinned. */
-  measure: (includeItems: boolean) => AnchorGeometry;
+  /** Include semantic items when requested, even if pinned. Preserve the
+   * retained reading location by default; false captures fresh reader intent. */
+  measure: (includeItems: boolean, preserveAnchor?: boolean) => AnchorGeometry;
   active?: () => boolean;
   onChange?: () => void;
+  /** Defaults to instant. Read each frame so reduced-motion changes finish an in-flight follow. */
+  followMotion?: () => "smooth" | "instant";
   requestFrame?: (callback: FrameRequestCallback) => number;
   cancelFrame?: (id: number) => void;
 }
@@ -52,6 +55,9 @@ export class CoordinatedScrollOwner {
   private touchY: number | null = null;
   private upwardPending = false;
   private lastCorrectionFrame = -Infinity;
+  private positioned = false;
+  private instantNext = false;
+  private motion: { from: number; target: number; started: number; sampled: number; deadline: number } | null = null;
   private readonly requestFrame: (callback: FrameRequestCallback) => number;
   private readonly cancelFrame: (id: number) => void;
   private readonly previousAnchoring: string;
@@ -100,23 +106,53 @@ export class CoordinatedScrollOwner {
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
     const geometry = this.measure();
+    const following = this.options.anchor.isPinned();
     const target = this.options.anchor.afterMutation(geometry, this.newContent);
     this.newContent = false;
-    const top = Math.max(0, Math.min(target, geometry.scrollHeight - geometry.clientHeight));
-    if (Math.abs(this.scroller.scrollTop - top) > 0.5) {
+    const destination = Math.max(0, Math.min(target, geometry.scrollHeight - geometry.clientHeight));
+    let top = destination;
+    if (this.positioned && !this.instantNext && !this.revealTarget && !this.heldTarget
+      && following && this.options.followMotion?.() === "smooth"
+      && Math.abs(destination - geometry.scrollTop) > 0.5) {
+      if (this.motion?.target !== destination && Math.abs(destination - geometry.scrollTop) > 0.5) {
+        // Spend the elapsed frame on the newest target instead of restarting
+        // at zero every time the stream grows (which would starve motion).
+        this.motion = { from: geometry.scrollTop, target: destination,
+          started: this.motion?.sampled ?? timestamp, sampled: timestamp, deadline: timestamp + 240 };
+      }
+      if (this.motion) {
+        // Retarget from the visible position, never from an obsolete origin.
+        // A final layout change therefore settles within 240ms of its frame.
+        const duration = Math.max(1, this.motion.deadline - this.motion.started);
+        const progress = Math.min(1, Math.max(0, (timestamp - this.motion.started) / duration));
+        top = this.motion.from + (destination - this.motion.from) * (1 - (1 - progress) ** 3);
+        this.motion.sampled = timestamp;
+        if (progress === 1) this.motion = null;
+      }
+    } else this.motion = null;
+    this.positioned = true;
+    this.instantNext = false;
+    // Resolve the reveal against the proposed anchor position before writing:
+    // the two sources share one correction, rather than visibly fighting.
+    const reveal = this.resolveReveal(top);
+    top = reveal.top;
+    if (Math.abs(this.scroller.scrollTop - top) > 0.5
+      || (!this.motion && this.options.anchor.isPinned() && this.scroller.scrollTop !== top)) {
       this.lastCorrectionFrame = timestamp;
       this.scroller.scrollTop = top;
     }
     this.previous = { ...geometry, scrollTop: this.scroller.scrollTop };
+    if (reveal.moved) {
+      this.options.anchor.pause(this.options.measure(true, false));
+      this.motion = null;
+    }
     // Any later scroll echo belongs to this correction, not an earlier
     // wheel/key gesture whose native movement never arrived.
     this.upwardPending = false;
-    // After the anchor has had its say, so the reveal is the last word on
-    // where this frame leaves the scroller.
-    this.applyReveal(timestamp);
     // Whatever this frame settled on — the anchor's correction, the reveal's
     // refinement of it, or neither — is the position the hold now defends.
     if (this.heldTarget) this.heldTop = this.scroller.scrollTop;
+    if (this.motion) this.request();
     this.options.onChange?.();
   }
 
@@ -172,6 +208,10 @@ export class CoordinatedScrollOwner {
     const resume = this.resumeFollowing;
     this.clearHold();
     if (resume) {
+      // Ending a temporary control placement restores its prior follow intent;
+      // it is not a new reader-requested animated journey through the transcript.
+      this.motion = null;
+      this.instantNext = true;
       this.options.anchor.jumpToLatest(this.options.measure(false));
       this.request();
       this.options.onChange?.();
@@ -200,32 +240,20 @@ export class CoordinatedScrollOwner {
    * the same treatment an upward gesture gets. A reveal that needs no move
    * leaves the anchor alone, so following is not lost for nothing.
    */
-  private applyReveal(timestamp: number): void {
-    if (this.heldTarget && !this.scroller.contains(this.heldTarget)) {
-      this.release();
-      return;
-    }
+  private resolveReveal(proposedTop: number): { top: number; moved: boolean } {
     const target = this.revealTarget;
     const options = this.revealOptions;
     this.revealTarget = null;
     this.revealOptions = undefined;
-    if (!target || !this.scroller.contains(target)) return;
-    const delta = this.revealDelta(target, options);
-    if (Math.abs(delta) < 0.5) return;
+    if (!target || !this.scroller.contains(target)) return { top: proposedTop, moved: false };
+    const delta = this.revealDelta(target, options, proposedTop);
+    if (Math.abs(delta) < 0.5) return { top: proposedTop, moved: false };
     const limit = Math.max(0, this.scroller.scrollHeight - this.scroller.clientHeight);
-    const top = Math.max(0, Math.min(this.scroller.scrollTop + delta, limit));
-    if (Math.abs(this.scroller.scrollTop - top) <= 0.5) return;
-    this.lastCorrectionFrame = timestamp;
-    this.scroller.scrollTop = top;
-    const geometry = this.options.measure(true);
-    this.options.anchor.pause(geometry);
-    this.previous = geometry;
-    // The reveal is our own assignment, not a gesture awaiting native
-    // movement: its scroll echo must not be read as the reader moving.
-    this.upwardPending = false;
+    const top = Math.max(0, Math.min(proposedTop + delta, limit));
+    return { top, moved: Math.abs(top - proposedTop) > 0.5 };
   }
 
-  private revealDelta(target: HTMLElement, options?: RevealOptions): number {
+  private revealDelta(target: HTMLElement, options: RevealOptions | undefined, proposedTop: number): number {
     if (typeof target.getBoundingClientRect !== "function") return 0;
     const box = this.scroller.getBoundingClientRect();
     const rect = target.getBoundingClientRect();
@@ -239,6 +267,9 @@ export class CoordinatedScrollOwner {
       unionTop = Math.min(unionTop, extra.top);
       unionBottom = Math.max(unionBottom, extra.bottom);
     }
+    const shift = proposedTop - this.scroller.scrollTop;
+    unionTop -= shift;
+    unionBottom -= shift;
     // No computed style (or none declared) means no reserved band: 0.
     const style = typeof getComputedStyle === "function" ? getComputedStyle(this.scroller) : null;
     const padTop = Number.parseFloat(style?.scrollPaddingTop ?? "") || 0;
@@ -269,10 +300,13 @@ export class CoordinatedScrollOwner {
     }
   }
 
-  /** Immediate positioning, on the next coordinated frame, never a smooth animation. */
-  latest(): void {
+  /** Resume following. Initial views may opt out of motion for their first placement. */
+  latest(options?: { motion?: "instant" }): void {
     if (!this.active()) return;
     this.clearHold();
+    this.motion = null;
+    this.positioned = true;
+    this.instantNext = options?.motion === "instant";
     this.upwardPending = false;
     // An explicit jump to the end outranks a reveal still waiting for a frame.
     this.revealTarget = null;
@@ -286,6 +320,8 @@ export class CoordinatedScrollOwner {
   cancel(): void {
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
+    this.motion = null;
+    this.instantNext = false;
     this.newContent = false;
     this.upwardPending = false;
     this.revealTarget = null;
@@ -303,7 +339,7 @@ export class CoordinatedScrollOwner {
   pause(): void {
     if (!this.active()) return;
     this.cancel();
-    const geometry = this.options.measure(true);
+    const geometry = this.options.measure(true, false);
     this.options.anchor.pause(geometry);
     this.upwardPending = true;
     this.previous = geometry;
@@ -339,12 +375,21 @@ export class CoordinatedScrollOwner {
       this.request();
     } else if (this.upwardPending && movement !== "none") {
       this.upwardPending = false;
-      this.options.anchor.pause(this.options.measure(true));
+      this.options.anchor.pause(this.options.measure(true, false));
     } else if (geometry.clientHeight !== previous.clientHeight && this.options.anchor.isPinned()) {
       // Native caret positioning can move a pinned transcript upward when
       // composer/dock chrome resizes its viewport. That is layout, not reader
       // intent. Explicit upward input was handled above; intrinsic content
       // changes alone still take the ordinary movement path below.
+      this.request();
+    } else if (movement === "down" && this.options.anchor.isPinned()) {
+      // Catch-up leaves room for a reader to move toward latest themselves.
+      // Only upward intent pauses following; rebase from their new position
+      // so an older animation curve cannot pull their forward progress back.
+      if (this.motion) {
+        this.motion.from = geometry.scrollTop;
+        this.motion.started = this.motion.sampled;
+      }
       this.request();
     } else if (changedExtent && movement !== "up") {
       // Extent growth alone cannot speak for the reader. An unaccounted
@@ -353,7 +398,7 @@ export class CoordinatedScrollOwner {
       // own assignments already updated `previous` in flush().
       this.request();
     } else {
-      this.options.anchor.observe(movement === "up" ? this.options.measure(true) : geometry, movement);
+      this.options.anchor.observe(movement !== "none" ? this.options.measure(true, false) : geometry, movement);
       if (this.options.anchor.isPinned()) this.request();
     }
     this.previous = geometry;

@@ -1,7 +1,7 @@
 import { test as baseTest, expect } from "./fixtures";
 import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
-import { bootShell, frames as settleFrames, log, shell, position, drag } from "./chat-shell-helpers";
+import { bootShell, frames as settleFrames, settleScroll, log, shell, position, drag } from "./chat-shell-helpers";
 
 const test = withEngineBrowsers(baseTest);
 
@@ -194,7 +194,9 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         await phase("restore-size"); await floating.getByRole("button", { name: "Restore size" }).click();
         await settleFrames(page); await atBottom();
       }
-      await phase("return"); await floating.getByRole("button", { name: "Return to chat" }).click();
+      await phase("return");
+      await expect(floating.getByRole("button", { name: "Return to chat" })).toBeInViewport({ ratio: 1 });
+      await floating.getByRole("button", { name: "Return to chat" }).click();
       await expect(floating).toHaveCount(0); await settleFrames(page); await atBottom();
       await phase("returned-passive"); await update(count + 1, "completed"); await atBottom();
       await phase("paused-popout"); reading = await interrupt();
@@ -203,12 +205,29 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
       });
       await settleFrames(page);
       expect(await outerIntent()).toBe(false);
+      // Navigation to an offscreen control is intentional movement, not part
+      // of the reparenting transaction. Establish the handoff baseline only
+      // after that navigation, so locator.click() cannot silently move it.
+      const popout = outputView.getByRole("button", { name: "Pop out", exact: true });
+      await popout.scrollIntoViewIfNeeded();
+      await settleScroll(timeline);
+      await expect(popout).toBeInViewport({ ratio: 1 });
+      if (await outerIntent()) {
+        await timeline.evaluate(el => {
+          el.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -4 }));
+          window.__shellFrameTrace.reader = true;
+          try { el.scrollTop -= 4; } finally { window.__shellFrameTrace.reader = false; }
+        });
+        await settleScroll(timeline);
+      }
+      expect(await outerIntent()).toBe(false);
+      await expect(popout).toBeInViewport({ ratio: 1 });
       const outerTop = (await position(timeline)).top;
       const clampedReading = async () => {
         const expected = await viewport.evaluate((el, top) => Math.min(top, Math.max(0, el.scrollHeight - el.clientHeight)), reading);
         await stableReading(expected);
       };
-      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      await popout.click();
       await expect(floating).toBeVisible(); await settleFrames(page); await clampedReading();
       expect(await outerIntent()).toBe(false);
       if (!touch) {
@@ -217,7 +236,9 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         await phase("paused-restore"); await floating.getByRole("button", { name: "Restore size" }).click();
         await settleFrames(page); await clampedReading();
       }
-      await phase("paused-return"); await floating.getByRole("button", { name: "Return to chat" }).click();
+      await phase("paused-return");
+      await expect(floating.getByRole("button", { name: "Return to chat" })).toBeInViewport({ ratio: 1 });
+      await floating.getByRole("button", { name: "Return to chat" }).click();
       await expect(floating).toHaveCount(0); await settleFrames(page); await stableReading(reading);
       expect(await outerIntent()).toBe(false);
       expect(Math.abs((await position(timeline)).top - outerTop)).toBeLessThan(2);
