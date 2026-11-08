@@ -2,6 +2,7 @@
 import type chokidar from "chokidar";
 import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import type { Stats } from "node:fs";
+import { EventEmitter } from "node:events";
 import path from "node:path";
 import { loadIgnoreMatcher } from "../ignore/engine";
 import { collectRepositorySnapshots } from "../document/git-data";
@@ -33,6 +34,8 @@ const KEEPALIVE_FRAME = ": keepalive\n\n";
 
 export type WatchSessionOptions = {
   collectRepositories?: typeof collectRepositorySnapshots;
+  // The Git ignored-folder inventory (tests substitute a slow one).
+  collectIgnored?: typeof collectIgnoredInventory;
   usePolling?: boolean;
   respectGitignore?: boolean;
   terminalEnabled?: boolean;
@@ -336,16 +339,25 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const policyBefore = await policyRevision(entry);
     const matcher = await loadIgnoreMatcher({ rootPath: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
       respectGitignore: options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
-    // Folders Git ignores as a whole are listed, not walked.
-    const ignored = entry.kind === "dir" ? await collectIgnoredInventory(entry.absolutePath, cancellation.signal) : null;
     if (stopped) return null;
     let root!: ObservedRoot;
-    const index = new FileIndex(entry, matcher, { revision: nextRevision, classify: options.classify, publish: batch => fileBatch(root, batch), ignored,
+    const index = new FileIndex(entry, matcher, { revision: nextRevision, classify: options.classify, publish: batch => fileBatch(root, batch),
       windowLimit: options.ignoredWindowLimit,
       onWork: kind => metrics?.inc(`index.${kind}_total`),
       onInvalidate: (id, descendants) => media.invalidate(entry.absolutePath, id, descendants),
     });
     policies.set(entry.absolutePath, index.policy);
+    const ready = Promise.withResolvers<void>();
+    // The root accepts targeted file requests (a preview, a direct link)
+    // while Git collects the ignored-folder inventory; the watcher starts
+    // walking only once it knows which folders not to read.
+    root = { index, watcher: Object.assign(new EventEmitter(), { close: async () => {} }), followNewest: new NewestDocument(),
+      classificationWaiters: new Map(), ready: false, finish: () => ready.resolve() };
+    owned.add(root);
+    if (!staged) { roots.set(entry.absolutePath, root); prepared.get(entry.absolutePath)?.resolve(root); }
+    // Folders Git ignores as a whole are listed, not walked.
+    index.setIgnoredInventory(entry.kind === "dir" ? await (options.collectIgnored ?? collectIgnoredInventory)(entry.absolutePath, cancellation.signal) : null);
+    if (stopped) return null;
     const watcher: FileObserver = options.watch ? options.watch(entry.absolutePath, {
       ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
       usePolling: options.usePolling ?? false, interval: 100, ignored: index.policy.ignored,
@@ -355,10 +367,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       background: file => index.isIgnoredPath(file),
       onWork: kind => metrics?.inc(`index.${kind}_total`),
     });
-    const ready = Promise.withResolvers<void>();
-    root = { index, watcher, followNewest: new NewestDocument(), classificationWaiters: new Map(), ready: false, finish: () => ready.resolve() };
-    owned.add(root);
-    if (!staged) { roots.set(entry.absolutePath, root); prepared.get(entry.absolutePath)?.resolve(root); }
+    root.watcher = watcher;
+    for (const id of index.pinnedIds) if (index.isIgnoredPath(id)) watcher.track?.(id);
     watcher.on("all", (event, file, stats) => {
       if (stopped || !owned.has(root)) return;
       metrics?.inc(`watcher.events_total.${event}`);

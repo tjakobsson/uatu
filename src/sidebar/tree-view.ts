@@ -102,6 +102,9 @@ export class TreeView {
   // Keyed by root and folder id: overlapping roots share absolute ids.
   private readonly folderPathById = new Map<string, string>();
   private renderedFolders = new Set<string>();
+  // Removed folder rows that still had rows beneath them; cleaned up once the
+  // last descendant leaves.
+  private readonly staleFolderRows = new Set<string>();
   private folderRowsVisible = true;
   private readonly listing = new Map<string, "pending" | "failed">();
   private readonly onListFolder: TreeViewOptions["onListFolder"];
@@ -374,6 +377,7 @@ export class TreeView {
         this.lastPathsKey = pathsFingerprint(libraryPaths);
         this.renderedPaths = new Set(renderedPaths);
         this.renderedFolders = new Set(folderPaths);
+        this.staleFolderRows.clear();
         this.ensureRevealCueStyleElement();
         this.syncFollowOverrideObserver();
         this.applyFollowOverrideAttribute();
@@ -419,6 +423,7 @@ export class TreeView {
         } else tree.resetPaths(libraryPaths, { initialExpandedPaths: mergedReveal });
         this.renderedPaths = new Set(renderedPaths);
         this.renderedFolders = new Set(folderPaths);
+        this.staleFolderRows.clear();
         if (previousFilterKind === "all" && nextFilterKind === "all") {
           // Initialization also opens ancestors of expanded descendants. Undo
           // that implicit reveal without collapsing the descendants themselves.
@@ -525,9 +530,7 @@ export class TreeView {
         removedStatusPaths.push(path);
         // Recursive: implicit subfolders left empty by this batch's file
         // removals would block a plain removal.
-        if (this.renderedFolders.delete(path) && ![...this.renderedPaths, ...this.renderedFolders].some(other => other.startsWith(path))) {
-          operations.push({ type: "remove", path, recursive: true });
-        }
+        if (this.renderedFolders.delete(path)) this.staleFolderRows.add(path);
       }
       for (const folder of patch.folderUpserts ?? []) {
         const prefix = this.rootPrefixById.get(folder.rootId);
@@ -541,6 +544,13 @@ export class TreeView {
           operations.push({ type: "add", path });
         }
         if (this.folderRowsVisible) updatedStatuses.push({ path, status: "ignored" });
+      }
+      for (const path of [...this.staleFolderRows].sort((a, b) => a.length - b.length)) {
+        if (this.renderedFolders.has(path)) { this.staleFolderRows.delete(path); continue; }
+        if ([...this.renderedPaths, ...this.renderedFolders].some(other => other.startsWith(path))) continue;
+        this.staleFolderRows.delete(path);
+        if (operations.some(operation => operation.type === "remove" && operation.recursive && path.startsWith(operation.path))) continue;
+        operations.push({ type: "remove", path, recursive: true });
       }
       if (operations.length) tree.batch(operations);
       if (removedStatusPaths.length || updatedStatuses.length) tree.applyGitStatusPatch({ remove: removedStatusPaths, set: updatedStatuses });
@@ -769,6 +779,7 @@ export class TreeView {
     this.foldersByPath.clear();
     this.folderPathById.clear();
     this.renderedFolders = new Set();
+    this.staleFolderRows.clear();
     this.listing.clear();
     this.renderedLeafCount = 0;
     this.renderedBinaryLeafCount = 0;

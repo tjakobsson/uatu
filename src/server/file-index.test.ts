@@ -371,3 +371,20 @@ test("ignored files waiting on content classification never take every slot from
   await index.idle();
   expect(documentIds(index, "/docs/build/")).toHaveLength(20);
 });
+
+test("deleting a large ignored folder publishes its removal only after every file's removal", async () => {
+  const { index, batches } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  for (let i = 0; i < 1500; i++) index.observe("add", `/docs/build/obj${i}.o`, stat());
+  await index.idle();
+  batches.length = 0;
+  index.observe("unlinkDir", "/docs/build");
+  await index.idle();
+  const lane = batches.filter(batch => batch.lane);
+  const folderBatch = lane.findIndex(batch => (batch.folderRemovals ?? []).some(removal => removal.id === "/docs/build"));
+  const lastFileBatch = lane.findLastIndex(batch => batch.removals.length > 0);
+  expect(lane.flatMap(batch => batch.removals)).toHaveLength(1500);
+  expect(folderBatch).toBeGreaterThanOrEqual(lastFileBatch);
+  expect(lane.every(batch => batch.upserts.length + batch.removals.length + (batch.folderRemovals ?? []).length <= 1024)).toBe(true);
+});

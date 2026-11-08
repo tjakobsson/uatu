@@ -348,3 +348,23 @@ test("polling: an ancestor .gitignore change outside the root reconciles ignored
     expect(rootOf(session).folders).toBeUndefined();
   } finally { await reader?.cancel(); await session.stop(); }
 }, 25_000);
+
+test("a file opens while the Git inventory is still running, and the inventory's folders arrive afterwards", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/a.o"]);
+  const gate = Promise.withResolvers<void>();
+  const { collectIgnoredInventory } = await import("./git-ignore");
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, {
+    collectIgnored: async (root, signal) => { await gate.promise; return collectIgnoredInventory(root, signal); },
+  });
+  try {
+    const started = session.start();
+    const readme = await session.ensureDocument(path.join(cwd, "README.md"));
+    expect(readme?.relativePath).toBe("README.md");
+    gate.resolve();
+    await started;
+    expect(folders(rootOf(session))).toEqual(["build/"]);
+    expect(paths(rootOf(session)).filter(file => file.startsWith("build/"))).toEqual([]);
+  } finally { gate.resolve(); await session.stop(); }
+});

@@ -209,6 +209,18 @@ describe("TreeView selection lifecycle with the real library", () => {
     expect(tree().getItem("build/renders/")).toBeNull();
   });
 
+  it("a folder row removed before its last files leaves once they do", () => {
+    const docs = ["a.o", "b.o"].map((name, index) => ({ id: `/r1/build/${name}`, name, relativePath: `build/${name}`, rootId: "r1", mtimeMs: 0, kind: "binary" as const, gitIgnoreStatus: "ignored" as const, revision: index + 1 }));
+    view.update([{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0, docs,
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: true, revision: 0 }] }], null);
+    const patch = (revision: number, values: Partial<DocumentPatch>): DocumentPatch => ({ kind: "patch", epoch: "e", previousRevision: revision - 1, revision, generatedAt: revision,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: String(revision), upserts: [], removals: [], changedId: null, ...values });
+    expect(view.applyPatch(patch(3, { removals: [{ rootId: "r1", id: "/r1/build/a.o" }], folderRemovals: [{ rootId: "r1", id: "/r1/build" }] }), null)).toBe(true);
+    expect(tree().getItem("build/b.o")).not.toBeNull();
+    expect(view.applyPatch(patch(4, { removals: [{ rootId: "r1", id: "/r1/build/b.o" }] }), null)).toBe(true);
+    expect(tree().getItem("build/")).toBeNull();
+  });
+
   it("folder removals are qualified by root when overlapping roots share a folder id", () => {
     const shared = { id: "/repo/sub/build", listed: false, revision: 0 };
     const overlapping: RootGroup[] = [

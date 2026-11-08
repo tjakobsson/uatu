@@ -81,7 +81,7 @@ export class FileIndex {
   readonly ignoredFolders: IgnoredFolders;
   readonly folders = new Map<string, RevisionedFolder>();
   private readonly knownIgnoredFiles: Set<string>;
-  private readonly git: boolean;
+  private git: boolean;
   private lanePending = new Map<string, { doc: RevisionedDocument | null; order: number }>();
   private folderPending = new Map<string, RevisionedFolder | null>();
   private laneScheduler: ReturnType<typeof createRefreshScheduler>;
@@ -103,6 +103,19 @@ export class FileIndex {
     for (const relative of inventory?.folders ?? []) {
       const id = path.join(entry.absolutePath, ...relative.split("/"));
       if (this.policy.accepts(id, DIRECTORY)) this.folders.set(id, this.folderEntry(id, relative, false, 0));
+    }
+  }
+
+  // The Git inventory, when it arrives after the index (so a file can be
+  // opened while Git runs). Its folder entries are published as a patch.
+  setIgnoredInventory(inventory: IgnoredInventory | null): void {
+    if (this.entry.kind !== "dir" || !inventory) return;
+    this.git = true;
+    for (const file of inventory.files) this.knownIgnoredFiles.add(file);
+    for (const relative of inventory.folders) {
+      this.ignoredFolders.addTop(relative);
+      const id = path.join(this.entry.absolutePath, ...relative.split("/"));
+      if (this.policy.accepts(id, DIRECTORY)) this.queueFolder(id, relative);
     }
   }
 
@@ -342,12 +355,6 @@ export class FileIndex {
     const folderUpserts: RevisionedFolder[] = [];
     const folderRemovals: DocumentReference[] = [];
     const full = () => upserts.length + removals.length + folderUpserts.length + folderRemovals.length >= IGNORED_LANE_PATCH_LIMIT;
-    for (const [id, folder] of this.folderPending) {
-      if (full()) break;
-      this.folderPending.delete(id);
-      if (folder) { this.folders.set(id, folder); folderUpserts.push(folder); }
-      else if (this.folders.delete(id)) folderRemovals.push({ rootId: this.entry.absolutePath, id });
-    }
     const lanePending = this.lanePending;
     const laneEntries = function* () {
       const preferred = preferredId ? lanePending.get(preferredId) : undefined;
@@ -360,6 +367,15 @@ export class FileIndex {
       this.lanePending.delete(id);
       if (value.doc) { this.documents.set(id, value.doc); upserts.push(value.doc); }
       else if (this.documents.delete(id)) { this.newest.remove(id); removals.push({ rootId: this.entry.absolutePath, id }); }
+    }
+    for (const [id, folder] of this.folderPending) {
+      if (full()) break;
+      // A folder leaves only after every pending entry beneath it has been
+      // published, so no patch removes a row while its files remain.
+      if (!folder && [...this.lanePending.keys()].some(child => child.startsWith(`${id}${path.sep}`))) continue;
+      this.folderPending.delete(id);
+      if (folder) { this.folders.set(id, folder); folderUpserts.push(folder); }
+      else if (this.folders.delete(id)) folderRemovals.push({ rootId: this.entry.absolutePath, id });
     }
     if (!this.unpublished && this.initialComplete) this.initialPublished = true;
     this.options.onWork?.("batch");
