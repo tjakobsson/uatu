@@ -8904,6 +8904,58 @@ describe("pending permission recovery", () => {
     await adapter.dispose();
   });
 
+  for (const mode of ["legacy", "native", "replacement"] as const) test(`${mode} question cleanup retains an actually replaced native row`, async () => {
+    const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent")];
+    provider.listMessages = async () => ({ items: [], completeItems: [], accounting: [] });
+    let pending = [{ requestId: "same", conversationId: "parent",
+      questions: [{ prompt: "Old question", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }];
+    provider.listQuestions = async () => pending;
+    let hold = false, entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    provider.listPermissions = async () => {
+      if (hold) { hold = false; entered = true; await gate; }
+      return [];
+    };
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0, onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    let reading: ReturnType<ChatAdapter["history"]> | undefined;
+    const internals = adapter as unknown as {
+      readCoveredHistory: (id: string, options: {}, recovery: { dirty: boolean }, replacement: {}) => ReturnType<ChatAdapter["history"]>;
+    };
+    try {
+      await adapter.history("parent");
+      const projection = adapter.projectionForTests("parent"), old = projection.get("question:same");
+      pending = [];
+      hold = true;
+      reading = mode === "replacement" ? internals.readCoveredHistory("parent", {}, { dirty: false }, {}) : adapter.history("parent");
+      await waitUntil(() => entered); // absence has staged this exact old row
+      provider.eventQueue.push({ type: "question.asked", data: { sessionID: "parent", id: "same", timestamp: Date.now(),
+        questions: [{ question: "New native question", options: [{ label: "A" }] }] } });
+      await waitUntil(() => projection.get("question:same") !== old);
+      const native = projection.get("question:same");
+      expect(native).toMatchObject({ type: "question", status: "pending", questions: [expect.objectContaining({ prompt: "New native question" })] });
+      release();
+      const snapshot = await reading;
+      expect(snapshot.items.find(item => item.id === "question:same")).toEqual(native);
+      expect(projection.get("question:same")).toEqual(native);
+      expect(events.filter(event => event.type === "resolved")).toEqual([]);
+      expect(adapter.activity().awaiting).toBe(true);
+      provider.eventQueue.push({ id: "empty-refresh", type: "session.next.tool.success",
+        data: { sessionID: "parent", callID: "empty-refresh", tool: "question" } } as never);
+      await waitUntil(() => !projection.has("question:same"));
+      await liveEventsApplied(adapter, provider);
+      expect(adapter.activity().awaiting).toBe(false);
+      const announced = events.flatMap(event => event.type === "notification" ? [event.notification.id] : []);
+      expect(announced).toHaveLength(1);
+      expect(events.flatMap(event => event.type === "resolved" ? [event.id] : [])).toEqual(announced);
+    } finally {
+      release(); await reading?.catch(() => undefined);
+      await adapter.stopEventPump(); await pump; await adapter.dispose();
+    }
+  });
+
   for (const announcement of ["before read", "during deferred cleanup"] as const) test(`deferred question cleanup fences child announcement ${announcement}`, async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

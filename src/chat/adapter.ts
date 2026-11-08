@@ -1591,7 +1591,8 @@ export class ChatAdapter {
       const ownsQuestion = (item: QuestionRequest) => this.publishedQuestions.get(id) === previousTracking.get(id)
         && this.publishedQuestions.get(item.conversationId ?? id) === previousTracking.get(item.conversationId ?? id);
       const retainCurrentQuestion = (item: QuestionRequest) => !ownsQuestion(item)
-        || (this.announced.get(item.id)?.tick ?? 0) > questionTick;
+        || ((this.announced.get(item.id)?.tick ?? 0) > questionTick
+          && historyRemovals.get(item.id)?.expected !== item);
       reconcileQuestionFreshness = () => {
         // A tool refresh owns a complete newer set, including absence. An old
         // read must neither resurrect its unprojected rows nor retire current
@@ -1601,7 +1602,11 @@ export class ChatAdapter {
           if (item.type === "question" && !ownsQuestion(item)) items.splice(index, 1);
         }
         for (const [itemId, removal] of historyRemovals) {
-          if (removal.expected?.type === "question" && retainCurrentQuestion(removal.expected)) historyRemovals.delete(itemId);
+          // An announcement can precede its awaited parent mirror. Its tick
+          // protects notification/timestamp retirement, not the old parent
+          // row already covered by this read's absence. Only a newer set
+          // revokes that removal authority; row replacement has its own fence.
+          if (removal.expected?.type === "question" && !ownsQuestion(removal.expected)) historyRemovals.delete(itemId);
         }
         for (const item of projection.items()) {
           if (item.type !== "question" || !retainCurrentQuestion(item)) continue;

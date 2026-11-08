@@ -44,6 +44,7 @@ describe("chat reversible-history composer", () => {
     document.documentElement.setAttribute("data-chat-panel", "open");
     stubConversationSelect(document);
     const { createOpenCodeV2Provider } = await import("./opencode/v2/provider");
+    const { assistantContentUpdates } = await import("./opencode/v2/normalization");
     const { ChatAdapter } = await import("./adapter");
     const { TimelineRenderer } = await import("./timeline-renderer");
     const { TimelineAnchorController } = await import("./anchor");
@@ -51,7 +52,15 @@ describe("chat reversible-history composer", () => {
     const olderId = surface === "main" ? "chat-load-older" : "chat-drilldown-older";
     const directory = process.cwd(), freshText = "Fresh native oldest loaded answer";
     const records = Array.from({ length: 150 }, (_, n) => ({ id: `msg${n}`, type: "assistant", time: { created: n + 1 },
-      content: [{ id: `part${n}`, type: "text", text: `Native answer ${n}` }] }));
+      content: [{ type: "text", text: `Native answer ${n}` }] }));
+    // V2 stored and live text share message + ordinal identities, not the
+    // independently named part IDs used by the V1 fixtures. Capture them
+    // before the removal case empties a stored message's content.
+    const answerIds = records.map(record => {
+      const update = assistantContentUpdates(record.id, record.content, record.time.created)[0];
+      if (update?.kind !== "text") throw new Error("Expected a native text fixture");
+      return update.itemId;
+    });
     const info = { id, projectID: "global", title: id, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       time: { created: 1, updated: 151 }, location: { directory } };
     let wire: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -78,13 +87,13 @@ describe("chat reversible-history composer", () => {
     provider.listQuestions = async (...args) => {
       if (armed && !injected) {
         injected = true;
-        records[50]!.content = [{ id: "part50", type: "text", text: freshText }];
+        records[50]!.content = [{ type: "text", text: freshText }];
         // The production V2 provider consumes and normalizes this event while
         // the real adapter's covered head read is pending. coverage.merge may
-        // add part50 to that head, but it cannot add the intervening page.
+        // add msg50's text to that head, but not the intervening page.
         wire!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: "evt_oldest", created: 51, type: "session.message.content.updated",
           durable: { aggregateID: id, seq: 1, version: 1 }, data: { sessionID: id, messageID: "msg50", content: records[50]!.content } })}\n\n`));
-        await waitUntil(() => { const row = adapter.projectionForTests(id).get("part:part50"); return row?.type === "assistant_message" && row.markdown === freshText; });
+        await waitUntil(() => { const row = adapter.projectionForTests(id).get(answerIds[50]!); return row?.type === "assistant_message" && row.markdown === freshText; });
       }
       return questions(...args);
     };
@@ -114,11 +123,11 @@ describe("chat reversible-history composer", () => {
       }
       await waitUntil(() => streams === 1);
       document.querySelector<HTMLButtonElement>(`#${olderId}`)!.click();
-      await waitUntil(() => document.querySelector(`#${itemsId} [data-chat-item-id="part:part50"]`) !== null);
+      await waitUntil(() => document.querySelector(`#${itemsId} [data-chat-item-id="${answerIds[50]}"]`) !== null);
       expect(document.querySelectorAll(`#${itemsId} [data-chat-item-id^="part:"]`)).toHaveLength(100);
       const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
       type(input, "Native frontier draft");
-      const reading = { itemId: "part:part50", offset: -12 };
+      const reading = { itemId: answerIds[50]!, offset: -12 };
       anchor!.restore(reading);
       // Removing the stored text part keeps the provider's 150-message page
       // positions intact, while the fresh authoritative page omits that row.
@@ -128,11 +137,11 @@ describe("chat reversible-history composer", () => {
       await waitUntil(() => streams === 2);
       await flush();
       expect(injected).toBe(true);
-      expect(heads[0]!.items).toContainEqual(expect.objectContaining({ id: "part:part50", markdown: freshText }));
-      expect(heads[0]!.historyStart).toEqual(frontierAvailable ? { id: "part:part100", createdAt: 101 } : undefined);
+      expect(heads[0]!.items).toContainEqual(expect.objectContaining({ id: answerIds[50], markdown: freshText }));
+      expect(heads[0]!.historyStart).toEqual(frontierAvailable ? { id: answerIds[100], createdAt: 101 } : undefined);
       expect(document.querySelectorAll(`#${itemsId} [data-chat-item-id^="part:"]`)).toHaveLength(frontierAvailable ? removeAnswer ? 99 : 100 : 150);
-      expect(document.querySelector(`#${itemsId} [data-chat-item-id="part:part50"]`)?.textContent).toContain(freshText);
-      if (removeAnswer) expect(document.querySelector(`#${itemsId} [data-chat-item-id="part:part75"]`)).toBeNull();
+      expect(document.querySelector(`#${itemsId} [data-chat-item-id="${answerIds[50]}"]`)?.textContent).toContain(freshText);
+      if (removeAnswer) expect(document.querySelector(`#${itemsId} [data-chat-item-id="${answerIds[75]}"]`)).toBeNull();
       if (frontierAvailable) expect(installed!.olderCursor).toBeDefined();
       else expect(installed!.olderCursor).toBeUndefined();
       expect(document.querySelector<HTMLButtonElement>(`#${olderId}`)!.hidden).toBe(!frontierAvailable);
