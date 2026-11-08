@@ -2,7 +2,9 @@
 
 ## Purpose
 Provide a library-backed document tree with selection and reveal behavior, filtered path sets, file counts and icons, and repository-status annotations.
+
 ## Requirements
+
 ### Requirement: Preserve manual directory open/closed state in the document tree
 Directories in the sidebar tree SHALL render collapsed (closed) by default, matching the conventions of common file trees (VS Code, Finder, GitHub). When a user expands or collapses a directory, that explicit choice SHALL persist across document selections and across sidebar re-renders triggered by file changes — including filesystem-driven `resetPaths` calls into the library — except for ancestors required to reveal a newly active document. When a document becomes active (initial default, follow-mode auto-switch, or explicit document navigation), the system SHALL reveal its path by expanding every ancestor directory between the watched root and the document, then marking that document's row as selected. Reveal MUST be purely additive — it opens ancestors but never closes any directory the user has opened. In the All view, background refreshes that leave the document selection unchanged, including an intentionally empty selection, MUST preserve surviving directories' open/closed state; refreshing content or rebuilding the file list MUST NOT itself request a new reveal or choose a document. A manual collapse of an ancestor of the active document SHALL instead clear the active document as specified by the manual-collapse requirement below. The separate Changed-filter expansion and filter-transition policies remain unchanged and MUST NOT be mistaken for manual deselection. Folder expansion need not persist across page reloads; intentional document deselection SHALL persist as specified below.
 
@@ -250,34 +252,31 @@ Collapsing an unrelated directory, opening a directory, moving keyboard focus wi
 - **AND** no title, path, rendered content, source, or diff from that old request replaces the empty preview
 
 ### Requirement: Display sidebar file count breakdown
-The sidebar SHALL display a file count for the current scope. When the Files-pane filter is `All`, the count SHALL show the total number of files visible in the tree; when the filter is `Changed`, the count SHALL show `N of M files` where N is the number of files visible under the filter (including any temporarily-revealed follow-override row) and M is the total tree size. When the visible set contains binary files, the count SHALL additionally show how many are binary; under filter `Changed`, the binary subcount reflects the visible (filtered) binary count, not the total binary count. The hardcoded directory denylist (e.g. `node_modules/`, `.git/`) MUST NOT contribute to a hidden count and the counter MUST NOT expose a `hidden` segment, since filtering is now configured through a single source of truth (`.uatu.json ignore.exclude` plus `.gitignore` honoring) rather than the previous dual-source `.uatuignore` + `.gitignore` model.
+The sidebar SHALL display one quiet count of eligible file entries in the selected All, Recent, or Changed view after visibility, filename/path, and media-type filtering. The count SHALL include eligible entries outside the current viewport and SHALL exclude directory rows; All SHALL count files regardless of collapsed folders. Changed SHALL include any existing temporary active-file inclusion. The count MUST NOT display binary subcounts, hidden counts, or N-of-M wording. Its accessible name SHALL identify it as a file/result count.
 
 #### Scenario: Counter shows only the total when the tree is uniform
-- **WHEN** the watched roots contain only viewable text and Markdown files
-- **AND** the Files-pane filter is `All`
-- **THEN** the sidebar counter reads `N files` (e.g. `3 files`)
+- **WHEN** All contains three eligible text files
+- **THEN** the quiet count is 3 and its accessible label identifies three files
 
 #### Scenario: Counter surfaces the binary subcount
-- **WHEN** the watched roots contain a mix of viewable and binary files
-- **AND** the Files-pane filter is `All`
-- **THEN** the sidebar counter reads `N files · M binary` where M is the number of binary entries in the tree
+- **WHEN** All contains a mix of text and binary files
+- **THEN** the count includes all eligible files without a binary subcount
 
 #### Scenario: Counter never includes a hidden segment
-- **WHEN** the watch root has files filtered by `.uatu.json ignore.exclude` or `.gitignore`
-- **THEN** the sidebar counter does NOT include a `· hidden` segment
-- **AND** the counter reflects only the visible total and the binary subcount
+- **WHEN** exposure or visibility rules omit files
+- **THEN** the count reflects the eligible set and has no hidden segment
 
 #### Scenario: Counter shows `N of M` form under the Changed filter
-- **WHEN** the Files-pane filter is `Changed`
-- **AND** there are 12 files in the change set and 1,840 total files in the tree
-- **THEN** the sidebar counter reads `12 of 1,840 files`
+- **WHEN** Changed contains 12 eligible entries in a workspace with 1,840 indexed entries
+- **THEN** the quiet count is 12 rather than 12 of 1,840
 
 #### Scenario: Binary subcount under filter reflects the visible binary count
-- **WHEN** the Files-pane filter is `Changed`
-- **AND** of the 12 filtered entries, 2 are binary
-- **AND** the total tree contains more binary entries that are outside the change set
-- **THEN** the sidebar counter reads `12 of 1,840 files · 2 binary`
-- **AND** the binary subcount does NOT include binaries that are filtered out
+- **WHEN** two of Changed's 12 eligible files are binary
+- **THEN** the quiet count remains 12 with no separate binary statistic
+
+#### Scenario: Collapsed folders do not shrink the count
+- **WHEN** All contains 128 eligible files and most containing directories are collapsed
+- **THEN** the count remains 128 rather than counting mounted rows
 
 ### Requirement: Reduce the tree's path set when the Files-pane filter is set to Changed
 
@@ -385,28 +384,29 @@ The document tree SHALL display a small icon next to each tree leaf — both cli
 - **THEN** the tree row shows the library's icon for that extension (or the default icon if not mapped)
 
 ### Requirement: Annotate tree rows with git status
-When the watched repository is git-backed AND the repository change data for that repository is available, the document tree SHALL display the git status of each changed path as a row annotation on the corresponding tree row, using `@pierre/trees`' git-status API. The set of changed paths fed to the annotation pipeline MUST be the changed-files list. The supported statuses MUST include at minimum: added, modified, deleted, untracked, and ignored. The `ignored` annotation MUST be applied to paths surfaced in the git-ignored files list (files visible in the tree that match git's standard ignore rules) so reviewers can distinguish "clean tracked file" from "git is intentionally not following this file" — for example, a per-machine settings file excluded by `core.excludesFile`. Renamed paths MUST display the annotation on the new path. Annotations MUST update whenever the repository's change data changes. The annotations replace the previous All/Changed Files-pane toggle: there is one tree, and changed files are visually distinguished in place.
+When repository change data is available, the document tree SHALL annotate changed paths from the changed-files list using its existing Git-status presentation. Supported statuses SHALL include added, modified, deleted, renamed, untracked, and ignored; renamed annotations SHALL apply at the new path. Change annotations SHALL update when repository change data changes and SHALL coexist with All/Recent/Changed presentation controls. Independently supplied known Git-ignore classification SHALL permit ignored styling without waiting for repository change collection. Ignored files SHALL use a muted filename and faded file icon without a visible ignored-status label or badge. Selection, focus, recency cues, and playback actions SHALL remain legible and usable. Unknown ignore status MUST NOT be presented as confirmed ignored or confirmed clean. Recent SHALL use the same muted ignored treatment.
 
 #### Scenario: Modified file shows a modified annotation
-- **WHEN** the watched root is git-backed and a file in the working tree has uncommitted modifications
-- **THEN** that file's tree row shows a modified annotation
-- **AND** the file remains in its normal hierarchical position in the tree
+- **WHEN** repository change data reports an uncommitted modification
+- **THEN** the tree annotates that file in its normal hierarchical position
 
 #### Scenario: Untracked file shows an untracked annotation
-- **WHEN** the watched root is git-backed and a new file has been created but not staged
-- **THEN** that file's tree row shows an untracked annotation
+- **WHEN** repository change data reports an unstaged new file
+- **THEN** the corresponding row shows an untracked annotation
 
 #### Scenario: Annotations clear when changes are committed
-- **WHEN** the working-tree changes that produced an annotation are committed
-- **AND** the next repository change data reflects a clean working tree for that path
-- **THEN** the corresponding tree row no longer shows a status annotation
+- **WHEN** a commit removes the changes and updated repository data confirms it
+- **THEN** those change annotations clear
 
 #### Scenario: No annotations when git is unavailable
-- **WHEN** the watched root is not a git repository OR the repository change data is unavailable
-- **THEN** no rows display git-status annotations
-- **AND** the tree still renders the full file listing
+- **WHEN** repository change data and ignore classification are unavailable
+- **THEN** the tree still lists eligible files without inventing Git-status annotations
 
 #### Scenario: Gitignored file visible in the tree shows the ignored annotation
-- **WHEN** the watched root is git-backed AND uatu's tree displays a file that matches git's standard ignore rules (e.g. excluded by `core.excludesFile` or by `.gitignore` while gitignore-respect is disabled)
-- **THEN** that file's tree row shows the `ignored` annotation
-- **AND** the row is visually distinguishable from a clean tracked file (which has no annotation) and from an untracked file (which has the `untracked` annotation)
+- **WHEN** a visible file is known to be Gitignored
+- **THEN** its filename is muted and file icon faded without repeated visible status text
+- **AND** it remains selectable and distinguishable from clean tracked or untracked entries
+
+#### Scenario: An ignored file is selected or playing
+- **WHEN** a muted ignored row is selected or its clip is auditioned
+- **THEN** selection and playback controls remain clearly distinguishable and actionable

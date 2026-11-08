@@ -7,29 +7,33 @@ The hub-brokered live stream is the one long-lived connection a hub-served sessi
 ## Requirements
 
 ### Requirement: A hub-served page holds exactly one live connection
-A session page served through the hub SHALL receive every pushed update — document state, conversation inventory, conversation events, subagent transcripts, and cross-workspace activity — over one authenticated Server-Sent Events connection to the hub origin. Selecting a conversation, opening a subagent transcript, opening or collapsing the chat panel, and switching the previewed document MUST NOT open an additional long-lived HTTP connection. WebSocket terminal sessions are outside this guarantee. A page hidden from view SHALL release its live connection while hidden, retaining every subscription and its cursor, and SHALL resume every topic from those cursors when it is shown again; a page opened in the background SHALL NOT hold a live connection before it is first shown, so the connections a browser holds to the hub are bounded by its visible session pages, not by its open tabs. The stream SHALL be authenticated by the hub session exactly as other hub routes are, and a stream MUST carry only workspaces the authenticated user may access.
+A hub-served page SHALL receive every pushed update, including document state, conversation inventory/events, subagent transcripts, and cross-workspace activity, over one authenticated SSE connection. Selecting a conversation, opening a transcript, opening/collapsing Chat, or switching preview MUST NOT create another pushed-update connection. Terminal WebSockets and finite, independently cancellable media GET/HEAD/range responses are outside this guarantee; media bytes MUST NOT enter SSE. A page hidden from view SHALL release its live connection while retaining subscriptions and cursors, and resume topics from them when visible. A page initially opened hidden SHALL wait until visible to connect. Streams SHALL carry only workspaces authorized for the authenticated user.
 
 #### Scenario: A page with everything open holds one stream
-- **WHEN** a user has the chat panel open, a conversation selected, a subagent transcript open, and a document previewed in one session tab
-- **THEN** the browser holds one long-lived HTTP connection to the hub for that tab's live updates
+- **WHEN** a page has Chat, a conversation, a child transcript, and a preview open
+- **THEN** it holds one SSE connection for pushed updates
 
 #### Scenario: Background tabs do not exhaust the browser
-- **WHEN** a user has six or more session tabs open on the same hub origin in one browser, each with a conversation selected, and one of them is visible
-- **THEN** the hidden tabs hold no live connection
-- **AND** an ordinary request from the visible tab (a document load, a personal-state update) is answered without waiting for a live connection to close
+- **WHEN** six or more workspace tabs exist with only one visible
+- **THEN** hidden tabs hold no live-update connection
+- **AND** ordinary visible-tab requests do not wait for a hidden tab's live stream to close
 
 #### Scenario: A background tab resumes where it was left
-- **WHEN** a hidden session tab with a conversation selected is shown again
-- **THEN** it holds one live connection again, resumed from its retained cursors
-- **AND** its conversation timeline, draft, and previewed document are as the user left them
+- **WHEN** a hidden workspace tab becomes visible
+- **THEN** its one replacement stream resumes retained topic cursors without losing its preview, draft, or timeline
 
 #### Scenario: A tab opened in the background waits to connect
-- **WHEN** a user opens a session in a background tab
-- **THEN** the tab holds no live connection until it is first shown
+- **WHEN** a workspace tab is opened hidden
+- **THEN** its live stream waits until the page is shown
 
 #### Scenario: Terminals do not count
-- **WHEN** a session tab has several terminal panes attached
-- **THEN** the tab still holds exactly one live HTTP connection; terminal WebSockets are separate
+- **WHEN** several terminal panes are attached
+- **THEN** the page still has one pushed-update SSE connection independently of terminal WebSockets
+
+#### Scenario: Seeking does not add another update stream
+- **WHEN** a video plays or seeks through media range requests
+- **THEN** the page retains one pushed-update stream and media bytes travel only in the independent HTTP responses
+- **AND** cancelling a media request does not close the live stream
 
 ### Requirement: Events are enveloped by workspace and topic with independent cursors
 Every `live` event on the stream SHALL be enveloped with the workspace it belongs to, its topic, and a topic-scoped cursor; the only other frames are the `hello` event that opens the stream and names its id, and transport keepalives. Topics SHALL be a fixed vocabulary: `document` (workspace state snapshots and change signals), `inventory` (conversation inventory invalidation), `conversation` (one conversation's ordered events, keyed by conversation id), `activity` (the cross-workspace summary), `worktrees` (bounded worktree-inventory invalidation scoped to an accessible source workspace), and `personal` (account-private personal-state invalidation for the stream's workspace). Cursors SHALL be independent per topic: replaying one topic from a retained cursor MUST NOT depend on, reorder, or duplicate another topic's events. A client reconnecting SHALL present the last cursor it applied for each cursor-bearing subscription it resumes (`document`, `inventory`, `conversation`), and the hub SHALL replay each from its cursor in order before live events, or signal a topic-scoped resync when that cursor is not replayable — never resync the whole stream because one topic fell behind. The `activity` topic takes no cursor: on every stream open the hub sends a fresh summary for each workspace the user may access, so a reconnect receives that snapshot rather than a replay. The `worktrees` topic SHALL likewise require no replay cursor and SHALL send fresh invalidation on subscription or reconnect so the client fetches authoritative inventory. It SHALL invalidate immediately after a committed Uatu worktree operation and after reconciliation changes inventory, without adding paths or content to the `activity` topic or opening another long-lived connection. Worktree invalidations MUST reveal no inaccessible workspace, path, credential or conversation content. Transport keepalives SHALL be comment frames that carry no envelope and MUST NOT advance any cursor.
