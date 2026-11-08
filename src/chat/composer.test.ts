@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { Composer, type ComposerConversation, type ComposerPresentation, type ComposerTransport } from "./composer";
 import { ChatTransportError } from "./client";
+import { ConversationProjection } from "./adapter";
+import { ConversationReplay } from "./replay";
+import { applyChatEvent } from "./projection";
 import type { ChatProjection } from "./projection";
 import type { ConversationSnapshot, MessageAttachment, QueuedMessage, ReversibleHistoryResult } from "./types";
 
@@ -69,6 +72,128 @@ test("ordinary send captures once, accepts without consuming newer text and rele
   expect(f.texts.get("one")).toBe("Newer"); expect(f.prompts[0]![2]).toBe("Original");
   expect(f.prompts[0]![6]).toEqual([{ id: "upload-1", name: "image.png", mimeType: "image/png" }]);
   expect(f.released).toEqual(f.created); expect(f.projection().items).toHaveLength(1);
+});
+
+test("an oversized prepared recovery cannot let a delayed direct acknowledgement resurrect its excluded prompt", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>();
+  const f = fixture();
+  f.transport.prompt = async (...args) => { f.prompts.push(args); return response.promise; };
+  let receipts = 0, consumed = 0, releasedQueue = 0;
+  f.presentation.accepted = () => { receipts++; };
+  f.context.consumeConfiguration = () => { consumed++; };
+  f.transport.sendNow = async () => { releasedQueue++; return { messageId: "unrelated", delivery: "steer" }; };
+  const replay = new ConversationReplay("g", "one", 1024 * 1024);
+  const server = new ConversationProjection(replay);
+  const subscription = replay.handoff(() => null).subscription;
+  const iterator = subscription[Symbol.asyncIterator]();
+  const ordinary = new ConversationReplay("g", "one", 1024 * 1024);
+  const incremental = ordinary.handoff(() => null).subscription;
+  try {
+    f.composer.edit("Original");
+    await f.composer.attach([image("original.png")]);
+    const sent = f.composer.submit();
+    // The provider published the accepted prompt before its HTTP receipt
+    // returned. A missed external revert then excludes that same message.
+    server.upsert({ id: "message:message-1", type: "user_message", createdAt: 1, text: "Original" });
+    const native = (await iterator.next()).value!;
+    const applied = applyChatEvent(f.projection(), native, replay.latestCursor());
+    f.context.write(applied.projection);
+    f.composer.observe(native, applied.outcome === "applied");
+    const workers = Array.from({ length: 225 }, (_, n) => ({ id: `worker:${n}`, type: "background_task" as const, createdAt: 2 + n,
+      taskId: `worker:${n}`, description: `Worker ${n}`, status: "completed" as const, summary: "x".repeat(4096) }));
+    // The old incremental queue accommodates this actual publication. The
+    // prepared producer's bounded policy instead withholds the whole batch.
+    ordinary.publish({ type: "item.remove", itemId: "message:message-1" });
+    for (const item of workers) ordinary.publish({ type: "item.upsert", item });
+    expect(ordinary.subscriberCount()).toBe(1);
+    server.recover([{ kind: "remove", itemId: "message:message-1" }, ...workers.map(item => ({ kind: "upsert" as const, item }))]);
+    const marker = (await iterator.next()).value!;
+    expect(marker).toMatchObject({ type: "resync", reason: "conversation-rewritten" });
+    const invalidated = applyChatEvent(f.projection(), marker, replay.latestCursor());
+    expect(invalidated.outcome).toBe("resync");
+    f.context.write(invalidated.projection);
+    expect((await iterator.next()).done).toBe(true);
+    expect(f.projection().removedIds ?? []).toEqual([]);
+    const queued = [entry({ id: "unrelated", delivery: "queue", text: "Do not release", paused: true })];
+    const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "idle" },
+      generation: "g", cursor: replay.latestCursor(), configuration: { mode: "fresh" }, items: server.items(), queued };
+    f.context.write(f.composer.acceptSnapshot(snapshot, f.projection().acceptedDrafts));
+    f.reload();
+    expect(f.projection().items).toHaveLength(225);
+    expect(f.projection().removedIds ?? []).toEqual([]);
+    f.composer.edit("Newer private draft");
+    await f.composer.attach([image("newer.png")]);
+    response.resolve(acceptance({ configuration: { mode: "obsolete" } }));
+    await sent;
+    expect(f.projection().items.some(item => item.id === "message:message-1")).toBe(false);
+    expect(f.projection().items).toHaveLength(225);
+    expect(f.projection().acceptedDrafts).toEqual([]);
+    expect(f.projection().configuration).toEqual({ mode: "fresh" });
+    expect(f.projection().queued).toEqual(queued);
+    expect(f.texts.get("one")).toBe("Newer private draft");
+    expect(f.composer.pendingAttachments().map(item => item.name)).toEqual(["newer.png"]);
+    expect(f.released).toEqual([f.created[0]!]);
+    expect(receipts).toBe(1);
+    expect(consumed).toBe(1);
+    expect(releasedQueue).toBe(0);
+    expect(f.prompts).toHaveLength(1);
+    expect(f.composer.submitting).toBe(false);
+  } finally { subscription.cancel(); incremental.cancel(); f.composer.dispose(); }
+});
+
+for (const replacement of ["none", "absent", "present", "generation", "switch-and-return"] as const) test(`direct acknowledgement retains acceptance but inserts only with current presentation authority: ${replacement}`, async () => {
+  const response = deferred<ReturnType<typeof acceptance>>();
+  const f = fixture();
+  f.transport.prompt = async (...args) => { f.prompts.push(args); return response.promise; };
+  let receipts = 0;
+  f.presentation.accepted = () => { receipts++; };
+  f.composer.edit("Original");
+  await f.composer.attach([image()]);
+  const sent = f.composer.submit();
+  f.composer.edit("Newer");
+  if (replacement === "switch-and-return") {
+    f.select("two"); f.reload(); f.composer.edit("Other conversation draft");
+    f.select("one");
+  }
+  if (replacement !== "none") {
+    const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "idle" },
+      generation: replacement === "generation" ? "new-generation" : "g", cursor: "fresh", configuration: {},
+      items: replacement === "present" ? [{ id: "message:message-1", type: "user_message", createdAt: 1, text: "Authoritative native prompt" }] : [] };
+    f.context.write(f.composer.acceptSnapshot(snapshot, f.projection().acceptedDrafts));
+    // Also exercise a changed generation independently of the epoch fence.
+    if (replacement !== "generation") f.reload();
+  }
+  response.resolve(acceptance());
+  await sent;
+  expect(receipts).toBe(1);
+  expect(f.prompts).toHaveLength(1);
+  expect(f.texts.get("one")).toBe("Newer");
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.released).toEqual(f.created);
+  if (replacement === "none" || replacement === "present") {
+    expect(f.projection().items).toHaveLength(1);
+    expect(f.projection().items[0]).toMatchObject({ id: "message:message-1", text: replacement === "present" ? "Authoritative native prompt" : "Original",
+      requestId: f.prompts[0]![1], attachments: f.prompts[0]![6] });
+  } else expect(f.projection().items).toEqual([]);
+  if (replacement === "switch-and-return") expect(f.texts.get("two")).toBe("Other conversation draft");
+});
+
+for (const delivery of ["queue", "steer"] as const) test(`a pre-replacement pending ${delivery} receipt cannot recreate an absent queue entry`, async () => {
+  const response = deferred<ReturnType<typeof acceptance>>();
+  const f = fixture({ prompt: () => response.promise });
+  let receipts = 0;
+  f.presentation.accepted = () => { receipts++; };
+  f.composer.edit("Original");
+  const sent = f.composer.submit();
+  const queued = [entry({ id: "unrelated", delivery: "queue", paused: true })];
+  f.setProjection({ queued }); f.reload(); f.composer.edit("Newer");
+  response.resolve(acceptance({ pending: true, delivery }));
+  await sent;
+  expect(receipts).toBe(1);
+  expect(f.projection().queued).toEqual(queued);
+  expect(f.projection().items).toEqual([]);
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.texts.get("one")).toBe("Newer");
 });
 
 test("refusal restores capture before newer edits and reuses original request and uploaded refs", async () => {

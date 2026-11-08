@@ -303,11 +303,13 @@ export class Composer {
       this.presentation.accepted(accepted);
       this.update(id, p => {
         if (accepted.delivery !== "steer" && !retried && this.conversation.epoch() === epoch && p.configurationRevision === configurationRevision) p = { ...p, configuration: accepted.configuration };
-        // Receipts bridge only a fresh acceptance. Streamed queue/configuration
-        // evidence or a replacement projection outranks that local bridge.
+        // Receipts bridge only a fresh acceptance. A replacement snapshot can
+        // exclude a message without streaming its removal (bulk resync), so a
+        // pre-replacement direct acknowledgement may settle the draft and
+        // confirm a present row, but cannot recreate an absent one.
         return accepted.pending
           ? !retried && this.conversation.epoch() === epoch ? noteQueuedMessage(p, { id: accepted.messageId, text, queuedAt: Date.now(), delivery: accepted.delivery, requestId, ...(refs.length ? { attachments: refs } : {}) }, queueRevision) : removeAcceptedDraft(p, requestId)
-          : confirmAcceptedDraft(p, { requestId, messageId: accepted.messageId, text, ...(refs.length ? { attachments: refs } : {}) }, { insert: accepted.operation !== "reload" });
+          : confirmAcceptedDraft(p, { requestId, messageId: accepted.messageId, text, ...(refs.length ? { attachments: refs } : {}) }, { insert: accepted.operation !== "reload" && this.conversation.epoch() === epoch && p.generation === current.generation });
       });
       this.changed("accepted", id);
       this.presentation.note(null);
