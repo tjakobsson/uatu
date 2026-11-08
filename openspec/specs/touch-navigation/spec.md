@@ -42,19 +42,23 @@ The `Files` tab's surface SHALL be the existing sidebar pane stack (the visible 
 - **AND** a single tap changes nothing
 
 ### Requirement: A preview-bound navigation switches to the Preview tab
-When the user navigates to content the preview renders — picking a document (a tree row or a search-pane result, both the follow-mode Rule A path), opening a review score, or opening a commit — the UI SHALL switch to the Preview tab showing that content. Directory expand/collapse taps SHALL NOT switch tabs. Programmatic tree updates (follow-mode Rules C/D, file events) MUST NOT switch tabs.
+When the user explicitly navigates to preview content by selecting a filename in the tree or Recent, selecting a search result, or opening a commit or other preview destination, the UI SHALL switch to Preview. Directory expansion, Files view/query/filter controls, and media audition actions SHALL NOT switch tabs. A media Play action SHALL stay in Files and retain the current preview destination. Programmatic tree/Recent updates and Follow events MUST NOT switch tabs.
 
 #### Scenario: Pick lands on Preview
-- **WHEN** the user taps a document row in the Files tab
-- **THEN** the Preview tab becomes active showing the picked document
+- **WHEN** the user taps a filename in All, Recent, or Changed
+- **THEN** Preview becomes active and shows that file without initiating media playback or interrupting an already active session
 
 #### Scenario: A search result lands on Preview
-- **WHEN** the user taps a search-pane result in the Files tab
-- **THEN** the Preview tab becomes active showing the matched document
+- **WHEN** the user taps a project-search result in Files
+- **THEN** Preview becomes active with the matched document
 
 #### Scenario: File events do not steal the Files tab
-- **WHEN** the Files tab is active and a watched-file event updates the tree
-- **THEN** the Files tab remains active with the tree updated
+- **WHEN** Files is active and a file event updates the tree or Recent
+- **THEN** Files remains active without automatic playback
+
+#### Scenario: Audition stays in Files
+- **WHEN** the user activates a Recent media row's Play action
+- **THEN** Files remains active and the current preview and URL remain unchanged
 
 ### Requirement: A surface-directed shortcut SHALL bring its surface forward
 A keyboard shortcut that acts on a specific surface SHALL make that surface the active tab before it acts, so its affordance is never mounted or focused inside a hidden subtree. `⌘F` targets the preview and SHALL activate the Preview tab; `⇧⌘F` targets the Search pane in the sidebar stack and SHALL activate the Files tab. This is the shortcut counterpart of the existing rule for preview-bound navigations: a shortcut the user pressed is an act of intent, so it may promote a surface, whereas programmatic activity (follow-mode Rules C/D, file events) still MUST NOT. A shortcut that consumes the key and suppresses the host's own handling MUST NOT leave the user with nothing visible to use.
@@ -159,3 +163,23 @@ When a tablet uses desktop mode, the workspace SHALL fit the visible viewport du
 - **WHEN** the user switches between touch and desktop mode during an editing session
 - **THEN** the target layout uses the current viewport and safe areas without stale padding or double-counted insets
 - **AND** the draft and current conversation survive the switch
+
+### Requirement: A persistent player fits above the existing touch tabs
+During audition the compact player SHALL remain operable above the existing Files/Preview/Chat/Terminal tab bar. Its layout SHALL account for device safe areas, rotation, keyboard/viewport changes, and the available height of each surface. It MUST NOT obscure the last reachable file row, Chat composer, or terminal controls. Video SHALL have an expandable presentation. Switching surfaces or UI mode SHALL retain the player session and time without adding a fifth tab or a duplicate player.
+
+#### Scenario: A clip plays while Chat is used
+- **WHEN** the user switches from Files to Chat during playback on a phone
+- **THEN** the compact controls remain reachable and do not cover the composer
+- **AND** the same playback session continues
+
+#### Scenario: The last Recent row is reached
+- **WHEN** the player and bottom tabs are visible and the user scrolls to the end of Recent
+- **THEN** the last file row and its actions can be fully brought above the player
+
+#### Scenario: A device rotates or changes UI mode
+- **WHEN** the device rotates or switches between touch and desktop presentation during playback
+- **THEN** controls fit the usable viewport and the active clip retains its time without duplicate playback
+
+#### Scenario: Terminal remains operable
+- **WHEN** Terminal is shown with an active compact player
+- **THEN** terminal sizing accounts for both the player and existing tabs while retaining the PTY attachment
