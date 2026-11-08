@@ -87,7 +87,10 @@ export class FileIndex {
   private laneScheduler: ReturnType<typeof createRefreshScheduler>;
   private laneDrainTimer: ReturnType<typeof setTimeout> | null = null;
   // Windowed documents in write order (oldest first), and the pinned ones.
-  private windowed = new Map<string, true>();
+  // Windowed documents by observed write order (ascending), and the latest
+  // order appended; a late-classified older write is placed by its order.
+  private windowed = new Map<string, number>();
+  private windowTail = 0;
   private pinned = new Set<string>();
 
   constructor(readonly entry: WatchEntry, readonly matcher: IgnoreMatcher, private options: FileIndexOptions) {
@@ -400,16 +403,20 @@ export class FileIndex {
     this.laneScheduler.schedule();
   }
 
-  private touchWindow(id: string): void {
+  // Returns false when the write itself is the oldest and leaves the window.
+  private touchWindow(id: string, order: number): boolean {
     this.windowed.delete(id);
-    this.windowed.set(id, true);
+    if (order >= this.windowTail) { this.windowed.set(id, order); this.windowTail = order; }
+    else this.windowed = new Map([...this.windowed, [id, order] as const].sort((a, b) => a[1] - b[1]));
     const limit = this.options.windowLimit ?? IGNORED_WINDOW_LIMIT;
-    if (this.windowed.size <= limit) return;
-    for (const candidate of this.windowed.keys()) {
+    if (this.windowed.size <= limit) return true;
+    for (const candidate of [...this.windowed.keys()]) {
       if (this.windowed.size <= limit) break;
-      if (this.pinned.has(candidate) || candidate === id) continue;
+      if (this.pinned.has(candidate)) continue;
+      if (candidate === id) { this.windowed.delete(id); return false; }
       this.remove(candidate, this.options.revision());
     }
+    return true;
   }
 
   stop(): void {
@@ -462,10 +469,14 @@ export class FileIndex {
     const relative = rootRelative(this.entry, id);
     if (relative && this.ignoredFolders.isInside(relative)) {
       this.windowed.delete(id);
+      // An upsert queued before its folder became ignored is in the other
+      // lane; it must not be published after the file is gone.
+      this.pending.delete(id);
       // Never published: nothing to retract.
       if (this.documents.has(id)) { this.lanePending.set(id, { doc: null, order }); this.laneScheduler.schedule(); }
       else this.lanePending.delete(id);
     } else if (this.documents.has(id) || this.pending.get(id)?.doc) {
+      this.lanePending.delete(id);
       this.pending.set(id, { doc: null, order, live: false });
       this.schedule();
     }
@@ -534,10 +545,14 @@ export class FileIndex {
       };
       this.fingerprints.set(job.id, { revision: job.order, value: fileFingerprint(stats) });
       if (inside) {
-        if (this.ignoredFolders.isWindowed(relative)) this.touchWindow(job.id);
+        // An older write that finished classifying late can be the one that
+        // leaves the window; it is then not published.
+        if (this.ignoredFolders.isWindowed(relative) && !this.touchWindow(job.id, job.order)) return;
+        this.pending.delete(job.id);
         this.lanePending.set(job.id, { doc, order: job.order });
         this.laneScheduler.schedule();
       } else {
+        this.lanePending.delete(job.id);
         this.pending.set(job.id, { doc, live: job.live, order: job.order });
         this.schedule();
       }

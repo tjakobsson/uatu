@@ -91,17 +91,21 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
   // Chokidar cannot defer a decision, so a folder Git starts ignoring after
   // discovery is still walked in this mode. A known unlisted folder is
   // watched itself (so a new one gets its row) but nothing inside it is.
+  // Files a client opened inside an unlisted folder are tracked individually.
+  const tracked = new Set<string>();
   const ignored: Options["ignored"] = (file, stats) => options.ignored(file, stats)
-    || options.unlisted?.(path.dirname(file)) === true;
+    || !tracked.has(file) && options.unlisted?.(path.dirname(file)) === true;
   const watcher = chokidar.watch(entry.absolutePath, {
     ignored, usePolling: polling, interval: 100,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
   });
-  return polling
-    ? new PolledBaselineCheck(watcher, ignored, {
-      root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
-    })
-    : Object.assign(watcher, { reveal: (directory: string) => { watcher.add(directory); }, track: (file: string) => { watcher.add(file); } });
+  const track = (file: string) => { tracked.add(file); watcher.add(file); };
+  if (!polling) return Object.assign(watcher, { reveal: (directory: string) => { watcher.add(directory); }, track });
+  const observer = new PolledBaselineCheck(watcher, ignored, {
+    root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
+  });
+  observer.track = track;
+  return observer;
 }
 
 // Chokidar polls each file and directory with fs.watchFile, which (in Bun, as

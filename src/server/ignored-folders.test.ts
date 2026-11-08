@@ -399,3 +399,21 @@ test("polling: a folder created inside a listed ignored level gets a row and lis
     await wait(() => paths(rootOf(session)).includes("build/new.txt"), "write in a listed level");
   } finally { await session.stop(); }
 }, 20_000);
+
+test("polling: a file opened inside an unlisted ignored folder sees its edits and deletion", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/a.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { usePolling: true });
+  const opened = path.join(cwd, "build/a.md");
+  try {
+    await session.start();
+    const first = await session.ensureDocument(opened);
+    expect(first).toBeDefined();
+    await Bun.sleep(1200);
+    await writeFile(opened, "# edited, longer than before");
+    await wait(() => (session.findDocument(opened)?.revision ?? 0) > first!.revision!, "edit observed");
+    await rm(opened);
+    await wait(() => !session.findDocument(opened), "deletion observed");
+  } finally { await session.stop(); }
+}, 20_000);

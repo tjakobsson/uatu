@@ -388,3 +388,30 @@ test("deleting a large ignored folder publishes its removal only after every fil
   expect(folderBatch).toBeGreaterThanOrEqual(lastFileBatch);
   expect(lane.every(batch => batch.upserts.length + batch.removals.length + (batch.folderRemovals ?? []).length <= 1024)).toBe(true);
 });
+
+test("deleting a file whose folder became ignored before its first flush clears both lanes", async () => {
+  const { index } = ignoredFixture({ classifyDirectory: async () => true });
+  index.markReady();
+  await index.idle();
+  index.observe("add", "/docs/gen/a.md", stat());
+  await Bun.sleep(5);
+  expect(await index.classifyNewDirectory("/docs/gen")).toBe(true);
+  index.observe("unlink", "/docs/gen/a.md");
+  await index.idle();
+  expect(index.documents.has("/docs/gen/a.md")).toBe(false);
+});
+
+test("the live-write window evicts by write order, not by when classification finished", async () => {
+  const blocked = Promise.withResolvers<"binary">();
+  const { index } = ignoredFixture({ windowLimit: 2, classify: async id => id.endsWith(".unknown") ? blocked.promise : "text" });
+  index.markReady();
+  await index.idle();
+  index.observe("add", "/docs/build/renders/old.unknown", stat(1));
+  await Bun.sleep(5);
+  index.observe("add", "/docs/build/renders/newer.md", stat(2));
+  index.observe("add", "/docs/build/renders/newest.md", stat(3));
+  await Bun.sleep(5);
+  blocked.resolve("binary");
+  await index.idle();
+  expect(documentIds(index, "/docs/build/").sort()).toEqual(["/docs/build/renders/newer.md", "/docs/build/renders/newest.md"]);
+});
