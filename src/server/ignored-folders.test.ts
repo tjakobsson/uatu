@@ -368,3 +368,34 @@ test("a file opens while the Git inventory is still running, and the inventory's
     expect(paths(rootOf(session)).filter(file => file.startsWith("build/"))).toEqual([]);
   } finally { gate.resolve(); await session.stop(); }
 });
+
+test("a watched root that is itself ignored by an ancestor rule is read like any workspace", async () => {
+  const repo = await fixture();
+  await writeFile(path.join(repo, ".gitignore"), "build/\n");
+  await files(repo, ["build/out.md", "build/renders/take.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: path.join(repo, "build") }], false);
+  try {
+    await session.start();
+    expect(rootOf(session).folders).toBeUndefined();
+    expect(paths(rootOf(session))).toEqual(["out.md", "renders/take.md"]);
+  } finally { await session.stop(); }
+});
+
+test("polling: a folder created inside a listed ignored level gets a row and lists", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/CMakeCache.txt"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { usePolling: true });
+  try {
+    await session.start();
+    await session.listFolder(cwd, "build");
+    await files(cwd, ["build/renders/a.md"]);
+    await wait(() => folders(rootOf(session)).includes("build/renders/"), "new child folder row");
+    expect(paths(rootOf(session))).not.toContain("build/renders/a.md");
+    await session.listFolder(cwd, "build/renders");
+    expect(paths(rootOf(session))).toContain("build/renders/a.md");
+    // The earlier polling guarantees still hold in a listed level.
+    await writeFile(path.join(cwd, "build/new.txt"), "x");
+    await wait(() => paths(rootOf(session)).includes("build/new.txt"), "write in a listed level");
+  } finally { await session.stop(); }
+}, 20_000);

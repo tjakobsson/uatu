@@ -34,7 +34,9 @@ export async function collectIgnoredInventory(cwd: string, signal?: AbortSignal)
     const [output, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     if (code !== 0) return null;
     const entries = output.split("\0").filter(Boolean);
-    const candidates = entries.filter(entry => entry.endsWith("/"));
+    // "./" means the watched root itself is ignored by a rule above it. The
+    // root is what the user opened, so it is read like any workspace.
+    const candidates = entries.filter(entry => entry.endsWith("/") && entry !== "./");
     const statuses = await classifyGitIgnored(cwd, candidates, signal);
     if (statuses.includes("unknown")) return null;
     return {

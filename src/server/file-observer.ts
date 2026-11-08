@@ -89,9 +89,10 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
     }
   }
   // Chokidar cannot defer a decision, so a folder Git starts ignoring after
-  // discovery is still walked in this mode; known unlisted folders are not.
+  // discovery is still walked in this mode. A known unlisted folder is
+  // watched itself (so a new one gets its row) but nothing inside it is.
   const ignored: Options["ignored"] = (file, stats) => options.ignored(file, stats)
-    || (stats === undefined || stats.isDirectory()) && options.unlisted?.(file) === true;
+    || options.unlisted?.(path.dirname(file)) === true;
   const watcher = chokidar.watch(entry.absolutePath, {
     ignored, usePolling: polling, interval: 100,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
