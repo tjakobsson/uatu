@@ -8838,6 +8838,62 @@ describe("pending permission recovery", () => {
   });
 
   for (const mode of ["legacy", "native"] as const)
+  for (const reconciliation of ["parent only", "child empty", "child replacement"] as const)
+  test(`${mode} three related child histories cannot strand parent question discovery (${reconciliation})`, async () => {
+    const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listMessages = async () => ({ items: [], completeItems: [], accounting: [] });
+    const question = (owner: string, requestId: string) => ({ requestId, conversationId: owner,
+      questions: [{ prompt: requestId, header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] });
+    const parent = question("parent", "parent-pending"), oldChild = question("child", "old-child"), newChild = question("child", "new-child");
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    const state = adapter as unknown as {
+      questionRefreshes: Set<string>; questionReads: Set<unknown>;
+      publishedQuestions: Map<string, Set<string>>; questionCreatedAt: Map<string, number>;
+    };
+    provider.listQuestions = async () => reconciliation === "parent only" ? [] : [oldChild];
+    await adapter.history("parent");
+    const captured = reconciliation === "parent only" ? [parent] : [parent, oldChild];
+    let inChild = false, targetLists = 0, childCommits = 0;
+    provider.listQuestions = async () => {
+      if (inChild) return reconciliation === "child replacement" ? [parent, newChild] : [parent];
+      targetLists++;
+      if (targetLists > 3) throw new Error("question refresh exceeded its three-list bound");
+      // Every parent list captures the same still-pending parent question.
+      // Each overlaps a younger child commit, including the final allowed list.
+      inChild = true;
+      try { await adapter.history("child"); childCommits++; }
+      finally { inChild = false; }
+      return captured;
+    };
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ id: "discover-parent", type: "session.next.tool.success", data: { sessionID: "parent", callID: "discover-parent", tool: "question" } } as never);
+      await waitUntil(() => targetLists > 0);
+      await waitUntil(() => !state.questionRefreshes.has("parent"));
+      await liveEventsApplied(adapter, provider);
+      expect(targetLists).toBe(3);
+      expect(childCommits).toBe(3);
+      // Assert before any further history read or tool event can rescue it.
+      const expected = reconciliation === "child replacement" ? ["question:new-child", "question:parent-pending"] : ["question:parent-pending"];
+      expect(adapter.projectionForTests("parent").items().filter(item => item.type === "question").map(item => item.id).sort()).toEqual(expected);
+      expect(adapter.projectionForTests("parent").get("question:parent-pending")).toMatchObject({ conversationId: "parent", status: "pending" });
+      expect(adapter.activity().awaiting).toBe(true);
+      expect([...(state.publishedQuestions.get("parent") ?? [])].sort()).toEqual(expected);
+      expect(state.questionCreatedAt.has("question:old-child")).toBe(false);
+      expect(state.questionReads.size).toBe(0);
+      provider.listQuestions = async () => [];
+      await adapter.history("child");
+      provider.eventQueue.push({ id: "retire-parent", type: "session.next.tool.success", data: { sessionID: "parent", callID: "retire-parent", tool: "question" } } as never);
+      await waitUntil(() => !adapter.projectionForTests("parent").items().some(item => item.type === "question"));
+      await liveEventsApplied(adapter, provider);
+      expect(adapter.activity().awaiting).toBe(false);
+      expect(state.publishedQuestions.has("parent")).toBe(false);
+      expect(state.questionReads.size).toBe(0);
+    } finally { await adapter.stopEventPump(); await pump; await adapter.dispose(); }
+  });
+
+  for (const mode of ["legacy", "native"] as const)
   for (const relevantSource of ["child", "grandchild"] as const)
   test(`${mode} a newly discovered ${relevantSource}'s empty history still supersedes an older parent refresh`, async () => {
     const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });

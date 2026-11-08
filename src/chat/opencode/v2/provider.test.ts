@@ -4612,6 +4612,16 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     return marker;
   };
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const history = adapter.history.bind(adapter);
+  let reconnectHistory: ReturnType<ChatAdapter["history"]> | undefined, reconnectStarted!: () => void;
+  const reconnectReadStarted = new Promise<void>(resolve => { reconnectStarted = resolve; });
+  adapter.history = (...args) => {
+    const result = history(...args);
+    if (read === "history" && holdChild && args[0] === "ses_parent" && !owner.getStore() && !reconnectHistory) {
+      reconnectHistory = result; reconnectStarted();
+    }
+    return result;
+  };
   let pending: Promise<unknown> | undefined;
   const row = (items: import("../../types").ConversationItem[]) => items.find(item => item.id === "tool:root") as import("../../types").ToolItem;
   const assert = (items: import("../../types").ConversationItem[], foreign: boolean) => {
@@ -4631,6 +4641,19 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     // owner: only the requested history/undo may enter the final-boundary gate.
     void adapter.startEventPump();
     await provider.waitForEventStream!(AbortSignal.timeout(5_000));
+    if (read === "history") {
+      // server.connected also calls history(parent). Let that real recovery
+      // finish before starting the explicit owner: its older question-set
+      // publication can otherwise conflict with the owner held at its final
+      // boundary, independently of any worker-association counterproof.
+      // Unlike gating another page, this exercises reconnect's actual expiry
+      // and publication, and keeps the no-extra-reread assertion scoped to the
+      // target lookup below. Undo retains its separate boundary-change race.
+      await reconnectReadStarted;
+      assert((await reconnectHistory!).items, false);
+      expect(childPages).toBe(0);
+      expect(expiredReads).toBe(heldReads);
+    }
     if (outcome === "cached-foreign") {
       // A healthy lookup for another parent is positive counterproof for this
       // cached edge. The watch must consume it even with no later observation.

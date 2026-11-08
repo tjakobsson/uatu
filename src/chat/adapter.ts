@@ -513,7 +513,7 @@ export type ChatAdapterOptions = {
 };
 
 type QuestionSetObservation = { ids: Set<string>; age: number };
-type QuestionSetCoverage = { own?: QuestionSetObservation; children?: QuestionSetObservation };
+type QuestionSetCoverage = { parentId?: string; own?: QuestionSetObservation; children?: QuestionSetObservation };
 type QuestionSetRead = { conversationId: string; parentId?: string; scope: Set<string>; sets: Map<string, QuestionSetCoverage>; age: number; conflicted: boolean; revision: number };
 
 export class ChatAdapter {
@@ -1616,12 +1616,7 @@ export class ChatAdapter {
         for (const [owner, ids] of byChild) tracking.set(owner, ids);
       }
       const questionAuthority = (item: QuestionRequest): QuestionSetObservation | undefined => {
-        const owner = item.conversationId ?? id;
-        const owning = questionRead.sets.get(owner);
-        const parent = owner === id ? session.parentId : this.sessionParents.get(owner);
-        const applicable = [questionRead.sets.get(id)?.children, owning?.own, owning?.children,
-          parent ? questionRead.sets.get(parent)?.children : undefined];
-        return applicable.reduce<QuestionSetObservation | undefined>((latest, fact) => fact && (!latest || fact.age > latest.age) ? fact : latest, undefined);
+        return this.questionAuthority(questionRead, item);
       };
       const refreshedQuestion = (item: QuestionRequest) => questionAuthority(item) !== undefined;
       const ownsQuestion = (item: QuestionRequest) => questionAuthority(item)?.ids.has(item.id) ?? true;
@@ -6203,10 +6198,10 @@ export class ChatAdapter {
   }
 
   /** Throws on provider failure — an errored list is unknown, not empty. */
-  private async pendingQuestions(id: string, rememberTimestamps = true): Promise<ConversationItem[]> {
+  private async pendingQuestions(id: string, rememberTimestamps = true): Promise<QuestionRequest[]> {
     if (!this.provider.listQuestions) return [];
     const pending = await this.provider.listQuestions();
-    const items: ConversationItem[] = [];
+    const items: QuestionRequest[] = [];
     for (const request of pending) {
       // This conversation's own, or a subagent's it launched — the same
       // parentage rule as permissions, and for the same reason: a question
@@ -6279,10 +6274,20 @@ export class ChatAdapter {
       const coverage: QuestionSetCoverage = read.sets.get(owner) ?? {};
       const kind = children ? "children" : "own";
       if (age <= read.age || age < (coverage[kind]?.age ?? 0)) continue;
+      coverage.parentId = owner === source.conversationId ? source.parentId : source.conversationId;
       coverage[kind] = { ids: pending, age };
       read.sets.set(owner, coverage);
       read.revision++;
     }
+  }
+
+  private questionAuthority(read: QuestionSetRead, item: QuestionRequest): QuestionSetObservation | undefined {
+    const owner = item.conversationId ?? read.conversationId;
+    const owning = read.sets.get(owner);
+    const parent = owner === read.conversationId ? read.parentId : owning?.parentId ?? this.sessionParents.get(owner);
+    const applicable = [read.sets.get(read.conversationId)?.children, owning?.own, owning?.children,
+      parent ? read.sets.get(parent)?.children : undefined];
+    return applicable.reduce<QuestionSetObservation | undefined>((latest, fact) => fact && (!latest || fact.age > latest.age) ? fact : latest, undefined);
   }
 
   /**
@@ -6297,14 +6302,40 @@ export class ChatAdapter {
     void (async () => {
       try {
         const scope = await this.questionReadScope(conversationId, parentId);
+        const questionTick = this.interactionClock;
         for (let attempt = 0; attempt < 3; attempt++) {
           const source: QuestionSetRead = { conversationId, parentId, scope, sets: new Map(), age: ++this.questionReadClock, conflicted: false, revision: 0 };
           if (!this.disposed) this.questionReads.add(source);
           try {
-            const items = await this.pendingQuestions(conversationId, false);
-            // A younger history source already committed while this list waited.
-            // Reread; completion order alone cannot authorize the older result.
-            if (source.sets.size) continue;
+            let items = await this.pendingQuestions(conversationId, false);
+            if (source.conflicted) continue;
+            const projection = this.projection(conversationId);
+            const current = projection.items().filter((item): item is QuestionRequest => item.type === "question" && item.status === "pending");
+            // Prefer a fresh list while retries remain. On the final attempt
+            // reconcile applicable membership instead of abandoning discovery:
+            // a child's empty set cannot exclude its parent's own question.
+            if (source.sets.size && attempt < 2) continue;
+            const authority = (item: QuestionRequest) => this.questionAuthority(source, item);
+            items = items.filter(item => authority(item)?.ids.has(item.id) ?? true);
+            // Younger history can discover a question absent from the captured
+            // list. Borrow its committed row, but not a grandchild outside this
+            // list's coverage. References live only for this active read.
+            for (const owner of source.sets.keys()) {
+              for (const item of this.projections.get(owner)?.items() ?? []) {
+                if (item.type !== "question" || item.status !== "pending") continue;
+                const itemOwner = item.conversationId ?? owner;
+                const parent = source.sets.get(itemOwner)?.parentId ?? this.sessionParents.get(itemOwner);
+                if (itemOwner !== conversationId && parent !== conversationId) continue;
+                if (!authority(item)?.ids.has(item.id) || items.some(candidate => candidate.id === item.id)) continue;
+                items.push(item);
+              }
+            }
+            for (const item of current) {
+              if (!authority(item)?.ids.has(item.id) && (this.announced.get(item.id)?.tick ?? 0) <= questionTick) continue;
+              const index = items.findIndex(candidate => candidate.id === item.id);
+              if (index < 0) items.push(item);
+              else items[index] = item;
+            }
             for (const item of items) if (!this.questionCreatedAt.has(item.id)) this.questionCreatedAt.set(item.id, item.createdAt);
             const live = new Set(items.map(item => item.id));
             const previous = this.publishedQuestions.get(conversationId) ?? new Set<string>();
@@ -6314,7 +6345,10 @@ export class ChatAdapter {
               updates.push({ kind: "remove", itemId: id });
               this.questionCreatedAt.delete(id);
             }
-            this.publishQuestionSet(conversationId, live, source.age, source, true);
+            // Only evidence covering this entire owner's set can renew its
+            // child-inclusive age; descendant/owner-only facts keep their scope.
+            const age = Math.max(source.age, source.sets.get(conversationId)?.children?.age ?? 0);
+            this.publishQuestionSet(conversationId, live, age, source, true);
             if (updates.length > 0) {
               await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
               coalescer.push(conversationId, updates);
