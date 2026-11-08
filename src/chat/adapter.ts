@@ -512,6 +512,8 @@ export type ChatAdapterOptions = {
   onNotification?: (event: AgentNotificationEvent) => void;
 };
 
+type QuestionSetRead = { sets: Map<string, Set<string>>; revision: number };
+
 export class ChatAdapter {
   private readonly notifications: AgentNotificationTracker;
   readonly generation: string;
@@ -527,6 +529,9 @@ export class ChatAdapter {
   // Question item ids currently published per conversation, so a question that
   // stops being pending can be withdrawn from the timeline.
   private readonly publishedQuestions = new Map<string, Set<string>>();
+  // Empty reconciliation authority belongs only to overlapping reads, never
+  // to the adapter's retained conversation state.
+  private readonly questionReads = new Set<QuestionSetRead>();
   private readonly questionRefreshes = new Set<string>();
   private readonly questionCreatedAt = new Map<string, number>();
   private readonly permissionCreatedAt = new Map<string, number>();
@@ -973,6 +978,14 @@ export class ChatAdapter {
   }
 
   private async readHistory(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage?: HistoryCoverage): Promise<ConversationSnapshot> {
+    const questions = { sets: new Map<string, Set<string>>(), revision: 0 };
+    const release = () => { this.questionReads.delete(questions); };
+    coverage?.signal.addEventListener("abort", release, { once: true });
+    try { return await this.readHistoryWithQuestions(id, options, coverage, questions); }
+    finally { release(); coverage?.signal.removeEventListener("abort", release); }
+  }
+
+  private async readHistoryWithQuestions(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage: HistoryCoverage | undefined, questionRead: QuestionSetRead): Promise<ConversationSnapshot> {
     const session = await this.requireSession(id);
     coverage?.assertCurrent();
     // Captured before the provider reads: a pump event landing during them
@@ -1537,9 +1550,9 @@ export class ChatAdapter {
     let commitQuestionTracking: (() => void) | undefined;
     let reconcileQuestionFreshness: (() => void) | undefined;
     let questionTrackingCurrent: (() => boolean) | undefined;
-    try {
+    if (this.provider.listQuestions) try {
       const questionTick = coverage?.questionTick ?? this.interactionClock;
-      const previousTracking = new Map(this.publishedQuestions);
+      if (!this.disposed) this.questionReads.add(questionRead);
       const pendingNow = await this.pendingQuestions(id, false);
       coverage?.assertCurrent();
       for (const pending of pendingNow) {
@@ -1588,9 +1601,12 @@ export class ChatAdapter {
         }
         for (const [owner, ids] of byChild) tracking.set(owner, ids);
       }
-      const ownsQuestion = (item: QuestionRequest) => this.publishedQuestions.get(id) === previousTracking.get(id)
-        && this.publishedQuestions.get(item.conversationId ?? id) === previousTracking.get(item.conversationId ?? id);
-      const retainCurrentQuestion = (item: QuestionRequest) => !ownsQuestion(item)
+      const refreshedQuestion = (item: QuestionRequest) => questionRead.sets.has(id) || questionRead.sets.has(item.conversationId ?? id);
+      const ownsQuestion = (item: QuestionRequest) => [id, item.conversationId ?? id].every(owner => {
+        const newer = questionRead.sets.get(owner);
+        return !newer || newer.has(item.id);
+      });
+      const retainCurrentQuestion = (item: QuestionRequest) => (refreshedQuestion(item) && ownsQuestion(item))
         || ((this.announced.get(item.id)?.tick ?? 0) > questionTick
           && historyRemovals.get(item.id)?.expected !== item);
       reconcileQuestionFreshness = () => {
@@ -1604,9 +1620,9 @@ export class ChatAdapter {
         for (const [itemId, removal] of historyRemovals) {
           // An announcement can precede its awaited parent mirror. Its tick
           // protects notification/timestamp retirement, not the old parent
-          // row already covered by this read's absence. Only a newer set
-          // revokes that removal authority; row replacement has its own fence.
-          if (removal.expected?.type === "question" && !ownsQuestion(removal.expected)) historyRemovals.delete(itemId);
+          // row already covered by this read's absence. A newer set retaining
+          // this question revokes removal; row replacement has its own fence.
+          if (removal.expected?.type === "question" && refreshedQuestion(removal.expected) && ownsQuestion(removal.expected)) historyRemovals.delete(itemId);
         }
         for (const item of projection.items()) {
           if (item.type !== "question" || !retainCurrentQuestion(item)) continue;
@@ -1615,9 +1631,8 @@ export class ChatAdapter {
           else items[index] = item;
         }
         // Hooks may invalidate admission, but cannot admit another stale set.
-        const admittedTracking = new Map(this.publishedQuestions);
-        const owners = new Set([id, ...items.flatMap(item => item.type === "question" ? [item.conversationId ?? id] : []), ...tracking.keys()]);
-        questionTrackingCurrent = () => [...owners].every(owner => this.publishedQuestions.get(owner) === admittedTracking.get(owner));
+        const revision = questionRead.revision;
+        questionTrackingCurrent = () => questionRead.revision === revision;
       };
       commitQuestionTracking = () => {
         // Tracking is removal authority for the next tool refresh. Publish it
@@ -1642,7 +1657,7 @@ export class ChatAdapter {
         }
         for (const [owner, ids] of tracking) {
           // A concurrent parent/child refresh or history owns its newer set.
-          const newer = this.publishedQuestions.get(owner) !== previousTracking.get(owner);
+          const newer = questionRead.sets.has(owner);
           const pending = new Set([...ids].filter(itemId => {
             const item = projection.get(itemId);
             return item?.type === "question" && item.status === "pending"
@@ -1652,7 +1667,7 @@ export class ChatAdapter {
             if (!pending.size) continue;
             for (const itemId of this.publishedQuestions.get(owner) ?? []) pending.add(itemId);
           }
-          this.publishedQuestions.set(owner, pending);
+          this.publishQuestionSet(owner, pending, questionRead);
         }
       };
     } catch { /* unknown, not empty */ }
@@ -2116,6 +2131,7 @@ export class ChatAdapter {
   dispose(): Promise<void> {
     if (this.disposalPromise) return this.disposalPromise;
     this.disposed = true;
+    this.questionReads.clear();
     for (const admission of this.admittingSteers.values()) admission.retired = true;
     this.admittingSteers.clear();
     for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.checking?.finish(); }
@@ -6190,6 +6206,18 @@ export class ChatAdapter {
     } catch { /* unknown, not empty — requirePending still decides */ }
   }
 
+  /** Retain pending removal authority; lend empty-set authority only to reads
+   * already in flight. Each read observes the latest set, not a mutation log. */
+  private publishQuestionSet(owner: string, pending: Set<string>, source?: QuestionSetRead): void {
+    if (pending.size) this.publishedQuestions.set(owner, pending);
+    else this.publishedQuestions.delete(owner);
+    for (const read of this.questionReads) {
+      if (read === source) continue;
+      read.sets.set(owner, pending);
+      read.revision++;
+    }
+  }
+
   /**
    * Republishes the pending-question set for one conversation: upserts what is
    * pending now and removes what no longer is (answered elsewhere, or from the
@@ -6210,9 +6238,7 @@ export class ChatAdapter {
           updates.push({ kind: "remove", itemId: id });
           this.questionCreatedAt.delete(id);
         }
-        // Keep an empty set's identity too: absence supersedes an older read
-        // even when that read started before any questions were tracked.
-        this.publishedQuestions.set(conversationId, live);
+        this.publishQuestionSet(conversationId, live);
         if (updates.length > 0) {
           await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
           coalescer.push(conversationId, updates);

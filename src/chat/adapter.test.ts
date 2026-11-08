@@ -8681,6 +8681,86 @@ describe("pending permission recovery", () => {
     }
   });
 
+  for (const mode of ["legacy", "native"] as const) test(`${mode} concurrent child history keeps the parent's unchanged recovered question`, async () => {
+    const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listQuestions = async () => [{ requestId: "same", conversationId: "child",
+      questions: [{ prompt: "Still pending", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }];
+    let entered = false, release!: () => void, hold = true;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    provider.listPermissions = async () => { if (hold) { hold = false; entered = true; await gate; } return []; };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    const reading = adapter.history("parent");
+    try {
+      await waitUntil(() => entered);
+      expect(adapter.projectionForTests("parent").has("question:same")).toBe(false);
+      expect((await adapter.history("child")).items).toContainEqual(expect.objectContaining({ id: "question:same" }));
+      release();
+      expect((await reading).items).toContainEqual(expect.objectContaining({ id: "question:same", conversationId: "child", status: "pending" }));
+      expect(adapter.projectionForTests("parent").has("question:same")).toBe(true);
+      expect(adapter.activity().awaiting).toBe(true);
+      provider.listQuestions = async () => [];
+      provider.eventQueue.push({ id: "answered", type: "session.next.tool.success", data: { sessionID: "child", callID: "answered", tool: "question" } } as never);
+      await waitUntil(() => !adapter.projectionForTests("parent").has("question:same") && !adapter.projectionForTests("child").has("question:same"));
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally { release(); await reading.catch(() => undefined); await adapter.stopEventPump(); await pump; await adapter.dispose(); }
+  });
+
+  for (const listsQuestions of [false, true]) test(`empty question tracking stays bounded across 500 evicted conversations (list available: ${listsQuestions})`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = Array.from({ length: 500 }, (_, index) => fixtureSession(`empty-${index}`));
+    if (listsQuestions) provider.listQuestions = async () => [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+    const state = adapter as unknown as { projections: Map<string, unknown>; publishedQuestions: Map<string, Set<string>>; questionReads: Set<unknown> };
+    try {
+      for (const session of provider.sessions) {
+        await adapter.history(session.id);
+        expect(state.publishedQuestions.size).toBe(0);
+        expect(state.questionReads.size).toBe(0);
+      }
+      expect(state.projections.size).toBe(1);
+    } finally { await adapter.dispose(); }
+  });
+
+  for (const mode of ["legacy", "native"] as const) test(`${mode} overlapping reads retain empty refresh authority only until each read finishes`, async () => {
+    const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("parent")];
+    let pending = [{ requestId: "old", conversationId: "parent",
+      questions: [{ prompt: "Old", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }];
+    provider.listQuestions = async () => pending;
+    const releases: Array<() => void> = [];
+    provider.listPermissions = async () => { await new Promise<void>(resolve => { releases.push(resolve); }); return []; };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    const state = adapter as unknown as { publishedQuestions: Map<string, Set<string>>; questionReads: Set<{ sets: Map<string, Set<string>> }> ; questionRefreshes: Set<string> };
+    const pump = adapter.startEventPump();
+    const first = adapter.history("parent", { limit: 1 });
+    const second = adapter.history("parent", { limit: 2 });
+    try {
+      await waitUntil(() => releases.length === 2);
+      pending = [];
+      provider.eventQueue.push({ id: "empty", type: "session.next.tool.success", data: { sessionID: "parent", callID: "empty", tool: "question" } } as never);
+      await liveEventsApplied(adapter, provider);
+      await waitUntil(() => !state.questionRefreshes.has("parent"));
+      expect(state.publishedQuestions.size).toBe(0);
+      expect(state.questionReads.size).toBe(2);
+      for (const read of state.questionReads) expect(read.sets.get("parent")?.size).toBe(0);
+      releases[0]!();
+      const settled = await Promise.race([first, second]);
+      expect(settled.items.some(item => item.id === "question:old")).toBe(false);
+      expect(state.questionReads.size).toBe(1);
+      for (const read of state.questionReads) expect(read.sets.get("parent")?.size).toBe(0);
+      releases[1]!();
+      for (const snapshot of await Promise.all([first, second])) expect(snapshot.items.some(item => item.id === "question:old")).toBe(false);
+      expect(state.questionReads.size).toBe(0);
+      expect(state.publishedQuestions.size).toBe(0);
+      expect(adapter.activity().awaiting).toBe(false);
+    } finally {
+      for (const release of releases) release();
+      await Promise.allSettled([first, second]); await adapter.stopEventPump(); await pump; await adapter.dispose();
+    }
+  });
+
   for (const mode of ["legacy", "native", "replacement"] as const)
   for (const owner of ["parent", "child"] as const)
   for (const superseding of ["none", "new", "empty"] as const)
