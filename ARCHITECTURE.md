@@ -1105,6 +1105,11 @@ when content-visibility supplies nonzero placeholder boxes. A closed row's own
 summary remains eligible; offscreen retained rows are not discarded merely
 because the browser skips their rendering work.
 Following measures only scroll extents, not transcript items or markdown blocks.
+Native history scrolling classifies movement from extents before taking at most
+one semantic measurement for that event. Continuous upward touch movement captures
+pause intent once per owned gesture phase; actual native scroll events still
+refresh the reading point. New layout work, corrections, direction changes and
+renewed gestures invalidate that reuse, so it cannot suppress a new interruption.
 Following uses bounded, interruptible movement rather than repeatedly restarting
 native smooth scrolling. Reduced motion disables animation; initial presentation
 and saved-position restoration are direct. Each conversation/task view retains

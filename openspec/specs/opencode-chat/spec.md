@@ -1153,6 +1153,13 @@ When following is paused, layout changes elsewhere SHALL preserve the unchanged 
 - **AND** hidden activity descendants are excluded from reading anchors even if the browser reports placeholder layout boxes
 - **AND** the collapsed group's visible summary remains available as an anchor
 
+#### Scenario: History gestures avoid redundant anchor work
+- **WHEN** a paused reader scrolls through loaded conversation history
+- **THEN** each native scroll event performs at most one semantic reading-anchor measurement
+- **AND** continuous upward touch movement does not repeat the same pause-intent capture without new work
+- **AND** actual native movement, renewed gestures, direction changes and layout corrections still capture fresh intent where needed
+- **AND** upward input interrupts a new latest-content request immediately
+
 #### Scenario: Shell output initially follows independently
 - **WHEN** a shell viewport first shows output and further output arrives
 - **THEN** it shows the bottom of its scrollback

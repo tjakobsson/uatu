@@ -53,6 +53,9 @@ export class CoordinatedScrollOwner {
   private disposed = false;
   private previous: AnchorGeometry;
   private touchY: number | null = null;
+  // Reuse only the intent capture of this uninterrupted upward touch run.
+  // Native scrolls still capture fresh positions; new coordinator work renews intent.
+  private touchPaused = false;
   private upwardPending = false;
   private lastCorrectionFrame = -Infinity;
   private positioned = false;
@@ -87,6 +90,7 @@ export class CoordinatedScrollOwner {
   /** Coalesces render, resize, toggle and viewport work. Reads geometry at execution. */
   request(hasNewContent = false): void {
     if (!this.active()) return;
+    this.touchPaused = false;
     this.newContent ||= hasNewContent;
     if (this.frame !== null) return;
     this.frame = this.requestFrame(timestamp => {
@@ -100,6 +104,7 @@ export class CoordinatedScrollOwner {
    */
   flush(timestamp: number): void {
     if (!this.active()) { this.cancel(); return; }
+    this.touchPaused = false;
     if (this.lastCorrectionFrame === timestamp) { this.request(); return; }
     // Retire stale DOM ownership before the anchor chooses this frame's top.
     if (this.heldTarget && !this.scroller.contains(this.heldTarget)) this.release();
@@ -295,6 +300,7 @@ export class CoordinatedScrollOwner {
 
   beforeMutation(preferredItemId?: string): void {
     if (this.active() && !this.options.anchor.isPinned()) {
+      this.touchPaused = false;
       // Do not overwrite the pre-mutation anchor while a correction is waiting.
       if (this.frame === null) this.options.anchor.beforeMutation(this.measure(), preferredItemId);
     }
@@ -348,7 +354,9 @@ export class CoordinatedScrollOwner {
 
   private observe = (): void => {
     if (!this.active()) return;
-    const geometry = this.measure();
+    // Classify native movement using extents only. Semantic geometry is read
+    // once below, after deciding whether to retain or replace the reading anchor.
+    const geometry = this.options.measure(false);
     const previous = this.previous;
     const changedExtent = geometry.scrollHeight !== previous.scrollHeight || geometry.clientHeight !== previous.clientHeight;
     const movement = geometry.scrollTop < previous.scrollTop - 0.5 ? "up"
@@ -398,7 +406,7 @@ export class CoordinatedScrollOwner {
       // own assignments already updated `previous` in flush().
       this.request();
     } else {
-      this.options.anchor.observe(movement !== "none" ? this.options.measure(true, false) : geometry, movement);
+      this.options.anchor.observe(movement !== "none" ? this.options.measure(true, false) : this.measure(), movement);
       if (this.options.anchor.isPinned()) this.request();
     }
     this.previous = geometry;
@@ -435,11 +443,19 @@ export class CoordinatedScrollOwner {
     if ((event.clientX >= box.left && event.clientX < left) || (event.clientX >= right && event.clientX < box.right)) this.pause();
   };
   private touchStart = (event: TouchEvent): void => {
+    this.touchPaused = false;
     this.touchY = this.ownsInput(event) && !this.inTextControl(event) ? event.touches[0]?.clientY ?? null : null;
   };
   private touchMove = (event: TouchEvent): void => {
     const y = event.touches[0]?.clientY;
-    if (y !== undefined && this.touchY !== null && y > this.touchY && this.ownsInput(event) && !this.inTextControl(event)) this.pause();
+    if (y !== undefined && this.touchY !== null && this.ownsInput(event) && !this.inTextControl(event)) {
+      if (y > this.touchY) {
+        if (!this.touchPaused || this.options.anchor.isPinned()) {
+          this.pause();
+          this.touchPaused = true;
+        }
+      } else if (y < this.touchY) this.touchPaused = false;
+    } else this.touchPaused = false;
     this.touchY = y ?? null;
   };
   private keyDown = (event: KeyboardEvent): void => {

@@ -25,8 +25,8 @@ function fixture(followMotion?: () => "smooth" | "instant") {
   const options = {
     followMotion,
     anchor, active: () => active,
-    measure: () => ({ scrollTop: top, scrollHeight: extent, clientHeight: viewport,
-      items: [{ id: "line", top: itemTop - top, bottom: itemTop - top + 1000 }] }),
+    measure: (includeItems: boolean, _preserveAnchor?: boolean) => ({ scrollTop: top, scrollHeight: extent, clientHeight: viewport,
+      items: includeItems ? [{ id: "line", top: itemTop - top, bottom: itemTop - top + 1000 }] : [] }),
     requestFrame: (callback: FrameRequestCallback) => { frames.set(++sequence, callback); return sequence; },
     cancelFrame: (id: number) => { frames.delete(id); },
   };
@@ -64,6 +64,120 @@ function withVisibleBand(band: { height: number; offsetTop: number }, run: () =>
 }
 
 describe("coordinated scrolling", () => {
+  test("renewed upward touch interrupts latest and holds and recaptures after bottom arrival or a new direction", () => {
+    for (const renewal of ["queued latest", "moving latest", "hold", "bottom", "direction", "new touch"] as const) {
+      const f = fixture(() => "smooth");
+      f.grow(900); f.move(300); f.owner.pause(); f.owner.cancel();
+      f.event("touchstart", { touches: [{ clientY: 100 }] });
+      f.event("touchmove", { touches: [{ clientY: 110 }] });
+      const field = f.document.createElement("input") as unknown as HTMLElement;
+      f.element.append(field);
+      if (renewal === "queued latest" || renewal === "moving latest") f.owner.latest();
+      if (renewal === "moving latest") { f.flush(0); f.flush(32); expect(f.element.scrollTop).toBeGreaterThan(300); }
+      if (renewal === "hold") f.owner.hold(field);
+      if (renewal === "bottom") {
+        f.move(280); f.event("scroll");
+        f.move(600); f.event("scroll"); expect(f.anchor.isPinned()).toBe(true);
+      }
+      if (renewal === "direction") f.event("touchmove", { touches: [{ clientY: 90 }] });
+      if (renewal === "new touch") f.event("touchstart", { touches: [{ clientY: 100 }] });
+      const top = f.element.scrollTop;
+      const calls: Array<[boolean, boolean | undefined]> = [];
+      const measure = f.options.measure;
+      f.options.measure = (items, preserve) => { calls.push([items, preserve]); return measure(items, preserve); };
+      f.event("touchmove", { touches: [{ clientY: 120 }] });
+      expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+      expect(f.anchor.isPinned()).toBe(false);
+      expect(f.owner.isHolding(field)).toBe(false);
+      expect(f.frames.size).toBe(0);
+      f.grow(1000); f.owner.request(true); f.flush(400);
+      expect(f.element.scrollTop).toBe(top);
+    }
+  });
+
+  test("new layout work or a correction renews upward touch intent within the same gesture", () => {
+    for (const work of ["request", "correction", "beforeMutation"] as const) {
+      const f = fixture();
+      f.grow(2000); f.move(500); f.owner.pause(); f.owner.cancel();
+      f.event("touchstart", { touches: [{ clientY: 100 }] });
+      f.event("touchmove", { touches: [{ clientY: 110 }] });
+      f.shift(100); f.grow(2100);
+      if (work === "beforeMutation") f.owner.beforeMutation();
+      else f.owner.request(true);
+      if (work === "correction") f.flush(16);
+      const top = f.element.scrollTop;
+      const calls: Array<[boolean, boolean | undefined]> = [];
+      const measure = f.options.measure;
+      f.options.measure = (items, preserve) => { calls.push([items, preserve]); return measure(items, preserve); };
+      f.event("touchmove", { touches: [{ clientY: 120 }] });
+      expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+      expect(f.frames.size).toBe(0);
+      expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: 100 - top });
+      f.owner.request(); f.flush(32);
+      expect(f.element.scrollTop).toBe(top);
+    }
+  });
+
+  test("continuous upward touch captures intent once while native movement and momentum keep capturing fresh positions", () => {
+    const f = fixture();
+    f.grow(2000); f.move(500); f.owner.pause(); f.owner.cancel();
+    const calls: Array<[boolean, boolean | undefined]> = [];
+    const measure = f.options.measure;
+    f.options.measure = (includeItems, preserveAnchor) => {
+      calls.push([includeItems, preserveAnchor]);
+      return measure(includeItems, preserveAnchor);
+    };
+    let changes = 0;
+    Object.assign(f.options, { onChange: () => changes++ });
+    f.event("touchstart", { touches: [{ clientY: 100 }] });
+    for (const y of [110, 110, 120, 130]) f.event("touchmove", { touches: [{ clientY: y }] });
+    expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+    expect(changes).toBe(1);
+    expect(f.anchor.isPinned()).toBe(false);
+    for (const [y, top] of [[140, 480], [150, 460]] as const) {
+      calls.length = 0;
+      f.event("touchmove", { touches: [{ clientY: y }] });
+      f.move(top); f.event("scroll");
+      expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+      expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: -top });
+    }
+    f.event("touchend", { touches: [] });
+    f.move(440); f.event("scroll");
+    f.shift(100); f.grow(2100); f.owner.request(); f.flush(16);
+    expect(f.element.scrollTop).toBe(540);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("paused native movement measures semantic items once and echoes retain the reading anchor", () => {
+    for (const delta of [-20, 20]) {
+      const f = fixture();
+      f.grow(2000); f.move(500); f.owner.pause();
+      const calls: Array<[boolean, boolean | undefined]> = [];
+      const measure = f.options.measure;
+      f.options.measure = (includeItems, preserveAnchor) => {
+        calls.push([includeItems, preserveAnchor]);
+        return measure(includeItems, preserveAnchor);
+      };
+      // First movement consumes pending input; the next is native momentum.
+      for (const top of [500 + delta, 500 + delta * 2]) {
+        calls.length = 0;
+        f.move(top); f.event("scroll");
+        expect(calls.filter(([includeItems]) => includeItems)).toEqual([[true, false]]);
+        expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: -top });
+        expect(f.anchor.isPinned()).toBe(false);
+        expect(f.writes).toEqual([]);
+      }
+      f.owner.request(); f.flush(16);
+      calls.length = 0;
+      f.event("scroll");
+      expect(calls.filter(([includeItems]) => includeItems)).toEqual([[true, undefined]]);
+      expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: -(500 + delta * 2) });
+      f.shift(100); f.grow(2100); f.owner.request(); f.flush(32);
+      expect(f.element.scrollTop).toBe(600 + delta * 2);
+      expect(f.anchor.isPinned()).toBe(false);
+    }
+  });
+
   for (const origin of ["outside", "textarea", "programmatic"] as const) test(`ordinary button focus navigation from ${origin} stays visible through a later render`, () => {
     const f = fixture();
     f.grow(2000); f.move(1000); f.owner.pause();
