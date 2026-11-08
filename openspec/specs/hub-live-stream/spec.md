@@ -215,3 +215,57 @@ The existing document topic SHALL support a full snapshot followed by ordered in
 - **WHEN** clients subscribe with different file scopes or comparison targets
 - **THEN** snapshots and patches remain confined to their respective contexts
 - **AND** neither client's selection nor scope is changed by the other's subscription
+
+### Requirement: Burst delivery distinguishes reading clients from stalled clients
+The hub SHALL let actively draining client streams receive a finite burst of ordered conversation events without disconnecting merely because the upstream delivered that burst in one chunk. This SHALL apply both to shared live delivery and subscriber catch-up. Delivery SHALL retain bounded outbound queues and SHALL end a genuinely stalled client rather than accumulating unbounded pending data. A released or superseded upstream MUST NOT publish additional frames after resuming from a delivery yield.
+
+#### Scenario: A large normalization burst reaches a reading client
+- **WHEN** a reading client watches a conversation and the upstream delivers thousands of small ordered events in one chunk exceeding the outbound backlog limit in aggregate
+- **THEN** that client receives every event once in cursor order and its live stream remains open
+
+#### Scenario: Catch-up receives a large replay chunk
+- **WHEN** a reading client catches up from an older cursor and the child delivers a large replay in one chunk
+- **THEN** the replay reaches that client in order before merging into live delivery without dropping the client stream
+
+#### Scenario: A stalled client remains bounded
+- **WHEN** a client stops pulling and conversation events exceed its queue limit
+- **THEN** the hub ends that stream and releases its subscriptions
+
+#### Scenario: Ownership ends during a delivery yield
+- **WHEN** a stream or subscription is released while a child batch is being delivered
+- **THEN** no remaining frame in that batch is delivered through the released owner
+
+### Requirement: Bulk conversation recovery does not simulate an upstream outage
+An actively consuming conversation subscriber SHALL receive a bulk recovered change as ordered complete delivery or explicit topic-scoped resynchronization, without overflow-induced unavailability caused solely by the publication burst. Delivery and replay queues SHALL remain byte-bounded. Other topics and the page's one live connection MUST remain independent.
+
+#### Scenario: Clustered ordinary worker results reach a healthy reader
+- **WHEN** an actively draining conversation stream receives a recovery containing 318 worker results of about 4 KiB each, with ordinary-sized events and no transport failure
+- **THEN** the subscriber receives the ordered changes or an explicit conversation resync followed by a complete fresh snapshot
+- **AND** the burst alone does not produce conversation unavailability or a transport-error retry cycle
+- **AND** the stream's other topics continue to deliver
+
+#### Scenario: A smaller recovery fits bounded incremental delivery
+- **WHEN** the equivalent worker-result recovery fits the incremental publication budget
+- **THEN** its changes arrive in order with consistent cursors
+- **AND** publication does not require unnecessary resynchronization
+
+#### Scenario: A large batch requires explicit snapshot recovery
+- **WHEN** recovered changes cannot be delivered within the bounded incremental budget
+- **THEN** the stream explicitly invalidates that conversation after the complete recovery commit
+- **AND** no published prefix is presented as the complete batch
+- **AND** an older cursor cannot silently skip the withheld changes
+
+#### Scenario: A consumer genuinely stops reading
+- **WHEN** a subscriber stops consuming while ordered events continue beyond its existing byte backlog limit
+- **THEN** it is terminated within that bound rather than retaining an unbounded queue
+- **AND** other subscribers remain usable
+
+#### Scenario: Cancellation or replacement happens around recovery
+- **WHEN** a conversation subscription is cancelled or replaced while recovery is prepared
+- **THEN** obsolete delivery stops and its resources are released
+- **AND** the current subscription receives only events belonging to its own ordered cursor history
+
+#### Scenario: The child actually fails
+- **WHEN** the child exits or its transport fails independently of a valid bulk publication
+- **THEN** existing topic-scoped unavailability and bounded retry behavior still apply
+- **AND** the page's live connection and unrelated topics are not ended

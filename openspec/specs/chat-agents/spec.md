@@ -300,3 +300,84 @@ in effect.
 #### Scenario: Login clears the notice
 - **WHEN** a user logs in to the agent while its conversation is open
 - **THEN** the notice disappears and the composer can send without reloading the page
+
+### Requirement: Internal worker evidence read excludes transcript payloads
+
+The workspace child SHALL expose a versioned compact authoritative worker-evidence read for one agent-qualified conversation through its existing authenticated internal routing. The read SHALL return only exact worker identities, evidence signatures and active/dismissible facts after establishing complete current source coverage and resolving launcher relationships. It SHALL NOT expose account dismissal marks or ordinary conversation content. It SHALL fail rather than return successful truncated, malformed, contradictory, changed or over-capacity evidence. The Hub SHALL validate version, selected conversation, completeness, bounds and every evidence field before using the result.
+
+#### Scenario: Complete native history
+- **WHEN** the provider supplies a complete current source containing a long transcript and large tool outputs
+- **THEN** the internal read projects bounded worker facts from that source once without display-history pagination or output serialization
+
+#### Scenario: Failed or truncated source
+- **WHEN** the provider supplies only incomplete pages and complete coverage cannot be proven within the existing bounded fallback
+- **THEN** the read reports unavailable instead of returning an empty or partial successful worker set
+
+#### Scenario: Page-scoped provenance cannot be combined safely
+- **WHEN** a fallback page carries association, origin, hidden-result, fallback, revert or accounting provenance without complete-source coverage
+- **THEN** the read refuses that fallback rather than discarding provenance and authorizing a contradictory worker dismissal
+
+#### Scenario: Contradictory duplicate worker source identities
+- **WHEN** one current source contains conflicting lifecycle, occurrence or association facts for the same worker row or shared exact execution alias
+- **THEN** the read refuses before normalization or deduplication can discard positive activity
+- **AND** compatible duplicate observations and independently owned later recovery updates retain their established identity behavior
+
+#### Scenario: Retained cache or missing recovery is weaker than current source
+- **WHEN** a current source carries positive or nondismissible worker evidence but retained projection rows or empty/failed recovery carry weaker information
+- **THEN** compact evidence preserves the current source evidence or fails unavailable
+- **AND** no intermediate deduplication, weak supersession or late cache overwrite authorizes dismissal by discarding that evidence
+
+#### Scenario: Shared exact aliases disagree on immutable occurrence facts
+- **WHEN** rows sharing an exact execution alias disagree on known task, child, launcher, result or launch-reference facts
+- **THEN** the read refuses even if their lifecycle signatures match
+- **AND** unknown intermediate rows and alias-group bridges cannot erase prior known facts
+- **AND** explicitly supported compatible legacy alias enrichment remains available
+
+#### Scenario: Native canonical history enriches a call-scoped launcher key
+- **WHEN** native history proves multiple launch calls share exact execution aliases and a larger canonical launcher/alias set fully contains an old call-scoped row
+- **AND** both rows independently permit dismissal and the old row is running/unavailable without a result, request or end fact
+- **AND** native parent/child scope, task-key recipes, launcher anchoring and known generation/launch-reference facts agree
+- **THEN** compact evidence discards only that certified abstaining shadow before strict shared-alias cohort validation
+- **AND** it does not discard positive or nondismissible activity, conflicting outcomes, same-row conflicts or missing supplemental coverage
+- **AND** the projection grants no worker-completion or Stop authority
+
+### Requirement: Recovered conversation publication preserves authority
+Recovered conversation state SHALL be admitted as a coherent commit under current source and mutation ownership. A stale or superseded read MUST NOT overwrite newer native facts or advance delivery state. Controlling publication size MUST NOT weaken activity evidence, worker execution identity, or dismissal conflict checks.
+
+#### Scenario: New native evidence arrives during a recovery read
+- **WHEN** a recovery read overlaps a newer worker update or removal
+- **THEN** recovery preserves the newer owned fact
+- **AND** delivery cannot restore a removed execution or its mutation authority from stale source data
+
+#### Scenario: Recovery loses ownership before commit
+- **WHEN** a read's stream generation, projection, source coverage or mutation ownership is superseded before admission
+- **THEN** that result cannot change conversation state or its stream cursor
+- **AND** it cannot issue a resync on behalf of the superseded result
+
+#### Scenario: Equivalent presentation has different private evidence
+- **WHEN** a valid read refreshes private worker proof without changing effective displayed values
+- **THEN** the proof is handled under existing authority rules
+- **AND** avoiding redundant publication does not grant dismissal or activity authority absent from that proof
+
+### Requirement: Bulk snapshot recovery converges on current conversation state
+When bulk recovery requires a fresh snapshot, that snapshot SHALL represent the complete admitted state and its cursor. Reattaching from it SHALL resume later updates without regenerating invalidation solely because the same source is read again. Read recovery MUST NOT repeat mutations or discard retained drafts and reading position.
+
+#### Scenario: Oversized recovery is followed by unchanged reads
+- **WHEN** a client obtains the post-commit snapshot, reattaches, and three further reads return equivalent effective state
+- **THEN** those unchanged reads cause no additional resync or unavailability
+- **AND** a later native update is delivered and applied once in order
+
+#### Scenario: A snapshot is requested during a bulk commit
+- **WHEN** a snapshot or subscription is observed at a bulk publication boundary
+- **THEN** it names either the complete prior state or the complete admitted state with the matching cursor
+- **AND** it cannot expose a partially admitted batch as current
+
+#### Scenario: A bulk commit cannot complete
+- **WHEN** recovery preparation or admission fails
+- **THEN** no partial recovery batch is announced as committed
+- **AND** a subsequent valid recovery can proceed without stranded publication state
+
+#### Scenario: Activity and private dismissals coexist with recovery
+- **WHEN** a conversation with working tasks, terminal tasks, fresh activity and existing account-private dismissal marks recovers
+- **THEN** their existing activity and dismissal eligibility rules remain unchanged
+- **AND** recovery neither replays a dismissal mutation nor accepts a conflict merely because execution generation changed
