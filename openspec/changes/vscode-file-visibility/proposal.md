@@ -34,5 +34,5 @@ None.
 - **Client:** `src/sidebar/tree-view.ts` (unloaded-folder rows, expand-to-load, merge), `src/shell/follow.ts`, and the Recent and count models.
 - **Wire and API:** snapshots and patches carry ignored-folder entries and their loaded state. This changes the published live-payload schema, so the workspace API revision is bumped. The listing route stays an internal child operation with an explicit non-public exclusion. The Hub broker's document index carries folder entries.
 - **Docs:** README.md and docs/FILES.md describe the VS Code-aligned rules, the security stance on secret-like files, and `ignore.exclude` as the way to hide things.
-- **Sequencing:** the deltas are written against the requirements introduced by `add-recent-media-browsing`, so that change must be archived (#620) before this one is.
+- **Sequencing:** the deltas are written against the requirements introduced by `add-recent-media-browsing`, which were archived into the main specs in #620.
 - **Cost:** non-Git roots have no ignore information, so they are discovered eagerly in full; a large `node_modules` there is bounded only by `ignore.exclude`. In the Chokidar polling fallback, unlisted ignored folders are not watched.
