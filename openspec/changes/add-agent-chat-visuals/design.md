@@ -6,7 +6,7 @@ See [proposal.md](proposal.md) for motivation and
 [the capability delta](specs/chat-visuals/spec.md) for acceptance behavior.
 The initial implementation was uncommitted on top of merge `331661b`, which
 integrated upstream `71e4700`. The current integration base is upstream
-`1ab17f4` (2026-11-08). The user approved the retrospective planning on
+`14b60e7` (final rebase on 2026-11-09). Retrospective planning was approved on
 2026-10-30; implementation presence still does not establish final acceptance.
 
 The shared chat model owns presentation while native agent transcripts own
@@ -79,7 +79,7 @@ fields. Wire indexes describe current rendered positions
 and may exceed seven; the reference array itself remains bounded at eight.
 
 Admission choices from intermediate unreleased test builds are not migrated.
-The user explicitly removed legacy-priority compatibility on 2026-11-02.
+Legacy-priority compatibility was explicitly removed on 2026-11-02.
 Existing stored files, IDs, and bytes remain untouched and resolvable; an old
 test conversation may show a different set of up to eight previews after
 upgrading. The ledger begins on first processing by the new implementation.
@@ -125,8 +125,8 @@ retain natural sizing. The existing dialog provides enlargement. Existing
 reading-anchor/follow-intent logic remains responsible for image layout changes.
 
 The image-anchor tests also exposed a pre-existing touch interaction: blurring
-the focused composer can move Latest before a pointer click completes. The
-user approved a narrow correction and focused/unfocused pointer regressions;
+the focused composer can move Latest before a pointer click completes. A
+narrow correction and focused/unfocused pointer regressions were approved;
 implementation and verification status are tracked separately in tasks.md.
 
 ### Inject guidance through native session context only
@@ -150,10 +150,11 @@ are not changed.
   generated-input tests for hostile references, SVG source, and snapshot fields.
 - Persistent snapshots can consume disk → retain the specified per-image and
   per-message bounds; disclose that no lifetime storage quota is introduced.
-- Earlier checks used Bun 1.4.2 and client 2.0.28 → on 2026-10-30 the user
-  approved a scoped restore. Task-local Bun 1.4.3 was release-digest verified,
+- Earlier checks used Bun 1.4.2 and client 2.0.28 → a scoped restore was approved
+  on 2026-10-30. Task-local Bun 1.4.3 was release-digest verified,
   and a frozen install supplied client 2.1.2 without manifest/lockfile changes.
-  Rerun affected checks against that pinned state; global Bun remains unchanged.
+  Later runtime/dependency integration and renewed checks are recorded in
+  tasks.md; global Bun remains unchanged.
 
 ## Migration Plan
 

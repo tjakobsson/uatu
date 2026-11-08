@@ -1,8 +1,8 @@
 # Tasks
 
 This is a retrospective checklist. Checked items have focused verification;
-they do not mean the feature has passed final review. The user approved these
-artifacts on 2026-10-30 and implementation has resumed. Existing implementation
+they do not mean the feature has passed final review. These artifacts were
+approved on 2026-10-30 and implementation has resumed. Existing implementation
 and safety stash are preserved; no feature commit or publication is implied.
 
 ## 1. Integration and approval
@@ -11,6 +11,7 @@ and safety stash are preserved; no feature commit or publication is implied.
 - [x] 1.2 Obtain user approval of the proposal, capability delta, design, and tasks before resuming implementation; verify an explicit approval response.
 - [x] 1.3 Obtain separate approval before refreshing dependencies or tools to the merged pins; verify Bun and installed SDK versions and a frozen-lockfile install without unintended manifest changes. Approved 2026-10-30: task-local Bun 1.4.3 verified against the release asset SHA-256; frozen restore supplies client 2.1.2 and leaves both manifest/lockfile hashes unchanged.
 - [x] 1.4 Refresh the task-local runtime and dependencies for the 2026-11-08 rebase with separate approval: Bun 1.4.4 archive SHA-256 matches the GitHub release asset digest; the frozen restore supplies Claude SDK 0.3.316, OpenCode SDK 1.19.5 and client 2.2.5 without changing the upstream manifest or lockfile.
+- [x] 1.5 Integrate the two later upstream commits at `14b60e7` without conflicts. Reuse the approved task-local Bun 1.4.4 frozen restore for upstream's Claude SDK 0.3.319 patch; all other package pins and API revisions are unchanged, and manifest/lockfile hashes remain unchanged by the restore. Preserve pre-rebase head `00dd13d1` in a separate backup branch.
 
 ## 2. Markdown preparation and safety
 
@@ -37,11 +38,11 @@ and safety stash are preserved; no feature commit or publication is implied.
 
 ## 5. Contracts and acceptance
 
-- [x] 5.1 Confirm Hub revision 14, workspace revision 36, web revision 4, closed visual-reference schemas, examples, API migration notes, and chat documentation agree after rebasing onto `1ab17f47`; API validation, pinned-base compatibility (workspace only), and 50 structural/route/contract tests pass. OpenAPI lint retains one upstream composition warning.
+- [x] 5.1 Confirm Hub revision 14, workspace revision 36, web revision 4, closed visual-reference schemas, examples, API migration notes, and chat documentation agree after rebasing onto `14b60e7`; API validation and final pinned-base compatibility (workspace only) pass, retaining the 50 earlier structural/route/contract checks. OpenAPI lint retains one upstream composition warning.
 - [x] 5.2 Fresh independent GPT-6.1 Sol High Standards and Spec reviews cleared the full rebased change and verification corrections. Renewed reviews of the CodeQL/Codex follow-up found bounded-work issues in XML/CSS comments, tag cleanup, preview namespace detection, and origin-name selection; all were corrected and fresh independent follow-up reviews now report zero actionable findings. Final reviews ran serially after parallel launches hit a harness database lock; model and High effort selection were unchanged.
 - [x] 5.3 Run final relevant unit/property, browser, build, smoke, license, and dependency checks with Bun 1.4.4. The corrected full unit run at `7b6babe4` passed 10,078, skipped 16, failed zero across 346 files. Browser coverage passed 47/49; both remaining failures report a WebKit ResizeObserver warning reproduced on pinned upstream before Latest interaction. Keep the assertion intact; no clean browser-suite, live-agent or physical-device claim is made. Renew affected checks after the CodeQL correction.
 - [ ] 5.4 Synchronize `chat-visuals` into main specs and archive this change only after acceptance; verify strict OpenSpec validation, clean diff whitespace, and preserved demo files before final merge/publication review.
-- [x] 5.5 Rebase onto pinned latest `upstream/main` (`1ab17f47`), preserving backup `07fe3b6a`, the original stash, and unchanged demo hashes. Renew full-change reviews and affected checks; fetch again before pushing and verify upstream remains an ancestor. Published `7b6babe4` using an exact lease against the prior remote head.
+- [x] 5.5 Final pre-push integration: the first rebase onto `1ab17f47` was verified and published as `7b6babe4` with an exact lease. The later rebase onto `14b60e7` completed without conflicts; range-diff confirms all four feature commits unchanged. Renewed affected checks passed 838 tests (four skipped), typecheck, API validation/compatibility, dependency/license audits and strict OpenSpec validation. Fresh independent integration review reports no Standards/Spec findings. Upstream ancestry, backups, original stash and demo hashes are verified; repeat the remote-head/ancestry guard when pushing.
 - [x] 5.6 Create PR #622 through GitHub MCP with approved text and publication metadata. Initially verified draft on 2026-11-08 at `71f424279fe9211d3c02d0ba93a666baf2542115`; subsequently marked ready and read back `draft: false` at explicit request. Issue #544 is confirmed as the intended closing issue once fully resolved; the PR currently uses a non-closing reference.
 - [ ] 5.7 Update the verified rebased head, obtain approval for refreshed PR text, and run the Codex review/fix loop until a no-findings thumbs-up covers that head.
 - [ ] 5.8 Address CodeQL's incomplete multi-character sanitization alert in SVG comment handling without suppressing the alert or relaxing SVG policy; verify focused regressions, renewed independent review, and a clean remote CodeQL result.
@@ -50,13 +51,14 @@ and safety stash are preserved; no feature commit or publication is implied.
 
 ## Historical checkpoint evidence (current status is tracked above)
 
+- 2026-11-09 final upstream integration: base `14b60e7` changes only the Claude SDK patch and an unrelated OpenSpec proposal. The feature implementation is unchanged by rebase; installed SDK 0.3.319 passes 838 affected tests with four skips, typecheck and contract checks. Dependency audit reports only the existing low KaTeX advisory; 595-package license audit passes. The final parser/security corrections passed 210 targeted checks and nine affected browser cases, plus a compiled build/smoke checkpoint before this SDK-only integration. Renewed build/smoke and final remote CodeQL/Codex checks remain separate acceptance gates.
 - 2026-11-08 rebased checkpoint: Bun 1.4.4 typecheck, API validation and pinned-base compatibility, 50 structural/route/contract tests, dependency audit (no moderate-or-higher advisories), 595-package license audit, compiled build and full binary smoke pass. Fresh full-change Standards/Spec reviews each report zero findings. The browser run passed 47/49; both WebKit touch-Latest failures report only a ResizeObserver loop warning after their behavioral assertions pass. Six focused repeats passed four and failed two with that warning; diagnosis remains open. The full unit run at `637b6f9f` completed with 10,063 passed, 16 skipped, 15 failed and two between-test errors. Nine failures were the stale revision assertion and DOM-constructor guard; both corrections pass 965 focused tests and renewed independent Standards/Spec review. The six other failed cases all pass on isolated feature reruns (the Hub case requires its whole 81-test file). The isolated recovery/UI cases also pass on pinned upstream, so contention attribution is not established. No clean full-suite result is claimed. Live-agent and physical-device verification remain unclaimed.
 - Post-integration: `bun run typecheck` passed; `bun test src/chat src/server/chat-routes.test.ts api/contract.test.ts` passed **1,685**, skipped **9**, failed **0**.
 - Focused browser run: visual and attachment Playwright files passed **35** tests after the identity fixes.
 - Independent Sol high scoped review passed **42** focused tests and **150** generated offset checks; it identified the low-severity `<image>` annotation regression tracked in task 2.1.
 - On 2026-10-30, tasks 2.1/2.2 passed 52 parser/render/property/store tests, 550 bounded generated cases (750 full-render evaluations), and 30 service tests. The alias service regression failed before extending the capture precheck and passed after; typecheck and diff whitespace checks passed.
 - Pinned contract checks passed API validation, baseline compatibility, and 79 contract tests. License checks passed for 597 installed packages.
-- Publication blocker: audit reports high-severity GHSA-27r3-jxmh-p828 in upstream-locked body-parser 2.3.0. The user chose to keep feature scope rather than authorize a dependency patch. Leave task 5.3 incomplete and do not publish while this blocker is unresolved.
+- At that checkpoint, audit reported high-severity GHSA-27r3-jxmh-p828 in upstream-locked body-parser 2.3.0. Dependency remediation stayed outside feature scope; later upstream integration supplies its patch and the current audit result is recorded above.
 - The complete two-axis review loop has not yet reached a clean round.
 - Resumed round 2: Standards found two low-severity heuristics (duplicate sanitizer policy and unused highlight option); Spec found secondary-watched-root capture outside the agent workspace and loss of refused URL destinations. The workspace boundary regression went red then green; 99 reader/service/route tests and typecheck passed. Parser findings remain in progress.
 - Browser resilience handoff passed 246 focused unit tests and 41 visual/attachment browser tests; task 4.2 remains open while checking touch-pointer activation in the synthetic anchor scenario.
