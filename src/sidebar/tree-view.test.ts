@@ -195,6 +195,20 @@ describe("TreeView selection lifecycle with the real library", () => {
     expect(view.hasVisibleFolderRows()).toBe(true);
   });
 
+  it("removing a folder row whose live-written file sat in an implicit subfolder does not fail", () => {
+    const inventory: RootGroup[] = [{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0,
+      docs: [{ id: "/r1/build/renders/a.wav", name: "a.wav", relativePath: "build/renders/a.wav", rootId: "r1", mtimeMs: 0, kind: "binary", gitIgnoreStatus: "ignored", revision: 1 }],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: false, revision: 0 }] }];
+    view.update(inventory, null);
+    expect(tree().getItem("build/renders/a.wav")).not.toBeNull();
+    const patch: DocumentPatch = { kind: "patch", epoch: "e", previousRevision: 1, revision: 2, generatedAt: 2,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "2", upserts: [], changedId: null,
+      removals: [{ rootId: "r1", id: "/r1/build/renders/a.wav" }], folderRemovals: [{ rootId: "r1", id: "/r1/build" }] };
+    expect(view.applyPatch(patch, null)).toBe(true);
+    expect(tree().getItem("build/")).toBeNull();
+    expect(tree().getItem("build/renders/")).toBeNull();
+  });
+
   it("folder removals are qualified by root when overlapping roots share a folder id", () => {
     const shared = { id: "/repo/sub/build", listed: false, revision: 0 };
     const overlapping: RootGroup[] = [

@@ -441,12 +441,17 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         for (const level of old?.index.ignoredFolders.listedFolders ?? []) {
           if (next.index.ignoredFolders.isInside(level)) await listLevel(next, level).catch(() => {});
         }
-        // Files a client opened (playing media, say) stay while they exist.
+        // Files a client opened (playing media, say) stay while they exist,
+        // under the same containment checks as opening them.
         for (const id of old?.index.pinnedIds ?? []) {
           next.index.pin(id);
-          if (next.index.documents.has(id) || !rootRelative(entry, id)) continue;
-          const stats = await lstat(id).catch(() => null);
-          if (stats?.isFile() && next.index.policy.accepts(id, stats)) next.index.observe("add", id, stats, true);
+          const relative = rootRelative(entry, id);
+          if (next.index.documents.has(id) || !relative) continue;
+          const stats = await containedFile(entry, relative, id);
+          if (stats?.isFile() && next.index.policy.accepts(id, stats)) {
+            next.index.observe("add", id, stats, true);
+            trackAdmitted(next, id);
+          }
         }
         await next.index.idle();
         for (const doc of next.index.documents.values()) if (followEligible(doc)) next.followNewest.update(doc);
@@ -472,6 +477,33 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     recovery.set(entry.absolutePath, promise);
     publish({ upserts: [], removals: [], changedId: null });
     return promise;
+  }
+
+  // The file at `id` if it is a real file reached through real directories
+  // inside the root: no symlinked component and no realpath escape.
+  async function containedFile(entry: WatchEntry, relative: string, id: string): Promise<Stats | null> {
+    const base = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
+    const realBase = await realpath(base).catch(() => null);
+    const realFile = await realpath(id).catch(() => null);
+    if (!realBase || !realFile) return null;
+    const contained = path.relative(realBase, realFile);
+    if (contained === ".." || contained.startsWith(`..${path.sep}`) || path.isAbsolute(contained)) return null;
+    let current = base;
+    let leafStats: Stats | null = null;
+    for (const segment of relative.split("/")) {
+      current = path.join(current, segment);
+      const stats = await lstat(current).catch(() => null);
+      if (!stats || stats.isSymbolicLink()) return null;
+      leafStats = stats;
+    }
+    return leafStats;
+  }
+
+  // A file admitted directly inside an unlisted ignored folder is unknown to
+  // the watcher, which never reads that folder; register it so its deletion
+  // and later edits are observed.
+  function trackAdmitted(root: ObservedRoot, id: string) {
+    if (root.index.isIgnoredPath(id)) root.watcher.track?.(id);
   }
 
   function recoverIgnoredFolders() {
@@ -590,24 +622,11 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         const matcher = await loadIgnoreMatcher({ rootPath: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
           respectGitignore: options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
         if (entry.kind === "dir" && matcher.shouldIgnore(relative)) continue;
-        const base = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
-        const realBase = await realpath(base);
-        const realFile = await realpath(id).catch(() => null);
-        if (!realFile) continue;
-        const contained = path.relative(realBase, realFile);
-        if (contained === ".." || contained.startsWith(`..${path.sep}`) || path.isAbsolute(contained)) continue;
-        let current = base;
-        let allowed = true;
-        let leafStats: Stats | null = null;
-        for (const segment of relative.split("/")) {
-          current = path.join(current, segment);
-          const stats = await lstat(current).catch(() => null);
-          if (!stats || stats.isSymbolicLink()) { allowed = false; break; }
-          leafStats = stats;
-        }
-        if (!allowed || !leafStats) continue;
+        const leafStats = await containedFile(entry, relative, id);
+        if (!leafStats) continue;
         await root.index.request(id, leafStats);
         root.index.pin(id);
+        trackAdmitted(root, id);
         return find(id);
       }
       return undefined;

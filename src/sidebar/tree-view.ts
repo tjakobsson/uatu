@@ -457,7 +457,7 @@ export class TreeView {
     this.recency.applyPatch(patch);
     const tree = this.tree;
     const previousId = this.requestedDocumentId;
-    const operations: { type: "add" | "remove"; path: string }[] = [];
+    const operations: { type: "add" | "remove"; path: string; recursive?: boolean }[] = [];
     const removeVisible = (path: string) => {
       if (!this.renderedPaths.delete(path)) return;
       operations.push({ type: "remove", path });
@@ -523,8 +523,10 @@ export class TreeView {
         this.foldersByPath.delete(path);
         this.listing.delete(path);
         removedStatusPaths.push(path);
+        // Recursive: implicit subfolders left empty by this batch's file
+        // removals would block a plain removal.
         if (this.renderedFolders.delete(path) && ![...this.renderedPaths, ...this.renderedFolders].some(other => other.startsWith(path))) {
-          operations.push({ type: "remove", path });
+          operations.push({ type: "remove", path, recursive: true });
         }
       }
       for (const folder of patch.folderUpserts ?? []) {

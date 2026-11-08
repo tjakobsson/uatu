@@ -9,8 +9,9 @@ import chokidar from "chokidar";
 import type { WatchEntry } from "./roots";
 import type { createWatchPolicy } from "./watch-policy";
 
-// `reveal` starts reading a directory that was unlisted until now.
-export type FileObserver = EventEmitter & { close(): Promise<void>; reveal?(directory: string): void };
+// `reveal` starts reading a directory that was unlisted until now; `track`
+// starts observing one file inside such a directory.
+export type FileObserver = EventEmitter & { close(): Promise<void>; reveal?(directory: string): void; track?(file: string): void };
 type Options = {
   ignored: ReturnType<typeof createWatchPolicy>["ignored"];
   // An ignored folder level nobody has listed: known, never read or walked.
@@ -99,7 +100,7 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
     ? new PolledBaselineCheck(watcher, ignored, {
       root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
     })
-    : Object.assign(watcher, { reveal: (directory: string) => { watcher.add(directory); } });
+    : Object.assign(watcher, { reveal: (directory: string) => { watcher.add(directory); }, track: (file: string) => { watcher.add(file); } });
 }
 
 // Chokidar polls each file and directory with fs.watchFile, which (in Bun, as
@@ -177,6 +178,10 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
 
   reveal(directory: string): void {
     if (!this.closed) this.watcher.add(directory);
+  }
+
+  track(file: string): void {
+    if (!this.closed) this.watcher.add(file);
   }
 
   async close(): Promise<void> {
@@ -405,6 +410,10 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
 
   reveal(directory: string): void {
     this.enqueue(directory, true);
+  }
+
+  track(file: string): void {
+    if (!this.known.has(file)) this.enqueue(file, false);
   }
 
   async close(): Promise<void> {

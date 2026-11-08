@@ -279,3 +279,36 @@ test.skipIf(process.getuid?.() === 0)("an unreadable ignored folder stays, unlis
     expect(folders(rootOf(session))).toEqual(["build/ listed", "build/locked/"]);
   } finally { await chmod(locked, 0o755).catch(() => {}); await session.stop(); }
 });
+
+test("recovery does not restore a pinned file whose folder became a symlink out of the root", async () => {
+  const cwd = await fixture();
+  const outside = await fixture(false);
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/a.md"]);
+  await files(outside, ["a.md"], "# outside");
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false);
+  const opened = path.join(cwd, "build/a.md");
+  try {
+    await session.start();
+    expect(await session.ensureDocument(opened)).toBeDefined();
+    await rm(path.join(cwd, "build"), { recursive: true });
+    await symlink(outside, path.join(cwd, "build"));
+    await session.recover();
+    expect(session.findDocument(opened)).toBeUndefined();
+  } finally { await session.stop(); }
+});
+
+test("a file opened inside an unlisted ignored folder is removed when it is deleted", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/report.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false);
+  const opened = path.join(cwd, "build/report.md");
+  try {
+    await session.start();
+    expect(await session.ensureDocument(opened)).toBeDefined();
+    await Bun.sleep(200);
+    await rm(opened);
+    await wait(() => !session.findDocument(opened), "deleted opened file leaves the index");
+  } finally { await session.stop(); }
+}, 15_000);
