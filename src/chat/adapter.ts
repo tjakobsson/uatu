@@ -133,7 +133,7 @@ type InventorySessionMetadata = {
   deleted: boolean;
 };
 type CachedAssociationCounterproof = { parentId: string; childIds: readonly string[]; transcriptKeys: ReadonlySet<string> };
-type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; replacement?: true };
+type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; questionTick: number; replacement?: true };
 class HistoryReadChangedError extends Error {}
 
 /** Evidence flows from shared accounting owners to each enclosing read before
@@ -932,6 +932,9 @@ export class ChatAdapter {
         // The whole handoff, including rereads, shares one bounded lifetime.
         let inboxReconciled = false;
         let refreshAttribution = false;
+        // Dirty replacement retries belong to the same read. They must not
+        // turn its later accepted announcements into pre-read retirement targets.
+        const questionTick = this.interactionClock;
         while (true) {
           recovery.dirty = false;
           const readProjection = this.projection(id);
@@ -942,7 +945,7 @@ export class ChatAdapter {
           const associations = associationRead?.begin(workerSources);
           const cachedAssociations = associations?.evidence ?? [];
           try {
-            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, ...(replacement ? { replacement: true } : {}) });
+            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, questionTick, ...(replacement ? { replacement: true } : {}) });
             inboxReconciled = true;
             assertCurrent();
             if (!recovery.dirty) return snapshot;
@@ -987,6 +990,11 @@ export class ChatAdapter {
     let page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
     coverage?.assertCurrent();
     if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+    // Capture the requested provider slice, not the later augmented snapshot:
+    // accounting, launcher backfills and coverage.merge may add rows from far
+    // outside this page. Only an actual page message establishes its frontier.
+    const firstMessage = page.items.find(item => item.type === "user_message" || item.type === "assistant_message" && item.markdown !== "");
+    const historyStart = firstMessage ? { id: this.correlateSteerMessage(id, firstMessage, coverage?.steerCorrelations).id, createdAt: firstMessage.createdAt } : undefined;
     if (options.workers && !page.completeItems) {
       // The compact read requires complete coverage, not a cached projection.
       // Native providers supply completeItems in one read. Legacy providers may
@@ -1530,7 +1538,7 @@ export class ChatAdapter {
     let reconcileQuestionFreshness: (() => void) | undefined;
     let questionTrackingCurrent: (() => boolean) | undefined;
     try {
-      const questionTick = this.interactionClock;
+      const questionTick = coverage?.questionTick ?? this.interactionClock;
       const previousTracking = new Map(this.publishedQuestions);
       const pendingNow = await this.pendingQuestions(id, false);
       coverage?.assertCurrent();
@@ -1582,6 +1590,8 @@ export class ChatAdapter {
       }
       const ownsQuestion = (item: QuestionRequest) => this.publishedQuestions.get(id) === previousTracking.get(id)
         && this.publishedQuestions.get(item.conversationId ?? id) === previousTracking.get(item.conversationId ?? id);
+      const retainCurrentQuestion = (item: QuestionRequest) => !ownsQuestion(item)
+        || (this.announced.get(item.id)?.tick ?? 0) > questionTick;
       reconcileQuestionFreshness = () => {
         // A tool refresh owns a complete newer set, including absence. An old
         // read must neither resurrect its unprojected rows nor retire current
@@ -1591,10 +1601,13 @@ export class ChatAdapter {
           if (item.type === "question" && !ownsQuestion(item)) items.splice(index, 1);
         }
         for (const [itemId, removal] of historyRemovals) {
-          if (removal.expected?.type === "question" && !ownsQuestion(removal.expected)) historyRemovals.delete(itemId);
+          if (removal.expected?.type === "question" && retainCurrentQuestion(removal.expected)) historyRemovals.delete(itemId);
         }
         for (const item of projection.items()) {
-          if (item.type === "question" && !ownsQuestion(item) && !items.some(candidate => candidate.id === item.id)) items.push(item);
+          if (item.type !== "question" || !retainCurrentQuestion(item)) continue;
+          const index = items.findIndex(candidate => candidate.id === item.id);
+          if (index < 0) items.push(item);
+          else items[index] = item;
         }
         // Hooks may invalidate admission, but cannot admit another stale set.
         const admittedTracking = new Map(this.publishedQuestions);
@@ -1956,6 +1969,7 @@ export class ChatAdapter {
       queued: this.queuedMessages(id),
       ...(reversibleHistory ? { reversibleHistory } : {}),
       olderCursor: page.nextCursor ? encodeHistoryCursor({ provider: page.nextCursor }) : undefined,
+      ...(historyStart ? { historyStart } : {}),
     };
   }
 

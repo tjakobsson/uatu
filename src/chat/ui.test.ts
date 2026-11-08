@@ -35,6 +35,115 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
+  for (const surface of ["main", "child"] as const) for (const { removeAnswer, frontierAvailable } of [
+    { removeAnswer: false, frontierAvailable: true }, { removeAnswer: true, frontierAvailable: true }, { removeAnswer: false, frontierAvailable: false },
+  ]) test(`native backfill cannot prove contiguous loaded-range coverage: ${surface} removed=${removeAnswer} frontier=${frontierAvailable}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const { createOpenCodeV2Provider } = await import("./opencode/v2/provider");
+    const { ChatAdapter } = await import("./adapter");
+    const { TimelineRenderer } = await import("./timeline-renderer");
+    const { TimelineAnchorController } = await import("./anchor");
+    const id = surface === "main" ? "one" : "child", itemsId = surface === "main" ? "chat-items" : "chat-drilldown-items";
+    const olderId = surface === "main" ? "chat-load-older" : "chat-drilldown-older";
+    const directory = process.cwd(), freshText = "Fresh native oldest loaded answer";
+    const records = Array.from({ length: 150 }, (_, n) => ({ id: `msg${n}`, type: "assistant", time: { created: n + 1 },
+      content: [{ id: `part${n}`, type: "text", text: `Native answer ${n}` }] }));
+    const info = { id, projectID: "global", title: id, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1, updated: 151 }, location: { directory } };
+    let wire: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init), pathname = new URL(request.url).pathname;
+      if (pathname === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        wire = controller;
+        controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+        request.signal.addEventListener("abort", () => { try { controller.close(); } catch {} }, { once: true });
+      } }), { headers: { "content-type": "text/event-stream" } });
+      if (pathname === `/api/session/${id}`) return Response.json({ data: info });
+      if (pathname === `/api/session/${id}/message`) return Response.json({ data: records, cursor: {} });
+      if (pathname === `/api/session/${id}/inbox`) return Response.json({ data: [] });
+      if (pathname === "/api/session/active") return Response.json({});
+      if (pathname === "/api/session") return Response.json({ data: [info], cursor: {} });
+      if (["/api/form", "/api/permission/request", "/api/command", "/api/skill"].includes(pathname)) return Response.json({ location: { directory }, data: [] });
+      return Response.json({ _tag: "NotFoundError", message: `Unexpected fixture route ${pathname}` }, { status: 404 });
+    }) as typeof globalThis.fetch;
+    const provider = createOpenCodeV2Provider({ endpoint: "http://frontier.test", password: "fixture-only", directory, fetch: fetcher });
+    const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+    let armed = false, injected = false, streams = 0;
+    const heads: ConversationSnapshot[] = [];
+    const questions = provider.listQuestions!.bind(provider);
+    provider.listQuestions = async (...args) => {
+      if (armed && !injected) {
+        injected = true;
+        records[50]!.content = [{ id: "part50", type: "text", text: freshText }];
+        // The production V2 provider consumes and normalizes this event while
+        // the real adapter's covered head read is pending. coverage.merge may
+        // add part50 to that head, but it cannot add the intervening page.
+        wire!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: "evt_oldest", created: 51, type: "session.message.content.updated",
+          durable: { aggregateID: id, seq: 1, version: 1 }, data: { sessionID: id, messageID: "msg50", content: records[50]!.content } })}\n\n`));
+        await waitUntil(() => { const row = adapter.projectionForTests(id).get("part:part50"); return row?.type === "assistant_message" && row.markdown === freshText; });
+      }
+      return questions(...args);
+    };
+    const api = taskApi(document, { items: () => [] });
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    api.snapshot = async (requested, cursor) => {
+      if (requested !== id) return { ...snapshot(requested), items: [{ id: "task:child", type: "background_task", taskId: "child", taskType: "local_agent", description: "Native frontier child", status: "completed", createdAt: 1, childConversationId: "child", foreground: true }] };
+      const page = await adapter.history(id, { cursor, limit: 50 });
+      const { historyStart: _frontier, ...legacy } = page;
+      const served = frontierAvailable ? page : legacy;
+      if (armed && !cursor) heads.push(served);
+      return served;
+    };
+    api.stream = (requested, _cursor, next) => { if (requested === id) { handlers = next; streams++; } return { close() {} }; };
+    let installed: import("./projection").ChatProjection | null = null;
+    let anchor: InstanceType<typeof TimelineAnchorController> | undefined;
+    const render = TimelineRenderer.prototype.render, restore = TimelineAnchorController.prototype.restore;
+    const restored: unknown[] = [];
+    TimelineRenderer.prototype.render = function (...args: Parameters<typeof render>) { if (args[0].id === itemsId) installed = args[1]; return render.apply(this, args); };
+    TimelineAnchorController.prototype.restore = function (value) { anchor = this; restored.push(value); return restore.call(this, value); };
+    try {
+      const { initChat } = await import(`./ui.ts?native-frontier=${surface}-${removeAnswer}-${frontierAvailable}-${Date.now()}`);
+      initChat(api);
+      if (surface === "child") {
+        await waitUntil(() => document.querySelector('[data-inspect-task="child"]') !== null);
+        document.querySelector<HTMLButtonElement>('[data-inspect-task="child"]')!.click();
+      }
+      await waitUntil(() => streams === 1);
+      document.querySelector<HTMLButtonElement>(`#${olderId}`)!.click();
+      await waitUntil(() => document.querySelector(`#${itemsId} [data-chat-item-id="part:part50"]`) !== null);
+      expect(document.querySelectorAll(`#${itemsId} [data-chat-item-id^="part:"]`)).toHaveLength(100);
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      type(input, "Native frontier draft");
+      const reading = { itemId: "part:part50", offset: -12 };
+      anchor!.restore(reading);
+      // Removing the stored text part keeps the provider's 150-message page
+      // positions intact, while the fresh authoritative page omits that row.
+      if (removeAnswer) records[75]!.content = [];
+      armed = true;
+      handlers!.resync();
+      await waitUntil(() => streams === 2);
+      await flush();
+      expect(injected).toBe(true);
+      expect(heads[0]!.items).toContainEqual(expect.objectContaining({ id: "part:part50", markdown: freshText }));
+      expect(heads[0]!.historyStart).toEqual(frontierAvailable ? { id: "part:part100", createdAt: 101 } : undefined);
+      expect(document.querySelectorAll(`#${itemsId} [data-chat-item-id^="part:"]`)).toHaveLength(frontierAvailable ? removeAnswer ? 99 : 100 : 150);
+      expect(document.querySelector(`#${itemsId} [data-chat-item-id="part:part50"]`)?.textContent).toContain(freshText);
+      if (removeAnswer) expect(document.querySelector(`#${itemsId} [data-chat-item-id="part:part75"]`)).toBeNull();
+      if (frontierAvailable) expect(installed!.olderCursor).toBeDefined();
+      else expect(installed!.olderCursor).toBeUndefined();
+      expect(document.querySelector<HTMLButtonElement>(`#${olderId}`)!.hidden).toBe(!frontierAvailable);
+      expect(restored.at(-1)).toEqual(reading);
+      expect(input.value).toBe("Native frontier draft");
+    } finally {
+      TimelineRenderer.prototype.render = render; TimelineAnchorController.prototype.restore = restore;
+      window.dispatchEvent(new Event("pagehide")); await adapter.dispose();
+    }
+  });
+
   for (const surface of ["main", "child"] as const) for (const carrierSource of ["retained", "recovered", "removed-answer"] as const) test(`bulk resync excludes accounting carriers from loaded-range evidence: ${surface} ${carrierSource}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
@@ -59,7 +168,8 @@ describe("chat reversible-history composer", () => {
       const end = Number(cursor ?? answers.length), start = Math.max(0, end - 50);
       const items = answers.slice(start, end).filter(item => !fresh || carrierSource !== "removed-answer" || item.id !== "answer:75")
         .map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item);
-      return { ...snapshot(requested), items: [...items, ...(!cursor && (fresh || carrierSource !== "recovered") ? [carrier] : [])], olderCursor: start ? String(start) : undefined };
+      return { ...snapshot(requested), items: [...items, ...(!cursor && (fresh || carrierSource !== "recovered") ? [carrier] : [])], olderCursor: start ? String(start) : undefined,
+        historyStart: items[0] && { id: items[0].id, createdAt: items[0].createdAt } };
     };
     api.stream = (requested, _cursor, next) => { if (requested === id) { handlers = next; streams++; } return { close() {} }; };
     const { TimelineAnchorController } = await import("./anchor");
@@ -309,7 +419,8 @@ describe("chat reversible-history composer", () => {
       if (id === "one") return { ...snapshot(id), items: [{ id: "task:child", type: "background_task", taskId: "child", taskType: "local_agent", description: "Child review", status: "completed", createdAt: 1, childConversationId: "child", foreground: true }] };
       reads.push(cursor);
       const end = Number(cursor ?? total), start = Math.max(0, end - (fresh ? 20 : cursor ? 10 : 50));
-      return { ...snapshot(id), items: answers.slice(start, end).filter(item => !fresh || (range === "rewrite" ? item.createdAt <= 10 : item.id !== removedId)).map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item), olderCursor: start ? String(start) : undefined,
+      const items = answers.slice(start, end).filter(item => !fresh || (range === "rewrite" ? item.createdAt <= 10 : item.id !== removedId)).map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item);
+      return { ...snapshot(id), items, olderCursor: start ? String(start) : undefined, historyStart: items[0] && { id: items[0].id, createdAt: items[0].createdAt },
         ...(fresh && range === "rewrite" ? { reversibleHistory: { staged: true, canUndo: true, canRedo: true, revertedMessages: [] } } : {}) };
     };
     api.stream = (id, _cursor, next) => { if (id === "child") { handlers = next; childStreams++; } return { close() {} }; };
@@ -363,7 +474,8 @@ describe("chat reversible-history composer", () => {
       if (id === "other") return { ...snapshot(id), items: [{ id: "other:answer", type: "assistant_message", createdAt: 1, markdown: "Other child answer" }] };
       if (fresh && !cursor) recoveryHeads++;
       const end = Number(cursor ?? 100), start = Math.max(0, end - (fresh ? 20 : cursor ? 10 : 50));
-      const page = { ...snapshot(id), items: answers.slice(start, end).filter(item => !fresh || item.id !== "answer:46"), olderCursor: start ? String(start) : undefined };
+      const items = answers.slice(start, end).filter(item => !fresh || item.id !== "answer:46");
+      const page = { ...snapshot(id), items, olderCursor: start ? String(start) : undefined, historyStart: items[0] && { id: items[0].id, createdAt: items[0].createdAt } };
       if (fresh && cursor && !heldOnce) { heldOnce = true; heldPage = page; return held.promise; }
       return page;
     };
@@ -632,7 +744,9 @@ describe("chat reversible-history composer", () => {
       reads.push(cursor);
       const offset = cursor ? Number(cursor) : total;
       const start = Math.max(0, offset - (fresh ? 20 : 50));
-      return { ...snapshot(id), items: [...answers.slice(start, offset).filter(item => !fresh || item.id !== removedId).map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item), ...(!cursor ? metadata : [])], olderCursor: start ? String(start) : undefined };
+      const items = answers.slice(start, offset).filter(item => !fresh || item.id !== removedId).map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item);
+      return { ...snapshot(id), items: [...items, ...(!cursor ? metadata : [])], olderCursor: start ? String(start) : undefined,
+        historyStart: items[0] && { id: items[0].id, createdAt: items[0].createdAt } };
     };
     api.stream = (_id, _cursor, next) => { handlers = next; streams++; return { close() {} }; };
     const { TimelineAnchorController } = await import("./anchor");
@@ -697,7 +811,9 @@ describe("chat reversible-history composer", () => {
       if (rewritten) return { ...snapshot(id), items: answers.slice(0, 5) };
       const offset = cursor ? Number(cursor) : 80;
       const start = Math.max(0, offset - (recovering ? 20 : 50));
-      const page = { ...snapshot(id), cursor: cursorAt(live ? 1 : 0), items: [...answers.slice(start, offset).filter(item => !recovering || item.id !== "answer:6"), ...(!cursor && live ? [native] : [])], olderCursor: start ? String(start) : undefined };
+      const items = answers.slice(start, offset).filter(item => !recovering || item.id !== "answer:6");
+      const page = { ...snapshot(id), cursor: cursorAt(live ? 1 : 0), items: [...items, ...(!cursor && live ? [native] : [])], olderCursor: start ? String(start) : undefined,
+        historyStart: items[0] && { id: items[0].id, createdAt: items[0].createdAt } };
       if (recovering && !cursor && overlap === "stale-head" && !staleHeadServed) {
         staleHeadServed = true;
         return { ...page, cursor: cursorAt(0), items: page.items.filter(item => item.id !== native.id) };

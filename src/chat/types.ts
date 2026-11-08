@@ -950,6 +950,12 @@ export type ConversationSnapshot = {
   queued?: QueuedMessage[];
   reversibleHistory?: ReversibleHistoryState;
   olderCursor?: string;
+  // First displayable message in the provider's actual requested page, before
+  // adapter accounting backfills or concurrent native-row merging. Following
+  // olderCursor pages establishes contiguous coverage through this frontier;
+  // arbitrary rows elsewhere in items do not. Absent on older producers or
+  // pages with no displayable message. Never a replay or mutation authority.
+  historyStart?: { id: string; createdAt: number };
 };
 
 export type ConversationInventoryEvent = {

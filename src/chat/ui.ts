@@ -3029,10 +3029,12 @@ export function initChat(api = new ChatApiClient()): void {
       if (head.conversation.id !== id || head.generation === current.generation && projectionFromSnapshot(head).sequence < current.sequence) return null;
       const cursors = new Set<string>();
       let advanced = false;
-      // Only message rows prove that paging reached a time boundary: tool
-      // launchers can be backfilled into the newest page for accounting.
-      const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.items.some(item => hasTranscriptContent(item)
-        && (item.type === "user_message" || item.type === "assistant_message") && (item.id === boundary.id || item.createdAt < boundary.createdAt)));
+      // Only the provider-page frontier proves contiguous coverage. Even a
+      // visible answer can be backfilled by a concurrent native update. Older
+      // producers without a frontier conservatively page to the beginning,
+      // within the same read budget, rather than trusting arbitrary items.
+      const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.historyStart !== undefined
+        && (snapshot.historyStart.id === boundary.id || snapshot.historyStart.createdAt < boundary.createdAt));
       while (snapshot.olderCursor && !covered()) {
         if (pageReads >= 1_000 || cursors.has(snapshot.olderCursor)) return null;
         const cursor = snapshot.olderCursor;
@@ -3051,7 +3053,8 @@ export function initChat(api = new ChatApiClient()): void {
           if (pass !== 0 || projectionFromSnapshot(page).sequence <= projectionFromSnapshot(snapshot).sequence) return null;
           advanced = true;
         }
-        snapshot = { ...head, cursor: page.cursor, items: prependSnapshot(projectionFromSnapshot(snapshot), page).items, olderCursor: page.olderCursor };
+        snapshot = { ...head, cursor: page.cursor, items: prependSnapshot(projectionFromSnapshot(snapshot), page).items, olderCursor: page.olderCursor,
+          historyStart: page.historyStart ?? snapshot.historyStart };
       }
       if (!advanced) break;
       // A cold native adapter publishes the older rows it first reads.

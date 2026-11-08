@@ -259,6 +259,20 @@ describe("chat domain validation", () => {
     expect(parseConversationSnapshot({ ...snapshot, queued: undefined })).toBeDefined();
   });
 
+  test("snapshot page frontiers are optional, public and closed", () => {
+    const snapshot = { conversation: summary, configuration: {}, generation: "g", cursor: "cursor", items: [], olderCursor: "opaque" };
+    expect(parseConversationSnapshot(snapshot)).toEqual(snapshot);
+    const historyStart = { id: "part:first-in-source-page", createdAt: 100 };
+    // A subsequently removed page-boundary row need not survive in items.
+    expect(parseConversationSnapshot({ ...snapshot, historyStart }).historyStart).toEqual(historyStart);
+    for (const invalid of [null, {}, { id: "", createdAt: 100 }, { id: "part:x", createdAt: -1 },
+      { id: "part:x", createdAt: Infinity }, { id: "part:x", createdAt: "100" },
+      { ...historyStart, privateSource: "not-a-wire-field" }]) {
+      expect(() => parseConversationSnapshot({ ...snapshot, historyStart: invalid })).toThrow();
+    }
+    expect(() => parseConversationSnapshot({ ...snapshot, unexpected: true })).toThrow();
+  });
+
   test("accepts pending and resolved interaction request fixtures", () => {
     expect(parseInteractionRequest(items[6])).toBeDefined();
     expect(parseInteractionRequest(items[7])).toBeDefined();

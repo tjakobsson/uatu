@@ -4595,6 +4595,25 @@ describe("OpenCode conversation inventory and history", () => {
     expect(items).toEqual([expect.objectContaining({ id: "tool:p1", status: "running" })]);
   });
 
+  for (const hasMessage of [false, true]) test(`history frontier precedes adapter backfills and ignores non-message page rows (${hasMessage})`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const carrier: ConversationItem = { id: "usage:older", type: "assistant_message", createdAt: 0, markdown: "", usage: { input: 100, costUsd: 1 } };
+    const tool: ConversationItem = { id: "tool:backfilled", type: "tool", createdAt: 1, name: "task", status: "completed" };
+    const first: ConversationItem = { id: "message:page-start", type: "user_message", createdAt: 100, text: "Actual page start" };
+    const last: ConversationItem = { id: "part:page-end", type: "assistant_message", createdAt: 101, markdown: "Latest answer" };
+    provider.listMessages = async () => ({ items: [tool, ...(hasMessage ? [first, last] : [])], accounting: [],
+      completeItems: [carrier, tool, ...(hasMessage ? [first, last] : [])], nextCursor: "opaque-provider-boundary" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+    try {
+      const page = await adapter.history("session");
+      expect(page.historyStart).toEqual(hasMessage ? { id: first.id, createdAt: first.createdAt } : undefined);
+      expect(page.items).toContainEqual(carrier);
+      expect(page.items).toContainEqual(tool);
+      expect(page.olderCursor).toBeDefined();
+    } finally { await adapter.dispose(); }
+  });
+
   test("uses opaque stable provider page boundaries without duplicate or reordered items", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -8668,7 +8687,8 @@ describe("pending permission recovery", () => {
   test(`${mode} history fences unprojected ${owner} questions against ${superseding} refresh`, async () => {
     const provider = Object.assign(new FakeProvider(), mode === "legacy" ? {} : { waitForEventStream: async (_signal: AbortSignal) => {} });
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
-    provider.listMessages = async () => ({ items: [], completeItems: [], accounting: [] });
+    let historyReads = 0;
+    provider.listMessages = async () => { historyReads++; return { items: [], completeItems: [], accounting: [] }; };
     const question = (requestId: string) => ({ requestId, conversationId: owner,
       questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] });
     let pending: ReturnType<typeof question>[] = [];
@@ -8684,6 +8704,7 @@ describe("pending permission recovery", () => {
       onNotification: event => notifications.push(event) });
     const pump = adapter.startEventPump();
     let reading: ReturnType<ChatAdapter["history"]> | undefined;
+    let nativeCreatedAt: number | undefined;
     const refresh = (callID: string) => provider.eventQueue.push({ id: callID, type: "session.next.tool.success",
       data: { sessionID: owner, callID, tool: "question" } } as never);
     const internals = adapter as unknown as {
@@ -8693,6 +8714,7 @@ describe("pending permission recovery", () => {
     };
     try {
       await adapter.history("parent");
+      const readsBefore = historyReads;
       pending = [question("old")];
       hold = true;
       // Exercise the real complete-replacement reader, not a copied merge.
@@ -8712,6 +8734,7 @@ describe("pending permission recovery", () => {
           provider.eventQueue.push({ type: "question.asked", data: { sessionID: owner, id: "native", timestamp: Date.now(),
             questions: [{ question: "Pick", options: [{ label: "A" }] }] } });
           await waitUntil(() => adapter.projectionForTests("parent").has("question:native"));
+          nativeCreatedAt = adapter.projectionForTests("parent").get("question:native")!.createdAt;
         }
       }
       release();
@@ -8719,6 +8742,13 @@ describe("pending permission recovery", () => {
       const expected = superseding === "none" ? ["question:old"] : superseding === "new" ? ["question:native", "question:new"] : [];
       expect(snapshot.items.filter(item => item.type === "question").map(item => item.id).sort()).toEqual(expected);
       expect(adapter.projectionForTests("parent").items().filter(item => item.type === "question").map(item => item.id).sort()).toEqual(expected);
+      if (superseding === "new") {
+        expect(snapshot.items.find(item => item.id === "question:native")?.createdAt).toBe(nativeCreatedAt);
+        // The accepted event dirties the parent's complete replacement. Its
+        // retry must retain the original read's announcement fence, even
+        // though the provider's question list still contains only "new".
+        if (mode === "replacement" && owner === "parent") expect(historyReads).toBeGreaterThan(readsBefore + 1);
+      }
       expect(internals.questionCreatedAt.has("question:old")).toBe(superseding === "none");
       expect(adapter.activity().awaiting).toBe(expected.length > 0);
       pending = [];
