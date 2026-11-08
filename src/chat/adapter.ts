@@ -512,7 +512,7 @@ export type ChatAdapterOptions = {
   onNotification?: (event: AgentNotificationEvent) => void;
 };
 
-type QuestionSetRead = { sets: Map<string, Set<string>>; revision: number };
+type QuestionSetRead = { sets: Map<string, Set<string>>; ages: Map<string, number>; age: number; conflicted: boolean; revision: number };
 
 export class ChatAdapter {
   private readonly notifications: AgentNotificationTracker;
@@ -532,6 +532,7 @@ export class ChatAdapter {
   // Empty reconciliation authority belongs only to overlapping reads, never
   // to the adapter's retained conversation state.
   private readonly questionReads = new Set<QuestionSetRead>();
+  private questionReadClock = 0;
   private readonly questionRefreshes = new Set<string>();
   private readonly questionCreatedAt = new Map<string, number>();
   private readonly permissionCreatedAt = new Map<string, number>();
@@ -978,14 +979,22 @@ export class ChatAdapter {
   }
 
   private async readHistory(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage?: HistoryCoverage): Promise<ConversationSnapshot> {
-    const questions = { sets: new Map<string, Set<string>>(), revision: 0 };
-    const release = () => { this.questionReads.delete(questions); };
-    coverage?.signal.addEventListener("abort", release, { once: true });
-    try { return await this.readHistoryWithQuestions(id, options, coverage, questions); }
-    finally { release(); coverage?.signal.removeEventListener("abort", release); }
+    const questionTick = coverage?.questionTick ?? this.interactionClock;
+    for (let attempt = 0; ; attempt++) {
+      const questions: QuestionSetRead = { sets: new Map(), ages: new Map(), age: 0, conflicted: false, revision: 0 };
+      const release = () => { this.questionReads.delete(questions); };
+      coverage?.signal.addEventListener("abort", release, { once: true });
+      try { return await this.readHistoryWithQuestions(id, options, coverage, questions, questionTick); }
+      catch (error) {
+        // Covered reads retry under their existing bounded owner. Legacy
+        // reads get at most two retries to include an older overlapping commit.
+        if (coverage || !questions.conflicted || !(error instanceof HistoryReadChangedError) || attempt >= 2) throw error;
+      }
+      finally { release(); coverage?.signal.removeEventListener("abort", release); }
+    }
   }
 
-  private async readHistoryWithQuestions(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage: HistoryCoverage | undefined, questionRead: QuestionSetRead): Promise<ConversationSnapshot> {
+  private async readHistoryWithQuestions(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage: HistoryCoverage | undefined, questionRead: QuestionSetRead, questionTick: number): Promise<ConversationSnapshot> {
     const session = await this.requireSession(id);
     coverage?.assertCurrent();
     // Captured before the provider reads: a pump event landing during them
@@ -1551,7 +1560,7 @@ export class ChatAdapter {
     let reconcileQuestionFreshness: (() => void) | undefined;
     let questionTrackingCurrent: (() => boolean) | undefined;
     if (this.provider.listQuestions) try {
-      const questionTick = coverage?.questionTick ?? this.interactionClock;
+      questionRead.age = ++this.questionReadClock;
       if (!this.disposed) this.questionReads.add(questionRead);
       const pendingNow = await this.pendingQuestions(id, false);
       coverage?.assertCurrent();
@@ -1610,6 +1619,9 @@ export class ChatAdapter {
         || ((this.announced.get(item.id)?.tick ?? 0) > questionTick
           && historyRemovals.get(item.id)?.expected !== item);
       reconcileQuestionFreshness = () => {
+        // An older source may have committed rows after our absence sweep.
+        // Reread rather than granting its completion newer source authority.
+        if (questionRead.conflicted) throw new HistoryReadChangedError();
         // A tool refresh owns a complete newer set, including absence. An old
         // read must neither resurrect its unprojected rows nor retire current
         // ones. Carry current rows for replacement/seed as well as recovery.
@@ -1667,7 +1679,7 @@ export class ChatAdapter {
             if (!pending.size) continue;
             for (const itemId of this.publishedQuestions.get(owner) ?? []) pending.add(itemId);
           }
-          this.publishQuestionSet(owner, pending, questionRead);
+          this.publishQuestionSet(owner, pending, Math.max(questionRead.age, questionRead.ages.get(owner) ?? 0), questionRead);
         }
       };
     } catch { /* unknown, not empty */ }
@@ -6208,12 +6220,21 @@ export class ChatAdapter {
 
   /** Retain pending removal authority; lend empty-set authority only to reads
    * already in flight. Each read observes the latest set, not a mutation log. */
-  private publishQuestionSet(owner: string, pending: Set<string>, source?: QuestionSetRead): void {
+  private publishQuestionSet(owner: string, pending: Set<string>, age: number, source?: QuestionSetRead): void {
     if (pending.size) this.publishedQuestions.set(owner, pending);
     else this.publishedQuestions.delete(owner);
     for (const read of this.questionReads) {
       if (read === source) continue;
+      if (age < read.age) {
+        // Older publication is not a newer observation. It can introduce rows
+        // after this read's sweep, so revoke its admission and retry instead.
+        read.conflicted = true;
+        read.revision++;
+        continue;
+      }
+      if (age <= read.age || age < (read.ages.get(owner) ?? 0)) continue;
       read.sets.set(owner, pending);
+      read.ages.set(owner, age);
       read.revision++;
     }
   }
@@ -6229,24 +6250,35 @@ export class ChatAdapter {
     this.questionRefreshes.add(conversationId);
     void (async () => {
       try {
-        const items = await this.pendingQuestions(conversationId);
-        const live = new Set(items.map(item => item.id));
-        const previous = this.publishedQuestions.get(conversationId) ?? new Set<string>();
-        const updates: NormalizedProviderUpdate[] = items.map(item => ({ kind: "upsert", item }));
-        for (const id of previous) {
-          if (live.has(id)) continue;
-          updates.push({ kind: "remove", itemId: id });
-          this.questionCreatedAt.delete(id);
-        }
-        this.publishQuestionSet(conversationId, live);
-        if (updates.length > 0) {
-          await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
-          coalescer.push(conversationId, updates);
-          // This fallback is the only path that discovers a subagent's
-          // question at all (no asked event exists), and the pump's mirror
-          // only sees the original tool update — so without mirroring here
-          // the parent shows a task running and no sign anything is waiting.
-          await this.mirrorToParent(conversationId, updates, coalescer);
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const source: QuestionSetRead = { sets: new Map(), ages: new Map(), age: ++this.questionReadClock, conflicted: false, revision: 0 };
+          if (!this.disposed) this.questionReads.add(source);
+          try {
+            const items = await this.pendingQuestions(conversationId, false);
+            // A younger history source already committed while this list waited.
+            // Reread; completion order alone cannot authorize the older result.
+            if (source.sets.size) continue;
+            for (const item of items) if (!this.questionCreatedAt.has(item.id)) this.questionCreatedAt.set(item.id, item.createdAt);
+            const live = new Set(items.map(item => item.id));
+            const previous = this.publishedQuestions.get(conversationId) ?? new Set<string>();
+            const updates: NormalizedProviderUpdate[] = items.map(item => ({ kind: "upsert", item }));
+            for (const id of previous) {
+              if (live.has(id)) continue;
+              updates.push({ kind: "remove", itemId: id });
+              this.questionCreatedAt.delete(id);
+            }
+            this.publishQuestionSet(conversationId, live, source.age, source);
+            if (updates.length > 0) {
+              await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
+              coalescer.push(conversationId, updates);
+              // This fallback is the only path that discovers a subagent's
+              // question at all (no asked event exists), and the pump's mirror
+              // only sees the original tool update — so without mirroring here
+              // the parent shows a task running and no sign anything is waiting.
+              await this.mirrorToParent(conversationId, updates, coalescer);
+            }
+            return;
+          } finally { this.questionReads.delete(source); }
         }
       }
       // A failed refresh must reach THIS catch with the published set intact:
