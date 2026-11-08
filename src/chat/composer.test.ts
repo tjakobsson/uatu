@@ -3,6 +3,7 @@ import { Composer, type ComposerConversation, type ComposerPresentation, type Co
 import { ChatTransportError } from "./client";
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay } from "./replay";
+import { IdempotencyReceipts } from "./receipts";
 import { applyChatEvent } from "./projection";
 import type { ChatProjection } from "./projection";
 import type { ConversationSnapshot, MessageAttachment, QueuedMessage, ReversibleHistoryResult } from "./types";
@@ -72,6 +73,117 @@ test("ordinary send captures once, accepts without consuming newer text and rele
   expect(f.texts.get("one")).toBe("Newer"); expect(f.prompts[0]![2]).toBe("Original");
   expect(f.prompts[0]![6]).toEqual([{ id: "upload-1", name: "image.png", mimeType: "image/png" }]);
   expect(f.released).toEqual(f.created); expect(f.projection().items).toHaveLength(1);
+});
+
+test("a cached direct retry after oversized recovery retains its original insertion authority", async () => {
+  const f = fixture();
+  f.steering.set("one", false);
+  const receipts = new IdempotencyReceipts({ maxEntries: 8, maxBytes: 64 * 1024, ttlMs: 60_000 });
+  const retryResponse = deferred<void>();
+  const replay = new ConversationReplay("g", "one", 1024 * 1024), server = new ConversationProjection(replay);
+  const subscription = replay.handoff(() => null).subscription, iterator = subscription[Symbol.asyncIterator]();
+  let providerPrompts = 0, acknowledged = 0, consumed = 0, unpaused = 0;
+  f.presentation.accepted = () => { acknowledged++; };
+  f.context.consumeConfiguration = () => { consumed++; };
+  f.transport.sendNow = async () => { unpaused++; return { messageId: "held", delivery: "steer" }; };
+  f.transport.prompt = async (...args) => {
+    f.prompts.push(args);
+    const receipt = await receipts.run(`${args[0]}:prompt:${args[1]}`, async () => {
+      const messageId = `message-${++providerPrompts}`;
+      server.upsert({ id: `message:${messageId}`, type: "user_message", createdAt: providerPrompts, text: args[2] });
+      return acceptance({ messageId, configuration: { mode: "original" } });
+    });
+    if (f.prompts.length === 1) throw new ChatTransportError("Accepted response was lost", 502);
+    if (f.prompts.length === 2) await retryResponse.promise;
+    return receipt;
+  };
+  try {
+    f.composer.edit("Original"); await f.composer.attach([image("original.png")]);
+    await f.composer.submit();
+    expect(providerPrompts).toBe(1);
+    expect(f.texts.get("one")).toBe("Original");
+    expect(f.composer.pendingAttachments()).toHaveLength(1);
+    expect(f.released).toEqual([]);
+    const native = (await iterator.next()).value!;
+    const applied = applyChatEvent(f.projection(), native, replay.latestCursor());
+    f.context.write(applied.projection); f.composer.observe(native, applied.outcome === "applied");
+    const workers = Array.from({ length: 225 }, (_, n) => ({ id: `worker:${n}`, type: "background_task" as const, createdAt: n + 2,
+      taskId: `worker:${n}`, description: `Worker ${n}`, status: "completed" as const, summary: "x".repeat(4096) }));
+    server.recover([{ kind: "remove", itemId: "message:message-1" }, ...workers.map(item => ({ kind: "upsert" as const, item }))]);
+    const marker = (await iterator.next()).value!;
+    expect(marker).toMatchObject({ type: "resync", reason: "conversation-rewritten" });
+    expect((await iterator.next()).done).toBe(true);
+    expect(applyChatEvent(f.projection(), marker).outcome).toBe("resync");
+    const queued = [entry({ id: "held", delivery: "queue", paused: true })];
+    const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "idle" },
+      generation: "g", cursor: replay.latestCursor(), configuration: { mode: "fresh" }, items: server.items(), queued };
+    f.context.write(f.composer.acceptSnapshot(snapshot, f.projection().acceptedDrafts)); f.reload();
+    expect(f.projection().removedIds ?? []).toEqual([]);
+    const retried = f.composer.submit();
+    f.composer.edit("Newer private draft"); await f.composer.attach([image("newer.png")]);
+    retryResponse.resolve(); await retried;
+    expect(f.prompts).toHaveLength(2);
+    expect(f.prompts[1]![1]).toBe(f.prompts[0]![1]);
+    expect(f.prompts[1]![6]).toEqual(f.prompts[0]![6]);
+    expect(providerPrompts).toBe(1);
+    expect(receipts.size()).toBe(1);
+    expect(f.projection().items).toHaveLength(225);
+    expect(f.projection().items.some(item => item.id === "message:message-1")).toBe(false);
+    expect(f.projection().acceptedDrafts).toEqual([]);
+    expect(f.projection().configuration).toEqual({ mode: "fresh" });
+    expect(f.projection().queued).toEqual(queued);
+    expect(f.texts.get("one")).toBe("Newer private draft");
+    expect(f.composer.pendingAttachments().map(item => item.name)).toEqual(["newer.png"]);
+    expect(f.released).toEqual([f.created[0]!]);
+    expect(acknowledged).toBe(1); expect(consumed).toBe(1); expect(unpaused).toBe(0);
+    // Once the logical retry settles, a genuinely new draft gets a new
+    // request and current insertion authority, not the old receipt's fence.
+    await f.composer.submit();
+    expect(providerPrompts).toBe(2);
+    expect(f.prompts).toHaveLength(3);
+    expect(f.prompts[2]![1]).not.toBe(f.prompts[0]![1]);
+    expect(f.projection().items).toContainEqual(expect.objectContaining({ id: "message:message-2", text: "Newer private draft" }));
+    expect(f.projection().items.some(item => item.id === "message:message-1")).toBe(false);
+    expect(acknowledged).toBe(2); expect(unpaused).toBe(0);
+    expect(f.released).toEqual(f.created);
+  } finally { retryResponse.resolve(); subscription.cancel(); f.composer.dispose(); }
+});
+
+for (const replacement of ["none", "present", "generation", "switch-and-return", "repeated-loss", "new-draft"] as const) test(`idempotent direct retry retains its first attempt's authority: ${replacement}`, async () => {
+  const f = fixture(); f.steering.set("one", false);
+  const receipts = new IdempotencyReceipts({ maxEntries: 8, maxBytes: 64 * 1024, ttlMs: 60_000 });
+  let providerPrompts = 0, acknowledged = 0;
+  f.presentation.accepted = () => { acknowledged++; };
+  f.transport.prompt = async (...args) => {
+    f.prompts.push(args);
+    const receipt = await receipts.run(`${args[0]}:prompt:${args[1]}`, async () => acceptance({ messageId: `message-${++providerPrompts}` }));
+    if (f.prompts.length === 1 || replacement === "repeated-loss" && f.prompts.length === 2) throw new ChatTransportError("Response lost", 502);
+    return receipt;
+  };
+  f.composer.edit("Original"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("Original");
+  if (replacement === "switch-and-return") {
+    f.select("two"); f.reload(); f.composer.edit("Other draft"); f.select("one"); f.reload();
+  } else if (replacement === "generation") f.setProjection({ generation: "new-generation" });
+  else if (replacement !== "none") f.reload();
+  if (replacement === "present") f.setProjection({ items: [{ id: "message:message-1", type: "user_message", createdAt: 1, text: "Authoritative native prompt" }] });
+  if (replacement === "repeated-loss") { await f.composer.submit(); f.reload(); }
+  if (replacement === "new-draft") f.composer.edit("Different request");
+  const sent = f.composer.submit(); f.composer.edit("Newer"); await sent;
+  expect(acknowledged).toBe(1);
+  expect(providerPrompts).toBe(replacement === "new-draft" ? 2 : 1);
+  expect(f.texts.get("one")).toBe("Newer");
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  if (replacement === "new-draft") {
+    expect(f.prompts.at(-1)![1]).not.toBe(f.prompts[0]![1]);
+    expect(f.projection().items).toContainEqual(expect.objectContaining({ id: "message:message-2", text: "Different request" }));
+  } else {
+    expect(f.prompts.every(args => args[1] === f.prompts[0]![1])).toBe(true);
+    if (replacement === "none" || replacement === "present") expect(f.projection().items).toEqual([expect.objectContaining({ id: "message:message-1",
+      text: replacement === "present" ? "Authoritative native prompt" : "Original", requestId: f.prompts[0]![1] })]);
+    else expect(f.projection().items).toEqual([]);
+  }
+  if (replacement === "switch-and-return") expect(f.texts.get("two")).toBe("Other draft");
 });
 
 test("an oversized prepared recovery cannot let a delayed direct acknowledgement resurrect its excluded prompt", async () => {

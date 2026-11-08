@@ -1559,7 +1559,7 @@ export class ChatAdapter {
         if (items.some(item => item.id === pending.id)) continue;
         items.push(pending);
       }
-      if (this.provider.listQuestions) {
+      {
         questionsReconciled = true;
         // A successful read is authoritative: it carries this conversation's
         // own questions and its children's, so one absent from it was
