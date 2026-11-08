@@ -20,16 +20,16 @@
 ## 4. Follow
 
 - [x] 4.1 Exclude Git-ignored files from server Follow nomination (`latestChanges`, per-subscriber `changedId`, reconnect `latestChange`, `newest()`/`NewestDocument`), collapse the per-visibility `latestChanges` maps, and treat failed classification as not ignored; verify watch-session tests for an ignored build batch with Show ignored on and off, a mixed batch following the document, a tracked `dist/index.html` being followed, and an initial default that skips newer ignored files.
-- [ ] 4.2 Exclude Git-ignored files from the client's chip catch-up in `src/shell/follow.ts`, and keep refresh in place for opened ignored files; verify a unit test for catch-up and a browser test that rewrites an opened ignored `build/report.md` without changing selection.
+- [x] 4.2 Exclude Git-ignored files from the client's chip catch-up in `src/shell/follow.ts`, and keep refresh in place for opened ignored files; verify a unit test for catch-up and a browser test that rewrites an opened ignored `build/report.md` without changing selection.
 
 ## 5. Tree, Recent, and count (client)
 
-- [ ] 5.1 Render folder entries as explicit muted directories in `src/sidebar/tree-view.ts`, request a listing on genuine user expansion with a loading state on the row, merge results under `withProgrammaticUpdate`, offer retry on failure, never re-request listed levels, and request ancestor levels when revealing an explicitly selected file; verify browser tests with pointer, touch, and keyboard expansion, a failed listing, focus staying on the row, and no listing requests during mount or filter reconciliation.
-- [ ] 5.2 Extend `isDocumentVisible` to folder entries so Show ignored files and `ignore.exclude` negations apply to them, and make Recent and the count reflect known files only; verify `file-visibility` and `recent-model` tests plus a browser test in which listing a level raises the count.
+- [x] 5.1 Render folder entries as explicit muted directories in `src/sidebar/tree-view.ts`, request a listing on genuine user expansion with a loading state on the row, merge results under `withProgrammaticUpdate`, offer retry on failure, never re-request listed levels, and request ancestor levels when revealing an explicitly selected file; verify browser tests with pointer, touch, and keyboard expansion, a failed listing, focus staying on the row, and no listing requests during mount or filter reconciliation.
+- [x] 5.2 Extend `isDocumentVisible` to folder entries so Show ignored files and `ignore.exclude` negations apply to them, and make Recent and the count reflect known files only; verify `file-visibility` and `recent-model` tests plus a browser test in which listing a level raises the count.
 
 ## 6. End-to-end and cost
 
-- [ ] 6.1 Add an e2e test with an unconfigured Git workspace ignoring `/build*/` and `node_modules/`: both appear muted, expanding `build/renders/` lists and plays a render, a render written during the session appears in Recent and under Audio without expansion and does not take Follow, and `.env` is listed and previewable; verify on desktop and touch Chromium and WebKit through the Hub, and save screenshots of the muted folders, an expanding folder, and Recent.
+- [x] 6.1 Add an e2e test with an unconfigured Git workspace ignoring `/build*/` and `node_modules/`: both appear muted, expanding `build/renders/` lists and plays a render, a render written during the session appears in Recent and under Audio without expansion and does not take Follow, and `.env` is listed and previewable; verify on desktop and touch Chromium and WebKit through the Hub, and save screenshots of the muted folders, an expanding folder, and Recent.
 - [ ] 6.2 Add an `@perf` e2e test with a 40,000-file ignored `node_modules/` and an 80,000-write install burst, asserting deterministic counters (one folder entry at discovery, no stats inside it, at most 2,000 windowed entries, lane patch counts, zero Follow navigations, an ordinary edit visible within its bound), and recording discovery time and tree-mount time as evidence; verify it passes under `bun run test:e2e:perf`.
 
 ## 7. Documentation
