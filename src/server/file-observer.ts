@@ -18,6 +18,9 @@ type Options = {
   // A directory that appeared after discovery: true if it is ignored as a
   // whole (it then becomes unlisted) — decided before it is read.
   classifyNew?: (directory: string) => Promise<boolean>;
+  // Paths inside Git-ignored folders: inspected after every other queued
+  // path, so an install's burst never delays an ordinary edit.
+  background?: (file: string) => boolean;
   usePolling?: boolean;
   renew?: boolean;
   // Controlled native notifications with real filesystem reads in tests.
@@ -361,6 +364,7 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
   private known = new Map<string, Stats>();
   private children = new Map<string, Set<string>>();
   private pending = new Map<string, boolean>();
+  private backgroundPending = new Map<string, boolean>();
   private activePaths = new Set<string>();
   private deleted = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
@@ -408,6 +412,7 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
     this.stopped = true;
     this.release();
     this.pending.clear();
+    this.backgroundPending.clear();
     for (const timer of this.deleted.values()) clearTimeout(timer);
     this.deleted.clear();
     this.known.clear();
@@ -417,7 +422,8 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
 
   private enqueue(file: string, discover: boolean): void {
     if (this.stopped) return;
-    this.pending.set(file, (this.pending.get(file) ?? false) || discover);
+    const queue = this.options.background?.(file) ? this.backgroundPending : this.pending;
+    queue.set(file, (queue.get(file) ?? false) || discover);
     if (this.scheduled) return;
     this.scheduled = true;
     queueMicrotask(() => { this.scheduled = false; this.pump(); });
@@ -425,23 +431,28 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
 
   private pump(): void {
     if (this.stopped) return;
-    for (const [file, discover] of this.pending) {
-      if (this.activePaths.size >= 16) break;
-      if (this.activePaths.has(file)) continue;
-      this.pending.delete(file);
-      this.activePaths.add(file);
-      void this.inspect(file, discover).catch(error => {
-        if (!this.stopped) { this.failed = true; this.emit("error", error); }
-      }).finally(() => {
-        this.activePaths.delete(file);
-        this.pump();
-      });
+    for (const queue of [this.pending, this.backgroundPending]) {
+      for (const [file, discover] of queue) {
+        if (this.activePaths.size >= 16) break;
+        if (this.activePaths.has(file)) continue;
+        queue.delete(file);
+        this.activePaths.add(file);
+        void this.inspect(file, discover).catch(error => {
+          if (!this.stopped) { this.failed = true; this.emit("error", error); }
+        }).finally(() => {
+          this.activePaths.delete(file);
+          this.pump();
+        });
+      }
+      // Background paths wait while any ordinary path is queued.
+      if (queue === this.pending && queue.size) break;
     }
-    if (!this.ready && !this.failed && !this.pending.size && !this.activePaths.size) {
+    const queued = this.pending.size + this.backgroundPending.size;
+    if (!this.ready && !this.failed && !queued && !this.activePaths.size) {
       this.ready = true;
       this.emit("ready");
     }
-    if (!this.pending.size && !this.activePaths.size) this.emit("idle");
+    if (!queued && !this.activePaths.size) this.emit("idle");
   }
 
   private async inspect(file: string, discover: boolean): Promise<void> {

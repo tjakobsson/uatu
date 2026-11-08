@@ -6,7 +6,7 @@ import { test as base, expect } from "./fixtures";
 import { withEngineBrowsers, attachPageDiagnosticsOnFailure } from "./page-diagnostics";
 import { workspacePath } from "./config";
 import { wavFixture } from "./media-fixtures";
-import { captureScreenshot } from "./evidence";
+import { captureScreenshot, saveEvidence } from "./evidence";
 import { revealTreeRow, treeRow, waitForTreeIdle } from "./tree-helpers";
 
 const test = withEngineBrowsers(base);
@@ -214,4 +214,91 @@ test("a direct link to a file inside unlisted ignored folders lists the levels r
   await expect.poll(() => listings.slice().sort()).toEqual(["build/", "build/renders/"]);
   await rowAppears(page, "build/CMakeCache.txt");
   await expect(await row(page, "build/renders/notes.txt")).toHaveAttribute("aria-selected", "true");
+});
+
+test("a 40,000-file ignored node_modules costs one entry, and an 80,000-write install stays bounded and never steals Follow @perf", { tag: "@perf" }, async ({ page, request }, info) => {
+  test.setTimeout(300_000);
+  const extras: Record<string, string> = { ".gitignore": "node_modules/\n" };
+  for (let i = 0; i < 40_000; i++) extras[`node_modules/pkg-${i % 800}/file-${i}.js`] = "module.exports = 1;\n";
+  const startedReset = performance.now();
+  const reset = await request.post("/__e2e/reset", { data: { git: true, follow: true, nativeWatch: true, extras }, timeout: 240_000 });
+  expect(reset.ok()).toBe(true);
+  const discoveryMs = performance.now() - startedReset;
+  const initial = await request.get("/api/state").then(response => response.json());
+  const docs = initial.roots.flatMap((root: any) => root.docs);
+  // Discovery: one folder entry, nothing read beneath it.
+  expect(initial.roots.flatMap((root: any) => root.folders ?? []).map((folder: any) => folder.relativePath)).toEqual(["node_modules/"]);
+  expect(docs.filter((doc: any) => doc.relativePath.startsWith("node_modules/"))).toHaveLength(0);
+
+  await page.addInitScript(() => {
+    const Native = window.EventSource;
+    (window as any).__patches = [];
+    window.EventSource = class extends Native {
+      constructor(url: string | URL, options?: EventSourceInit) {
+        super(url, options);
+        this.addEventListener("live", event => {
+          const envelope = JSON.parse((event as MessageEvent).data);
+          const patch = envelope.event?.data;
+          if (envelope.topic !== "document" || patch?.kind !== "patch") return;
+          const paths = [...patch.upserts.map((doc: any) => doc.relativePath), ...patch.removals.map((doc: any) => doc.id)];
+          (window as any).__patches.push({ at: Date.now(), entries: patch.upserts.length + patch.removals.length,
+            install: paths.filter((value: string) => value.includes("node_modules/")).length, changedId: patch.changedId, paths: paths.slice(0, 3) });
+        });
+      }
+    };
+  });
+  const { token } = await (await request.get("/__e2e/terminal-token")).json();
+  const mountStarted = performance.now();
+  await page.goto(`/?t=${encodeURIComponent(token)}`);
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await expect.poll(async () => { await revealTreeRow(page, "node_modules/"); return treeRow(page, "node_modules/").count(); }).toBe(1);
+  const treeMountMs = performance.now() - mountStarted;
+  const selected = page.url();
+
+  // An install writes 80,000 files into the unlisted folder, and a document
+  // is saved in the middle of it.
+  const installStarted = performance.now();
+  let editAt = 0;
+  for (let batch = 0; batch < 80; batch++) {
+    await Promise.all(Array.from({ length: 1000 }, async (_, i) => {
+      const directory = workspacePath("node_modules", `new-${batch}`);
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(`${directory}/f-${i}.js`, "x");
+    }));
+    if (batch === 40) {
+      editAt = Date.now();
+      await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nSaved during an install.\n");
+    }
+  }
+  const installMs = performance.now() - installStarted;
+  await expect(page.locator("#preview")).toContainText("Saved during an install.", { timeout: 15_000 });
+  const editVisibleMs = Date.now() - editAt;
+  // Let the lane drain.
+  await expect.poll(async () => {
+    const state = await request.get("/api/state").then(response => response.json());
+    return state.roots.flatMap((root: any) => root.docs).filter((doc: any) => doc.relativePath.startsWith("node_modules/")).length;
+  }, { timeout: 30_000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(6000);
+  const after = await request.get("/api/state").then(response => response.json());
+  const installDocs = after.roots.flatMap((root: any) => root.docs).filter((doc: any) => doc.relativePath.startsWith("node_modules/"));
+  const patches: { at: number; entries: number; install: number; changedId: string | null; paths: string[] }[] = await page.evaluate(() => (window as any).__patches);
+  const editPatchMs = (patches.find(patch => patch.paths.includes("guides/setup.md"))?.at ?? Infinity) - editAt;
+  const lanePatches = patches.filter(patch => patch.install > 0);
+  // Deterministic counters: the window bound, the lane's patch size, a
+  // separate document patch, and no Follow into the install.
+  expect(installDocs.length).toBeLessThanOrEqual(2000);
+  expect(lanePatches.every(patch => patch.entries <= 1024)).toBe(true);
+  expect(patches.some(patch => patch.install === 0 && patch.paths.includes("guides/setup.md"))).toBe(true);
+  expect(patches.filter(patch => patch.changedId?.includes("node_modules"))).toEqual([]);
+  // A loose wall-clock guard on the 2 s publication bound (recorded below).
+  expect(editPatchMs).toBeLessThan(4000);
+  expect(page.url()).not.toContain("node_modules");
+  void selected;
+  await saveEvidence(info, "ignored-install-perf.json", JSON.stringify({
+    fixture: { ignoredFiles: 40_000, installWrites: 80_000 },
+    discoveryMs: Math.round(discoveryMs), treeMountMs: Math.round(treeMountMs), installMs: Math.round(installMs),
+    editVisibleMs: Math.round(editVisibleMs), editPatchMs: Math.round(editPatchMs), installDocsAfter: installDocs.length,
+    lanePatches: lanePatches.length, largestLanePatch: Math.max(0, ...lanePatches.map(patch => patch.entries)),
+    lanePatchEntries: lanePatches.reduce((n, patch) => n + patch.entries, 0),
+  }, null, 2));
 });

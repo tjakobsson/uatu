@@ -349,6 +349,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     }) : observeFiles(entry, { ignored: index.policy.ignored, usePolling: options.usePolling, renew: staged,
       unlisted: directory => index.isUnlistedDirectory(directory),
       classifyNew: directory => index.classifyNewDirectory(directory),
+      background: file => index.isIgnoredPath(file),
       onWork: kind => metrics?.inc(`index.${kind}_total`),
     });
     const ready = Promise.withResolvers<void>();

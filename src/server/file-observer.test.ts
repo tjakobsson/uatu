@@ -767,3 +767,26 @@ for (const polling of [false, true]) {
     await until(() => added().includes("build/CMakeFiles.txt"), "write in a listed level");
   });
 }
+
+test("paths inside ignored folders are inspected after ordinary paths queued later", async () => {
+  const root = await fixture();
+  await mkdir(path.join(root, "node_modules"));
+  const installed = Array.from({ length: 200 }, (_, i) => path.join(root, "node_modules", `f${i}.js`));
+  await Promise.all([...installed, path.join(root, "notes.md")].map(file => writeFile(file, "x")));
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    unlisted: directory => directory === path.join(root, "node_modules"),
+    background: file => file.startsWith(path.join(root, "node_modules") + path.sep) });
+  observers.push(observer);
+  const added: string[] = [];
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  observer.on("all", (event, file) => { if (event === "add" || event === "change") added.push(path.relative(root, file)); });
+  await writeFile(path.join(root, "notes.md"), "edited during the install");
+  for (const file of installed) control.notify("change", file);
+  control.notify("change", path.join(root, "notes.md"));
+  await until(() => added.length === 201, "every report");
+  // At most the 16 background inspections already running finish first.
+  expect(added.indexOf("notes.md")).toBeLessThanOrEqual(16);
+});

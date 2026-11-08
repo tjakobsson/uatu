@@ -129,6 +129,11 @@ export class FileIndex {
     };
   }
 
+  isIgnoredPath(id: string): boolean {
+    const relative = rootRelative(this.entry, path.resolve(id));
+    return !!relative && this.ignoredFolders.isInside(relative);
+  }
+
   // A directory inside the ignored tree that nobody has listed: the watcher
   // knows it but does not read it.
   isUnlistedDirectory(id: string): boolean {
