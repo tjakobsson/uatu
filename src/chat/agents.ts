@@ -493,10 +493,13 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   }
 
   private async enrichSnapshot(snapshot: AgentConversationSnapshot): Promise<AgentConversationSnapshot> {
-    const lastUser = snapshot.items.findLastIndex(item => item.type === "user_message");
+    // Match the renderer's assistantMessageComplete lifecycle: a steer may
+    // follow an answer that is still growing. Within a live conversation, a
+    // turn footer closes prior rows; enrichItem also honors completedAt.
+    const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
     const items: ConversationItem[] = [];
     for (const [index, item] of snapshot.items.entries()) {
-      items.push(await this.enrichItem(snapshot.conversation.id, item, index > lastUser && isLiveConversationStatus(snapshot.conversation.status)));
+      items.push(await this.enrichItem(snapshot.conversation.id, item, index > lastTurn && isLiveConversationStatus(snapshot.conversation.status)));
     }
     return { ...snapshot, items };
   }

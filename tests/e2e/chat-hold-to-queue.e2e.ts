@@ -212,6 +212,31 @@ test("side reader uses safe chat markdown with locally scrolling tables", async 
   await expect(notice).toBeFocused();
   await expect(page.locator("#chat-input")).toHaveValue("Keep my selection");
 });
+for (const touch of [false, true]) test(`side-reader SVG source remains accessible and copyable (${touch ? "mobile" : "desktop"})`, async ({ launchBrowser, baseURL, request }) => {
+  const browser = await launchBrowser(engine);
+  const page = await browser.newPage({ baseURL, viewport: touch ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: touch, isMobile: touch });
+  try {
+    await boot(page, request);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 80"><text x="10" y="40">Side answer</text></svg>\n';
+    await page.route("**/aside", route => route.fulfill({ json: { text: `\`\`\`svg\n${svg}\`\`\`` } }));
+    await page.locator("#chat-input").fill("/btw Show the diagram source");
+    await page.locator("#chat-send").click();
+    const notice = page.locator("#chat-aside-ready");
+    await expect(notice).toHaveText("Side answer ready");
+    await notice.click();
+    const reader = page.locator("#chat-aside-dialog");
+    await expect(reader).toHaveAttribute("aria-modal", String(touch));
+    const visual = reader.locator(".chat-visual");
+    await visual.getByRole("button", { name: "Source", exact: true }).click();
+    await expect(visual.locator(".chat-visual-source")).toBeVisible();
+    await expect(visual.locator(".chat-visual-source code")).toHaveText(svg);
+    await visual.getByRole("button", { name: "Copy source", exact: true }).click();
+    await expect(visual.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    await page.locator("#chat-aside-close").click();
+    await expect(reader).toBeHidden();
+    await expect(notice).toBeFocused();
+  } finally { await browser.close(); }
+});
 for (const mode of ["desktop", "touch"] as const) test(`side-reader workspace links open in-app without losing the answer or admitting another prompt (${mode})`, async ({ launchBrowser, baseURL, request }, info) => {
   const browser = await launchBrowser(engine);
   const page = await browser.newPage({ baseURL, viewport: { width: mode === "touch" ? 390 : 1280, height: 844 }, hasTouch: mode === "touch", isMobile: mode === "touch" });

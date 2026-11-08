@@ -102,50 +102,92 @@ async function visualLstat(filename: string) {
 // entity expansion.
 // The preview remains an image document under CSP, never inline DOM.
 export function isSafeSvg(source: string): boolean {
+  return parseSafeSvg(source) !== null;
+}
+type SafeSvgDocument = { body: string; rootOffset: number; hasNamespace: boolean };
+function parseSafeSvg(source: string): SafeSvgDocument | null {
   source = svgDocumentBody(source);
-  if (!source.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f]|\]\]>|<!|<\?|&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[\da-f]+;)/i.test(source)) return false;
+  if (!source.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(source)) return null;
   const tags = new Set("svg g defs symbol use path rect circle ellipse line polyline polygon text tspan title desc style linearGradient radialGradient stop clipPath mask pattern marker".toLowerCase().split(" "));
   const stack: string[] = [];
-  let root = false;
+  let document: SafeSvgDocument | null = null;
   let offset = 0;
-  const token = /<\/?[A-Za-z][^<>]*>/g;
-  for (const match of source.matchAll(token)) {
-    const between = source.slice(offset, match.index);
-    if (/[<>]/.test(between) || (!stack.length && between.trim())) return false;
-    if (stack.at(-1)?.toLowerCase() === "style" && !safeCss(between)) return false;
-    offset = match.index! + match[0].length;
-    const text = match[0];
-    const name = /^<\/?([A-Za-z][\w-]*)/.exec(text)?.[1];
-    if (!name || !tags.has(name.toLowerCase())) return false;
-    if (text.startsWith("</")) {
-      if (!/^<\/[A-Za-z][\w-]*\s*>$/.test(text) || stack.pop() !== name) return false;
+  const styleText: string[] = [];
+  const token = /<\/?[A-Za-z][^<>]*>/y;
+  while (offset < source.length) {
+    const start = source.indexOf("<", offset);
+    if (start < 0) break;
+    const between = source.slice(offset, start);
+    if (/[<>]|\]\]>|&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[\da-f]+;)/i.test(between) || (!stack.length && between.trim())) return null;
+    if (stack.at(-1)?.toLowerCase() === "style") styleText.push(between);
+    if (source.startsWith("<!--", start)) {
+      const end = source.indexOf("-->", start + 4);
+      if (end < 0) return null;
+      // XML comments are tokens, not deletions that can repair malformed XML.
+      const comment = source.slice(start + 4, end);
+      if (comment.includes("--") || comment.endsWith("-")) return null;
+      offset = end + 3;
       continue;
     }
-    if (!stack.length) { if (root || name !== "svg") return false; root = true; }
-    let rest = text.slice(/^<[A-Za-z][\w-]*/.exec(text)![0].length).replace(/\/?\s*>$/, "");
+    token.lastIndex = start;
+    const match = token.exec(source);
+    if (!match) return null;
+    offset = token.lastIndex;
+    const text = match[0];
+    // Comments do not separate XML character data consumed by CSS.
+    if (styleText.length) {
+      if (!safeCss(styleText.join(""))) return null;
+      styleText.length = 0;
+    }
+    const name = /^<\/?([A-Za-z][\w-]*)/.exec(text)?.[1];
+    if (!name || !tags.has(name.toLowerCase())) return null;
+    if (stack.at(-1)?.toLowerCase() === "style" && !text.startsWith("</")) return null;
+    if (text.startsWith("</")) {
+      if (!/^<\/[A-Za-z][\w-]*\s*>$/.test(text) || stack.pop() !== name) return null;
+      continue;
+    }
+    const isRoot = stack.length === 0;
+    if (isRoot) {
+      if (document || name !== "svg") return null;
+      document = { body: source, rootOffset: start, hasNamespace: false };
+    }
+    const selfClosing = text.endsWith("/>");
+    let rest = text.slice(/^<[A-Za-z][\w-]*/.exec(text)![0].length, selfClosing ? -2 : -1).trimEnd();
     const seen = new Set<string>();
-    while (rest.trim()) {
+    while (rest) {
       const attr = /^\s+([A-Za-z][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(rest);
-      if (!attr) return false;
+      if (!attr) return null;
       const key = attr[1]!.toLowerCase(), value = attr[2] ?? attr[3] ?? "";
-      if (seen.has(key) || key.startsWith("on") || /[<&]/.test(value)) return false;
+      if (seen.has(key) || key.startsWith("on") || /[<&]/.test(value)) return null;
       seen.add(key);
-      if (key === "xmlns") { if (value !== "http://www.w3.org/2000/svg") return false; }
-      else if (key.includes(":")) return false;
-      else if (key === "href") { if (!/^#[\w.-]+$/.test(value)) return false; }
-      else if (!safeCss(value)) return false;
+      if (key === "xmlns") { if (value !== "http://www.w3.org/2000/svg") return null; }
+      else if (key.includes(":")) return null;
+      else if (key === "href") { if (!/^#[\w.-]+$/.test(value)) return null; }
+      else if (!safeCss(value)) return null;
+      if (isRoot && document && attr[1] === "xmlns") document.hasNamespace = true;
       rest = rest.slice(attr[0].length);
     }
-    if (!/\/\s*>$/.test(text)) stack.push(name);
+    if (!selfClosing) stack.push(name);
   }
-  return root && stack.length === 0 && !source.slice(offset).trim();
+  return document && stack.length === 0 && !source.slice(offset).trim() ? document : null;
 }
 function svgDocumentBody(source: string): string {
-  return source.replace(/^\s*<\?xml\s+version=(?:"1\.0"|'1\.0')(?:\s+encoding=(?:"UTF-8"|'UTF-8'))?\s*\?>/i, "")
-    .replace(/<!--(?:[^-]|-(?!-))*-->/g, "");
+  return source.replace(/^\s*<\?xml\s+version=(?:"1\.0"|'1\.0')(?:\s+encoding=(?:"UTF-8"|'UTF-8'))?\s*\?>/i, "");
 }
 function safeCss(value: string): boolean {
-  return !/(?:url|image-set|cross-fade|paint|src)\s*\(|@|\\|&|expression|(?:https?|data|file|javascript|ftp|blob):|\/\//i.test(value.replace(/\/\*[\s\S]*?\*\//g, "").replace(/url\(\s*(?:#[\w.-]+|"#[\w.-]+"|'#[\w.-]+')\s*\)/gi, ""));
+  const segments: string[] = [];
+  let offset = 0;
+  while (offset < value.length) {
+    const start = value.indexOf("/*", offset);
+    if (start < 0) break;
+    const end = value.indexOf("*/", start + 2);
+    if (end < 0) return false;
+    segments.push(value.slice(offset, start));
+    offset = end + 2;
+  }
+  segments.push(value.slice(offset));
+  const css = segments.join("");
+  return !/(?:url|image-set|cross-fade|paint|src)\s*\(|@|\\|&|expression|(?:https?|data|file|javascript|ftp|blob):|\/\//i.test(css.replace(/url\(\s*(?:#[\w.-]+|"#[\w.-]+"|'#[\w.-]+')\s*\)/gi, ""));
 }
 
 type RecordState = { sourceHash: string; snapshot: ChatVisualSnapshot; bytes?: string; sourceBytes?: string };
@@ -250,17 +292,16 @@ export class VisualStore {
         if (input.kind !== "svg" && path.extname(decodeURIComponent(input.source)).toLowerCase() !== ".svg") throw new VisualReadError();
         const svg = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
         mimeType = "image/svg+xml";
-        if (!isSafeSvg(svg)) {
+        const document = parseSafeSvg(svg);
+        if (!document) {
           record = { sourceHash, snapshot: { index: input.index, status: "unavailable", id, mimeType, message: "SVG preview is unavailable or not allowed" }, sourceBytes: Buffer.from(bytes).toString("base64") };
         } else {
           // Fenced fragments commonly omit the XML namespace. Add it only to
           // the image document, retaining the exact original for source/copy.
-          const body = svgDocumentBody(svg);
-          const opening = /<svg(?=[\s/>])[^>]*>/.exec(body)?.[0] ?? "";
-          const hasNamespace = [...opening.matchAll(/\s+([\w:.-]+)\s*=\s*(?:"[^"]*"|'[^']*')/g)].some(match => match[1] === "xmlns");
-          if (!hasNamespace) {
-            preview = new TextEncoder().encode(body.replace(/<svg(?=[\s/>])/, '<svg xmlns="http://www.w3.org/2000/svg"'));
-          } else preview = new TextEncoder().encode(body);
+          const offset = document.rootOffset + "<svg".length;
+          const body = document.hasNamespace ? document.body
+            : document.body.slice(0, offset) + ' xmlns="http://www.w3.org/2000/svg"' + document.body.slice(offset);
+          preview = new TextEncoder().encode(body);
           record = { sourceHash, snapshot: { index: input.index, status: "ready", id, mimeType }, bytes: Buffer.from(preview).toString("base64"), sourceBytes: Buffer.from(bytes).toString("base64") };
         }
       } else {

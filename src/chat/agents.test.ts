@@ -11,10 +11,110 @@ import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ConversationReplay, ReplaySubscription } from "./replay";
-import { createWatchedVisualReader, VisualStore } from "./visual-store";
+import { createWatchedVisualReader, VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
-import type { AssistantMessageItem, ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary, MessageDelivery, UsageReadMode } from "./types";
+import type { AssistantMessageItem, ChatActivity, ChatAvailability, ChatEvent, ConversationItem, ConversationSnapshot, ConversationSummary, MessageDelivery, UsageReadMode } from "./types";
+
+test.each([
+  { entry: "history", completion: "message" }, { entry: "history", completion: "conversation" },
+  { entry: "subscribe", completion: "message" }, { entry: "subscribe", completion: "conversation" },
+] as const)("steered visuals stay pending through $entry reload and finish on $completion completion", async ({ entry, completion }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await fs.mkdir(root, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(root, "lifecycle-"));
+  const replay = new ConversationReplay("g", "c", 100_000);
+  const projection = new ConversationProjection(replay);
+  projection.status = "running";
+  const assistant: AssistantMessageItem = { id: "part:answer", type: "assistant_message", createdAt: 2, markdown: '![Generated](later.png)\n\n```svg\n<svg><rect width="10"' };
+  for (const item of [
+    { id: "message:prompt", type: "user_message", createdAt: 1, text: "Draw it" },
+    assistant,
+    { id: "message:steer", type: "user_message", createdAt: 3, text: "Use a smaller rectangle" },
+  ] satisfies ConversationItem[]) projection.upsert(item);
+  const current = (): ConversationSnapshot => ({ ...snapshot("c"), generation: "g", cursor: replay.latestCursor(), conversation: { ...summary("c"), status: projection.status }, items: projection.items() });
+  const provider = {
+    history: async () => current(),
+    subscribe: async () => { const handoff = replay.handoff(cursor => ({ ...current(), cursor })); return { snapshot: handoff.snapshot, events: handoff.subscription }; },
+    dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  let available = false;
+  let reads = 0;
+  const services: MultiAgentChatService[] = [];
+  const subscriptions: Array<{ cancel(): void }> = [];
+  const makeService = () => {
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async source => { expect(source).toBe("later.png"); reads++; if (!available) throw new VisualReadError(true); return png; });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    services.push(service);
+    return service;
+  };
+  const answer = (value: ConversationSnapshot) => value.items.find(item => item.id === assistant.id) as AssistantMessageItem;
+  const attach = async (service: MultiAgentChatService) => {
+    const subscription = await service.subscribe("opencode:c");
+    subscriptions.push(subscription.events);
+    return subscription;
+  };
+  try {
+    const service = makeService();
+    const first = entry === "history" ? await service.history("opencode:c") : (await attach(service)).snapshot;
+    expect(first.items.map(item => item.id)).toEqual(["message:prompt", assistant.id, "message:steer"]);
+    expect(answer(first).visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
+    // A new store simulates reload/server restart; a second subscription also
+    // exercises attachment to an answer that started before its latest steer.
+    const restarted = makeService();
+    expect(answer(await restarted.history("opencode:c")).visuals).toEqual(answer(first).visuals);
+    const second = await attach(restarted);
+    expect(answer(second.snapshot).visuals).toEqual(answer(first).visuals);
+    expect(reads).toBe(1);
+    const iterator = second.events[Symbol.asyncIterator]();
+    const delta = '/></svg>\n```';
+    projection.apply({ kind: "text", itemId: assistant.id, identity: "answer", mode: "incremental", text: delta });
+    const finishedFence = (await iterator.next()).value as ChatEvent;
+    if (finishedFence.type !== "item.upsert" || finishedFence.item.type !== "assistant_message") throw new Error("expected completed SVG capture");
+    expect(finishedFence.item.visuals?.map(visual => visual.status)).toEqual(["pending", "ready"]);
+    expect(reads).toBe(1);
+    available = true;
+    if (completion === "message") projection.upsert({ ...assistant, markdown: assistant.markdown + delta, completedAt: 4 });
+    else projection.statusUpdate("completed");
+    const terminal = (await iterator.next()).value as ChatEvent;
+    expect(terminal.type).toBe(completion === "message" ? "item.upsert" : "resync");
+    const completed = answer(await restarted.history("opencode:c"));
+    expect(completed.visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
+    expect(reads).toBe(2);
+    expect((await restarted.resolveVisual(completed.visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(new TextDecoder().decode((await restarted.resolveVisual(completed.visuals![1]!.id!))?.sourceBytes)).toBe('<svg><rect width="10"/></svg>\n');
+    const reloaded = makeService();
+    expect(answer(await reloaded.history("opencode:c")).visuals).toEqual(completed.visuals);
+    expect(reads).toBe(2);
+  } finally {
+    for (const subscription of subscriptions) subscription.cancel();
+    for (const service of services) await service.dispose();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(["completedAt", "turn_status"] as const)("historical visuals stay terminal during a later running turn via %s", async completion => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await fs.mkdir(root, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(root, "historical-"));
+  const old: AssistantMessageItem = { id: "old", type: "assistant_message", createdAt: 1, markdown: '![Old](old.png)\n\n```svg\n<svg>', ...(completion === "completedAt" ? { completedAt: 2 } : {}) };
+  const items: ConversationItem[] = [old, ...(completion === "turn_status" ? [{ id: "turn:old", type: "turn_status" as const, createdAt: 2, status: "completed" as const }] : []), { id: "new", type: "user_message", createdAt: 3, text: "Next turn" }];
+  const provider = { history: async () => ({ ...snapshot("c"), conversation: { ...summary("c"), status: "running" }, items }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  let reads = 0;
+  let available = false;
+  const store = new VisualStore("/workspace", directory);
+  store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]); });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "test", name: "Test" }, service: provider }] });
+  try {
+    const first = (await service.history("test:c")).items[0] as AssistantMessageItem;
+    expect(first.visuals?.map(visual => visual.status)).toEqual(["unavailable", "unavailable"]);
+    available = true;
+    expect(((await service.history("test:c")).items[0] as AssistantMessageItem).visuals).toEqual(first.visuals);
+    expect(reads).toBe(1);
+  } finally { await service.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+});
 
 test("raw HTML image aliases pass the visual-capture precheck", async () => {
   const scratch = path.join(os.tmpdir(), "opencode");

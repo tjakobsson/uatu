@@ -194,6 +194,19 @@ test.describe("agent inline visuals", () => {
     });
   }
 
+  test("SVG comments preserve the real root, decoded preview and exact source", async ({ page, request }) => {
+    const conversationId = await boot(page, request);
+    const source = '<!-- <svg xmlns="http://evil.test"/> --><svg viewBox="0 0 260 80"><text x="10" y="40">A<!--comment-->B</text></svg><!--after-->\n';
+    await publish(request, conversationId, "commented-svg", `\`\`\`svg\n${source}\`\`\``, true);
+    const visual = page.locator('[data-chat-item-id="commented-svg"] .chat-visual');
+    const image = visual.locator("img");
+    await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
+    const preview = await page.request.get((await image.getAttribute("src"))!);
+    expect(preview.ok()).toBe(true);
+    expect(await preview.text()).toBe(source.replace('<svg viewBox=', '<svg xmlns="http://www.w3.org/2000/svg" viewBox='));
+    await visual.getByRole("button", { name: "Source", exact: true }).click();
+    await expect(visual.locator(".chat-visual-source code")).toHaveText(source);
+  });
   test("PNG/JPEG/local SVG snapshots survive source changes and reload; external embeds never request", async ({ page, request }) => {
     const conversationId = await boot(page, request);
     const files = await page.evaluate(() => {

@@ -334,7 +334,50 @@ describe("immutable visual snapshots", () => {
     const normalized = await store.capture("a:c", "fragment", inline(fragment), false);
     const stored = (await store.resolve(normalized.id!))!;
     expect(new TextDecoder().decode(stored.sourceBytes)).toBe(fragment);
-    expect(new TextDecoder().decode(stored.bytes)).toStartWith('<svg xmlns="http://www.w3.org/2000/svg">');
+    expect(new TextDecoder().decode(stored.bytes)).toBe('<!-- <svg> --><svg xmlns="http://www.w3.org/2000/svg"><style>.x { fill:red }</style><rect class="x"/></svg>');
+  });
+  test.each([
+    {
+      name: "comments before, inside and after a namespace-less root",
+      source: '<!-- <svg xmlns="http://evil.test"/> --><svg><text>A<!--comment-->B</text></svg><!-- <svg/> -->',
+      preview: '<!-- <svg xmlns="http://evil.test"/> --><svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg><!-- <svg/> -->',
+    },
+    {
+      name: "a commented namespace-less root before a namespaced root",
+      source: '<!-- <svg> --><svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg>',
+      preview: '<!-- <svg> --><svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg>',
+    },
+    {
+      name: "declaration removal without comment or text changes",
+      source: '<?xml version="1.0" encoding="UTF-8"?>\n<!-- <svg/> -->\n<svg><text>A<!--comment-->B</text></svg>\n<!--after-->',
+      preview: '\n<!-- <svg/> -->\n<svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg>\n<!--after-->',
+    },
+  ])("SVG preserves exact preview comments, text adjacency and original source: $name", async ({ source, preview }) => {
+    const store = new VisualStore("/workspace", directory);
+    const ready = await store.capture("a:c", "commented", inline(source), false);
+    expect(ready.status).toBe("ready");
+    const stored = (await store.resolve(ready.id!))!;
+    expect(new TextDecoder().decode(stored.bytes)).toBe(preview);
+    expect(new TextDecoder().decode(stored.sourceBytes)).toBe(source);
+    const restarted = new VisualStore("/workspace", directory);
+    expect(await restarted.capture("a:c", "commented", inline(source), false)).toEqual(ready);
+    expect(await restarted.resolve(ready.id!)).toEqual(stored);
+  });
+  test.each([
+    '<svg><!-- outer <!-- inner --> outer --></svg>',
+    '<svg><!--a---></svg>',
+    '<svg><!<!--comment-->--reconstructed--></svg>',
+    '<!DOC<!--comment-->TYPE svg><svg/>',
+    '<svg><te<!--comment-->xt>A</text></svg>',
+    '<svg id="A<!--comment-->B"/>',
+    '<svg><text>&am<!--comment-->p;</text></svg>',
+  ])("malformed commented SVG retains source without preview bytes: %s", async source => {
+    const store = new VisualStore("/workspace", directory);
+    const refused = await store.capture("a:c", "malformed", inline(source), false);
+    expect(refused).toMatchObject({ status: "unavailable", mimeType: "image/svg+xml" });
+    const stored = (await store.resolve(refused.id!))!;
+    expect(stored.bytes).toBeUndefined();
+    expect(new TextDecoder().decode(stored.sourceBytes)).toBe(source);
   });
   test("refused local SVG preserves first original across mutation, deletion and restart, without preview bytes", async () => {
     const root = path.join(directory, "workspace");
@@ -511,6 +554,78 @@ describe("watched-root bounded reader", () => {
 });
 
 describe("conservative SVG validation", () => {
+  test.each([{ name: "absent", hasNamespace: false }, { name: "present", hasNamespace: true }])("bounds full preview preparation with trailing whitespace and namespace $name", ({ hasNamespace }) => {
+    const source = '<svg id="x"' + (hasNamespace ? ' xmlns="http://www.w3.org/2000/svg"' : "") + " ".repeat(1_048_576) + "/>";
+    const moduleUrl = new URL("./visual-store.ts", import.meta.url).href;
+    const child = Bun.spawnSync([process.execPath, "--eval", `
+      import { VisualStore } from ${JSON.stringify(moduleUrl)};
+      const source = await Bun.stdin.text();
+      const store = new VisualStore("/workspace", ${JSON.stringify(directory)});
+      const capture = await store.capture("a:c", "bounded-preview", { kind: "svg", index: 0, source, alt: "bounded", complete: true }, false);
+      if (capture.status !== "ready") process.exit(1);
+      const stored = await store.resolve(capture.id);
+      const expected = ${hasNamespace} ? source : source.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+      if (new TextDecoder().decode(stored.bytes) !== expected || new TextDecoder().decode(stored.sourceBytes) !== source) process.exit(1);
+      console.log("ready");
+    `], { stdin: Buffer.from(source), stdout: "pipe", stderr: "pipe", timeout: 3_000, killSignal: "SIGKILL" });
+    expect({ exitCode: child.exitCode, stderr: child.stderr.toString(), stdout: child.stdout.toString() })
+      .toEqual({ exitCode: 0, stderr: "", stdout: "ready\n" });
+  });
+  test.each([
+    { name: "malformed XML comments", source: () => "<svg>" + "<!--".repeat(262_144) + "</svg>", accepted: false },
+    { name: "malformed CSS comments", source: () => "<svg><style>" + "/*x".repeat(349_525) + "</style></svg>", accepted: false },
+    { name: "leading attribute whitespace", source: () => "<svg" + " ".repeat(1_048_576) + 'id="x"/>', accepted: true },
+    { name: "trailing attribute whitespace", source: () => "<svg" + Array.from({ length: 8_192 }, (_, i) => ` a${i}="x"`).join("") + " ".repeat(1_048_576) + "/>", accepted: true },
+  ])("bounds $name validation without stalling the test process", ({ source, accepted }) => {
+    const moduleUrl = new URL("./visual-store.ts", import.meta.url).href;
+    const child = Bun.spawnSync([process.execPath, "--eval", `
+      import { isSafeSvg } from ${JSON.stringify(moduleUrl)};
+      if (isSafeSvg(await Bun.stdin.text()) !== ${accepted}) process.exit(1);
+      console.log("checked");
+    `], { stdin: Buffer.from(source()), stdout: "pipe", stderr: "pipe", timeout: 3_000, killSignal: "SIGKILL" });
+    expect({ exitCode: child.exitCode, stderr: child.stderr.toString(), stdout: child.stdout.toString() })
+      .toEqual({ exitCode: 0, stderr: "", stdout: "checked\n" });
+  });
+  test("CSS comments retain local paint while refusing hidden resources and unfinished comments", () => {
+    expect(isSafeSvg('<svg><style>/*before*/.x { fill: url(/*paint*/#g); }/*after*/</style><rect style="fill:/*color*/red"/></svg>')).toBe(true);
+    expect(isSafeSvg('<svg><style>.x { fill:u/*comment*/rl(https://evil.test/x); }</style></svg>')).toBe(false);
+    expect(isSafeSvg('<svg><style>.x { fill:red; }/*unfinished</style></svg>')).toBe(false);
+  });
+  test.each([
+    '<!--before--><svg/><!--after-->',
+    '<svg><!--inside--><text>A<!--comment-->B</text></svg>',
+    '<!-- <svg xmlns="http://evil.test"><script/></svg> --><svg/>',
+    '<svg><!-- <!DOCTYPE svg> <?instruction?> &unknown; ]]> --><rect/></svg>',
+    '<svg><!----><text>A<!-- - -->B</text></svg>',
+  ])("valid XML comments are inert tokens: %s", source => {
+    expect(isSafeSvg(source)).toBe(true);
+  });
+  test.each([
+    '<svg><!-- outer <!-- inner --> outer --></svg>',
+    '<svg><!--<!-- --></svg>',
+    '<svg><!--a--b--></svg>',
+    '<svg><!--a---></svg>',
+    '<svg><!--unterminated</svg>',
+    '<!--before--!><svg/>',
+    '<svg/ >',
+    '<svg id="x"/ >',
+    '<svg><!<!--comment-->--reconstructed--></svg>',
+    '<!DOC<!--comment-->TYPE svg><svg/>',
+    '<svg><te<!--comment-->xt>A</text></svg>',
+    '<svg id="A<!--comment-->B"/>',
+    '<svg><text>&am<!--comment-->p;</text></svg>',
+    '<!--before--><?xml version="1.0"?><svg/>',
+    '<svg><style>.x { fill:e<!--comment-->xpression(1) }</style></svg>',
+    '<svg><style>.x { fill:h<!--comment-->ttps:evil }</style></svg>',
+    '<svg><style><g>@import url(https://evil.test/x.css);</g></style></svg>',
+    '<svg><!--before--><!DOCTYPE svg></svg>',
+    '<svg><!--before--><?instruction?></svg>',
+    '<svg><!--before--><script/></svg>',
+    '<svg><!--before--><use href="https://evil.test/x"/></svg>',
+    '<!-- <svg xmlns="http://www.w3.org/2000/svg"/> --><svg xmlns="http://evil.test"/>',
+  ])("comments never repair malformed XML or bypass resource checks: %s", source => {
+    expect(isSafeSvg(source)).toBe(false);
+  });
   test("basic shapes, gradients and local references", () => {
     expect(isSafeSvg(svg)).toBe(true);
     expect(isSafeSvg('<svg><defs><linearGradient id="g"><stop offset="1"/></linearGradient></defs><rect fill="url(#g)"/><use href="#g"/></svg>')).toBe(true);
@@ -582,7 +697,7 @@ test("genuine history and streamed deltas capture immediately, terminal status r
   snapshot.conversation.status = "running";
   exists = false;
   snapshot.items = [
-    { ...message, id: "old", markdown: "![old](old.png)" },
+    { ...message, id: "old", completedAt: 2, markdown: "![old](old.png)" },
     { id: "u", type: "user_message", createdAt: 2, text: "next turn" },
     { ...message, id: "new", createdAt: 3, markdown: "![new](new.png)" },
   ];

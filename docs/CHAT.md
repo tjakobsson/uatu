@@ -938,8 +938,10 @@ SVG files embedded with Markdown have the same controls. Previews use the
 browser's image renderer, not active SVG markup in the chat page. Scripts,
 embedded HTML, and external resources are not supported.
 SVGs can use a `viewBox` without explicit `width` or `height` attributes.
-Source controls also work when opening a collapsed Agent report containing an
-SVG fence. Streaming updates preserve keyboard focus on retained visual controls.
+Source controls also work in side answers and when opening a collapsed Agent
+report containing an SVG fence. Streaming updates preserve keyboard focus on
+retained visual controls. Valid XML comments remain inert in previews; malformed
+comments cannot repair otherwise invalid SVG markup.
 
 Visuals appear during streaming. An unfinished SVG fence shows
 “Generating image…” until its closing fence arrives. Images fit the message
@@ -968,6 +970,8 @@ links rather than becoming previews. Unsupported image URL schemes remain
 escaped, non-clickable reference text. Invalid or unavailable visuals show an
 explanation and preserve the reference or SVG source. A local file missing
 during streaming is retried once when the reply finishes.
+Steering does not finish the current reply or consume its completion retry;
+reloading or opening another client while it continues preserves pending visuals.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain

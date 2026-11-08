@@ -5,6 +5,19 @@ import { renderChatMarkdown } from "./markdown";
 import { getChatVisuals, prepareChatVisualMarkdown } from "./visual-markdown";
 
 describe("agent visual Markdown", () => {
+  test("origin-name collisions cannot stall visual preparation", () => {
+    const source = "```svg\n<svg><text>uatu-origin" + "-".repeat(1_048_576) + "</text></svg>\n```\n\n![Shot](result.png)";
+    const moduleUrl = new URL("./visual-markdown.ts", import.meta.url).href;
+    const child = Bun.spawnSync([process.execPath, "--eval", `
+      import { getChatVisuals } from ${JSON.stringify(moduleUrl)};
+      const source = await Bun.stdin.text();
+      const visuals = getChatVisuals(source, false);
+      if (visuals.length !== 2 || visuals[0].key !== "offset:0" || visuals[1].source !== "result.png" || visuals[1].key !== "offset:" + source.indexOf("![Shot]")) process.exit(1);
+      console.log("annotated");
+    `], { stdin: Buffer.from(source), stdout: "pipe", stderr: "pipe", timeout: 3_000, killSignal: "SIGKILL" });
+    expect({ exitCode: child.exitCode, stderr: child.stderr.toString(), stdout: child.stdout.toString() })
+      .toEqual({ exitCode: 0, stderr: "", stdout: "annotated\n" });
+  });
   test("enumerates visual occurrences in rendered document order without original image URLs", () => {
     const source = '![Shot](./shot.png)\n\n```svg\n<svg><text>A &amp; B</text></svg>\n```\n\n![Remote](https://example.com/track.jpg)';
     const prepared = prepareChatVisualMarkdown(source, true);
@@ -216,6 +229,14 @@ describe("agent visual Markdown", () => {
     const source = '<img uatu-origin="0" src="a.png"><img uatu-origin-="1" src="b.png">';
     const prepared = prepareChatVisualMarkdown(source, false);
     expect(prepared.visuals.map(input => input.key)).toEqual(["offset:0", `offset:${source.indexOf("<img", 1)}`]);
+    expect(prepared.html).not.toContain("uatu-origin");
+  });
+  test("numeric and case-folded origin collisions cannot forge SVG origins", () => {
+    const attributes = Array.from({ length: 50 }, (_, i) => `UATU-ORIGIN-${String(i).padStart(4, "0")}="1"`).join(" ");
+    const source = `<img ${attributes} uatu-origin-0050000="1" src="a.png">\n\n${"context ".repeat(512)}\n\n\`\`\`svg\n<svg/>\n\`\`\`\n\n<pre ${attributes}><code class="language-svg">&lt;svg/&gt;</code></pre>`;
+    const prepared = prepareChatVisualMarkdown(source, false);
+    expect(prepared.visuals.map(input => input.source)).toEqual(["a.png", "<svg/>\n"]);
+    expect(prepared.visuals.map(input => input.key)).toEqual(["offset:0", `offset:${source.indexOf("```svg")}`]);
     expect(prepared.html).not.toContain("uatu-origin");
   });
 

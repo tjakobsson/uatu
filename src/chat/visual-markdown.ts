@@ -133,8 +133,17 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
   const events = postprocess(parse({ extensions: [gfm(), frontmatter(["yaml", "toml"])] }).document().write(preprocess()(source, undefined, true)));
   // Pick an attribute absent from the source so raw HTML cannot forge an origin.
   // It is removed before sanitization and never reaches presentation HTML.
-  let attribute = "uatu-origin";
-  while (source.toLowerCase().includes(attribute)) attribute += "-";
+  // Fixed-width suffixes outnumber source characters. Collect their used
+  // prefixes once, then choose a short absent name without rescanning source.
+  const prefix = "uatu-origin-";
+  const width = String(source.length).length;
+  const usedSuffixes = new Set<number>();
+  for (const match of source.matchAll(new RegExp(`${prefix}([0-9]{${width}})`, "gi"))) {
+    usedSuffixes.add(Number(match[1]));
+  }
+  let suffix = 0;
+  while (usedSuffixes.has(suffix)) suffix++;
+  const attribute = prefix + String(suffix).padStart(width, "0");
   const origins = new Map<string, Origin>();
   const annotate = (html: string, position: number, origin: Origin) => {
     const id = String(origins.size);
