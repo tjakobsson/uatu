@@ -673,9 +673,12 @@ describe("chat lifecycle recovery", () => {
     expect(posts[0]!.url).toBe("/api/hub/live/s1/subscriptions");
     expect(sources).toHaveLength(1);
 
-    // The hub cannot replay the conversation's cursor: chat re-snapshots and
-    // subscribes again from the snapshot's cursor — still no new connection.
-    sources[0]!.live({ ws: "e2e", topic: "conversation", key: "one", cursor: "cursor-one-1", event: { kind: "resync" } });
+    // An oversized recovery uses the existing reason even without a provider
+    // rewrite. UI recovery is a snapshot GET and cursor reattachment, not a
+    // provider mutation or another connection.
+    sources[0]!.live({ ws: "e2e", topic: "conversation", key: "one", cursor: "cursor-one-1", event: { kind: "resync", data: {
+      generation: "generation", sequence: 1, conversationId: "one", type: "resync", reason: "conversation-rewritten",
+    } } });
     await waitUntil(() => channel.subscriptions().some(sub => sub.topic === "conversation" && sub.cursor === "cursor-one-2"));
     await waitUntil(() => posts.length >= 2);
     expect(sources).toHaveLength(1);

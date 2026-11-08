@@ -2932,7 +2932,7 @@ export function initChat(api = new ChatApiClient()): void {
     });
   };
 
-  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number) => {
+  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number, readingAnchor: TimelineAnchor | null = presentation.anchors[snapshot.conversation.id] ?? null) => {
     projection = composer.acceptSnapshot(snapshot, acceptedDrafts);
     const carried = removedRows.get(snapshot.conversation.id);
     if (carried) projection = { ...projection, removedIds: carried };
@@ -2942,7 +2942,7 @@ export function initChat(api = new ChatApiClient()): void {
     renderAttachments();
     announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
     cancelForSnapshot(parentScroll);
-    anchor.restore(presentation.anchors[snapshot.conversation.id] ?? null);
+    anchor.restore(readingAnchor);
     scheduleRender(false, false);
     stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
   };
@@ -2996,17 +2996,102 @@ export function initChat(api = new ChatApiClient()): void {
       recovered: () => { if (token === selectionGeneration) interruptions.clear("conversation"); },
     });
 
+  // Shared by the selected conversation and the open child. Each surface
+  // supplies its own selection/read/mutation ownership; neither owns the
+  // other's projection, draft, anchor or stream installation.
+  async function readLoadedConversationRange(current: ChatProjection, signal: AbortSignal,
+    latest: () => ChatProjection | null, ownsOwner: () => boolean): Promise<{ snapshot: ConversationSnapshot; isCurrent(): boolean } | null> {
+    const id = current.conversationId;
+    // Match TimelineRenderer's empty-markdown carrier rule. These rows keep
+    // their accounting in the snapshot, but cannot locate the reader's range.
+    const hasTranscriptContent = (item: ConversationItem) => !(item.type === "assistant_message" && item.markdown === "");
+    // Follow the oldest loaded transcript boundary, not item count: snapshots
+    // also carry workers/permissions and providers can cap each history page.
+    // A removed boundary is covered once paging passes its timestamp. If the
+    // reader reached the beginning, recover through the beginning again.
+    const boundary = current.items.filter(item => hasTranscriptContent(item) && !["background_task", "scheduled_wakeup", "permission", "question", "context_window", "context_report"].includes(item.type))
+      .reduce<ConversationItem | undefined>((oldest, item) => !oldest || item.createdAt < oldest.createdAt ? item : oldest, undefined);
+    // Inventory may replace only the summary wrapper while this read is
+    // pending. Live events may advance content too; the final snapshot
+    // must cover their cursor. Local changes without that evidence still
+    // invalidate the read. Neither change grants new selection ownership.
+    const ownsRead = () => {
+      const held = latest();
+      return !signal.aborted && ownsOwner() && held?.conversationId === id && held.generation === current.generation
+        && (held.sequence > current.sequence || held.cursor === current.cursor && held.status === current.status && held.items === current.items
+          && held.queued === current.queued && held.configuration === current.configuration && held.acceptedDrafts === current.acceptedDrafts);
+    };
+    let snapshot = await api.snapshot(id, undefined, signal);
+    if (!ownsRead()) return null;
+    let pageReads = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      const head = snapshot;
+      if (head.conversation.id !== id || head.generation === current.generation && projectionFromSnapshot(head).sequence < current.sequence) return null;
+      const cursors = new Set<string>();
+      let advanced = false;
+      // Only the provider-page frontier proves contiguous coverage. Even a
+      // visible answer can be backfilled by a concurrent native update. Older
+      // producers without a frontier conservatively page to the beginning,
+      // within the same read budget, rather than trusting arbitrary items.
+      const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.historyStart !== undefined
+        && (snapshot.historyStart.id === boundary.id || snapshot.historyStart.createdAt < boundary.createdAt));
+      while (snapshot.olderCursor && !covered()) {
+        if (pageReads >= 1_000 || cursors.has(snapshot.olderCursor)) return null;
+        const cursor = snapshot.olderCursor;
+        cursors.add(cursor);
+        pageReads++;
+        const page = await api.snapshot(id, cursor, signal).catch(error => {
+          // This is specifically a history-cursor GET. A source revision can
+          // invalidate its older-page cursor between requests; restart the
+          // owned range read, not the child layer or a provider mutation.
+          if (error instanceof ChatTransportError && error.status === 409) return null;
+          throw error;
+        });
+        if (!page) return null;
+        if (!ownsRead() || page.conversation.id !== id || page.generation !== head.generation) return null;
+        if (page.cursor !== snapshot.cursor) {
+          if (pass !== 0 || projectionFromSnapshot(page).sequence <= projectionFromSnapshot(snapshot).sequence) return null;
+          advanced = true;
+        }
+        snapshot = { ...head, cursor: page.cursor, items: prependSnapshot(projectionFromSnapshot(snapshot), page).items, olderCursor: page.olderCursor,
+          historyStart: page.historyStart ?? snapshot.historyStart };
+      }
+      if (!advanced) break;
+      // A cold native adapter publishes the older rows it first reads.
+      // Warm the entire range once, then verify one stable-cursor range.
+      // The wire has no separate source revision: monotonic advancement
+      // alone cannot distinguish page publication from a native mutation.
+      // This bounded second traversal is linear, not a retry per new page,
+      // and installs only fresh rows sharing the final replay boundary.
+      const previous = snapshot;
+      snapshot = await api.snapshot(id, undefined, signal);
+      if (!ownsRead() || snapshot.generation !== previous.generation
+        || projectionFromSnapshot(snapshot).sequence < projectionFromSnapshot(previous).sequence) return null;
+    }
+    // Returning across await adds a microtask boundary. The installing
+    // surface must recheck this proof immediately before its synchronous swap.
+    const isCurrent = () => {
+      if (!ownsRead() || snapshot.conversation.id !== id) return false;
+      const held = latest()!;
+      return snapshot.generation !== held.generation || projectionFromSnapshot(snapshot).sequence >= held.sequence;
+    };
+    return isCurrent() ? { snapshot, isCurrent } : null;
+  }
+
   async function refreshSelectedConversation(id: string, pendingEntry?: { id: string; action: PendingQueueAction }): Promise<boolean> {
     const token = selectionGeneration;
     const current = projection;
     if (!current || current.conversationId !== id || activeConversationId() !== id) return false;
+    const epoch = projectionEpoch;
+    const historyBusy = composer.historyBusy(id);
     try {
       return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id, pendingEntry); }, async signal => {
-        let snapshot = await api.snapshot(id, undefined, signal);
-        if (signal.aborted || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
-        snapshot = composer.checkedSnapshot(id, snapshot, pendingEntry);
+        const read = await readLoadedConversationRange(current, signal, () => projection, () => token === selectionGeneration
+          && projectionEpoch === epoch && activeConversationId() === id && composer.historyBusy(id) === historyBusy);
+        if (!read?.isCurrent()) return false;
+        const snapshot = composer.checkedSnapshot(id, read.snapshot, pendingEntry);
         const previousStream = stream;
-        installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
+        installConversationSnapshot(snapshot, projection!.acceptedDrafts, token, anchor.currentAnchor());
         if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
           stopConversationRefreshRecovery();
         }
@@ -4416,12 +4501,11 @@ export function initChat(api = new ChatApiClient()): void {
     if (!retainedProjection && chatSurfaceActive()) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
     else childRenderDirty = true;
     reconcileAnswerAfterPaint();
-    // Hidden until this child's own first page says whether more exists —
-    // otherwise a previous subagent's cursor would offer paging for a
-    // transcript that has none.
+    // A refresh retains this child's paging affordance; a different child
+    // waits for its own first page rather than borrowing the previous cursor.
     if (drilldownOlder) {
-      drilldownOlder.hidden = true;
-      drilldownOlder.disabled = false;
+      drilldownOlder.hidden = !retainedProjection?.olderCursor;
+      drilldownOlder.disabled = retainedProjection !== null;
     }
     if (automaticRefresh && retainedProjection && childScroll) cancelForSnapshot(childScroll);
     else childScroll?.cancel();
@@ -4430,14 +4514,47 @@ export function initChat(api = new ChatApiClient()): void {
     if (!automaticRefresh) drilldownBack?.focus();
     if (outputView) return;
     void runChildRead(next, "Loading conversation...", () => openChildConversation(id, label, automaticRefresh, next.task), async signal => {
-      const snapshot = await api.snapshot(id, undefined, signal);
+      let snapshot: ConversationSnapshot | null = null;
+      let delay = REFRESH_RETRY_INITIAL_MS;
+      while (!signal.aborted && generation === childGeneration && child === next) {
+        const held = next.projection;
+        const parentToken = selectionGeneration, parentEpoch = projectionEpoch;
+        const parentId = projection?.conversationId;
+        const historyBusy = parentId !== undefined && composer.historyBusy(parentId);
+        const ownsOwner = () => generation === childGeneration && child === next && parentToken === selectionGeneration && parentEpoch === projectionEpoch
+          && projection?.conversationId === parentId && (parentId !== undefined && composer.historyBusy(parentId)) === historyBusy;
+        // A passive child recovery must not read through the parent's own
+        // in-flight history mutation. Its settled epoch owns the next attempt.
+        if (!historyBusy && held) {
+          const read = await readLoadedConversationRange(held, signal, () => next.projection, ownsOwner);
+          snapshot = read?.isCurrent() ? read.snapshot : null;
+        } else if (!historyBusy) {
+          const first = await api.snapshot(id, undefined, signal);
+          snapshot = ownsOwner() ? first : null;
+        }
+        if (snapshot) break;
+        // Keep this read's lifetime and the retained view across incompatible
+        // verification pages. Closing/switching aborts the owned wait as well
+        // as fetch; no recovery can reopen a departed child.
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); };
+          const timer = setTimeout(done, delay);
+          signal.addEventListener("abort", done, { once: true });
+          if (signal.aborted) done();
+        });
+        delay = Math.min(delay * 2, REFRESH_RETRY_MAX_MS);
+      }
       if (signal.aborted || generation !== childGeneration || child !== next) return;
+      if (!snapshot) return;
+      const readingAnchor = childAnchor.currentAnchor();
       next.projection = projectionFromSnapshot(snapshot, []);
+      if (childScroll) cancelForSnapshot(childScroll);
+      childAnchor.restore(readingAnchor);
       announceChild(snapshot.items.length ? "" : "This subagent has not reported anything yet.");
       renderChild(false);
       next.stream = openChildStream(next, id, label, snapshot.cursor, generation);
       silentRun.follow(isLiveConversationStatus(next.projection.status));
-    });
+    }).finally(() => { if (generation === childGeneration && child === next && drilldownOlder) drilldownOlder.disabled = false; });
   };
 
   // The same paging the parent timeline offers: a subagent's transcript is

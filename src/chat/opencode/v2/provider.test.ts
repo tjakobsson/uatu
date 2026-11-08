@@ -4584,6 +4584,12 @@ test(`cached nested source authority survives expiry before page transfer (${rea
   provider.reconcileBackgroundTasks = (...args) => owner.run(false, () => recover(...args));
   const list = provider.listMessages.bind(provider);
   provider.listMessages = async (...args) => {
+    // Reconnect also starts an automatic parent history read. Undo changes its
+    // boundary while this test holds the requested replacement's final check;
+    // allowing that unrelated parent read to retry/publish would introduce a
+    // second authority writer into the cached-owner assertions below. Isolate
+    // its page, not production retries or the requested read's real deadline.
+    if (read === "undo" && holdChild && args[0] === "ses_parent" && !owner.getStore()) await automaticGate;
     // A reconnect retry can legitimately start a new owner after the first
     // expires, for either unavailable nested target. Keep its current page
     // out of the expired-owner assertions, then verify fresh recovery below.
@@ -4606,6 +4612,16 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     return marker;
   };
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  const history = adapter.history.bind(adapter);
+  let reconnectHistory: ReturnType<ChatAdapter["history"]> | undefined, reconnectStarted!: () => void;
+  const reconnectReadStarted = new Promise<void>(resolve => { reconnectStarted = resolve; });
+  adapter.history = (...args) => {
+    const result = history(...args);
+    if (read === "history" && holdChild && args[0] === "ses_parent" && !owner.getStore() && !reconnectHistory) {
+      reconnectHistory = result; reconnectStarted();
+    }
+    return result;
+  };
   let pending: Promise<unknown> | undefined;
   const row = (items: import("../../types").ConversationItem[]) => items.find(item => item.id === "tool:root") as import("../../types").ToolItem;
   const assert = (items: import("../../types").ConversationItem[], foreign: boolean) => {
@@ -4625,6 +4641,19 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     // owner: only the requested history/undo may enter the final-boundary gate.
     void adapter.startEventPump();
     await provider.waitForEventStream!(AbortSignal.timeout(5_000));
+    if (read === "history") {
+      // server.connected also calls history(parent). Let that real recovery
+      // finish before starting the explicit owner: its older question-set
+      // publication can otherwise conflict with the owner held at its final
+      // boundary, independently of any worker-association counterproof.
+      // Unlike gating another page, this exercises reconnect's actual expiry
+      // and publication, and keeps the no-extra-reread assertion scoped to the
+      // target lookup below. Undo retains its separate boundary-change race.
+      await reconnectReadStarted;
+      assert((await reconnectHistory!).items, false);
+      expect(childPages).toBe(0);
+      expect(expiredReads).toBe(heldReads);
+    }
     if (outcome === "cached-foreign") {
       // A healthy lookup for another parent is positive counterproof for this
       // cached edge. The watch must consume it even with no later observation.
@@ -4643,11 +4672,11 @@ test(`cached nested source authority survives expiry before page transfer (${rea
     if (outcome !== "cached-foreign") await provider.getSession(target).catch(error => { if (outcome !== "unavailable") throw error; });
     if (outcome === "successor") {
       mode = "healthy"; await provider.getSession(target);
-      assert((await adapter.history("ses_parent", { limit: 98 })).items, false);
+      assert((await owner.run(true, () => adapter.history("ses_parent", { limit: 98 }))).items, false);
     }
     if (outcome === "cancel") {
       await adapter.stopEventPump(); mode = "healthy";
-      assert((await adapter.history("ses_parent", { limit: 98 })).items, false);
+      assert((await owner.run(true, () => adapter.history("ses_parent", { limit: 98 }))).items, false);
     }
     releaseBoundary(); const result = await pending.catch(error => error);
     if (outcome === "cancel") { if (read === "history") expect(result).toBeInstanceOf(Error); }
@@ -5211,8 +5240,61 @@ for (const outcome of ["unavailable", "denied", "foreign-parent", "foreign-works
   } finally { await provider.dispose(); }
 });
 
-// Fresh native reads legitimately advance last-positive-observation clocks;
-// projection/filtering assertions still compare every other task/control fact.
+test("cold inventory observation clocks converge without inventing native progress", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const parent = (await provider.createSession("Cold observation clock")).id;
+    fake.launchRequestWorker(parent);
+    const first = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    expect(first.activity?.kind).toBe("working");
+    now += 1_000;
+    expect((await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!.activity).toEqual(first.activity);
+  } finally { clock.mockRestore(); await provider.dispose!(); await fake.stop(); }
+});
+
+test("inventory observation clocks converge while native request activity still advances", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const abort = new AbortController();
+  let reportApplied: (() => void) | undefined, requestApplied: (() => void) | undefined;
+  const pump = (async () => { for await (const event of provider.events(abort.signal)) {
+    if (event.eventType === "session.usage.updated") reportApplied?.();
+    if (event.eventType === "permission.asked") requestApplied?.();
+  } })();
+  try {
+    await provider.waitForEventStream!(abort.signal);
+    const parent = (await provider.createSession("Observation clock")).id;
+    const worker = fake.launchRequestWorker(parent);
+    const report = async (model: string) => {
+      const applied = new Promise<void>(resolve => { reportApplied = resolve; });
+      fake.workerReport(worker.childId, model, "high", 0.001);
+      await applied;
+      reportApplied = undefined;
+    };
+    await report("First observation");
+    const first = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    now += 1_000;
+    const repeated = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    expect(repeated.activity).toEqual(first.activity);
+    await report("Native progress");
+    const requested = new Promise<void>(resolve => { requestApplied = resolve; });
+    fake.workerRequest(worker.childId, "permission");
+    await requested;
+    const blocked = (await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!;
+    expect(blocked.activity?.kind).toBe("needs-answer");
+    expect(blocked.activity?.observedAt).toBeGreaterThan(first.activity!.observedAt!);
+    now += 1_000;
+    expect((await provider.reconcileBackgroundTasks!(parent, { fresh: true }))[0]!.activity).toEqual(blocked.activity);
+  } finally { clock.mockRestore(); abort.abort(); await pump; await provider.dispose!(); await fake.stop(); }
+});
+
+// These filtering assertions compare every other task/control fact; clock
+// convergence and real native observation progress are checked separately.
 const withoutObservationClock = (tasks: import("../../types").BackgroundTaskItem[]) => tasks.map(task => ({ ...task,
   ...(task.activity ? { activity: { ...task.activity, observedAt: undefined } } : {}) }));
 
@@ -5704,6 +5786,30 @@ function historyWorkerLaunch(id: string, at: number) {
   ] };
 }
 
+for (const sourceClock of ["reported", "absent", "unqualified"] as const) test(`cold inventory uses only a source observation clock (${sourceClock})`, async () => {
+  const launch = historyWorkerLaunch("source-clock", 20), part = launch.content[0]!;
+  const { completed: _completed, ...unfinished } = part.time;
+  const { ran: _ran, ...unqualified } = unfinished;
+  const history = [{ ...launch, content: [{ ...part, time: sourceClock === "reported" ? part.time : sourceClock === "absent" ? unfinished : unqualified }] }];
+  const server = fakeOpenCode({
+    "GET /api/session/active": () => ({ ses_child: { type: "running" } }),
+    "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+    "GET /api/session/ses_parent/message": () => ({ data: history, cursor: {} }),
+    "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+  });
+  const provider = server.provider();
+  let now = 1_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const [first] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(first?.activity?.kind).toBe("working");
+    expect(first?.activity?.observedAt).toBe(sourceClock === "reported" ? 22 : undefined);
+    now = 2_000;
+    expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toEqual(first?.activity);
+  } finally { clock.mockRestore(); await provider.dispose(); }
+});
+
 test("cold worker inventory failure retains the last positive server observation without authorizing Stop", async () => {
   let unavailable = false, now = 1_000;
   const server = fakeOpenCode({
@@ -5716,12 +5822,12 @@ test("cold worker inventory failure retains the last positive server observation
   const provider = server.provider(), clock = spyOn(Date, "now").mockImplementation(() => now);
   try {
     const [initial] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
-    expect(initial).toMatchObject({ activity: { kind: "working", observedAt: 1_000 }, control: { available: true } });
+    expect(initial).toMatchObject({ activity: { kind: "working", observedAt: 22 }, control: { available: true } });
     expect(initial!.control).toEqual({ available: true });
     unavailable = true;
     for (now of [2_000, 3_000]) {
       const [lost] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
-      expect(lost).toMatchObject({ activity: { kind: "unavailable", observedAt: 1_000, executionId: initial!.activity!.executionId }, control: { available: false, reason: "Worker control is unverified" } });
+      expect(lost).toMatchObject({ activity: { kind: "unavailable", observedAt: 22, executionId: initial!.activity!.executionId }, control: { available: false, reason: "Worker control is unverified" } });
       expect(lost!.control).toEqual({ available: false, reason: "Worker control is unverified" });
     }
     await expect(provider.stopTask("ses_parent", initial!.taskId)).rejects.toThrow();
@@ -5749,7 +5855,7 @@ for (const scenario of ["new execution", "changed launch clock", "ambiguous alia
       stream = observedNativeStream(provider);
       await stream.seen(event => event.eventType === "server.connected");
     }
-    expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toMatchObject({ kind: "working", observedAt: 1_000 });
+    expect((await provider.reconcileBackgroundTasks("ses_parent", { fresh: true }))[0]?.activity).toMatchObject({ kind: "working", observedAt: 22 });
     now = 2_000; unavailable = true;
     if (scenario === "new execution") history = [historyWorkerLaunch("cold", 50)];
     if (scenario === "changed launch clock") { history = [structuredClone(first)]; history[0]!.content[0]!.time.ran = 29; }
@@ -5792,7 +5898,9 @@ test("cold last-seen retention is bounded and losing a caption never restores co
     for (index of [0, 128]) {
       const [task] = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
       expect(task?.activity?.kind).toBe("unavailable");
-      expect(task?.activity?.observedAt).toBe(index === 0 ? undefined : 1_000);
+      // Retain the launch report's source clock (20 + 2), not the inventory
+      // receipt clock. Eviction loses only that caption, never control guards.
+      expect(task?.activity?.observedAt).toBe(index === 0 ? undefined : 22);
       expect(task?.control).toEqual({ available: false, reason: "Worker control is unverified" });
       await expect(provider.stopTask("ses_parent", task!.taskId)).rejects.toThrow();
     }

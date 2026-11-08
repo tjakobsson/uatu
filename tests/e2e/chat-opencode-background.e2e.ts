@@ -157,10 +157,14 @@ for (const engine of ["chromium", "webkit"] as const) test(`large resumed-worker
     await control(request, { op: "releaseMessageRead" });
     await expect(activeTask(page, resumed.taskId).locator(".chat-worker-model-name")).toHaveText("Concurrent recovery report");
     await expect(page.locator('#chat-timeline[aria-busy="true"]')).toHaveCount(0);
+    // A cold loaded range needs one warming traversal and one stable-cursor
+    // verification head. Neither the unchanged pages nor later native reports
+    // may restart recovery after that bounded handoff.
+    expect(reads).toBe(2);
     // A fresh native update proves that recovery reattached a usable stream.
     await control(request, { op: "workerReport", childId: worker.childId, usedModel: "After recovery", usedEffort: "medium", costUsd: 0.001 });
     await expect(activeTask(page, resumed.taskId).locator(".chat-worker-model-name")).toHaveText("After recovery");
-    expect(reads).toBe(1);
+    expect(reads).toBe(2);
     await expect(page.locator("#chat-input")).toHaveValue("Keep this draft through recovery");
     await expect.poll(() => timeline.evaluate((node, anchor) => {
       const row = node.querySelector<HTMLElement>(`[data-chat-item-id="${CSS.escape(anchor.id)}"]`);
