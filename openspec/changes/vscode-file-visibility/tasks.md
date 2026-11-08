@@ -19,7 +19,7 @@
 
 ## 4. Follow
 
-- [ ] 4.1 Exclude Git-ignored files from server Follow nomination (`latestChanges`, per-subscriber `changedId`, reconnect `latestChange`, `newest()`/`NewestDocument`), collapse the per-visibility `latestChanges` maps, and treat failed classification as not ignored; verify watch-session tests for an ignored build batch with Show ignored on and off, a mixed batch following the document, a tracked `dist/index.html` being followed, and an initial default that skips newer ignored files.
+- [x] 4.1 Exclude Git-ignored files from server Follow nomination (`latestChanges`, per-subscriber `changedId`, reconnect `latestChange`, `newest()`/`NewestDocument`), collapse the per-visibility `latestChanges` maps, and treat failed classification as not ignored; verify watch-session tests for an ignored build batch with Show ignored on and off, a mixed batch following the document, a tracked `dist/index.html` being followed, and an initial default that skips newer ignored files.
 - [ ] 4.2 Exclude Git-ignored files from the client's chip catch-up in `src/shell/follow.ts`, and keep refresh in place for opened ignored files; verify a unit test for catch-up and a browser test that rewrites an opened ignored `build/report.md` without changing selection.
 
 ## 5. Tree, Recent, and count (client)

@@ -17,7 +17,7 @@ import { isPolicyFile, rootRelative } from "./watch-policy";
 import { createRepositoryRefresh, type RepositoryResults } from "./repository-refresh";
 import { observeFiles, type FileObserver } from "./file-observer";
 import { classifyGitIgnored, collectIgnoredInventory } from "./git-ignore";
-import { isDocumentVisible } from "../shared/file-visibility";
+import { isFollowEligible } from "../shared/file-visibility";
 import { createRefreshScheduler } from "./refresh-scheduler";
 import { NewestDocument } from "./newest-document";
 import { MediaDelivery } from "./media-delivery";
@@ -51,7 +51,9 @@ type Subscriber = {
   keepalive: ReturnType<typeof setInterval> | null;
 };
 type ObservedRoot = {
-  visibleNewest: NewestDocument;
+  // Newest non-binary document Git does not ignore: the default selection
+  // and Follow catch-up target.
+  followNewest: NewestDocument;
   classificationWaiters: Map<string, { revision: number; resolve: () => void }[]>;
   index: FileIndex;
   watcher: FileObserver;
@@ -71,6 +73,7 @@ export class FolderListingError extends Error {
   constructor(readonly status: 400 | 404, message: string) { super(message); }
 }
 const DIRECTORY = { isDirectory: () => true, isSymbolicLink: () => false };
+const followEligible = isFollowEligible;
 
 export type WatchSession = ReturnType<typeof createWatchSession>;
 export function createWatchSession(entries: WatchEntry[], initialFollow: boolean, options: WatchSessionOptions = {}) {
@@ -92,7 +95,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   let revision = 0;
   let corpusRevision = 0;
   let latestFollowOrder = 0;
-  const latestChanges = new Map<boolean, { id: string; revision: number; order: number }>();
+  let latestChange: { id: string; revision: number; order: number } | null = null;
   const cancellation = new AbortController();
   const classificationQueue = new Map<ObservedRoot, Set<string>>();
   let classificationRunning: Promise<void> | null = null;
@@ -152,10 +155,10 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     if (entries.length === 1 && entries[0]?.kind === "file") return { ...context, scope: { kind: "file", documentId: entries[0].absolutePath } };
     return normalizeDocumentContext(context, discovery(), find);
   };
-  const newest = (context: WatchContext = DEFAULT_WATCH_CONTEXT): string | null => {
+  const newest = (_context: WatchContext = DEFAULT_WATCH_CONTEXT): string | null => {
     let best: ReturnType<typeof find>;
     for (const root of roots.values()) {
-      const id = context.showIgnored === false ? root.visibleNewest.id : root.index.newest.id;
+      const id = root.followNewest.id;
       const candidate = id ? root.index.documents.get(id) : undefined;
       if (candidate && (!best || candidate.mtimeMs > best.mtimeMs || candidate.mtimeMs === best.mtimeMs && candidate.relativePath.localeCompare(best.relativePath) < 0)) best = candidate;
     }
@@ -210,7 +213,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
           if (!doc || root.index.documents.get(doc.id) !== doc || doc.gitIgnoreStatus === statuses[i]) continue;
           const next = { ...doc, gitIgnoreStatus: statuses[i]! };
           root.index.documents.set(doc.id, next);
-          if (isDocumentVisible(next, false)) root.visibleNewest.update(next); else root.visibleNewest.remove(next.id);
+          if (followEligible(next)) root.followNewest.update(next); else root.followNewest.remove(next.id);
           upserts.push(next);
         }
         if (upserts.length) { corpusRevision++; publish({ upserts, removals: [], changedId: null }); }
@@ -248,11 +251,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       initialFollow, initialShowIgnored: initialShowIgnored(), defaultDocumentId: discovery().status === "ready" ? newest(normalized) : null, changedId, generatedAt, build: BUILD_SUMMARY,
       scope: { kind: "folder" }, discovery: discovery(), repositoryState: repositories.freshness,
       unscopedFingerprint: `${epoch}:${corpusRevision}`, terminal: options.terminalEnabled ? "enabled" : "disabled",
-      ...(() => {
-        const latest = latestChanges.get(normalized.showIgnored !== false);
-        return latest && isFollowableLatestChange(latest.id) && isDocumentVisible(find(latest.id)!, normalized.showIgnored)
-          ? { latestChange: { id: latest.id, revision: latest.revision } } : {};
-      })(),
+      ...(latestChange && isFollowableLatestChange(latestChange.id) && followEligible(find(latestChange.id)!)
+        ? { latestChange: { id: latestChange.id, revision: latestChange.revision } } : {}),
     };
     return projectDocumentSnapshot(state, normalized, state.repositories);
   }
@@ -265,11 +265,9 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     if (stopped) return;
     const previousRevision = revision;
     revision = nextRevision();
-    const previousOrders = new Map([...latestChanges].map(([show, latest]) => [show, latest.order]));
-    for (const show of [true, false]) {
-      const candidate = candidates.find(candidate => { const doc = find(candidate.id); return doc && isDocumentVisible(doc, show); });
-      if (candidate && candidate.order > (latestChanges.get(show)?.order ?? 0)) latestChanges.set(show, { ...candidate, revision });
-    }
+    const previousOrder = latestChange?.order ?? 0;
+    const eligible = candidates.find(candidate => { const doc = find(candidate.id); return doc && followEligible(doc); });
+    if (eligible && eligible.order > previousOrder) latestChange = { ...eligible, revision };
     generatedAt = Math.max(Date.now(), generatedAt + 1);
     const patch: DocumentPatch = {
       kind: "patch", epoch, previousRevision, revision, generatedAt,
@@ -284,7 +282,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         continue;
       }
       const headers = entries.filter(entry => context.scope.kind === "folder" || roots.get(entry.absolutePath)?.index.documents.has(context.scope.documentId)).map(rootHeader);
-      const candidate = candidates.find(candidate => { const doc = find(candidate.id); return candidate.order > (previousOrders.get(context.showIgnored !== false) ?? 0) && doc && isDocumentVisible(doc, context.showIgnored) && (context.scope.kind === "folder" || doc.id === context.scope.documentId); });
+      const candidate = candidates.find(candidate => { const doc = find(candidate.id); return candidate.order > previousOrder && doc && followEligible(doc) && (context.scope.kind === "folder" || doc.id === context.scope.documentId); });
       send(subscriber, projectDocumentPatch({ ...patch, changedId: candidates.length ? candidate?.id ?? null : patch.changedId,
         defaultDocumentId: discovery().status === "ready" ? newest(context) : null }, context, headers, repo ? repositories.results[context.compareTarget] : undefined));
     }
@@ -299,8 +297,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const folderUpserts = (batch.folderUpserts ?? []).filter(folder => policy.accepts(folder.id, DIRECTORY));
     const folderRemovals = [...(batch.folderRemovals ?? []), ...(batch.folderUpserts ?? []).filter(folder => !policy.accepts(folder.id, DIRECTORY)).map(folder => ({ rootId: folder.rootId, id: folder.id }))];
     const folders = { ...(folderUpserts.length ? { folderUpserts } : {}), ...(folderRemovals.length ? { folderRemovals } : {}) };
-    for (const doc of upserts) { if (isDocumentVisible(doc, false)) root.visibleNewest.update(doc); else root.visibleNewest.remove(doc.id); }
-    for (const removal of removals) root.visibleNewest.remove(removal.id);
+    for (const doc of upserts) { if (followEligible(doc)) root.followNewest.update(doc); else root.followNewest.remove(doc.id); }
+    for (const removal of removals) root.followNewest.remove(removal.id);
     if (batch.upserts.length || batch.removals.length) {
       corpusRevision++;
       // Git does not report ignored output, so a build needs no Git refresh.
@@ -354,7 +352,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       onWork: kind => metrics?.inc(`index.${kind}_total`),
     });
     const ready = Promise.withResolvers<void>();
-    root = { index, watcher, visibleNewest: new NewestDocument(), classificationWaiters: new Map(), ready: false, finish: () => ready.resolve() };
+    root = { index, watcher, followNewest: new NewestDocument(), classificationWaiters: new Map(), ready: false, finish: () => ready.resolve() };
     owned.add(root);
     if (!staged) { roots.set(entry.absolutePath, root); prepared.get(entry.absolutePath)?.resolve(root); }
     watcher.on("all", (event, file, stats) => {
@@ -366,7 +364,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
           // Policy metadata updates its own row, but is not Follow intent.
           index.observe(event, file, stats, true);
           // Which folders are ignored as a whole may have changed.
-          if (entry.kind === "dir") void recover(entry, true).catch(() => {});
+          void reconcileIgnoredFolders(entry);
           return;
         }
         void recover(entry, true).catch(() => {});
@@ -439,7 +437,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         for (const level of old?.index.ignoredFolders.listedFolders ?? []) {
           if (next.index.ignoredFolders.isInside(level)) await listLevel(next, level).catch(() => {});
         }
-        for (const doc of next.index.documents.values()) if (isDocumentVisible(doc, false)) next.visibleNewest.update(doc);
+        for (const doc of next.index.documents.values()) if (followEligible(doc)) next.followNewest.update(doc);
         queueClassifications(next, next.index.documents.keys());
         rootErrors.delete(entry.absolutePath);
         failures.delete(entry.absolutePath);
@@ -465,7 +463,21 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   }
 
   function recoverIgnoredFolders() {
-    for (const entry of entries) if (entry.kind === "dir") void recover(entry, true).catch(() => {});
+    for (const entry of entries) void reconcileIgnoredFolders(entry);
+  }
+
+  // Rebuilds a root only when the set of folders Git ignores as a whole has
+  // changed. Other ignore edits are classification metadata: they must not
+  // re-index files as fresh writes.
+  async function reconcileIgnoredFolders(entry: WatchEntry): Promise<void> {
+    if (entry.kind !== "dir" || stopped) return;
+    const inventory = await collectIgnoredInventory(entry.absolutePath, cancellation.signal);
+    const root = roots.get(entry.absolutePath);
+    if (stopped || !root) return;
+    const current = new Set(root.index.ignoredFolders.topFolders);
+    const next = inventory?.folders ?? [];
+    if (next.length === current.size && next.every(folder => current.has(folder))) return;
+    await recover(entry, true).catch(() => {});
   }
 
   // Lists one level of an ignored folder into the shared index: subfolders

@@ -181,3 +181,40 @@ test("files a client opens or is served stay indexed when later writes overflow 
     expect(session.findDocument(render("a.wav"))).toBeUndefined();
   } finally { await session.stop(); }
 });
+
+test("Follow skips ignored output in every batch, follows tracked output, and the default skips newer ignored files", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n/references/*\n!/references/README.md\n");
+  await files(cwd, ["docs/a.md", "dist/index.html", "build/report.md", "references/README.md"]);
+  expect(Bun.spawnSync(["git", "add", "dist/index.html", ".gitignore"], { cwd }).exitCode).toBe(0);
+  await Bun.sleep(20);
+  await files(cwd, ["references/newer.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], true);
+  const frames: { changedId: string | null }[] = [];
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  try {
+    await session.start();
+    const doc = (relative: string) => path.join(cwd, ...relative.split("/"));
+    await wait(() => session.findDocument(doc("references/newer.md"))?.gitIgnoreStatus === "ignored", "ignored reference");
+    expect(session.getStatePayload().defaultDocumentId).not.toBe(doc("references/newer.md"));
+    await session.listFolder(cwd, "build");
+    reader = session.eventsResponse().body!.getReader();
+    void (async () => { for (;;) { const value = await reader!.read(); if (value.done) return; for (const chunk of new TextDecoder().decode(value.value).split("\n\n")) if (chunk.startsWith("event: state")) frames.push(JSON.parse(chunk.split("data: ")[1]!)); } })();
+    await wait(() => frames.length > 0, "initial snapshot");
+    const followed = () => frames.map(frame => frame.changedId).filter(Boolean);
+    // An ignored build output alone, with or without ignored files shown.
+    await writeFile(doc("build/report.md"), "# rebuilt");
+    await writeFile(doc("build/renders.md"), "# new");
+    await Bun.sleep(1600);
+    expect(followed()).toEqual([]);
+    // A document saved during a build is followed even though output came later.
+    await writeFile(doc("docs/a.md"), "# edited");
+    await writeFile(doc("build/report.md"), "# rebuilt again");
+    await wait(() => followed().includes(doc("docs/a.md")), "document edit followed");
+    // A tracked file inside an output folder is ordinary content.
+    await writeFile(doc("dist/index.html"), "<p>new</p>");
+    await wait(() => followed().includes(doc("dist/index.html")), "tracked output followed");
+    await Bun.sleep(1600);
+    expect(followed().some(id => id!.includes(`${path.sep}build${path.sep}`))).toBe(false);
+  } finally { await reader?.cancel(); await session.stop(); }
+}, 20_000);

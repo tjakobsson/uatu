@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { RootGroup } from "../shared/types";
 import { chooseSelectionForFileEvent, imageChangeOutcome, selectionForChipTurnOn } from "./follow-rules";
+import { isFollowEligible } from "../shared/file-visibility";
 
 // Single-root fixture with two documents, README (older) and setup.md (newer).
 // setup.md is the newest-mtime non-binary doc, so it is what
@@ -83,6 +84,15 @@ describe("chooseSelectionForFileEvent — Rule C / Rule D", () => {
 });
 
 describe("selectionForChipTurnOn — Rule B catch-up", () => {
+  test("skips a newer ignored file once Follow eligibility filters the roots", () => {
+    const roots = fixture();
+    const newest = Math.max(...roots[0]!.docs.map(doc => doc.mtimeMs)) + 1000;
+    roots[0]!.docs.push({ id: "/tmp/docs/build/report.md", rootId: roots[0]!.id, name: "report.md", relativePath: "build/report.md", kind: "markdown", mtimeMs: newest, gitIgnoreStatus: "ignored" });
+    const eligible = roots.map(root => ({ ...root, docs: root.docs.filter(isFollowEligible) }));
+    expect(selectionForChipTurnOn(roots, "/tmp/docs/README.md")).toBe("/tmp/docs/build/report.md");
+    expect(selectionForChipTurnOn(eligible, "/tmp/docs/README.md")).toBe("/tmp/docs/guides/setup.md");
+  });
+
   test("returns the newest-mtime doc when it differs from the current selection", () => {
     const roots = fixture();
     expect(selectionForChipTurnOn(roots, "/tmp/docs/README.md")).toBe(
