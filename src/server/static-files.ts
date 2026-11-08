@@ -85,12 +85,13 @@ export async function resolveStaticFileRequest(
 export async function staticFileResponse(
   pathname: string,
   entries: WatchEntry[],
-  options: { respectGitignore?: boolean } = {},
+  options: { respectGitignore?: boolean; onServe?: (filePath: string) => void } = {},
 ): Promise<Response | null> {
   const resolved = await resolveStaticFileRequest(pathname, entries, options);
   if (resolved.status !== "found") {
     return null;
   }
+  options.onServe?.(resolved.filePath);
 
   return new Response(Bun.file(resolved.filePath), { headers: { "cache-control": "no-cache" } });
 }

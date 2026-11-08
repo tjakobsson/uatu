@@ -206,3 +206,122 @@ test("newest eligible document stays correct after replacement, reclassification
     expect(heap.id).toBe(expected);
   }
 });
+
+// Ignored folders (task: lists on demand, live-write window, batched lane).
+function ignoredFixture(options: Partial<FileIndexOptions> = {}) {
+  return fixture({ ignored: { folders: ["node_modules", "build"], files: [] }, classify: async () => "binary", ...options });
+}
+const insideIgnored = (batches: FileIndexBatch[]) => batches.filter(batch => batch.lane);
+function documentIds(index: FileIndex, prefix: string) {
+  return [...index.documents.keys()].filter(id => id.startsWith(prefix));
+}
+
+test("unlisted writes are captured within a bounded, newest-first window", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  for (let i = 0; i < 80_000; i++) index.observe("add", `/docs/node_modules/pkg${i % 400}/f${i}.js`, stat(i));
+  await index.idle();
+  const kept = documentIds(index, "/docs/node_modules/");
+  expect(kept).toHaveLength(2000);
+  expect(kept.every(id => Number(id.match(/f(\d+)\.js$/)![1]) >= 78_000)).toBe(true);
+  expect([...index.documents.values()].every(doc => doc.gitIgnoreStatus === "ignored")).toBe(true);
+}, 30_000);
+
+test("the window evicts the oldest unpinned write, refreshes rewritten files, and listing brings evicted files back", async () => {
+  const { index } = ignoredFixture({ windowLimit: 3 });
+  index.markReady();
+  const file = (name: string) => `/docs/build/renders/${name}.wav`;
+  for (const name of ["a", "b", "c"]) index.observe("add", file(name), stat());
+  await index.idle();
+  index.pin(file("a"));
+  index.observe("change", file("b"), stat(2)); // b is now the newest write
+  index.observe("add", file("d"), stat());
+  await index.idle();
+  // a is pinned, so c (the oldest unpinned) leaves; b was rewritten.
+  expect(documentIds(index, "/docs/build/").sort()).toEqual([file("a"), file("b"), file("d")]);
+  index.observe("add", file("e"), stat());
+  await index.idle();
+  expect(documentIds(index, "/docs/build/").sort()).toEqual([file("a"), file("d"), file("e")]);
+  // Listing the level: its files are admitted and leave the window.
+  index.markListed("/docs/build");
+  index.markListed("/docs/build/renders");
+  for (const name of ["b", "c"]) index.observe("add", file(name), stat(3));
+  await index.idle();
+  for (const name of ["f", "g", "h", "i"]) index.observe("add", file(name), stat(4));
+  await index.idle();
+  expect(documentIds(index, "/docs/build/").sort()).toEqual(["a", "b", "c", "d", "e", "f", "g", "h", "i"].map(file));
+});
+
+test("a burst inside an ignored folder arrives as a few classified patches with no Follow candidates", async () => {
+  const { index, batches } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  await index.idle();
+  batches.length = 0;
+  for (let i = 0; i < 5000; i++) index.observe("add", `/docs/build/obj${i}.o`, stat());
+  await index.idle();
+  const lane = insideIgnored(batches);
+  // idle() also forces the (empty) ordinary flush; only batches with files count.
+  expect(batches.filter(batch => batch.upserts.length || batch.removals.length)).toEqual(lane);
+  expect(lane.length).toBeLessThanOrEqual(5);
+  expect(lane.reduce((n, batch) => n + batch.upserts.length, 0)).toBe(5000);
+  expect(lane.every(batch => batch.upserts.length <= 1024 && batch.upserts.every(doc => doc.gitIgnoreStatus === "ignored"))).toBe(true);
+  expect(lane.every(batch => batch.changedId === null && (batch.followCandidates ?? []).length === 0)).toBe(true);
+});
+
+test("repeated writes collapse and short-lived output is never published", async () => {
+  const { index, batches } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  await index.idle();
+  batches.length = 0;
+  for (const mtime of [1, 2, 3]) index.observe("change", "/docs/build/main.o", stat(mtime));
+  index.observe("add", "/docs/build/tmp.o", stat());
+  index.observe("unlink", "/docs/build/tmp.o");
+  await index.idle();
+  const upserts = insideIgnored(batches).flatMap(batch => batch.upserts);
+  expect(upserts.map(doc => [doc.relativePath, doc.mtimeMs])).toEqual([["build/main.o", 3]]);
+  expect(insideIgnored(batches).flatMap(batch => batch.removals)).toEqual([]);
+});
+
+test("the lane waits at least 1 s and at most 5 s while ordinary edits keep their 2 s bound", async () => {
+  let now = 0, nextId = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const advance = async (target: number) => {
+    for (;;) {
+      const due = [...timers.entries()].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      timers.delete(due[0]); now = due[1].at; due[1].run();
+      await Promise.resolve();
+    }
+    now = target;
+  };
+  const published: { at: number; lane: boolean; ids: string[] }[] = [];
+  const { index } = ignoredFixture({
+    clock: { now: () => now,
+      setTimer: (run, delay) => { const id = ++nextId; timers.set(id, { at: now + delay, run }); return id as unknown as ReturnType<typeof setTimeout>; },
+      clearTimer: timer => { timers.delete(timer as unknown as number); },
+    },
+    publish: batch => published.push({ at: now, lane: batch.lane === true, ids: batch.upserts.map(doc => doc.relativePath) }),
+  });
+  index.markReady();
+  index.markListed("/docs/build");
+  index.flushLane();
+  published.length = 0;
+  // A build writes every 100 ms for 8 s; a document is saved at 1 s.
+  for (let time = 0; time < 8000; time += 100) {
+    await advance(time);
+    index.observe("change", `/docs/build/obj${time}.o`, stat(time));
+    if (time === 1000) index.observe("change", "/docs/notes.md", stat(time));
+    await Bun.sleep(0);
+  }
+  await advance(20_000);
+  const lane = published.filter(batch => batch.lane);
+  const ordinary = published.filter(batch => !batch.lane && batch.ids.length);
+  expect(ordinary.map(batch => batch.ids)).toEqual([["notes.md"]]);
+  expect(ordinary[0]!.at - 1000).toBeLessThanOrEqual(2000);
+  expect(lane[0]!.at).toBeGreaterThanOrEqual(1000);
+  expect(lane[0]!.at).toBeLessThanOrEqual(5000);
+  for (let i = 1; i < lane.length; i++) expect(lane[i]!.at - lane[i - 1]!.at).toBeLessThanOrEqual(5000);
+  expect(lane.flatMap(batch => batch.ids)).toHaveLength(80);
+});

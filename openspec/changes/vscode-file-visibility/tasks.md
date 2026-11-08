@@ -13,9 +13,9 @@
 
 ## 3. Live-write window and batched lane (server)
 
-- [ ] 3.1 Index native-watch writes inside unlisted ignored folders as windowed entries, with a per-root bound of 2,000, oldest-unpinned eviction as removals, pinning on document/static/media requests, and conversion to listed entries when their level is listed; verify file-index tests for the bound with 80,000 writes, eviction order, a pinned file surviving, and an evicted file returning on listing.
-- [ ] 3.2 Route paths inside ignored folders into a path-keyed lane with a 1 s debounce, 5 s maximum wait, and patches of at most 1,024 entries, carrying `ignored` status without classification and without Follow candidates, and leave the ordinary lane's 150 ms / 2 s / 256 behavior unchanged; verify fake-timer scheduler tests and file-index tests asserting ≤5 patches for 5,000 writes, a single entry for repeated writes, no entry for short-lived files, and an ordinary edit published within 2 s while the lane is busy.
-- [ ] 3.3 Keep the Chokidar fallback from traversing unlisted ignored folders while watching listed levels; verify file-observer tests in polling mode.
+- [x] 3.1 Index native-watch writes inside unlisted ignored folders as windowed entries, with a per-root bound of 2,000, oldest-unpinned eviction as removals, pinning on document/static/media requests, and conversion to listed entries when their level is listed; verify file-index tests for the bound with 80,000 writes, eviction order, a pinned file surviving, and an evicted file returning on listing.
+- [x] 3.2 Route paths inside ignored folders into a path-keyed lane with a 1 s debounce, 5 s maximum wait, and patches of at most 1,024 entries, carrying `ignored` status without classification and without Follow candidates, and leave the ordinary lane's 150 ms / 2 s / 256 behavior unchanged; verify fake-timer scheduler tests and file-index tests asserting ≤5 patches for 5,000 writes, a single entry for repeated writes, no entry for short-lived files, and an ordinary edit published within 2 s while the lane is busy.
+- [x] 3.3 Keep the Chokidar fallback from traversing unlisted ignored folders while watching listed levels; verify file-observer tests in polling mode.
 
 ## 4. Follow
 

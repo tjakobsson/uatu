@@ -253,6 +253,7 @@ async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof re
     const navigationFetch = createNavigationFetchHandler({
       getUnscopedRoots: () => watchSession!.getUnscopedRoots(),
       ensureDocument: id => watchSession!.ensureDocument(id),
+      pinDocument: id => watchSession!.pinDocument(id),
       isIndexComplete: () => watchSession!.getDiscoveryState().status === "ready",
       getEntries: () => rootEntries,
       getRespectGitignore: () => options.respectGitignore,

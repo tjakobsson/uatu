@@ -221,6 +221,8 @@ export function createNavigationFetchHandler(deps: {
   isIndexComplete?: () => boolean;
   getEntries: () => WatchEntry[];
   getRespectGitignore: () => boolean;
+  // A served file stays in the index even if the live-write window overflows.
+  pinDocument?: (id: string) => void;
   getServer: () => { hostname?: string | undefined; port?: number | undefined };
   basePath?: string;
 }): (request: Request) => Promise<Response> {
@@ -362,6 +364,7 @@ export function createNavigationFetchHandler(deps: {
 
     const response = await staticFileResponse(pathname, deps.getEntries(), {
       respectGitignore: deps.getRespectGitignore(),
+      onServe: deps.pinDocument,
     });
     if (response) {
       return response;

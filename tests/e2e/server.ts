@@ -912,6 +912,7 @@ await boundary.ready;
 const navigationFetch = createNavigationFetchHandler({
   getUnscopedRoots: () => watchSession.getUnscopedRoots(),
   ensureDocument: id => watchSession.ensureDocument(id),
+  pinDocument: id => watchSession.pinDocument(id),
   isIndexComplete: () => watchSession.getDiscoveryState().status === "ready",
   getEntries: () => activeEntries,
   getRespectGitignore: () => activeRespectGitignore,

@@ -22,7 +22,7 @@ type Options = {
   renew?: boolean;
   // Controlled native notifications with real filesystem reads in tests.
   watch?: typeof watch;
-  onWork?: (kind: "watch" | "stat" | "directory") => void;
+  onWork?: (kind: "watch" | "stat" | "directory", file?: string) => void;
 };
 type NativeSubscription = { watcher: FSWatcher; listeners: Set<(event: string, file: string | null) => void> };
 const subscriptions = new Map<string, NativeSubscription>();
@@ -478,7 +478,7 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       if (!previous) this.emit("all", "addDir", file, stats);
       if (unlisted) return;
       if (!discover && previous?.isDirectory() && previous.mtimeMs === stats.mtimeMs && previous.ino === stats.ino) return;
-      this.options.onWork?.("directory");
+      this.options.onWork?.("directory", file);
       const entries = await readdir(file, { withFileTypes: true }).catch(error => {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
         throw error;

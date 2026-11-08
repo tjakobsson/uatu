@@ -86,6 +86,7 @@ The key never reached a stable release. Parsing and the soft-exclusion branch ar
 - [Eviction removes a file from one client's tree that another client is about to open] → Opening it pins it. If an evicted row was already gone, the existing unavailable-destination rules apply, and expanding the folder restores it.
 - [A wire change touches the Hub broker, replay, and both clients] → Covered by contract tests, the API revision bump, and an e2e test through the Hub.
 - [The Chokidar fallback cannot see live writes in unlisted ignored folders] → Documented. The native watcher is the default on supported platforms.
+- [Chokidar cannot defer a traversal decision, so in polling mode a folder Git starts ignoring after discovery is walked like any other folder] → Folders known at discovery and listed levels behave as in native mode; the next recovery (for example a `.gitignore` edit) reclassifies the late folder. Documented with the other polling limits.
 
 ## Migration Plan
 

@@ -41,6 +41,8 @@ export type WatchSessionOptions = {
   // Controlled classification and observation in lifecycle/resource tests.
   classify?: FileIndexOptions["classify"];
   watch?: typeof chokidar.watch;
+  // Live-write window size per root (tests use a small one).
+  ignoredWindowLimit?: number;
 };
 
 type Subscriber = {
@@ -338,6 +340,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     if (stopped) return null;
     let root!: ObservedRoot;
     const index = new FileIndex(entry, matcher, { revision: nextRevision, classify: options.classify, publish: batch => fileBatch(root, batch), ignored,
+      windowLimit: options.ignoredWindowLimit,
       onWork: kind => metrics?.inc(`index.${kind}_total`),
       onInvalidate: (id, descendants) => media.invalidate(entry.absolutePath, id, descendants),
     });
@@ -583,6 +586,9 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       return undefined;
     },
     findDocument: find,
+    pinDocument(id: string) {
+      for (const root of roots.values()) if (rootRelative(root.index.entry, path.resolve(id))) root.index.pin(id);
+    },
     mediaResponse: (request: Request) => media.response(request),
     getDiscoveryState: discovery,
     documentRevision: (id: string) => `${epoch}:${find(id)?.revision ?? "missing"}`,

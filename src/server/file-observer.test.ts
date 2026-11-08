@@ -728,3 +728,42 @@ test("a child handed to polling Chokidar is reported and then polled", async () 
   expect(events.filter(event => event.event === "addDir" && event.file === folder)).toHaveLength(1);
   expect(chokidarWatcher.getWatched()[folder]).toEqual(["a.md"]);
 });
+
+for (const polling of [false, true]) {
+  test(`${polling ? "polling" : "native"} observation does not read unlisted ignored folders and reads a level once revealed`, async () => {
+    const root = await fixture();
+    await mkdir(path.join(root, "build/renders"), { recursive: true });
+    await mkdir(path.join(root, "build/objects"), { recursive: true });
+    await Promise.all(["README.md", "build/CMakeCache.txt", "build/renders/take.wav", "build/objects/a.o"].map(file => writeFile(path.join(root, file), "x")));
+    const listed = new Set<string>();
+    const unlisted = (directory: string) => {
+      const relative = path.relative(root, directory).split(path.sep).join("/");
+      return (relative === "build" || relative.startsWith("build/")) && !listed.has(relative);
+    };
+    const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+    const entry = { kind: "dir" as const, absolutePath: root };
+    const directoriesRead: string[] = [];
+    const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, usePolling: polling, unlisted,
+      onWork: (kind, file) => { if (kind === "directory" && file) directoriesRead.push(path.relative(root, file).split(path.sep).join("/")); } });
+    observers.push(observer);
+    const events: { event: string; file: string }[] = [];
+    observer.on("all", (event, file) => events.push({ event, file: path.relative(root, file).split(path.sep).join("/") }));
+    await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+    const added = () => events.filter(event => event.event === "add").map(event => event.file).sort();
+    // Native observation reports files from live events even inside an
+    // unlisted folder (the live-write window), so it is checked by what was
+    // read: only the root. Polling has no live events there at all.
+    if (polling) expect(added()).toEqual(["README.md"]);
+    else expect([...new Set(directoriesRead)]).toEqual([""]);
+    listed.add("build");
+    observer.reveal?.(path.join(root, "build"));
+    await until(() => added().includes("build/CMakeCache.txt"), "revealed level");
+    await Bun.sleep(polling ? 400 : 100);
+    // Only the revealed level: its subfolders stay unread.
+    if (polling) expect(added()).toEqual(["README.md", "build/CMakeCache.txt"]);
+    else expect([...new Set(directoriesRead)].sort()).toEqual(["", "build"]);
+    // A listed level stays watched.
+    await writeFile(path.join(root, "build/CMakeFiles.txt"), "x");
+    await until(() => added().includes("build/CMakeFiles.txt"), "write in a listed level");
+  });
+}

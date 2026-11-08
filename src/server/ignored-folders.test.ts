@@ -159,3 +159,25 @@ test("listed levels survive recovery while their folder is still ignored", async
     expect(paths(rootOf(session))).toContain("build/CMakeCache.txt");
   } finally { await session.stop(); }
 });
+
+test("files a client opens or is served stay indexed when later writes overflow the window", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { ignoredWindowLimit: 2 });
+  const render = (name: string) => path.join(cwd, "build/renders", name);
+  try {
+    await session.start();
+    await mkdir(path.join(cwd, "build/renders"), { recursive: true });
+    for (const name of ["opened.md", "served.png"]) await writeFile(render(name), "x");
+    await wait(() => !!session.findDocument(render("opened.md")) && !!session.findDocument(render("served.png")), "windowed renders");
+    expect(await session.ensureDocument(render("opened.md"))).toBeDefined();
+    session.pinDocument(render("served.png"));
+    for (const name of ["a.wav", "b.wav", "c.wav"]) { await writeFile(render(name), "x"); await Bun.sleep(30); }
+    await wait(() => !!session.findDocument(render("c.wav")), "later renders");
+    expect(session.findDocument(render("opened.md"))).toBeDefined();
+    expect(session.findDocument(render("served.png"))).toBeDefined();
+    // Unpinned older writes left the window.
+    expect(session.findDocument(render("a.wav"))).toBeUndefined();
+  } finally { await session.stop(); }
+});
