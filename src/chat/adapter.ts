@@ -133,7 +133,7 @@ type InventorySessionMetadata = {
   deleted: boolean;
 };
 type CachedAssociationCounterproof = { parentId: string; childIds: readonly string[]; transcriptKeys: ReadonlySet<string> };
-type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; replacement?: true };
+type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; questionTick: number; replacement?: true };
 class HistoryReadChangedError extends Error {}
 
 /** Evidence flows from shared accounting owners to each enclosing read before
@@ -512,6 +512,10 @@ export type ChatAdapterOptions = {
   onNotification?: (event: AgentNotificationEvent) => void;
 };
 
+type QuestionSetObservation = { ids: Set<string>; age: number };
+type QuestionSetCoverage = { parentId?: string; own?: QuestionSetObservation; children?: QuestionSetObservation };
+type QuestionSetRead = { conversationId: string; parentId?: string; scope: Set<string>; sets: Map<string, QuestionSetCoverage>; age: number; conflicted: boolean; revision: number };
+
 export class ChatAdapter {
   private readonly notifications: AgentNotificationTracker;
   readonly generation: string;
@@ -521,11 +525,16 @@ export class ChatAdapter {
   private readonly replayBytes: number;
   private readonly id: () => string;
   private readonly projections = new Map<string, ConversationProjection>();
+  private readonly replayClock = { next: 0 };
   private readonly permissionQueueOrder = new PermissionQueueOrder();
   private readonly receipts: IdempotencyReceipts;
   // Question item ids currently published per conversation, so a question that
   // stops being pending can be withdrawn from the timeline.
   private readonly publishedQuestions = new Map<string, Set<string>>();
+  // Empty reconciliation authority belongs only to overlapping reads, never
+  // to the adapter's retained conversation state.
+  private readonly questionReads = new Set<QuestionSetRead>();
+  private questionReadClock = 0;
   private readonly questionRefreshes = new Set<string>();
   private readonly questionCreatedAt = new Map<string, number>();
   private readonly permissionCreatedAt = new Map<string, number>();
@@ -931,6 +940,9 @@ export class ChatAdapter {
         // The whole handoff, including rereads, shares one bounded lifetime.
         let inboxReconciled = false;
         let refreshAttribution = false;
+        // Dirty replacement retries belong to the same read. They must not
+        // turn its later accepted announcements into pre-read retirement targets.
+        const questionTick = this.interactionClock;
         while (true) {
           recovery.dirty = false;
           const readProjection = this.projection(id);
@@ -941,7 +953,7 @@ export class ChatAdapter {
           const associations = associationRead?.begin(workerSources);
           const cachedAssociations = associations?.evidence ?? [];
           try {
-            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, ...(replacement ? { replacement: true } : {}) });
+            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, questionTick, ...(replacement ? { replacement: true } : {}) });
             inboxReconciled = true;
             assertCurrent();
             if (!recovery.dirty) return snapshot;
@@ -969,6 +981,22 @@ export class ChatAdapter {
   }
 
   private async readHistory(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage?: HistoryCoverage): Promise<ConversationSnapshot> {
+    const questionTick = coverage?.questionTick ?? this.interactionClock;
+    for (let attempt = 0; ; attempt++) {
+      const questions: QuestionSetRead = { conversationId: id, scope: new Set(), sets: new Map(), age: 0, conflicted: false, revision: 0 };
+      const release = () => { this.questionReads.delete(questions); };
+      coverage?.signal.addEventListener("abort", release, { once: true });
+      try { return await this.readHistoryWithQuestions(id, options, coverage, questions, questionTick); }
+      catch (error) {
+        // Covered reads retry under their existing bounded owner. Legacy
+        // reads get at most two retries to include an older overlapping commit.
+        if (coverage || !questions.conflicted || !(error instanceof HistoryReadChangedError) || attempt >= 2) throw error;
+      }
+      finally { release(); coverage?.signal.removeEventListener("abort", release); }
+    }
+  }
+
+  private async readHistoryWithQuestions(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage: HistoryCoverage | undefined, questionRead: QuestionSetRead, questionTick: number): Promise<ConversationSnapshot> {
     const session = await this.requireSession(id);
     coverage?.assertCurrent();
     // Captured before the provider reads: a pump event landing during them
@@ -986,6 +1014,11 @@ export class ChatAdapter {
     let page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
     coverage?.assertCurrent();
     if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+    // Capture the requested provider slice, not the later augmented snapshot:
+    // accounting, launcher backfills and coverage.merge may add rows from far
+    // outside this page. Only an actual page message establishes its frontier.
+    const firstMessage = page.items.find(item => item.type === "user_message" || item.type === "assistant_message" && item.markdown !== "");
+    const historyStart = firstMessage ? { id: this.correlateSteerMessage(id, firstMessage, coverage?.steerCorrelations).id, createdAt: firstMessage.createdAt } : undefined;
     if (options.workers && !page.completeItems) {
       // The compact read requires complete coverage, not a cached projection.
       // Native providers supply completeItems in one read. Legacy providers may
@@ -1069,6 +1102,14 @@ export class ChatAdapter {
       .map(item => this.correlateSteerMessage(id, item, coverage?.steerCorrelations));
     if (options.workers && items.length > WORKER_EVIDENCE_LIMIT) throw new WorkerEvidenceError("capacity", "worker dismissal source capacity reached");
     const sourceProjection = this.projection(id);
+    // Reads can still fail or lose admission after these decisions. Keep
+    // their removals (and request retirement effects) private until the same
+    // validated commit as the recovered rows. An early decision cannot remove
+    // a newer native replacement that arrived during a subsequent await.
+    const historyRemovals = new Map<string, { expected: ConversationItem | undefined; retired?: () => void }>();
+    const stageHistoryRemoval = (itemId: string, retired?: () => void) => {
+      historyRemovals.set(itemId, { expected: this.projection(id).get(itemId), retired: retired ?? historyRemovals.get(itemId)?.retired });
+    };
     const revokedChildren = new Set(page.workerAssociationContradictions);
     const fallbackRelations = [...(page.workerResultFallbacks ?? [])];
     const positiveFallbacks = new Set<string>();
@@ -1329,7 +1370,7 @@ export class ChatAdapter {
             // source row, even before the final non-weakening assertion runs.
             throw new WorkerEvidenceError("unavailable", "authoritative worker source was weakened without newer evidence");
           }
-          this.projection(id).apply({ kind: "remove", itemId: known.id });
+          stageHistoryRemoval(known.id);
           const index = items.findIndex(item => item.id === known.id);
           if (index >= 0) items.splice(index, 1);
           continue;
@@ -1517,15 +1558,22 @@ export class ChatAdapter {
     // list degrades the snapshot (the next refresh republishes) but must not
     // rewrite the published set — that would erase live questions.
     let questionsReconciled = false;
-    try {
-      const questionTick = this.interactionClock;
-      const pendingNow = await this.pendingQuestions(id);
+    let commitQuestionTracking: (() => void) | undefined;
+    let reconcileQuestionFreshness: (() => void) | undefined;
+    let questionTrackingCurrent: (() => boolean) | undefined;
+    if (this.provider.listQuestions) try {
+      questionRead.parentId = session.parentId;
+      questionRead.scope = await this.questionReadScope(id, session.parentId);
+      coverage?.assertCurrent();
+      questionRead.age = ++this.questionReadClock;
+      if (!this.disposed) this.questionReads.add(questionRead);
+      const pendingNow = await this.pendingQuestions(id, false);
       coverage?.assertCurrent();
       for (const pending of pendingNow) {
         if (items.some(item => item.id === pending.id)) continue;
         items.push(pending);
       }
-      if (this.provider.listQuestions) {
+      {
         questionsReconciled = true;
         // A successful read is authoritative: it carries this conversation's
         // own questions and its children's, so one absent from it was
@@ -1537,20 +1585,25 @@ export class ChatAdapter {
           // Announced after the read began: the snapshot predates it, so it
           // stays on the timeline and its notification stays pending.
           if ((this.announced.get(existing.id)?.tick ?? 0) > questionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
-          projection.apply({ kind: "remove", itemId: existing.id });
-          this.questionCreatedAt.delete(existing.id);
-          this.resolveAnnounced(existing.id);
+          stageHistoryRemoval(existing.id, () => {
+            // A child's newer announcement can precede its awaited parent
+            // mirror without changing this row's identity. Retire only the
+            // announcement covered by this read, not the newer notification.
+            if ((this.announced.get(existing.id)?.tick ?? 0) > questionTick) return;
+            this.questionCreatedAt.delete(existing.id);
+            this.resolveAnnounced(existing.id);
+          });
         }
       }
+      const tracking = new Map<string, Set<string>>([[id, new Set(pendingNow.map(item => item.id))]]);
       if (pendingNow.length > 0) {
-        this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
         // A recovered child question is ALSO recorded under its owning child:
         // the child's next question-tool update computes removals against
         // that set, and the pump mirrors them into this conversation. Keyed
         // only under the parent, an answer given elsewhere left the parent
         // offering a question OpenCode no longer had — 409 until reload.
-        // The sweep is child-inclusive, so each subset is that child's full
-        // current pending set and overwriting is safe.
+        // The sweep is child-inclusive, but each derived subset covers only
+        // that child's own questions, not the child's children.
         const byChild = new Map<string, Set<string>>();
         for (const item of pendingNow) {
           if (item.type !== "question") continue;
@@ -1560,8 +1613,99 @@ export class ChatAdapter {
           set.add(item.id);
           byChild.set(owner, set);
         }
-        for (const [owner, ids] of byChild) this.publishedQuestions.set(owner, ids);
-      } else this.publishedQuestions.delete(id);
+        for (const [owner, ids] of byChild) tracking.set(owner, ids);
+      }
+      const questionAuthority = (item: QuestionRequest): QuestionSetObservation | undefined => {
+        return this.questionAuthority(questionRead, item);
+      };
+      const refreshedQuestion = (item: QuestionRequest) => questionAuthority(item) !== undefined;
+      const ownsQuestion = (item: QuestionRequest) => questionAuthority(item)?.ids.has(item.id) ?? true;
+      const retainCurrentQuestion = (item: QuestionRequest) => (refreshedQuestion(item) && ownsQuestion(item))
+        || ((this.announced.get(item.id)?.tick ?? 0) > questionTick
+          && historyRemovals.get(item.id)?.expected !== item);
+      reconcileQuestionFreshness = () => {
+        // An older source may have committed rows after our absence sweep.
+        // Reread rather than granting its completion newer source authority.
+        if (questionRead.conflicted) throw new HistoryReadChangedError();
+        // A tool refresh owns a complete newer set, including absence. An old
+        // read must neither resurrect its unprojected rows nor retire current
+        // ones. Carry current rows for replacement/seed as well as recovery.
+        for (let index = items.length - 1; index >= 0; index--) {
+          const item = items[index]!;
+          if (item.type === "question" && !ownsQuestion(item)) items.splice(index, 1);
+        }
+        for (const [itemId, removal] of historyRemovals) {
+          // An announcement can precede its awaited parent mirror. Its tick
+          // protects notification/timestamp retirement, not the old parent
+          // row already covered by this read's absence. A newer set retaining
+          // this question revokes removal; row replacement has its own fence.
+          if (removal.expected?.type === "question" && refreshedQuestion(removal.expected) && ownsQuestion(removal.expected)) historyRemovals.delete(itemId);
+        }
+        for (const item of projection.items()) {
+          if (item.type !== "question") continue;
+          if (!ownsQuestion(item) && !retainCurrentQuestion(item)) {
+            // Scoped newer absence also governs a row an overlapping older
+            // publication inserted after our initial removal sweep.
+            stageHistoryRemoval(item.id, () => {
+              if ((this.announced.get(item.id)?.tick ?? 0) > questionTick) return;
+              this.questionCreatedAt.delete(item.id);
+              this.resolveAnnounced(item.id);
+            });
+            continue;
+          }
+          if (!retainCurrentQuestion(item)) continue;
+          const index = items.findIndex(candidate => candidate.id === item.id);
+          if (index < 0) items.push(item);
+          else items[index] = item;
+        }
+        // Hooks may invalidate admission, but cannot admit another stale set.
+        const revision = questionRead.revision;
+        questionTrackingCurrent = () => questionRead.revision === revision;
+      };
+      commitQuestionTracking = () => {
+        // Tracking is removal authority for the next tool refresh. Publish it
+        // only with these rows, retaining later native announcements under the
+        // same questionTick fence as removals. An unrelated permission update
+        // must not prevent newly recovered questions from being tracked.
+        for (const item of projection.items()) {
+          if (item.type !== "question" || item.status !== "pending"
+            || (this.announced.get(item.id)?.tick ?? 0) <= questionTick) continue;
+          tracking.get(id)!.add(item.id);
+          const owner = item.conversationId ?? id;
+          if (owner !== id) {
+            const ids = tracking.get(owner) ?? new Set<string>();
+            ids.add(item.id);
+            tracking.set(owner, ids);
+          }
+        }
+        for (const item of pendingNow) {
+          if (item.type !== "question" || !ownsQuestion(item) || this.questionCreatedAt.has(item.id)) continue;
+          const current = projection.get(item.id);
+          if (current?.type === "question" && current.status === "pending") this.questionCreatedAt.set(item.id, current.createdAt);
+        }
+        for (const [owner, ids] of tracking) {
+          // A concurrent parent/child refresh or history owns its newer set.
+          const newer = questionRead.sets.has(owner);
+          const pending = new Set([...ids].filter(itemId => {
+            const item = projection.get(itemId);
+            return item?.type === "question" && item.status === "pending"
+              && (ownsQuestion(item) || (this.announced.get(itemId)?.tick ?? 0) > questionTick);
+          }));
+          if (newer) {
+            for (const itemId of this.publishedQuestions.get(owner) ?? []) {
+              const known = projection.get(itemId) ?? pendingNow.find(item => item.id === itemId) ?? historyRemovals.get(itemId)?.expected;
+              if (known?.type === "question" && !ownsQuestion(known) && (this.announced.get(itemId)?.tick ?? 0) <= questionTick) continue;
+              pending.add(itemId);
+            }
+          }
+          const children = owner === id;
+          const observed = questionRead.sets.get(owner);
+          // A newer owner-only subset cannot renew older child-inclusive
+          // evidence. Preserve ages independently for the two coverage scopes.
+          const age = Math.max(questionRead.age, observed?.children?.age ?? 0, children ? 0 : observed?.own?.age ?? 0);
+          this.publishQuestionSet(owner, pending, age, questionRead, children);
+        }
+      };
     } catch { /* unknown, not empty */ }
     // A permission is otherwise knowable only from a live event: it has no
     // history representation, so one raised while the pump was restarting
@@ -1590,8 +1734,13 @@ export class ChatAdapter {
         for (const existing of projection.items()) {
           if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id) || coverage?.changed(existing.id)) continue;
           if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
-          projection.apply({ kind: "remove", itemId: existing.id });
-          this.retireRecoveredPermission(existing, id);
+          stageHistoryRemoval(existing.id, () => {
+            // A child can announce this request again before its async parent
+            // mirror replaces our row. Recheck the read's interaction fence
+            // before retiring other copies or resolving that newer announcement.
+            if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) return;
+            this.retireRecoveredPermission(existing, id);
+          });
         }
       }
     } catch {
@@ -1638,7 +1787,11 @@ export class ChatAdapter {
     // A newer native row can replace its correlated history copy in the
     // change fence. Reapply only the read-owned native-ID correlation, keeping
     // that row's newer contents even after its old cache/projection departed.
-    if (coverage) items.splice(0, items.length, ...coverage.merge(items).map(item => this.correlateSteerMessage(id, item, coverage.steerCorrelations)));
+    if (coverage) items.splice(0, items.length, ...coverage.merge(items).filter(item => {
+      const removal = historyRemovals.get(item.id);
+      return !removal || projection.get(item.id) !== removal.expected;
+    }).map(item => this.correlateSteerMessage(id, item, coverage.steerCorrelations)));
+    reconcileQuestionFreshness?.();
     // The live-task snapshot above was taken before several awaits; a task
     // that settled in the projection meanwhile keeps its settled row.
     for (let index = 0; index < items.length; index += 1) {
@@ -1691,8 +1844,10 @@ export class ChatAdapter {
       for (let index = items.length - 1; index >= 0; index--) if (excluded.has(items[index]!.id)) items.splice(index, 1);
       for (const itemId of excluded) {
         if (!projection.has(itemId)) continue;
-        projection.apply({ kind: "remove", itemId });
+        // Current exclusion authority retires this row even when an earlier
+        // decision staged its old incarnation before a native reinsertion.
         removed = true;
+        stageHistoryRemoval(itemId);
       }
       // A visible native result can change presentation when ownership
       // enrichment recovers. Neither page absence nor a notice-shaped id is
@@ -1706,7 +1861,7 @@ export class ChatAdapter {
         const index = items.findIndex(item => item.id === fallback.id && projection.matchesWorkerFallback(item, relation));
         if (index >= 0) items.splice(index, 1);
         const current = projection.get(fallback.id);
-        if (current && projection.matchesWorkerFallback(current, relation)) projection.apply({ kind: "remove", itemId: fallback.id });
+        if (current && projection.matchesWorkerFallback(current, relation)) stageHistoryRemoval(fallback.id);
       }
       const allocationCommits: Array<{ owner: AttributionOwner; floor: number | undefined; occurrences?: string }> = [];
       if (coverage && !cursor && accountingItems) for (const [child, publication] of allocationPublications) {
@@ -1781,7 +1936,11 @@ export class ChatAdapter {
       }
       // Ordinary upserts intentionally preserve terminal/sparse data. Exact
       // source revocation must replace it instead of merging hidden fields back.
-      if (!replace) for (const itemId of new Set([...resetReports, ...revokedRows])) if (projection.has(itemId)) projection.apply({ kind: "remove", itemId });
+      const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
+      for (const [itemId, removal] of historyRemovals) {
+        if (projection.get(itemId) === removal.expected) recoveryUpdates.push({ kind: "remove", itemId });
+      }
+      if (!replace) for (const itemId of new Set([...resetReports, ...revokedRows])) if (projection.has(itemId)) recoveryUpdates.push({ kind: "remove", itemId });
       if (page.workerOriginCoverage) projection.rememberWorkerOrigins(items, page.workerOriginCoverage, coverage?.changed);
       projection.rememberWorkerFallbacks(items, fallbackRelations, coverage?.changed, page.workerOriginCoverage);
       workerStrength?.(items);
@@ -1789,18 +1948,27 @@ export class ChatAdapter {
         // Worker retention, exact exclusions and result supersession above
         // apply equally to replacement. Ordinary transcript rows get no such
         // retention. Commit only after the covered read's final validation.
+        projection.replace(items, recoveryUpdates.flatMap(update => update.kind === "remove" ? [update.itemId] : []), () => {
+          coverage?.assertCurrent(); coverage?.workerSources.assertCurrent();
+          return !this.disposed && this.projections.get(id) === projection && (questionTrackingCurrent?.() ?? true);
+        });
+        // Replacement preparation/admission may fail. Do not discard buffered
+        // native events until the complete replacement has actually committed.
         this.eventCoalescer?.discard(id);
-        projection.replace(items);
       } else {
         // Recovery is also for clients already listening when V2 reconnects.
         // Publish recovered values, not just a silent seed of the next snapshot.
         for (const item of items) {
           const current = projection.get(item.id);
-          if (!current || !sameConversationItems([current], [item])) projection.apply({ kind: "upsert", item });
+          if (!current || !sameConversationItems([current], [item]) || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
           else if (current.type === "tool" && item.type === "tool" && coverage?.projection === projection && !coverage.changed(item.id)) {
             this.refreshEquivalentDescendantBindings(projection, current, item);
           }
         }
+        if (!projection.recover(recoveryUpdates, () => {
+          coverage?.assertCurrent(); coverage?.workerSources.assertCurrent();
+          return !this.disposed && this.projections.get(id) === projection && (questionTrackingCurrent?.() ?? true);
+        }, removed || !!visibilityChanged)) throw new HistoryReadChangedError();
       }
       // Publication and eligibility share the covering read's final fence.
       // Session lookups and child usage/model frames never clear this marker.
@@ -1814,8 +1982,16 @@ export class ChatAdapter {
         projection.reconciledHistoryVisibility = { state: reversibleHistory, ...(visibility ? { boundaryId: visibility.boundaryId } : {}) };
         this.rememberReversibleHistory(id, reversibleHistory);
       }
-      if (!replace && (removed || visibilityChanged)) projection.replay.publish({ type: "resync", reason: "conversation-rewritten" });
-    } else { workerStrength?.(items); projection.seed(items); }
+    } else {
+      workerStrength?.(items);
+      // Preserve legacy snapshot seeding (no incremental upsert fan-out).
+      // Complete its fallible preparation before publishing retired rows.
+      projection.seed(items);
+      projection.recover([...historyRemovals].filter(([itemId, removal]) => projection.get(itemId) === removal.expected)
+        .map(([itemId]) => ({ kind: "remove" as const, itemId })));
+    }
+    for (const [itemId, removal] of historyRemovals) if (!projection.has(itemId)) removal.retired?.();
+    commitQuestionTracking?.();
     for (let index = 0; index < items.length; index++) {
       const item = items[index]!;
       this.syncRecoveredPermission(item);
@@ -1849,6 +2025,7 @@ export class ChatAdapter {
       queued: this.queuedMessages(id),
       ...(reversibleHistory ? { reversibleHistory } : {}),
       olderCursor: page.nextCursor ? encodeHistoryCursor({ provider: page.nextCursor }) : undefined,
+      ...(historyStart ? { historyStart } : {}),
     };
   }
 
@@ -1990,6 +2167,7 @@ export class ChatAdapter {
   dispose(): Promise<void> {
     if (this.disposalPromise) return this.disposalPromise;
     this.disposed = true;
+    this.questionReads.clear();
     for (const admission of this.admittingSteers.values()) admission.retired = true;
     this.admittingSteers.clear();
     for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.checking?.finish(); }
@@ -5223,13 +5401,18 @@ export class ChatAdapter {
           // Reconcile their canonical views rather than publishing a hidden
           // launcher or terminal result directly from a live update.
           for (const update of updates) if (update.kind === "status") projection.apply(update);
+          const generation = this.backgroundStreamGeneration;
+          const fence = projection.beginHistoryRead();
           try { await this.history(conversationId); }
           catch {
-            if (!signal.aborted && this.projections.get(conversationId) === projection) for (const item of projection.items()) {
-              if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: unverifyWorkerTask(item) });
-            }
+            projection.recover(projection.items().flatMap(item => item.type === "background_task" && item.status === "running"
+              && !fence.changed(item.id) && !fence.workerChanged(item)
+              ? [{ kind: "upsert" as const, item: unverifyWorkerTask(item) }] : []),
+            () => !signal.aborted && !this.disposed && this.projections.get(conversationId) === projection
+              && generation === this.backgroundStreamGeneration && fence.current()
+              && !this.reversibleMutations.has(conversationId) && !this.revertReconciliations.has(conversationId));
             if (this.provider.reconcileBackgroundTasks) this.syncBackgroundState(conversationId);
-          }
+          } finally { fence.release(); }
           return;
         }
         const workerProgress = this.observeBackgroundSource(conversationId, projection, updates);
@@ -5351,8 +5534,9 @@ export class ChatAdapter {
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.
+        let eventSession: ProviderSession;
         try {
-          await this.requireSession(normalized.conversationId);
+          eventSession = await this.requireSession(normalized.conversationId);
         } catch (error) {
           if (error instanceof ConversationNotFoundError) continue;
           throw error;
@@ -5425,7 +5609,7 @@ export class ChatAdapter {
         // publish the difference; without this a question is invisible until
         // the next snapshot, which meant reloading the browser to see it.
         if (normalized.updates.some(isQuestionToolUpdate)) {
-          this.refreshQuestions(normalized.conversationId, coalescer);
+          this.refreshQuestions(normalized.conversationId, coalescer, eventSession.parentId);
         }
         // A subagent's request is otherwise only visible inside the child's
         // transcript — excluded from the picker, reachable solely through the
@@ -5682,23 +5866,30 @@ export class ChatAdapter {
         // A busy source does not invalidate independent facts. Read-lifetime
         // alias fences include rows added and removed entirely during the read.
         const safeTasks = tasks.filter(item => !fence.changed(item.id) && !fence.workerChanged(item));
-        // Re-key high-water marks when history resolves a provisional alias;
-        // renaming the same occurrence is not discovery of a new worker.
         const progressAliases = this.backgroundProgressAliases(recovery, projection);
+        const { byId, supersedes } = indexRecoveredBackgroundTasks(safeTasks);
+        const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
+        for (const known of projection.items()) {
+          if (fence.changed(known.id)) continue;
+          if (known.type === "background_task" && supersedes(known)) {
+            recoveryUpdates.push({ kind: "remove", itemId: known.id });
+            continue;
+          }
+          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) recoveryUpdates.push({ kind: "upsert", item: unverifyWorkerTask(known) });
+        }
+        for (const item of safeTasks) recoveryUpdates.push({ kind: "upsert", item });
+        if (!projection.recover(recoveryUpdates, () => !this.disposed && this.backgroundRecoveries.get(id) === recovery
+          && generation === this.backgroundStreamGeneration && this.projections.get(id) === projection && fence.current()
+          && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) {
+          recovery.dirty = true;
+          return;
+        }
+        // Only committed observations may consume progress. A rejected read
+        // must leave an identical successful retry eligible to extend its budget.
         let progress = false;
         for (const item of safeTasks) {
           if (this.recordBackgroundProgress(recovery, item, progressAliases, undefined, true)) progress = true;
         }
-        const { byId, supersedes } = indexRecoveredBackgroundTasks(safeTasks);
-        for (const known of projection.items()) {
-          if (fence.changed(known.id)) continue;
-          if (known.type === "background_task" && supersedes(known)) {
-            projection.apply({ kind: "remove", itemId: known.id });
-            continue;
-          }
-          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) projection.apply({ kind: "upsert", item: unverifyWorkerTask(known) });
-        }
-        for (const item of safeTasks) projection.apply({ kind: "upsert", item });
         // At most one retained marker per projected worker row, including
         // omitted rows kept uncertain. No growing retired-identity registry.
         for (const id of recovery.progress.keys()) if (!projection.has(id)) recovery.progress.delete(id);
@@ -5733,9 +5924,12 @@ export class ChatAdapter {
         recovery.inconclusiveReads = recovery.dirty || projection.find(item => item.type === "background_task" && item.status === "running" && item.stateUncertain === true) ? recovery.inconclusiveReads + 1 : 0;
       }, () => {
         if (this.disposed || this.backgroundRecoveries.get(id) !== recovery || generation !== this.backgroundStreamGeneration) return;
-        for (const known of this.projection(id).items()) {
-          if (known.type === "background_task" && known.status === "running" && !fence.changed(known.id)) this.projection(id).apply({ kind: "upsert", item: unverifyWorkerTask(known) });
-        }
+        if (!readProjection.recover(readProjection.items().flatMap(known => known.type === "background_task" && known.status === "running"
+          && !fence.changed(known.id) && !fence.workerChanged(known)
+          ? [{ kind: "upsert" as const, item: unverifyWorkerTask(known) }] : []),
+        () => !this.disposed && this.backgroundRecoveries.get(id) === recovery && generation === this.backgroundStreamGeneration
+          && this.projections.get(id) === readProjection && fence.current()
+          && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) recovery.dirty = true;
         this.syncBackgroundState(id);
         recovery.failures++;
       }).finally(() => {
@@ -6004,10 +6198,10 @@ export class ChatAdapter {
   }
 
   /** Throws on provider failure — an errored list is unknown, not empty. */
-  private async pendingQuestions(id: string): Promise<ConversationItem[]> {
+  private async pendingQuestions(id: string, rememberTimestamps = true): Promise<QuestionRequest[]> {
     if (!this.provider.listQuestions) return [];
     const pending = await this.provider.listQuestions();
-    const items: ConversationItem[] = [];
+    const items: QuestionRequest[] = [];
     for (const request of pending) {
       // This conversation's own, or a subagent's it launched — the same
       // parentage rule as permissions, and for the same reason: a question
@@ -6019,7 +6213,7 @@ export class ChatAdapter {
       // fresh Date.now() on every republish would keep moving the question
       // down the timeline as its tool part ticks over.
       const createdAt = this.questionCreatedAt.get(itemId) ?? Date.now();
-      this.questionCreatedAt.set(itemId, createdAt);
+      if (rememberTimestamps) this.questionCreatedAt.set(itemId, createdAt);
       items.push({
         id: itemId,
         type: "question" as const,
@@ -6049,36 +6243,123 @@ export class ChatAdapter {
     } catch { /* unknown, not empty — requirePending still decides */ }
   }
 
+  private async questionReadScope(id: string, parentId: string | undefined): Promise<Set<string>> {
+    const scope = new Set([id]);
+    let parent: string | null | undefined = parentId;
+    while (parent && !scope.has(parent)) {
+      scope.add(parent);
+      parent = await this.parentOf(parent);
+    }
+    return scope;
+  }
+
+  /** Retain pending removal authority; lend empty-set authority only to reads
+   * already in flight. Each read observes the latest set, not a mutation log. */
+  private publishQuestionSet(owner: string, pending: Set<string>, age: number, source: QuestionSetRead, children: boolean): void {
+    if (pending.size) this.publishedQuestions.set(owner, pending);
+    else this.publishedQuestions.delete(owner);
+    for (const read of this.questionReads) {
+      // A source proves its ancestor path before listing. This includes
+      // newly discovered children's empty sets without borrowing authority
+      // from unrelated roots (or requiring a retained tree/revision registry).
+      if (read === source || (owner !== read.conversationId && !source.scope.has(read.conversationId)
+        && !(children && owner === read.parentId))) continue;
+      if (age < read.age) {
+        // Older publication is not a newer observation. It can introduce rows
+        // after this read's sweep, so revoke its admission and retry instead.
+        read.conflicted = true;
+        read.revision++;
+        continue;
+      }
+      const coverage: QuestionSetCoverage = read.sets.get(owner) ?? {};
+      const kind = children ? "children" : "own";
+      if (age <= read.age || age < (coverage[kind]?.age ?? 0)) continue;
+      coverage.parentId = owner === source.conversationId ? source.parentId : source.conversationId;
+      coverage[kind] = { ids: pending, age };
+      read.sets.set(owner, coverage);
+      read.revision++;
+    }
+  }
+
+  private questionAuthority(read: QuestionSetRead, item: QuestionRequest): QuestionSetObservation | undefined {
+    const owner = item.conversationId ?? read.conversationId;
+    const owning = read.sets.get(owner);
+    const parent = owner === read.conversationId ? read.parentId : owning?.parentId ?? this.sessionParents.get(owner);
+    const applicable = [read.sets.get(read.conversationId)?.children, owning?.own, owning?.children,
+      parent ? read.sets.get(parent)?.children : undefined];
+    return applicable.reduce<QuestionSetObservation | undefined>((latest, fact) => fact && (!latest || fact.age > latest.age) ? fact : latest, undefined);
+  }
+
   /**
    * Republishes the pending-question set for one conversation: upserts what is
    * pending now and removes what no longer is (answered elsewhere, or from the
    * CLI). Fire-and-forget with one refresh in flight per conversation — a turn
    * emits many `question` tool updates and each must not become a round trip.
    */
-  private refreshQuestions(conversationId: string, coalescer: ProviderUpdateCoalescer): void {
+  private refreshQuestions(conversationId: string, coalescer: ProviderUpdateCoalescer, parentId?: string): void {
     if (!this.provider.listQuestions || this.questionRefreshes.has(conversationId)) return;
     this.questionRefreshes.add(conversationId);
     void (async () => {
       try {
-        const items = await this.pendingQuestions(conversationId);
-        const live = new Set(items.map(item => item.id));
-        const previous = this.publishedQuestions.get(conversationId) ?? new Set<string>();
-        const updates: NormalizedProviderUpdate[] = items.map(item => ({ kind: "upsert", item }));
-        for (const id of previous) {
-          if (live.has(id)) continue;
-          updates.push({ kind: "remove", itemId: id });
-          this.questionCreatedAt.delete(id);
-        }
-        if (live.size > 0) this.publishedQuestions.set(conversationId, live);
-        else this.publishedQuestions.delete(conversationId);
-        if (updates.length > 0) {
-          await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
-          coalescer.push(conversationId, updates);
-          // This fallback is the only path that discovers a subagent's
-          // question at all (no asked event exists), and the pump's mirror
-          // only sees the original tool update — so without mirroring here
-          // the parent shows a task running and no sign anything is waiting.
-          await this.mirrorToParent(conversationId, updates, coalescer);
+        const scope = await this.questionReadScope(conversationId, parentId);
+        const questionTick = this.interactionClock;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const source: QuestionSetRead = { conversationId, parentId, scope, sets: new Map(), age: ++this.questionReadClock, conflicted: false, revision: 0 };
+          if (!this.disposed) this.questionReads.add(source);
+          try {
+            let items = await this.pendingQuestions(conversationId, false);
+            if (source.conflicted) continue;
+            const projection = this.projection(conversationId);
+            const current = projection.items().filter((item): item is QuestionRequest => item.type === "question" && item.status === "pending");
+            // Prefer a fresh list while retries remain. On the final attempt
+            // reconcile applicable membership instead of abandoning discovery:
+            // a child's empty set cannot exclude its parent's own question.
+            if (source.sets.size && attempt < 2) continue;
+            const authority = (item: QuestionRequest) => this.questionAuthority(source, item);
+            items = items.filter(item => authority(item)?.ids.has(item.id) ?? true);
+            // Younger history can discover a question absent from the captured
+            // list. Borrow its committed row, but not a grandchild outside this
+            // list's coverage. References live only for this active read.
+            for (const owner of source.sets.keys()) {
+              for (const item of this.projections.get(owner)?.items() ?? []) {
+                if (item.type !== "question" || item.status !== "pending") continue;
+                const itemOwner = item.conversationId ?? owner;
+                const parent = source.sets.get(itemOwner)?.parentId ?? this.sessionParents.get(itemOwner);
+                if (itemOwner !== conversationId && parent !== conversationId) continue;
+                if (!authority(item)?.ids.has(item.id) || items.some(candidate => candidate.id === item.id)) continue;
+                items.push(item);
+              }
+            }
+            for (const item of current) {
+              if (!authority(item)?.ids.has(item.id) && (this.announced.get(item.id)?.tick ?? 0) <= questionTick) continue;
+              const index = items.findIndex(candidate => candidate.id === item.id);
+              if (index < 0) items.push(item);
+              else items[index] = item;
+            }
+            for (const item of items) if (!this.questionCreatedAt.has(item.id)) this.questionCreatedAt.set(item.id, item.createdAt);
+            const live = new Set(items.map(item => item.id));
+            const previous = this.publishedQuestions.get(conversationId) ?? new Set<string>();
+            const updates: NormalizedProviderUpdate[] = items.map(item => ({ kind: "upsert", item }));
+            for (const id of previous) {
+              if (live.has(id)) continue;
+              updates.push({ kind: "remove", itemId: id });
+              this.questionCreatedAt.delete(id);
+            }
+            // Only evidence covering this entire owner's set can renew its
+            // child-inclusive age; descendant/owner-only facts keep their scope.
+            const age = Math.max(source.age, source.sets.get(conversationId)?.children?.age ?? 0);
+            this.publishQuestionSet(conversationId, live, age, source, true);
+            if (updates.length > 0) {
+              await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
+              coalescer.push(conversationId, updates);
+              // This fallback is the only path that discovers a subagent's
+              // question at all (no asked event exists), and the pump's mirror
+              // only sees the original tool update — so without mirroring here
+              // the parent shows a task running and no sign anything is waiting.
+              await this.mirrorToParent(conversationId, updates, coalescer);
+            }
+            return;
+          } finally { this.questionReads.delete(source); }
         }
       }
       // A failed refresh must reach THIS catch with the published set intact:
@@ -6247,7 +6528,7 @@ export class ChatAdapter {
       this.projections.set(id, existing);
       return existing;
     }
-    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), (status, sourceTransition) => {
+    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes, this.replayClock), (status, sourceTransition) => {
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.
       const stop = this.stoppingTurns.get(id);
@@ -6295,8 +6576,9 @@ export class ChatAdapter {
     for (const [candidateId, candidate] of this.projections) {
       if (this.projections.size <= this.maxProjections) break;
       if (candidateId === id || candidate.replay.subscriberCount() > 0) continue;
-      // Evicted conversations lose their replay ring; a returning client's
-      // stale cursor resolves to a retention-gap resync, which is safe.
+      // Evicted conversations lose their ring. The shared high-water mark
+      // gives a replacement a newer boundary without retaining tombstones;
+      // old subscriptions still receive an explicit retention-gap resync.
       this.projections.delete(candidateId);
       if (this.backgroundRecoveries.get(candidateId)?.exhaustedAt !== undefined) this.retireBackgroundRecovery(candidateId);
       this.configurations.delete(candidateId);
@@ -6493,12 +6775,13 @@ export class ConversationProjection {
   // Last boundary whose timeline was reconciled, not merely read for queue
   // policy. Projection eviction naturally retires this view's authority.
   reconciledHistoryVisibility?: { state: ReversibleHistoryState; boundaryId?: string | null };
-  private readonly timeline = new Map<string, ConversationItem>();
-  private readonly text = new ProviderTextReconciler();
+  private timeline = new Map<string, ConversationItem>();
+  private text = new ProviderTextReconciler();
   // Only concurrent covered reads retain change fences. No permanent removal
   // tombstones: each owner releases its set on completion, abort or deadline.
   private readonly historyReads = new Set<{ changed: Set<string>; workerAliases: Set<string>; conversation?: ConversationSummary }>();
   private replacementRevision = 0;
+  private mutationRevision = 0;
 
   beginHistoryRead() {
     const changed = new Set<string>();
@@ -6524,6 +6807,7 @@ export class ConversationProjection {
   }
 
   private historyChanged(id: string): void {
+    this.mutationRevision++;
     for (const read of this.historyReads) read.changed.add(id);
   }
 
@@ -6576,6 +6860,7 @@ export class ConversationProjection {
       || current.activity && !["checking", "unavailable", "session-active"].includes(current.activity.kind)
       || !current.activity && !current.stateUncertain) return undefined;
     const item: BackgroundTaskItem = { ...current, activity: { ...current.activity, kind } };
+    this.mutationRevision++;
     this.timeline.set(item.id, item);
     this.replay.publish({ type: "item.upsert", item });
     return item;
@@ -6599,6 +6884,7 @@ export class ConversationProjection {
   }
 
   seed(items: ConversationItem[]): void {
+    this.mutationRevision++;
     for (const item of items) {
       const current = this.timeline.get(item.id);
       const interaction = mergeInteraction(current, item);
@@ -6615,18 +6901,119 @@ export class ConversationProjection {
     }
   }
 
-  replace(items: ConversationItem[]): ChatEvent {
-    const retained = new Set(items.map(item => item.id));
+  /** A synchronous, validated row recovery. Fallible merge/provenance hooks
+   * run against the old view; a reentrant mutation or revoked admission aborts
+   * the candidate. Only then swap the complete map and publish its bounded
+   * effective change set. Interaction notifications observe the complete new
+   * view and an already committed replay boundary, never a row-by-row prefix. */
+  recover(updates: readonly Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>[], admit: () => boolean = () => true, invalidate = false): boolean {
+    if (!admit()) return false;
+    const revision = this.mutationRevision, cursor = this.replay.latestCursor();
+    const prior = this.timeline, staged = new Map(prior);
+    const touched = new Set<string>(), settled = new Set<string>();
+    const firstRemoval = new Map<string, number>(), lastUpsert = new Map<string, number>();
+    for (const [index, update] of updates.entries()) {
+      if (update.kind === "remove") {
+        if (!firstRemoval.has(update.itemId)) firstRemoval.set(update.itemId, index);
+        staged.delete(update.itemId); touched.add(update.itemId); settled.add(update.itemId);
+        continue;
+      }
+      const incoming = update.item, current = staged.get(incoming.id);
+      const interaction = mergeInteraction(current, incoming);
+      const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
+      if ((merged.type === "permission" || merged.type === "question") && merged.status !== "pending") settled.add(merged.id);
+      if (merged.type === "question" && !merged.questions.length
+        || merged.type === "permission" && !merged.resources.length && merged.plan === undefined) continue;
+      this.beforePublish?.(merged, current, incoming);
+      staged.set(merged.id, merged); touched.add(merged.id);
+      lastUpsert.set(merged.id, index);
+    }
+    const publication = this.replay.prepareBatch((function* () {
+      // A deliberate remove/reinsert is a replacement, not a sparse upsert.
+      // Folding it to its final row would let browser merges retain revoked
+      // child/usage/control fields. Preserve its ordered reset pair when the
+      // complete batch fits; oversized batches still become one resync.
+      for (const [index, update] of updates.entries()) {
+        const id = update.kind === "remove" ? update.itemId : update.item.id;
+        const before = prior.get(id), item = staged.get(id);
+        if (update.kind === "remove") {
+          if (before && firstRemoval.get(id) === index) yield { type: "item.remove" as const, itemId: id };
+        } else if (item && lastUpsert.get(id) === index
+          && (!before || firstRemoval.has(id) || !sameConversationItems([before], [item]))) {
+          yield { type: "item.upsert" as const, item };
+        }
+      }
+      // A fitting visibility change keeps its existing ordered row events and
+      // terminal invalidation. An oversized plan collapses the entire batch,
+      // including this marker, to the single resync chosen by prepareBatch.
+      if (invalidate) yield { type: "resync" as const, reason: "conversation-rewritten" as const };
+    })());
+    if (!admit() || this.mutationRevision !== revision || this.replay.latestCursor() !== cursor) return false;
+    // No callback or await between the last admission check and publication.
+    this.timeline = staged;
+    for (const id of touched) {
+      const before = prior.get(id), item = staged.get(id);
+      this.touchWorker(before); this.touchWorker(item); this.historyChanged(id);
+      if (item) {
+        this.pruneWorkerFallback(item);
+        if (item.type === "assistant_message") this.text.seed(item.id.replace(/^part:/, ""), item.markdown);
+        else if (item.type === "reasoning") this.text.seed(item.id.replace(/^part:|^reasoning:/, ""), item.text);
+      } else {
+        this.workerOrigins.delete(id); this.workerFallbacks.delete(id);
+        this.text.forget(id); this.text.forget(id.replace(/^part:|^reasoning:/, ""));
+      }
+    }
+    publication();
+    for (const id of settled) this.interactions?.settled(id);
+    for (const id of touched) {
+      const item = staged.get(id);
+      if ((item?.type === "permission" || item?.type === "question") && item.status === "pending") this.interactions?.pending(id);
+    }
+    return true;
+  }
+
+  /** Replace the complete visible state, preserving seed (not sparse upsert)
+   * semantics. Required source removals and the terminal rewrite marker share
+   * one prepared publication. All fallible hooks/text preparation run against
+   * the old view, before the admission check and state swap. */
+  replace(items: ConversationItem[], removals: readonly string[] = [], admit: () => boolean = () => true): ChatEvent {
+    if (!admit()) throw new HistoryReadChangedError();
+    const revision = this.mutationRevision, cursor = this.replay.latestCursor(), prior = this.timeline;
+    const staged = new Map<string, ConversationItem>(), text = new ProviderTextReconciler();
+    const notifications: ConversationItem[] = [], prunedFallbacks = new Set<string>();
+    for (const item of items) {
+      const current = staged.get(item.id), interaction = mergeInteraction(current, item);
+      const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
+      const fallback = this.workerFallbacks.get(merged.id);
+      if (fallback && !sameConversationItems([merged], [fallback.fallback])) prunedFallbacks.add(merged.id);
+      this.beforePublish?.(merged, current, item);
+      staged.set(item.id, merged); notifications.push(merged);
+      if (item.type === "assistant_message") text.seed(item.id.replace(/^part:/, ""), item.markdown);
+      else if (item.type === "reasoning") text.seed(item.id.replace(/^part:|^reasoning:/, ""), item.text);
+    }
+    const publication = this.replay.prepareBatch((function* () {
+      for (const itemId of new Set(removals)) if (prior.has(itemId)) yield { type: "item.remove" as const, itemId };
+      yield { type: "resync" as const, reason: "conversation-rewritten" as const };
+    })());
+    if (!admit() || this.mutationRevision !== revision || this.replay.latestCursor() !== cursor) throw new HistoryReadChangedError();
+    // No callback or await between final admission, complete state swap and
+    // publication. A queued coalescer flush cannot run inside this commit.
+    this.timeline = staged; this.text = text;
+    const retained = new Set(staged.keys());
     for (const id of this.workerOrigins.keys()) if (!retained.has(id)) this.workerOrigins.delete(id);
-    for (const id of this.workerFallbacks.keys()) if (!retained.has(id)) this.workerFallbacks.delete(id);
+    for (const id of this.workerFallbacks.keys()) if (!retained.has(id) || prunedFallbacks.has(id)) this.workerFallbacks.delete(id);
     this.replacementRevision++;
-    for (const id of this.timeline.keys()) this.historyChanged(id);
-    for (const item of items) this.historyChanged(item.id);
-    this.timeline.clear();
-    this.text.clear();
+    for (const id of prior.keys()) this.historyChanged(id);
+    for (const id of staged.keys()) this.historyChanged(id);
+    const event = publication()!; // Every replacement includes its marker.
     this.interactions?.cleared();
-    this.seed(items);
-    return this.replay.publish({ type: "resync", reason: "conversation-rewritten" });
+    for (const item of notifications) {
+      if (item.type === "permission" || item.type === "question") {
+        if (item.status === "pending") this.interactions?.pending(item.id);
+        else this.interactions?.settled(item.id);
+      }
+    }
+    return event;
   }
 
   apply(update: NormalizedProviderUpdate): ChatEvent | undefined {

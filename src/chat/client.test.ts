@@ -270,7 +270,7 @@ describe("chat API client", () => {
     expect(channel.entries[0]!.closed).toBe(true);
   });
 
-  test("a topic resync detaches the subscription and hands the owner the child's reason", () => {
+  test.each(["retention-gap", "conversation-rewritten"] as const)("a %s topic resync detaches the subscription and hands the owner the child's reason", reason => {
     const channel = new FakeChannel();
     const client = new ChatApiClient(fetch, () => channel);
     const reasons: unknown[] = [];
@@ -279,14 +279,35 @@ describe("chat API client", () => {
       resync: reason => reasons.push(reason?.reason ?? null),
       error: () => {},
     });
-    channel.entries[0]!.consumer.resync?.({ generation: "g", sequence: 0, conversationId: "c1", type: "resync", reason: "retention-gap" }, 1);
-    expect(reasons).toEqual(["retention-gap"]);
+    channel.entries[0]!.consumer.resync?.({ generation: "g", sequence: 0, conversationId: "c1", type: "resync", reason }, 1);
+    expect(reasons).toEqual([reason]);
     expect(channel.entries[0]!.closed).toBe(true);
 
     // A resync with no usable payload still resyncs.
     client.stream("c2", "cursor-1", { event: () => {}, resync: reason => reasons.push(reason ?? null), error: () => {} });
     channel.entries[1]!.consumer.resync?.(undefined, 1);
-    expect(reasons).toEqual(["retention-gap", null]);
+    expect(reasons).toEqual([reason, null]);
+  });
+
+  test("conversation-rewritten recovery reads a snapshot and reattaches from its cursor without a mutation", async () => {
+    const channel = new FakeChannel();
+    const reads: Array<{ url: string; method: string }> = [];
+    const client = new ChatApiClient(async (url, init) => {
+      reads.push({ url: String(url), method: init?.method ?? "GET" });
+      return Response.json(snapshot());
+    }, () => channel);
+    let recovery: Promise<void> | undefined;
+    let data = 0;
+    const handlers = { event: () => { data += 1; }, error: () => {}, resync: () => {
+      recovery = client.snapshot("c/1").then(current => { client.stream("c/1", current.cursor, handlers); });
+    } };
+    client.stream("c/1", "old-cursor", handlers);
+    channel.entries[0]!.consumer.resync?.({ generation: "g", sequence: 10, conversationId: "c/1", type: "resync", reason: "conversation-rewritten" }, 1);
+    await recovery;
+    expect(reads).toEqual([{ url: "/api/chat/conversations/c%2F1?limit=50", method: "GET" }]);
+    expect(channel.entries[0]!.closed).toBe(true);
+    expect(channel.entries[1]!.cursor).toBe("cursor");
+    expect(data).toBe(0);
   });
 
   test("the first drop is silent, a persisting outage announces, and the topic's ready clears it", () => {

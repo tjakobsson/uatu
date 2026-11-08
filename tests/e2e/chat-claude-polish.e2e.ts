@@ -1206,7 +1206,14 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
   });
 
   test("plan usage reads in Claude Code's words, warns at 80%, and opens a readout of every window and the conversation's cost", async ({ page, request }, testInfo) => {
-    const now = Date.now();
+    // Keep the 35-minute reset on the same local day, even near midnight.
+    // Fix Date only; Playwright leaves timers running normally.
+    const now = await page.evaluate(() => {
+      const date = new Date();
+      date.setHours(12, 0, 0, 0);
+      return date.getTime();
+    });
+    await page.clock.setFixedTime(now);
     const id = await bootClaude(page, request, "Plan readout", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "How much of my plan is left?" },
       { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "Open the plan summary under the composer.", completedAt: 2 },

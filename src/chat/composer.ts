@@ -70,7 +70,8 @@ export class Composer {
   private readonly generations = new Map<string, number>();
   private readonly reserves = new Map<string, number>();
   private readonly refusals = new Map<string, number>();
-  private readonly retries = new Map<string, { text: string; requestId: string; attachments: string }>();
+  private readonly retries = new Map<string, { text: string; requestId: string; attachments: string;
+    authority: { conversationId: string; epoch: number; generation: string } }>();
   private readonly withdrawals = new Map<string, Map<string, { operation: string; entry: QueuedMessage }>>();
   private readonly actions = new Map<string, Map<string, PendingQueueAction>>();
   private readonly unknown = new Map<string, ChatProjection["acceptedDrafts"]>();
@@ -282,6 +283,9 @@ export class Composer {
     const { value: configuration, stage } = this.conversation.configuration();
     const current = this.conversation.read()!;
     const epoch = this.conversation.epoch(), queueRevision = current.queueRevision, configurationRevision = current.configurationRevision;
+    // Retrying the same logical request can return a cached acceptance. It
+    // does not renew the original attempt's permission to insert a message.
+    const authority = retried ? retry!.authority : { conversationId: id, epoch, generation: current.generation };
     const delivery = this.conversation.declares("steering") ? refs.length ? "queue" : options.delivery ?? "steer" : undefined;
     const nativeSteer = this.conversation.declares("steering") && !parsePromptSlashCommand(text, this.conversation.commands()) && (current.reversibleHistory?.staged === true || delivery === "steer" && (isLiveConversationStatus(current.status) || current.queued.length > 0));
     this.update(id, p => addAcceptedDraft(p, { requestId, messageId: `pending:${requestId}`, text, ...(refs.length ? { attachments: refs } : {}) }));
@@ -303,11 +307,15 @@ export class Composer {
       this.presentation.accepted(accepted);
       this.update(id, p => {
         if (accepted.delivery !== "steer" && !retried && this.conversation.epoch() === epoch && p.configurationRevision === configurationRevision) p = { ...p, configuration: accepted.configuration };
-        // Receipts bridge only a fresh acceptance. Streamed queue/configuration
-        // evidence or a replacement projection outranks that local bridge.
+        // Receipts bridge only a fresh acceptance. A replacement snapshot can
+        // exclude a message without streaming its removal (bulk resync), so a
+        // pre-replacement direct acknowledgement may settle the draft and
+        // confirm a present row, but cannot recreate an absent one.
         return accepted.pending
           ? !retried && this.conversation.epoch() === epoch ? noteQueuedMessage(p, { id: accepted.messageId, text, queuedAt: Date.now(), delivery: accepted.delivery, requestId, ...(refs.length ? { attachments: refs } : {}) }, queueRevision) : removeAcceptedDraft(p, requestId)
-          : confirmAcceptedDraft(p, { requestId, messageId: accepted.messageId, text, ...(refs.length ? { attachments: refs } : {}) }, { insert: accepted.operation !== "reload" });
+          : confirmAcceptedDraft(p, { requestId, messageId: accepted.messageId, text, ...(refs.length ? { attachments: refs } : {}) }, { insert: accepted.operation !== "reload"
+            && p.conversationId === authority.conversationId && this.conversation.selected() === authority.conversationId
+            && this.conversation.epoch() === authority.epoch && p.generation === authority.generation });
       });
       this.changed("accepted", id);
       this.presentation.note(null);
@@ -331,7 +339,7 @@ export class Composer {
         void this.checkUnknown(id, requestId, `Steer (${requestId})`, text);
       } else {
         const message = messageOf(error); this.presentation.announce(message, true);
-        this.retries.set(id, { text, requestId, attachments: key });
+        this.retries.set(id, { text, requestId, attachments: key, authority });
         this.putAttachments(id, [...staged, ...this.pendingAttachments(id)]); this.putUnavailable(id, [...missing, ...this.unavailableAttachments(id)]);
         this.update(id, p => removeAcceptedDraft(p, requestId)); this.merge(id, text);
         this.changed("restored", id);

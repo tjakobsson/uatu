@@ -624,7 +624,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
 
 export function parseConversationSnapshot(value: unknown): ConversationSnapshot {
   const record = expectRecord(value, "conversation snapshot");
-  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "queued", "reversibleHistory", "olderCursor"], "conversation snapshot");
+  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "queued", "reversibleHistory", "olderCursor", "historyStart"], "conversation snapshot");
   parseConversationSummary(record.conversation);
   parseConversationConfiguration(record.configuration);
   expectIdentity(record.generation, "generation");
@@ -634,6 +634,12 @@ export function parseConversationSnapshot(value: unknown): ConversationSnapshot 
   if (record.queued !== undefined) parseQueuedMessages(record.queued);
   if (record.reversibleHistory !== undefined) parseReversibleHistoryState(record.reversibleHistory);
   if (record.olderCursor !== undefined) expectNonEmptyString(record.olderCursor, "older cursor");
+  if (record.historyStart !== undefined) {
+    const start = expectRecord(record.historyStart, "history start");
+    expectKeys(start, ["id", "createdAt"], "history start");
+    expectIdentity(start.id, "history start id");
+    expectTimestamp(start.createdAt, "history start createdAt");
+  }
   return value as ConversationSnapshot;
 }
 
