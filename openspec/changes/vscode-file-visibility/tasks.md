@@ -1,8 +1,8 @@
 ## 1. Exposure rules and configuration
 
-- [ ] 1.1 Reduce `src/ignore/exposure.ts` to VS Code's `files.exclude` defaults (`.git`, `.svn`, `.hg`, `CVS`, `.DS_Store`, `Thumbs.db`), checked against VS Code's current source with the version noted in a comment, and remove every other name, suffix, and secret rule; verify `engine.test.ts` and `engine.property.test.ts` show `node_modules/x.js`, `.venv/…`, `.env`, `id_rsa`, `a.swp`, and `coverage/…` permitted and the six defaults denied at any depth.
-- [ ] 1.2 Remove the `build`/`dist` soft-exclusion branch from `src/ignore/engine.ts` and replace `ignore.include` parsing in `config.ts` with one no-effect warning; verify `config.test.ts` covers the warning for valid and malformed values and that exposure is identical with and without the key.
-- [ ] 1.3 Replace `ignore.include` fixtures and secret-denial assertions in `ignored-visibility.test.ts`, `static-files.test.ts`, `media-delivery.test.ts`, `src/hub/media-delivery.integration.test.ts`, and `tests/e2e/media-workflow.e2e.ts` with unconfigured ignored-folder fixtures and explicit-exclusion cases; verify those files pass.
+- [x] 1.1 Reduce `src/ignore/exposure.ts` to VS Code's `files.exclude` defaults (`.git`, `.svn`, `.hg`, `.jj`, `.DS_Store`, `Thumbs.db`), checked against VS Code's current source with the version noted in a comment, and remove every other name, suffix, and secret rule; verify `engine.test.ts` and `engine.property.test.ts` show `node_modules/x.js`, `.venv/…`, `.env`, `id_rsa`, `a.swp`, and `coverage/…` permitted and the six defaults denied at any depth.
+- [x] 1.2 Remove the `build`/`dist` soft-exclusion branch from `src/ignore/engine.ts` and replace `ignore.include` parsing in `config.ts` with one no-effect warning; verify `config.test.ts` covers the warning for valid and malformed values and that exposure is identical with and without the key.
+- [x] 1.3 Replace `ignore.include` fixtures and secret-denial assertions in `ignored-visibility.test.ts`, `static-files.test.ts`, `media-delivery.test.ts`, `src/hub/media-delivery.integration.test.ts`, and `tests/e2e/media-workflow.e2e.ts` with unconfigured ignored-folder fixtures and explicit-exclusion cases; verify those files pass.
 
 ## 2. Ignored-folder discovery and listing (server)
 

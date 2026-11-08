@@ -1,25 +1,11 @@
-// Mandatory denials apply at every depth, including admitted output subtrees.
-// build/dist are resolved separately by the root's narrow include policy.
-const deniedNames = new Set([
-  "node_modules", "coverage", ".git", ".svn", ".hg", ".ds_store", "thumbs.db",
-  ".cache", ".parcel-cache", ".turbo", ".next", ".nuxt", ".vercel", ".output", ".nitro", ".svelte-kit", ".astro",
-  ".venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__", ".gradle", ".m2",
-  ".npm", ".yarn", ".pnpm-store", ".terraform", ".serverless",
-]);
-const hiddenSuffixes = [".swp", ".tmp", ".temp", "~"];
-const secretNames = new Set([
-  ".env", ".npmrc", ".pypirc", ".netrc", ".ssh", "credentials.json", "credential.json",
-  "service-account.json", "service_account.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-]);
-const secretSuffixes = [".pem", ".key", ".p12", ".pfx"];
+// The only built-in exclusions: VS Code's `files.exclude` defaults, checked
+// against microsoft/vscode 1.145.2
+// (src/vs/workbench/contrib/files/browser/files.contribution.ts). Version
+// control metadata and OS litter, hidden at every depth. Everything else is
+// decided by Git-ignore visibility or an explicit `.uatu.json ignore.exclude`.
+// The VCS directories also keep the watcher out of Git internals.
+const deniedNames = new Set([".git", ".svn", ".hg", ".jj", ".ds_store", "thumbs.db"]);
 
 export function shouldDenyPath(relativePath: string): boolean {
-  return relativePath.split("/").some(name => {
-    const lower = name.toLowerCase();
-    return deniedNames.has(lower) || hiddenSuffixes.some(suffix => name.endsWith(suffix))
-      || secretNames.has(lower) || lower.startsWith(".env.")
-      || lower.endsWith("-credentials.json") || lower.endsWith("_credentials.json")
-      || lower.includes("private-key") || lower.includes("private_key")
-      || secretSuffixes.some(suffix => lower.endsWith(suffix));
-  });
+  return relativePath.split("/").some(name => deniedNames.has(name.toLowerCase()));
 }

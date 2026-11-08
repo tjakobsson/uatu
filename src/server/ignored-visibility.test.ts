@@ -61,23 +61,22 @@ test("mixed writes nominate separate per-client candidates, metadata never write
   } finally { await Promise.all(readers.map(reader => reader.cancel())); await session.stop(); }
 });
 
-test.each([false, true])("future output includes and runtime add/remove share index and direct policy, polling=%s", async usePolling => {
+test.each([false, true])("output folders appear without configuration and runtime exclusions share index and direct policy, polling=%s", async usePolling => {
   const cwd = await fixture();
-  await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"], exclude: ["build/renders/private/**"] } }));
   const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { usePolling });
   try {
     await session.start();
     await mkdir(path.join(cwd, "build/renders"), { recursive: true });
     await mkdir(path.join(cwd, "build/objects"));
-    const file = path.join(cwd, "build/renders/out.wav");
-    await writeFile(file, "audio"); await writeFile(path.join(cwd, "build/objects/no.o"), "object");
-    await wait(() => !!session.findDocument(file));
-    expect(session.getUnscopedRoots().flatMap(root => root.docs).some(doc => doc.relativePath.includes("objects"))).toBe(false);
-    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { include: [] } }));
-    await wait(() => !session.findDocument(file));
-    expect(await session.ensureDocument(file)).toBeUndefined();
-    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"] } }));
-    await wait(() => !!session.findDocument(file));
+    const file = path.join(cwd, "build/renders/out.wav"), object = path.join(cwd, "build/objects/main.o");
+    await writeFile(file, "audio"); await writeFile(object, "object");
+    await wait(() => !!session.findDocument(file) && !!session.findDocument(object));
+    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["build/objects/"] } }));
+    await wait(() => !session.findDocument(object));
+    expect(session.findDocument(file)).toBeDefined();
+    expect(await session.ensureDocument(object)).toBeUndefined();
+    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { exclude: [] } }));
+    await wait(() => !!session.findDocument(object));
   } finally { await session.stop(); }
 }, 15_000);
 

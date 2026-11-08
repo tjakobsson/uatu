@@ -32,7 +32,7 @@ VS Code's model, which this change adopts:
 
 ### 1. Built-in exclusions are VS Code's `files.exclude` defaults
 
-The remaining built-ins are `.git`, `.svn`, `.hg`, `CVS`, `.DS_Store`, and `Thumbs.db`. Every other denial is deleted: dependency names, cache names, virtual environments, editor temp suffixes, and secret patterns. The VCS directories stay mandatory, because the watcher must not traverse Git internals and `.git/config` can hold credentials. The implementation verifies this list against VS Code's current `files.exclude` default and records the version it checked.
+The remaining built-ins are `.git`, `.svn`, `.hg`, `.jj`, `.DS_Store`, and `Thumbs.db`. Every other denial is deleted: dependency names, cache names, virtual environments, editor temp suffixes, and secret patterns. The VCS directories stay mandatory, because the watcher must not traverse Git internals and `.git/config` can hold credentials. The implementation verifies this list against VS Code's current `files.exclude` default and records the version it checked.
 
 *Alternative:* keep the secret denylist as a security floor. The user rejected it. Rationale recorded for the docs: Hub authentication is the boundary, and an authenticated user already has the same file access through the embedded terminal and agents. Explicit `ignore.exclude` remains available.
 
