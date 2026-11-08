@@ -1012,8 +1012,8 @@ function patchInPlace(entry: RenderedEntry, item: ConversationItem, completedAss
     const content = entry.node.querySelector<HTMLElement>(".chat-assistant-content");
     if (!content) return false;
     if (current.markdown !== item.markdown || current.visuals !== item.visuals || entry.node.dataset.complete !== String(completedAssistant)) {
-      const focused = document.activeElement instanceof HTMLElement && content.contains(document.activeElement)
-        ? document.activeElement : null;
+      const active = content.ownerDocument.activeElement as HTMLElement | null;
+      const focused = active && content.contains(active) ? active : null;
       const retained = new Map(Array.from(content.querySelectorAll<HTMLElement>("[data-visual-key]"), visual => [visual.dataset.visualKey!, visual]));
       const next = document.createElement("div");
       next.innerHTML = renderChatMarkdown(item.markdown, { streaming: !completedAssistant, visuals: item.visuals });
