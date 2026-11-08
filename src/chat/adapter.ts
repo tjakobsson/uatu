@@ -512,7 +512,9 @@ export type ChatAdapterOptions = {
   onNotification?: (event: AgentNotificationEvent) => void;
 };
 
-type QuestionSetRead = { conversationId: string; scope: Set<string>; sets: Map<string, Set<string>>; ages: Map<string, number>; age: number; conflicted: boolean; revision: number };
+type QuestionSetObservation = { ids: Set<string>; age: number };
+type QuestionSetCoverage = { own?: QuestionSetObservation; children?: QuestionSetObservation };
+type QuestionSetRead = { conversationId: string; parentId?: string; scope: Set<string>; sets: Map<string, QuestionSetCoverage>; age: number; conflicted: boolean; revision: number };
 
 export class ChatAdapter {
   private readonly notifications: AgentNotificationTracker;
@@ -981,7 +983,7 @@ export class ChatAdapter {
   private async readHistory(id: string, options: { cursor?: string; limit?: number; workers?: true }, coverage?: HistoryCoverage): Promise<ConversationSnapshot> {
     const questionTick = coverage?.questionTick ?? this.interactionClock;
     for (let attempt = 0; ; attempt++) {
-      const questions: QuestionSetRead = { conversationId: id, scope: new Set(), sets: new Map(), ages: new Map(), age: 0, conflicted: false, revision: 0 };
+      const questions: QuestionSetRead = { conversationId: id, scope: new Set(), sets: new Map(), age: 0, conflicted: false, revision: 0 };
       const release = () => { this.questionReads.delete(questions); };
       coverage?.signal.addEventListener("abort", release, { once: true });
       try { return await this.readHistoryWithQuestions(id, options, coverage, questions, questionTick); }
@@ -1560,6 +1562,7 @@ export class ChatAdapter {
     let reconcileQuestionFreshness: (() => void) | undefined;
     let questionTrackingCurrent: (() => boolean) | undefined;
     if (this.provider.listQuestions) try {
+      questionRead.parentId = session.parentId;
       questionRead.scope = await this.questionReadScope(id, session.parentId);
       coverage?.assertCurrent();
       questionRead.age = ++this.questionReadClock;
@@ -1599,8 +1602,8 @@ export class ChatAdapter {
         // that set, and the pump mirrors them into this conversation. Keyed
         // only under the parent, an answer given elsewhere left the parent
         // offering a question OpenCode no longer had — 409 until reload.
-        // The sweep is child-inclusive, so each subset is that child's full
-        // current pending set, provided no newer refresh owns the tracking.
+        // The sweep is child-inclusive, but each derived subset covers only
+        // that child's own questions, not the child's children.
         const byChild = new Map<string, Set<string>>();
         for (const item of pendingNow) {
           if (item.type !== "question") continue;
@@ -1612,11 +1615,16 @@ export class ChatAdapter {
         }
         for (const [owner, ids] of byChild) tracking.set(owner, ids);
       }
-      const refreshedQuestion = (item: QuestionRequest) => questionRead.sets.has(id) || questionRead.sets.has(item.conversationId ?? id);
-      const ownsQuestion = (item: QuestionRequest) => [id, item.conversationId ?? id].every(owner => {
-        const newer = questionRead.sets.get(owner);
-        return !newer || newer.has(item.id);
-      });
+      const questionAuthority = (item: QuestionRequest): QuestionSetObservation | undefined => {
+        const owner = item.conversationId ?? id;
+        const owning = questionRead.sets.get(owner);
+        const parent = owner === id ? session.parentId : this.sessionParents.get(owner);
+        const applicable = [questionRead.sets.get(id)?.children, owning?.own, owning?.children,
+          parent ? questionRead.sets.get(parent)?.children : undefined];
+        return applicable.reduce<QuestionSetObservation | undefined>((latest, fact) => fact && (!latest || fact.age > latest.age) ? fact : latest, undefined);
+      };
+      const refreshedQuestion = (item: QuestionRequest) => questionAuthority(item) !== undefined;
+      const ownsQuestion = (item: QuestionRequest) => questionAuthority(item)?.ids.has(item.id) ?? true;
       const retainCurrentQuestion = (item: QuestionRequest) => (refreshedQuestion(item) && ownsQuestion(item))
         || ((this.announced.get(item.id)?.tick ?? 0) > questionTick
           && historyRemovals.get(item.id)?.expected !== item);
@@ -1639,7 +1647,18 @@ export class ChatAdapter {
           if (removal.expected?.type === "question" && refreshedQuestion(removal.expected) && ownsQuestion(removal.expected)) historyRemovals.delete(itemId);
         }
         for (const item of projection.items()) {
-          if (item.type !== "question" || !retainCurrentQuestion(item)) continue;
+          if (item.type !== "question") continue;
+          if (!ownsQuestion(item) && !retainCurrentQuestion(item)) {
+            // Scoped newer absence also governs a row an overlapping older
+            // publication inserted after our initial removal sweep.
+            stageHistoryRemoval(item.id, () => {
+              if ((this.announced.get(item.id)?.tick ?? 0) > questionTick) return;
+              this.questionCreatedAt.delete(item.id);
+              this.resolveAnnounced(item.id);
+            });
+            continue;
+          }
+          if (!retainCurrentQuestion(item)) continue;
           const index = items.findIndex(candidate => candidate.id === item.id);
           if (index < 0) items.push(item);
           else items[index] = item;
@@ -1675,13 +1694,21 @@ export class ChatAdapter {
           const pending = new Set([...ids].filter(itemId => {
             const item = projection.get(itemId);
             return item?.type === "question" && item.status === "pending"
-              && (!newer || (this.announced.get(itemId)?.tick ?? 0) > questionTick);
+              && (ownsQuestion(item) || (this.announced.get(itemId)?.tick ?? 0) > questionTick);
           }));
           if (newer) {
-            if (!pending.size) continue;
-            for (const itemId of this.publishedQuestions.get(owner) ?? []) pending.add(itemId);
+            for (const itemId of this.publishedQuestions.get(owner) ?? []) {
+              const known = projection.get(itemId) ?? pendingNow.find(item => item.id === itemId) ?? historyRemovals.get(itemId)?.expected;
+              if (known?.type === "question" && !ownsQuestion(known) && (this.announced.get(itemId)?.tick ?? 0) <= questionTick) continue;
+              pending.add(itemId);
+            }
           }
-          this.publishQuestionSet(owner, pending, Math.max(questionRead.age, questionRead.ages.get(owner) ?? 0), questionRead);
+          const children = owner === id;
+          const observed = questionRead.sets.get(owner);
+          // A newer owner-only subset cannot renew older child-inclusive
+          // evidence. Preserve ages independently for the two coverage scopes.
+          const age = Math.max(questionRead.age, observed?.children?.age ?? 0, children ? 0 : observed?.own?.age ?? 0);
+          this.publishQuestionSet(owner, pending, age, questionRead, children);
         }
       };
     } catch { /* unknown, not empty */ }
@@ -6233,14 +6260,15 @@ export class ChatAdapter {
 
   /** Retain pending removal authority; lend empty-set authority only to reads
    * already in flight. Each read observes the latest set, not a mutation log. */
-  private publishQuestionSet(owner: string, pending: Set<string>, age: number, source: QuestionSetRead): void {
+  private publishQuestionSet(owner: string, pending: Set<string>, age: number, source: QuestionSetRead, children: boolean): void {
     if (pending.size) this.publishedQuestions.set(owner, pending);
     else this.publishedQuestions.delete(owner);
     for (const read of this.questionReads) {
       // A source proves its ancestor path before listing. This includes
       // newly discovered children's empty sets without borrowing authority
       // from unrelated roots (or requiring a retained tree/revision registry).
-      if (read === source || (owner !== read.conversationId && !source.scope.has(read.conversationId))) continue;
+      if (read === source || (owner !== read.conversationId && !source.scope.has(read.conversationId)
+        && !(children && owner === read.parentId))) continue;
       if (age < read.age) {
         // Older publication is not a newer observation. It can introduce rows
         // after this read's sweep, so revoke its admission and retry instead.
@@ -6248,9 +6276,11 @@ export class ChatAdapter {
         read.revision++;
         continue;
       }
-      if (age <= read.age || age < (read.ages.get(owner) ?? 0)) continue;
-      read.sets.set(owner, pending);
-      read.ages.set(owner, age);
+      const coverage: QuestionSetCoverage = read.sets.get(owner) ?? {};
+      const kind = children ? "children" : "own";
+      if (age <= read.age || age < (coverage[kind]?.age ?? 0)) continue;
+      coverage[kind] = { ids: pending, age };
+      read.sets.set(owner, coverage);
       read.revision++;
     }
   }
@@ -6268,7 +6298,7 @@ export class ChatAdapter {
       try {
         const scope = await this.questionReadScope(conversationId, parentId);
         for (let attempt = 0; attempt < 3; attempt++) {
-          const source: QuestionSetRead = { conversationId, scope, sets: new Map(), ages: new Map(), age: ++this.questionReadClock, conflicted: false, revision: 0 };
+          const source: QuestionSetRead = { conversationId, parentId, scope, sets: new Map(), age: ++this.questionReadClock, conflicted: false, revision: 0 };
           if (!this.disposed) this.questionReads.add(source);
           try {
             const items = await this.pendingQuestions(conversationId, false);
@@ -6284,7 +6314,7 @@ export class ChatAdapter {
               updates.push({ kind: "remove", itemId: id });
               this.questionCreatedAt.delete(id);
             }
-            this.publishQuestionSet(conversationId, live, source.age, source);
+            this.publishQuestionSet(conversationId, live, source.age, source, true);
             if (updates.length > 0) {
               await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
               coalescer.push(conversationId, updates);
