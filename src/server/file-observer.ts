@@ -421,7 +421,13 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
     this.enqueue(directory, true);
   }
 
+  // Registers one file inside an unlisted folder, with the folders above it
+  // (known, not read), so a removal of any of them is noticed.
   track(file: string): void {
+    const root = this.entry.kind === "dir" ? this.entry.absolutePath : this.entry.parentDir;
+    for (let directory = path.dirname(file); directory !== root && contained(root, directory); directory = path.dirname(directory)) {
+      if (!this.known.has(directory)) this.enqueue(directory, false);
+    }
     if (!this.known.has(file)) this.enqueue(file, false);
   }
 

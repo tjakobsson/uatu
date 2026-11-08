@@ -195,7 +195,11 @@ export class FileIndex {
     const levels = new Set<string>();
     for (const doc of this.documents.values()) {
       if (!doc.relativePath.startsWith(`${relative}/`)) continue;
-      for (let level = path.posix.dirname(doc.relativePath); level.length >= relative.length; level = path.posix.dirname(level)) levels.add(level);
+      // Every level from the file's folder up to (and including) the adopted one.
+      for (let level = path.posix.dirname(doc.relativePath); ; level = path.posix.dirname(level)) {
+        levels.add(level);
+        if (level === relative || !level.startsWith(`${relative}/`)) break;
+      }
     }
     const id = path.join(this.entry.absolutePath, ...relative.split("/"));
     if (!levels.size) { if (this.policy.accepts(id, DIRECTORY)) this.queueFolder(id, relative); return; }

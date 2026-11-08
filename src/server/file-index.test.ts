@@ -480,3 +480,16 @@ test("a job that changes lanes replaces the older queued job instead of losing t
   await index.idle();
   expect(index.documents.get("/docs/gen/a.md")?.mtimeMs).toBe(2);
 });
+
+test("adopting a single-character folder lists its known levels and returns", () => {
+  const { index } = ignoredFixture({ ignored: { folders: [], files: [] } });
+  index.markReady();
+  index.observe("add", "/docs/a/doc.md", stat());
+  index.observe("add", "/docs/a/b/deep.md", stat());
+  return index.idle().then(() => {
+    index.adoptIgnoredFolder("a");
+    expect(index.ignoredFolders.isListed("a")).toBe(true);
+    expect(index.ignoredFolders.isListed("a/b")).toBe(true);
+    expect(index.ignoredFolders.isListed(".")).toBe(false);
+  });
+});
