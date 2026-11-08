@@ -83,19 +83,21 @@ describe("chat reversible-history composer", () => {
     const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
     let armed = false, injected = false, streams = 0;
     const heads: ConversationSnapshot[] = [];
-    const questions = provider.listQuestions!.bind(provider);
-    provider.listQuestions = async (...args) => {
+    const messages = provider.listMessages.bind(provider);
+    provider.listMessages = async (...args) => {
       if (armed && !injected) {
         injected = true;
         records[50]!.content = [{ type: "text", text: freshText }];
-        // The production V2 provider consumes and normalizes this event while
-        // the real adapter's covered head read is pending. coverage.merge may
-        // add msg50's text to that head, but not the intervening page.
+        // The adapter has opened its coverage fence before calling listMessages.
+        // Apply the native event before V2 reads the page and mints its versioned
+        // cursor: changing storage afterwards would invalidate the next page.
+        // coverage.merge still adds msg50's text to the head, not the intervening
+        // page, because the requested provider slice starts at msg100.
         wire!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: "evt_oldest", created: 51, type: "session.message.content.updated",
           durable: { aggregateID: id, seq: 1, version: 1 }, data: { sessionID: id, messageID: "msg50", content: records[50]!.content } })}\n\n`));
         await waitUntil(() => { const row = adapter.projectionForTests(id).get(answerIds[50]!); return row?.type === "assistant_message" && row.markdown === freshText; });
       }
-      return questions(...args);
+      return messages(...args);
     };
     const api = taskApi(document, { items: () => [] });
     let handlers: Parameters<ChatApiClient["stream"]>[2];
