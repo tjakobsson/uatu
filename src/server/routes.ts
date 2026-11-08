@@ -390,7 +390,8 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
           return Response.json(listed, { status: listed.status === "missing" ? 404 : 200, headers: { "cache-control": "no-store" } });
         } catch (error) {
           if (error instanceof FolderListingError) return Response.json({ error: error.message }, { status: error.status });
-          throw error;
+          // Unreadable for another reason: the folder stays, unlisted.
+          return Response.json({ error: "folder could not be read" }, { status: 500 });
         }
       },
     },

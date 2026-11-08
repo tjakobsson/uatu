@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { IgnoredFolders } from "./ignored-folders";
@@ -92,7 +92,11 @@ test("a folder Git ignores that appears at runtime becomes an entry without bein
     await rename(path.join(staging, "build"), path.join(cwd, "build"));
     await wait(() => folders(rootOf(session)).includes("build/"), "runtime ignored folder");
     await Bun.sleep(1500);
-    expect(paths(rootOf(session)).filter(file => file.startsWith("build/"))).toEqual([]);
+    // Some native backends (Linux) report the files of a directory moved in;
+    // those are live writes, captured as ignored entries within the window.
+    // The folder itself stays unlisted and is never read by Uatu.
+    expect(rootOf(session).folders?.find(folder => folder.relativePath === "build/")?.listed).toBe(false);
+    expect(rootOf(session).docs.filter(doc => doc.relativePath.startsWith("build/")).every(doc => doc.gitIgnoreStatus === "ignored")).toBe(true);
   } finally { await session.stop(); }
 });
 
@@ -238,4 +242,40 @@ test("a .gitignore written inside an ignored folder is an ordinary file, not an 
     expect(session._internalWatcher()).toBe(watcher);
     expect(session.getDiscoveryState().status).toBe("ready");
   } finally { await session.stop(); }
+});
+
+test("pinned files inside unlisted ignored folders survive recovery", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/take.wav"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false);
+  const take = path.join(cwd, "build/take.wav");
+  try {
+    await session.start();
+    expect(session.findDocument(take)).toBeUndefined();
+    expect(await session.ensureDocument(take)).toBeDefined();
+    await session.recover();
+    expect(session.findDocument(take)).toBeDefined();
+    expect(folders(rootOf(session))).toEqual(["build/"]);
+  } finally { await session.stop(); }
+});
+
+test.skipIf(process.getuid?.() === 0)("an unreadable ignored folder stays, unlisted, instead of being treated as missing", async () => {
+  const cwd = await fixture();
+  await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
+  await files(cwd, ["README.md", "build/locked/secret.o"]);
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false);
+  const locked = path.join(cwd, "build/locked");
+  try {
+    await session.start();
+    await session.listFolder(cwd, "build");
+    expect(folders(rootOf(session))).toEqual(["build/ listed", "build/locked/"]);
+    // Traversable but unreadable. On Linux realpath works and readdir fails;
+    // macOS fails earlier, in realpath. Either way the folder must stay.
+    await chmod(locked, 0o311);
+    const error = await session.listFolder(cwd, "build/locked").then(() => null, (caught: unknown) => caught);
+    expect(error).not.toBeNull();
+    expect(error).not.toBeInstanceOf(FolderListingError);
+    expect(folders(rootOf(session))).toEqual(["build/ listed", "build/locked/"]);
+  } finally { await chmod(locked, 0o755).catch(() => {}); await session.stop(); }
 });

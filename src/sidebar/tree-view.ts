@@ -99,6 +99,7 @@ export class TreeView {
   // Git-ignored folder entries by tree path (ending in "/"), the rows shown
   // for them, and listing requests in flight or failed.
   private readonly foldersByPath = new Map<string, FolderEntry>();
+  // Keyed by root and folder id: overlapping roots share absolute ids.
   private readonly folderPathById = new Map<string, string>();
   private renderedFolders = new Set<string>();
   private folderRowsVisible = true;
@@ -223,7 +224,7 @@ export class TreeView {
       for (const folder of root.folders ?? []) {
         const path = `${rootPrefix.get(root.id) ?? ""}${folder.relativePath}`;
         this.foldersByPath.set(path, folder);
-        this.folderPathById.set(folder.id, path);
+        this.folderPathById.set(folderKey(folder), path);
         if (folder.listed && this.listing.get(path) === "pending") this.listing.delete(path);
       }
     }
@@ -514,11 +515,11 @@ export class TreeView {
         if (nextDoc.kind === "binary") this.renderedBinaryLeafCount++;
       }
       const folderRemovals = [...(patch.folderRemovals ?? [])]
-        .sort((a, b) => (this.folderPathById.get(b.id)?.length ?? 0) - (this.folderPathById.get(a.id)?.length ?? 0));
+        .sort((a, b) => (this.folderPathById.get(folderKey(b))?.length ?? 0) - (this.folderPathById.get(folderKey(a))?.length ?? 0));
       for (const ref of folderRemovals) {
-        const path = this.folderPathById.get(ref.id);
+        const path = this.folderPathById.get(folderKey(ref));
         if (!path) continue;
-        this.folderPathById.delete(ref.id);
+        this.folderPathById.delete(folderKey(ref));
         this.foldersByPath.delete(path);
         this.listing.delete(path);
         removedStatusPaths.push(path);
@@ -531,7 +532,7 @@ export class TreeView {
         if (prefix === undefined) continue;
         const path = `${prefix}${folder.relativePath}`;
         this.foldersByPath.set(path, folder);
-        this.folderPathById.set(folder.id, path);
+        this.folderPathById.set(folderKey(folder), path);
         if (folder.listed && this.listing.get(path) === "pending") this.listing.delete(path);
         if (this.folderRowsVisible && !this.renderedFolders.has(path)) {
           this.renderedFolders.add(path);
@@ -635,6 +636,12 @@ export class TreeView {
   // Number of leaf paths the library is currently rendering. Used by the
   // sidebar's `N of M files` count under the Changed filter; matches the
   // visible-row total seen by the user (follow-override row included).
+  // Folder rows can be all a tree has (every file inside unlisted ignored
+  // folders); the tree stays visible so they can be expanded.
+  hasVisibleFolderRows(): boolean {
+    return this.renderedFolders.size > 0 && (!this.query || [...this.renderedFolders].some(path => matchesFileQuery(path, this.query)));
+  }
+
   getVisibleLeafCount(): number {
     if (!this.query) return this.renderedLeafCount;
     return [...this.renderedPaths].filter(path => matchesFileQuery(path, this.query)).length;
@@ -1338,6 +1345,10 @@ export function ancestorPaths(path: string): string[] {
     out.push(`${parts.slice(0, i).join("/")}/`);
   }
   return out;
+}
+
+function folderKey(folder: { rootId: string; id: string }): string {
+  return `${folder.rootId}\0${folder.id}`;
 }
 
 // Folder rows leave after the file rows of the same batch, outermost first and

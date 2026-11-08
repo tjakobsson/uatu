@@ -325,3 +325,26 @@ test("the lane waits at least 1 s and at most 5 s while ordinary edits keep thei
   for (let i = 1; i < lane.length; i++) expect(lane[i]!.at - lane[i - 1]!.at).toBeLessThanOrEqual(5000);
   expect(lane.flatMap(batch => batch.ids)).toHaveLength(80);
 });
+
+test("a requested ignored file is published before settlement even behind 1,500 pending entries", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  for (let i = 0; i < 1500; i++) index.observe("add", `/docs/build/obj${i}.o`, stat());
+  // Let the jobs finish without letting the lane publish.
+  await Bun.sleep(50);
+  await index.request("/docs/build/obj1499.o", stat());
+  expect(index.documents.has("/docs/build/obj1499.o")).toBe(true);
+});
+
+test("a folder recreated before its removal is published stays an entry", async () => {
+  const { index, batches } = ignoredFixture({ classifyDirectory: async () => true });
+  index.markReady();
+  await index.idle();
+  index.observe("unlinkDir", "/docs/build");
+  expect(await index.classifyNewDirectory("/docs/build")).toBe(true);
+  index.observe("addDir", "/docs/build");
+  index.flushLane();
+  expect(index.folders.has("/docs/build")).toBe(true);
+  expect(batches.flatMap(batch => batch.folderRemovals ?? []).filter(removal => removal.id === "/docs/build")).toEqual([]);
+});

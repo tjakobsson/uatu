@@ -174,6 +174,46 @@ describe("TreeView selection lifecycle with the real library", () => {
     expect(tree().getSelectedPaths()).toEqual([leaf]);
   });
 
+  it("a tree of only unlisted ignored folders stays visible, and filters hide folder rows without failing", () => {
+    const folderOnly: RootGroup[] = [{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0, docs: [],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: false, revision: 0 }] }];
+    view.update(folderOnly, null);
+    expect(view.getVisibleLeafCount()).toBe(0);
+    expect(view.hasVisibleFolderRows()).toBe(true);
+    expect(directory("build/").isExpanded()).toBe(false);
+    // A listed level's file plus a media filter: folder rows leave after their
+    // files, without a non-recursive removal of a non-empty folder.
+    const listed: RootGroup[] = [{ ...folderOnly[0]!, docs: [{ id: "/r1/build/out.txt", name: "out.txt", relativePath: "build/out.txt", rootId: "r1", mtimeMs: 0, kind: "text", gitIgnoreStatus: "ignored" }],
+      folders: [{ ...folderOnly[0]!.folders![0]!, listed: true }] }];
+    view.update(listed, null);
+    view.update(listed, null, { mediaType: "audio" });
+    expect(view.hasVisibleFolderRows()).toBe(false);
+    expect(tree().getItem("build/")).toBeNull();
+    view.update(listed, null, { mediaType: "all", showIgnored: false });
+    expect(view.hasVisibleFolderRows()).toBe(false);
+    view.update(listed, null);
+    expect(view.hasVisibleFolderRows()).toBe(true);
+  });
+
+  it("folder removals are qualified by root when overlapping roots share a folder id", () => {
+    const shared = { id: "/repo/sub/build", listed: false, revision: 0 };
+    const overlapping: RootGroup[] = [
+      { id: "/repo", label: "repo", path: "/repo", hiddenCount: 0, docs: [], folders: [{ ...shared, rootId: "/repo", relativePath: "sub/build/" }] },
+      { id: "/repo/sub", label: "sub", path: "/repo/sub", hiddenCount: 0, docs: [], folders: [{ ...shared, rootId: "/repo/sub", relativePath: "build/" }] },
+    ];
+    view.update(overlapping, null);
+    expect(tree().getItem("repo/sub/build/")).not.toBeNull();
+    expect(tree().getItem("sub/build/")).not.toBeNull();
+    const removal = (rootId: string): DocumentPatch => ({ kind: "patch", epoch: "e", previousRevision: 0, revision: 1, generatedAt: 1,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "1", upserts: [], removals: [], changedId: null,
+      folderRemovals: [{ rootId, id: shared.id }] });
+    expect(view.applyPatch(removal("/repo"), null)).toBe(true);
+    expect(tree().getItem("repo/sub/build/")).toBeNull();
+    expect(tree().getItem("sub/build/")).not.toBeNull();
+    expect(view.applyPatch({ ...removal("/repo/sub"), previousRevision: 1, revision: 2 }, null)).toBe(true);
+    expect(tree().getItem("sub/build/")).toBeNull();
+  });
+
   it("type filtering excludes an active nonmatching file and captures natural tree order including closed folders", () => {
     const inventory = roots(["z.wav", "renders/take10.wav", "renders/take2.wav", "movie.mp4", "README.md", "ignored.wav"]);
     inventory[0]!.docs.find(doc => doc.name === "ignored.wav")!.gitIgnoreStatus = "ignored";

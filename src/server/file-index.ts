@@ -193,6 +193,8 @@ export class FileIndex {
 
   // A file a client has opened stays indexed even if the window overflows.
   pin(id: string): void { this.pinned.add(path.resolve(id)); }
+  // Files a client opened, carried into a replacement index on recovery.
+  get pinnedIds(): readonly string[] { return [...this.pinned]; }
 
 
   observe(event: string, id: string, stats?: Stats, priority = false): void {
@@ -263,7 +265,7 @@ export class FileIndex {
       const waiting = this.pathWaiters.get(id) ?? [];
       waiting.push(resolve); this.pathWaiters.set(id, waiting);
     });
-    if (this.lanePending.has(id)) this.flushLane(); else this.flush(id);
+    if (this.lanePending.has(id)) this.flushLane(id); else this.flush(id);
   }
 
   async request(id: string, stats: Stats): Promise<void> {
@@ -321,7 +323,8 @@ export class FileIndex {
 
   // The ignored-folder lane: whole patches of up to IGNORED_LANE_PATCH_LIMIT
   // entries, back to back until the lane is empty.
-  flushLane(): void {
+  // A preferred entry (a file a client is waiting for) leads the first patch.
+  flushLane(preferredId?: string): void {
     this.laneScheduler.cancel();
     if (this.laneDrainTimer) clearTimeout(this.laneDrainTimer);
     this.laneDrainTimer = null;
@@ -337,8 +340,15 @@ export class FileIndex {
       if (folder) { this.folders.set(id, folder); folderUpserts.push(folder); }
       else if (this.folders.delete(id)) folderRemovals.push({ rootId: this.entry.absolutePath, id });
     }
-    for (const [id, value] of this.lanePending) {
+    const lanePending = this.lanePending;
+    const laneEntries = function* () {
+      const preferred = preferredId ? lanePending.get(preferredId) : undefined;
+      if (preferred && preferredId) yield [preferredId, preferred] as const;
+      yield* lanePending;
+    };
+    for (const [id, value] of laneEntries()) {
       if (full()) break;
+      if (!this.lanePending.has(id)) continue;
       this.lanePending.delete(id);
       if (value.doc) { this.documents.set(id, value.doc); upserts.push(value.doc); }
       else if (this.documents.delete(id)) { this.newest.remove(id); removals.push({ rootId: this.entry.absolutePath, id }); }
@@ -359,7 +369,8 @@ export class FileIndex {
   }
 
   private queueFolder(id: string, relative: string, listed = this.ignoredFolders.isListed(relative)): void {
-    const current = this.folderPending.get(id) ?? this.folders.get(id);
+    // A queued removal (null) is replaced when the folder reappears.
+    const current = this.folderPending.has(id) ? this.folderPending.get(id) : this.folders.get(id);
     if (current && current.listed === listed) return;
     this.folderPending.set(id, this.folderEntry(id, relative, listed, this.options.revision()));
     this.laneScheduler.schedule();

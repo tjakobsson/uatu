@@ -441,6 +441,14 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
         for (const level of old?.index.ignoredFolders.listedFolders ?? []) {
           if (next.index.ignoredFolders.isInside(level)) await listLevel(next, level).catch(() => {});
         }
+        // Files a client opened (playing media, say) stay while they exist.
+        for (const id of old?.index.pinnedIds ?? []) {
+          next.index.pin(id);
+          if (next.index.documents.has(id) || !rootRelative(entry, id)) continue;
+          const stats = await lstat(id).catch(() => null);
+          if (stats?.isFile() && next.index.policy.accepts(id, stats)) next.index.observe("add", id, stats, true);
+        }
+        await next.index.idle();
         for (const doc of next.index.documents.values()) if (followEligible(doc)) next.followNewest.update(doc);
         queueClassifications(next, next.index.documents.keys());
         rootErrors.delete(entry.absolutePath);
@@ -493,18 +501,21 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     const directory = path.join(entry.absolutePath, ...relative.split("/"));
     if (!root.index.ignoredFolders.isInside(relative)) throw new FolderListingError(404, "not an ignored folder");
     if (!root.index.policy.accepts(directory, DIRECTORY)) throw new FolderListingError(404, "folder not found");
+    // Only a folder that is gone is "missing"; any other read error leaves
+    // it unlisted so the client can retry.
+    const gone = (error: unknown) => ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "");
     let current = entry.absolutePath;
     for (const segment of relative.split("/")) {
       current = path.join(current, segment);
-      const stats = await lstat(current).catch(() => null);
+      const stats = await lstat(current).catch(error => { if (gone(error)) return null; throw error; });
       if (!stats) { root.index.forgetFolder(directory); await root.index.idle(); return "missing"; }
       if (stats.isSymbolicLink() || !stats.isDirectory()) throw new FolderListingError(404, "folder not found");
     }
     const contained = path.relative(await realpath(entry.absolutePath), await realpath(directory));
     if (contained === ".." || contained.startsWith(`..${path.sep}`) || path.isAbsolute(contained)) throw new FolderListingError(404, "folder not found");
-    root.index.markListed(directory);
-    const children = await readdir(directory, { withFileTypes: true }).catch(() => null);
+    const children = await readdir(directory, { withFileTypes: true }).catch(error => { if (gone(error)) return null; throw error; });
     if (!children) { root.index.forgetFolder(directory); await root.index.idle(); return "missing"; }
+    root.index.markListed(directory);
     for (const child of children) {
       const file = path.join(directory, child.name);
       if (child.isSymbolicLink() || !root.index.policy.accepts(file, child)) continue;
