@@ -790,3 +790,33 @@ test("paths inside ignored folders are inspected after ordinary paths queued lat
   // At most the 16 background inspections already running finish first.
   expect(added.indexOf("notes.md")).toBeLessThanOrEqual(16);
 });
+
+test("Git classification of many new directories never holds up an ordinary edit", async () => {
+  const root = await fixture();
+  await writeFile(path.join(root, "notes.md"), "# before");
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const gate = Promise.withResolvers<boolean>();
+  let classifications = 0;
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    classifyNew: () => { classifications++; return gate.promise; } });
+  observers.push(observer);
+  const events: string[] = [];
+  observer.on("all", (event, file) => events.push(`${event} ${path.relative(root, file)}`));
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  for (let i = 0; i < 20; i++) {
+    await mkdir(path.join(root, `out${i}`));
+    await writeFile(path.join(root, `out${i}`, "a.o"), "x");
+    control.notify("rename", path.join(root, `out${i}`));
+  }
+  await until(() => classifications === 4, "four classifications at a time");
+  await writeFile(path.join(root, "notes.md"), "# after, longer");
+  control.notify("change", path.join(root, "notes.md"));
+  await until(() => events.includes("change notes.md"), "ordinary edit while Git is busy");
+  // Nothing under the waiting folders was read yet.
+  expect(events.some(event => event.includes("a.o"))).toBe(false);
+  gate.resolve(false);
+  await until(() => events.filter(event => event.startsWith("add ") && event.endsWith("a.o")).length === 20, "folders read once Git answers");
+  expect(classifications).toBe(20);
+});

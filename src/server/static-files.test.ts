@@ -74,7 +74,7 @@ describe("asset root helpers", () => {
       { respectGitignore: true },
     );
 
-    expect(resolved).toEqual({ status: "found", filePath: await realpath(path.join(tempDirectory, "secret.txt")) });
+    expect(resolved).toEqual({ status: "found", filePath: await realpath(path.join(tempDirectory, "secret.txt")), documentPath: path.join(tempDirectory, "secret.txt") });
     await writeFile(path.join(tempDirectory, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["secret.txt"] } }));
     expect(await resolveStaticFileRequest("/secret.txt", [{ kind: "dir", absolutePath: tempDirectory }])).toEqual({ status: "not-found" });
   });
@@ -111,7 +111,7 @@ describe("asset root helpers", () => {
       { respectGitignore: false },
     );
 
-    expect(resolved).toEqual({ status: "found", filePath: await realpath(secretPath) });
+    expect(resolved).toEqual({ status: "found", filePath: await realpath(secretPath), documentPath: secretPath });
   });
 
   test("resolveStaticFileRequest rejects symlink escapes", async () => {
@@ -151,5 +151,19 @@ describe("asset root helpers", () => {
     expect((await resolveStaticFileRequest("/.env.local", entries)).status).toBe("found");
     await writeFile(path.join(tempDirectory, ".uatu.json"), JSON.stringify({ ignore: { exclude: [".env*"] } }));
     expect(await resolveStaticFileRequest("/.env.local", entries)).toEqual({ status: "not-found" });
+  });
+
+  test("a file served through a symlinked watch root is identified by its watched-root path", async () => {
+    const real = await mkdtemp(path.join(os.tmpdir(), "uatu-static-real-root-"));
+    const linkParent = await mkdtemp(path.join(os.tmpdir(), "uatu-static-link-root-"));
+    tempDirectories.push(real, linkParent);
+    const linked = path.join(linkParent, "workspace");
+    await symlink(real, linked);
+    await mkdir(path.join(real, "build"));
+    await writeFile(path.join(real, "build", "a.png"), "png");
+    const served: string[] = [];
+    const response = await staticFileResponse("/build/a.png", [{ kind: "dir", absolutePath: linked }], { onServe: id => served.push(id) });
+    expect(response?.status).toBe(200);
+    expect(served).toEqual([path.join(linked, "build", "a.png")]);
   });
 });

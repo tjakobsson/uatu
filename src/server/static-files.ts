@@ -10,7 +10,7 @@ import path from "node:path";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
 import { DEFAULT_RESPECT_GITIGNORE, shouldDenyPath, type WatchEntry } from "./roots";
 
-export type StaticFileResolution = { status: "found"; filePath: string } | { status: "not-found" };
+export type StaticFileResolution = { status: "found"; filePath: string; documentPath: string } | { status: "not-found" };
 
 export async function resolveStaticFileRequest(
   pathname: string,
@@ -76,7 +76,9 @@ export async function resolveStaticFileRequest(
       continue;
     }
 
-    return { status: "found", filePath: candidateRealPath };
+    // Bytes come from the validated real path; the document id is the
+    // watched-root path the index uses (a root can be reached via symlink).
+    return { status: "found", filePath: candidateRealPath, documentPath: candidate };
   }
 
   return { status: "not-found" };
@@ -91,7 +93,7 @@ export async function staticFileResponse(
   if (resolved.status !== "found") {
     return null;
   }
-  options.onServe?.(resolved.filePath);
+  options.onServe?.(resolved.documentPath);
 
   return new Response(Bun.file(resolved.filePath), { headers: { "cache-control": "no-cache" } });
 }

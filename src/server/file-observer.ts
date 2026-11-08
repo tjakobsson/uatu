@@ -375,6 +375,10 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
   private children = new Map<string, Set<string>>();
   private pending = new Map<string, boolean>();
   private backgroundPending = new Map<string, boolean>();
+  private classifyWaiting: [string, Stats][] = [];
+  // Directories awaiting Git: not read until it answers.
+  private classifying = new Set<string>();
+  private classifyActive = 0;
   private activePaths = new Set<string>();
   private deleted = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
@@ -427,6 +431,8 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
     this.release();
     this.pending.clear();
     this.backgroundPending.clear();
+    this.classifyWaiting = [];
+    this.classifying.clear();
     for (const timer of this.deleted.values()) clearTimeout(timer);
     this.deleted.clear();
     this.known.clear();
@@ -495,10 +501,16 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       children.add(file);
     }
     if (directory) {
-      let unlisted = file !== this.entry.absolutePath && this.options.unlisted?.(file) === true;
+      if (this.classifying.has(file)) return;
+      const unlisted = file !== this.entry.absolutePath && this.options.unlisted?.(file) === true;
       if (!unlisted && !previous && this.ready && file !== this.entry.absolutePath && this.options.classifyNew) {
-        unlisted = await this.options.classifyNew(file);
-        if (this.stopped) return;
+        // Git answers outside the shared inspection slots, so a build's new
+        // folders never hold up an ordinary edit; the folder is reported
+        // and read (or not) once it does.
+        this.classifying.add(file);
+        this.classifyWaiting.push([file, stats]);
+        this.drainClassification();
+        return;
       }
       if (!previous) this.emit("all", "addDir", file, stats);
       if (unlisted) return;
@@ -528,6 +540,22 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       const changed = !previous || previous.mtimeMs !== stats.mtimeMs || previous.ctimeMs !== stats.ctimeMs
         || previous.size !== stats.size || previous.ino !== stats.ino;
       if (changed) this.emit("all", previous?.isFile() ? "change" : "add", file, stats);
+    }
+  }
+
+  private drainClassification(): void {
+    while (!this.stopped && this.classifyActive < 4 && this.classifyWaiting.length) {
+      const [file, stats] = this.classifyWaiting.shift()!;
+      this.classifyActive++;
+      void this.options.classifyNew!(file).catch(() => false).then(ignored => {
+        this.classifyActive--;
+        this.classifying.delete(file);
+        if (!this.stopped && this.known.has(file)) {
+          this.emit("all", "addDir", file, stats);
+          if (!ignored) this.enqueue(file, true);
+        }
+        this.drainClassification();
+      });
     }
   }
 
