@@ -35,6 +35,80 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
+  for (const surface of ["main", "child"] as const) for (const carrierSource of ["retained", "recovered", "removed-answer"] as const) test(`bulk resync excludes accounting carriers from loaded-range evidence: ${surface} ${carrierSource}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const id = surface === "main" ? "one" : "child";
+    const itemsId = surface === "main" ? "chat-items" : "chat-drilldown-items";
+    const olderId = surface === "main" ? "chat-load-older" : "chat-drilldown-older";
+    const answers = Array.from({ length: 150 }, (_, i) => ({ id: `answer:${i}`, type: "assistant_message" as const, createdAt: i + 1, completedAt: i + 2, markdown: `Retained answer ${i}` }));
+    // readHistory backfills priced accounting independently of the page's
+    // transcript span. Its older timestamp must prove neither boundary nor
+    // coverage, whether it was already held or first appears during resync.
+    const carrier = { id: "usage:backfilled", type: "assistant_message" as const, createdAt: 0, markdown: "", usage: { input: 100, output: 10, costUsd: 0.25 } };
+    let fresh = false, streams = 0;
+    const reads: Array<string | undefined> = [];
+    let handlers: Parameters<ChatApiClient["stream"]>[2];
+    const api = taskApi(document, { items: () => [] });
+    api.snapshot = async (requested, cursor) => {
+      if (requested !== id) return { ...snapshot(requested), items: [{ id: "task:child", type: "background_task", taskId: "child", taskType: "local_agent", description: "Child accounting reader", status: "completed", createdAt: 1, childConversationId: "child", foreground: true }] };
+      reads.push(cursor);
+      const end = Number(cursor ?? answers.length), start = Math.max(0, end - 50);
+      const items = answers.slice(start, end).filter(item => !fresh || carrierSource !== "removed-answer" || item.id !== "answer:75")
+        .map(item => fresh ? { ...item, markdown: `${item.markdown} refreshed` } : item);
+      return { ...snapshot(requested), items: [...items, ...(!cursor && (fresh || carrierSource !== "recovered") ? [carrier] : [])], olderCursor: start ? String(start) : undefined };
+    };
+    api.stream = (requested, _cursor, next) => { if (requested === id) { handlers = next; streams++; } return { close() {} }; };
+    const { TimelineAnchorController } = await import("./anchor");
+    const { TimelineRenderer } = await import("./timeline-renderer");
+    const restore = TimelineAnchorController.prototype.restore, render = TimelineRenderer.prototype.render;
+    let anchor: InstanceType<typeof TimelineAnchorController> | undefined;
+    let installed: import("./projection").ChatProjection | null = null;
+    const restored: unknown[] = [];
+    TimelineAnchorController.prototype.restore = function (value) { anchor = this; restored.push(value); return restore.call(this, value); };
+    TimelineRenderer.prototype.render = function (...args: Parameters<typeof render>) {
+      if (args[0].id === itemsId) installed = args[1];
+      return render.apply(this, args);
+    };
+    try {
+      const { initChat } = await import(`./ui.ts?accounting-range=${surface}-${carrierSource}-${Date.now()}`);
+      initChat(api);
+      if (surface === "child") {
+        await waitUntil(() => document.querySelector('[data-inspect-task="child"]') !== null);
+        document.querySelector<HTMLButtonElement>('[data-inspect-task="child"]')!.click();
+      }
+      await waitUntil(() => streams === 1);
+      document.querySelector<HTMLButtonElement>(`#${olderId}`)!.click();
+      await waitUntil(() => document.querySelector(`#${itemsId} [data-chat-item-id="answer:55"]`) !== null);
+      expect(document.querySelectorAll(`#${itemsId} [data-chat-item-id^="answer:"]`)).toHaveLength(100);
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      type(input, "Keep the accounting reader draft");
+      const reading = { itemId: "answer:55", offset: -12 };
+      anchor!.restore(reading);
+      fresh = true;
+      handlers!.resync();
+      await waitUntil(() => streams === 2);
+      await flush();
+      expect(document.querySelectorAll(`#${itemsId} [data-chat-item-id^="answer:"]`)).toHaveLength(carrierSource === "removed-answer" ? 99 : 100);
+      expect(document.querySelector(`#${itemsId} [data-chat-item-id="answer:55"]`)?.textContent).toContain("refreshed");
+      if (carrierSource === "removed-answer") expect(document.querySelector(`#${itemsId} [data-chat-item-id="answer:75"]`)).toBeNull();
+      expect(document.querySelector(`#${itemsId} [data-chat-item-id="${carrier.id}"]`)).toBeNull();
+      expect(installed!.items.filter(item => item.id === carrier.id)).toEqual([carrier]);
+      expect(installed!.olderCursor).toBe("50");
+      expect(document.querySelector<HTMLButtonElement>(`#${olderId}`)!.hidden).toBe(false);
+      expect(restored.at(-1)).toEqual(reading);
+      expect(input.value).toBe("Keep the accounting reader draft");
+      expect(reads).toEqual([undefined, "100", undefined, "100"]);
+    } finally {
+      TimelineAnchorController.prototype.restore = restore;
+      TimelineRenderer.prototype.render = render;
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
   for (const surface of ["main", "child"] as const) test(`bulk resync recovers an evicted legacy adapter replay without accepting stale responses: ${surface}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

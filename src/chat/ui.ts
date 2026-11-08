@@ -3002,11 +3002,14 @@ export function initChat(api = new ChatApiClient()): void {
   async function readLoadedConversationRange(current: ChatProjection, signal: AbortSignal,
     latest: () => ChatProjection | null, ownsOwner: () => boolean): Promise<{ snapshot: ConversationSnapshot; isCurrent(): boolean } | null> {
     const id = current.conversationId;
+    // Match TimelineRenderer's empty-markdown carrier rule. These rows keep
+    // their accounting in the snapshot, but cannot locate the reader's range.
+    const hasTranscriptContent = (item: ConversationItem) => !(item.type === "assistant_message" && item.markdown === "");
     // Follow the oldest loaded transcript boundary, not item count: snapshots
     // also carry workers/permissions and providers can cap each history page.
     // A removed boundary is covered once paging passes its timestamp. If the
     // reader reached the beginning, recover through the beginning again.
-    const boundary = current.items.filter(item => !["background_task", "scheduled_wakeup", "permission", "question", "context_window", "context_report"].includes(item.type))
+    const boundary = current.items.filter(item => hasTranscriptContent(item) && !["background_task", "scheduled_wakeup", "permission", "question", "context_window", "context_report"].includes(item.type))
       .reduce<ConversationItem | undefined>((oldest, item) => !oldest || item.createdAt < oldest.createdAt ? item : oldest, undefined);
     // Inventory may replace only the summary wrapper while this read is
     // pending. Live events may advance content too; the final snapshot
@@ -3028,8 +3031,8 @@ export function initChat(api = new ChatApiClient()): void {
       let advanced = false;
       // Only message rows prove that paging reached a time boundary: tool
       // launchers can be backfilled into the newest page for accounting.
-      const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.items.some(item =>
-        (item.type === "user_message" || item.type === "assistant_message") && (item.id === boundary.id || item.createdAt < boundary.createdAt)));
+      const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.items.some(item => hasTranscriptContent(item)
+        && (item.type === "user_message" || item.type === "assistant_message") && (item.id === boundary.id || item.createdAt < boundary.createdAt)));
       while (snapshot.olderCursor && !covered()) {
         if (pageReads >= 1_000 || cursors.has(snapshot.olderCursor)) return null;
         const cursor = snapshot.olderCursor;
