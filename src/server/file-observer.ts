@@ -513,7 +513,12 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
         return;
       }
       if (!previous) this.emit("all", "addDir", file, stats);
-      if (unlisted) return;
+      if (unlisted) {
+        // An ambiguous rename inside it can name only a temporary source:
+        // recheck the files tracked there, without reading the rest.
+        if (discover) for (const child of this.children.get(file) ?? []) if (!this.known.get(child)?.isDirectory()) this.enqueue(child, false);
+        return;
+      }
       if (!discover && previous?.isDirectory() && previous.mtimeMs === stats.mtimeMs && previous.ino === stats.ino) return;
       this.options.onWork?.("directory", file);
       const entries = await readdir(file, { withFileTypes: true }).catch(error => {

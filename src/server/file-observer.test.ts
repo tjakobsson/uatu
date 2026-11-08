@@ -820,3 +820,26 @@ test("Git classification of many new directories never holds up an ordinary edit
   await until(() => events.filter(event => event.startsWith("add ") && event.endsWith("a.o")).length === 20, "folders read once Git answers");
   expect(classifications).toBe(20);
 });
+
+test("an atomic save of a tracked file inside an unlisted folder is noticed from a source-only rename", async () => {
+  const root = await fixture();
+  await mkdir(path.join(root, "build"));
+  const tracked = path.join(root, "build", "a.md");
+  await writeFile(tracked, "# before");
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    unlisted: directory => directory === path.join(root, "build") });
+  observers.push(observer);
+  const events: string[] = [];
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  observer.on("all", (event, file) => events.push(`${event} ${path.relative(root, file)}`));
+  observer.track?.(tracked);
+  await until(() => events.includes("add build/a.md"), "tracked file known");
+  const temporary = path.join(root, "build", ".a.md.tmp");
+  await writeFile(temporary, "# after, a longer body");
+  await rename(temporary, tracked);
+  control.notify("rename", temporary);
+  await until(() => events.includes("change build/a.md"), "atomic save noticed");
+});

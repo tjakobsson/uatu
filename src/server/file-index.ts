@@ -91,6 +91,9 @@ export class FileIndex {
   // order appended; a late-classified older write is placed by its order.
   private windowed = new Map<string, number>();
   private windowTail = 0;
+  // Counts folder removals, so a classification started before one can
+  // tell that its directory may be gone.
+  private folderRemovals = 0;
   private pinned = new Set<string>();
 
   constructor(readonly entry: WatchEntry, readonly matcher: IgnoreMatcher, private options: FileIndexOptions) {
@@ -171,10 +174,13 @@ export class FileIndex {
     const relative = rootRelative(this.entry, path.resolve(id));
     if (!relative || !this.git || this.stopped) return false;
     if (this.ignoredFolders.isInside(relative)) return this.ignoredFolders.isUnlistedDirectory(relative);
+    const generation = this.folderRemovals;
     const ignored = this.options.classifyDirectory
       ? await this.options.classifyDirectory(relative)
       : (await classifyGitIgnored(this.entry.absolutePath, [`${relative}/`]))[0] === "ignored";
     if (!ignored || this.stopped) return false;
+    // A removal while Git answered may have taken the directory away.
+    if (generation !== this.folderRemovals && !(await lstat(id).catch(() => null))?.isDirectory()) return false;
     this.ignoredFolders.addTop(relative);
     this.queueFolder(path.resolve(id), relative);
     return true;
@@ -221,7 +227,9 @@ export class FileIndex {
   forgetFolder(id: string): void {
     id = path.resolve(id);
     const relative = rootRelative(this.entry, id);
-    if (!relative) return;
+    // "" is the watched root itself: everything under it goes.
+    if (relative === null) return;
+    this.folderRemovals++;
     const order = this.options.revision();
     for (const child of [...(this.directories.get(id) ?? [])]) this.remove(child, order);
     for (const folderId of new Set([...this.folders.keys(), ...this.folderPending.keys()])) {
@@ -308,6 +316,13 @@ export class FileIndex {
       waiting.push(resolve); this.pathWaiters.set(id, waiting);
     });
     if (this.lanePending.has(id)) this.flushLane(id); else this.flush(id);
+    // A file replacing a folder of the same path waits for that folder's
+    // removal; the caller is waiting for the file itself.
+    while (!this.stopped && this.pending.get(id)?.doc) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      this.flushLane();
+      this.flush(id);
+    }
   }
 
   async request(id: string, stats: Stats): Promise<void> {
@@ -510,6 +525,10 @@ export class FileIndex {
 
   private queueJob(job: Job): void {
     const relative = rootRelative(this.entry, job.id);
+    // A replacement job may land in the other queue (its folder became
+    // ignored meanwhile); the older one must not run instead.
+    this.jobs.delete(job.id);
+    this.laneJobs.delete(job.id);
     (relative && this.ignoredFolders.isInside(relative) ? this.laneJobs : this.jobs).set(job.id, job);
   }
 

@@ -429,3 +429,54 @@ test("a file replacing an ignored folder of the same path arrives after the fold
   expect(removal).toBeGreaterThanOrEqual(0);
   expect(upsert).toBeGreaterThan(removal);
 });
+
+test("a directory removed while Git classifies it does not come back as an ignored folder", async () => {
+  const gate = Promise.withResolvers<boolean>();
+  const { index } = ignoredFixture({ classifyDirectory: () => gate.promise });
+  index.markReady();
+  await index.idle();
+  const classified = index.classifyNewDirectory("/docs/out");
+  index.observe("unlinkDir", "/docs/out");
+  gate.resolve(true);
+  expect(await classified).toBe(false);
+  await index.idle();
+  expect(index.folders.has("/docs/out")).toBe(false);
+});
+
+test("removing the watched root itself clears its indexed files", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  index.observe("add", "/docs/a.md", stat());
+  index.observe("add", "/docs/build/b.o", stat());
+  await index.idle();
+  expect(index.documents.size).toBe(2);
+  index.observe("unlinkDir", "/docs");
+  await index.idle();
+  expect(index.documents.size).toBe(0);
+  expect(index.folders.size).toBe(0);
+});
+
+test("a requested file replacing an ignored folder is published before the request resolves", async () => {
+  const { index } = ignoredFixture({ ignored: { folders: ["output"], files: [] } });
+  index.markReady();
+  await index.idle();
+  index.observe("unlinkDir", "/docs/output");
+  await index.request("/docs/output", stat());
+  expect(index.documents.has("/docs/output")).toBe(true);
+});
+
+test("a job that changes lanes replaces the older queued job instead of losing the write", async () => {
+  const blocker = Promise.withResolvers<"text">();
+  const { index } = ignoredFixture({ concurrency: 1, classifyDirectory: async () => true,
+    classify: async id => id.endsWith(".sniff") ? blocker.promise : "text" });
+  index.markReady();
+  await index.idle();
+  index.observe("add", "/docs/x.sniff", stat()); // holds the only slot
+  await Bun.sleep(5);
+  index.observe("add", "/docs/gen/a.md", stat(1)); // queued as an ordinary job
+  expect(await index.classifyNewDirectory("/docs/gen")).toBe(true);
+  index.observe("change", "/docs/gen/a.md", stat(2)); // now an ignored-folder job
+  blocker.resolve("text");
+  await index.idle();
+  expect(index.documents.get("/docs/gen/a.md")?.mtimeMs).toBe(2);
+});

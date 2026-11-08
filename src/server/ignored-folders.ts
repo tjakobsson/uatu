@@ -45,8 +45,9 @@ export class IgnoredFolders {
 
   markListed(relative: string): void { this.listed.add(relative); }
 
+  // "" forgets everything (the watched root itself went away).
   forget(relative: string): void {
-    const under = (candidate: string) => candidate === relative || candidate.startsWith(`${relative}/`);
+    const under = (candidate: string) => relative === "" || candidate === relative || candidate.startsWith(`${relative}/`);
     for (const top of [...this.tops]) if (under(top)) this.tops.delete(top);
     for (const level of [...this.listed]) if (under(level)) this.listed.delete(level);
   }
