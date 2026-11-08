@@ -334,7 +334,11 @@ export class FileIndex {
     if (queued && classifyFileName(path.basename(id)) !== null) {
       this.jobs.delete(id); this.laneJobs.delete(id); this.requested.delete(id);
       this.run({ ...queued, stats: queued.stats ?? stats });
-    } else if (queued) this.requested.add(id);
+    } else if (queued) {
+      // A waiting client goes first, into a free slot if there is one.
+      this.requested.add(id);
+      this.pump();
+    }
     else if (!this.current.has(id) && !this.pending.get(id)?.doc) this.observe("add", id, stats, true);
     await this.settled(id);
   }

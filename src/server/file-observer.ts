@@ -424,11 +424,16 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
   // Registers one file inside an unlisted folder, with the folders above it
   // (known, not read), so a removal of any of them is noticed.
   track(file: string): void {
-    const root = this.entry.kind === "dir" ? this.entry.absolutePath : this.entry.parentDir;
+    this.registerAncestors(file);
+    if (!this.known.has(file)) this.enqueue(file, false);
+  }
+
+  private registerAncestors(file: string): void {
+    if (this.entry.kind !== "dir") return;
+    const root = this.entry.absolutePath;
     for (let directory = path.dirname(file); directory !== root && contained(root, directory); directory = path.dirname(directory)) {
       if (!this.known.has(directory)) this.enqueue(directory, false);
     }
-    if (!this.known.has(file)) this.enqueue(file, false);
   }
 
   async close(): Promise<void> {
@@ -505,6 +510,9 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       let children = this.children.get(parent);
       if (!children) this.children.set(parent, children = new Set());
       children.add(file);
+      // A file reported inside a folder never read (an unlisted ignored
+      // folder): register the folders above it, so removing one is noticed.
+      if (!previous && !this.known.has(parent)) this.registerAncestors(file);
     }
     if (directory) {
       if (this.classifying.has(file)) return;

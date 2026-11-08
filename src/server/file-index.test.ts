@@ -493,3 +493,21 @@ test("adopting a single-character folder lists its known levels and returns", ()
     expect(index.ignoredFolders.isListed(".")).toBe(false);
   });
 });
+
+test("a requested ignored file already queued takes a free slot at once", async () => {
+  const first = Promise.withResolvers<"binary">();
+  const started: string[] = [];
+  const { index } = ignoredFixture({ concurrency: 2, classify: async id => { started.push(id); return id.endsWith("one.sniff") ? first.promise : "text"; } });
+  index.markReady();
+  index.markListed("/docs/build");
+  await index.idle();
+  index.observe("add", "/docs/build/one.sniff", stat());
+  index.observe("add", "/docs/build/two.sniff", stat());
+  await Bun.sleep(5);
+  // One background slot of two: the second ignored job waits.
+  expect(started).toEqual(["/docs/build/one.sniff"]);
+  await index.request("/docs/build/two.sniff", stat());
+  expect(index.documents.has("/docs/build/two.sniff")).toBe(true);
+  first.resolve("binary");
+  await index.idle();
+});

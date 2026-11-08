@@ -865,3 +865,26 @@ test("deleting a folder above a tracked file inside an unlisted folder removes t
   control.notify("rename", path.join(root, "build", "nested"));
   await until(() => events.includes("unlink build/nested/a.md"), "removal noticed through the deleted folder");
 });
+
+test("deleting a folder above a live-written file inside an unlisted folder removes the file", async () => {
+  const root = await fixture();
+  const build = path.join(root, "build");
+  await mkdir(build);
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    unlisted: directory => directory === build || directory.startsWith(build + path.sep) });
+  observers.push(observer);
+  const events: string[] = [];
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  observer.on("all", (event, file) => events.push(`${event} ${path.relative(root, file)}`));
+  await mkdir(path.join(build, "nested"));
+  await writeFile(path.join(build, "nested", "a.md"), "# written");
+  control.notify("change", path.join(build, "nested", "a.md"));
+  await until(() => events.includes("add build/nested/a.md"), "live write reported");
+  await Bun.sleep(50);
+  await rm(path.join(build, "nested"), { recursive: true });
+  control.notify("rename", path.join(build, "nested"));
+  await until(() => events.includes("unlink build/nested/a.md"), "removal noticed through the deleted folder");
+});
