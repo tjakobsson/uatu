@@ -34,7 +34,7 @@ async function playingPath(page: Page, path: string): Promise<void> {
 for (const engine of ["chromium", "webkit"] as const) {
   test(`${engine}: ignored generated media workflow remains responsive across Files, Preview, Chat and explicit Reload`, async ({ launchBrowser, request, serverPort }, info) => {
     test.setTimeout(90_000);
-    await request.post("/__e2e/reset", { data: { git: true, follow: false, uatuConfig: { ignore: { include: ["build/renders"] } }, extras: { ".gitignore": "build/\n" } } });
+    await request.post("/__e2e/reset", { data: { git: true, follow: false, extras: { ".gitignore": "build/\n" } } });
     await request.post("/__e2e/chat", { data: { action: "seed", title: "Media workflow", items: [] } });
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL: `http://127.0.0.1:${serverPort}`, viewport: { width: 390, height: 844 }, hasTouch: true });

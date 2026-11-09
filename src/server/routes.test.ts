@@ -8,7 +8,7 @@ import { DOCUMENT_NOT_READABLE_ERROR } from "../shared/document-errors";
 import { scanRoots } from "./roots";
 import * as markdownRenderer from "../render/markdown";
 import { NotificationFeed, CHILD_NOTIFICATIONS_PATH } from "../chat/notification-feed";
-import { createWatchSession } from "./watch-session";
+import { createWatchSession, FolderListingError } from "./watch-session";
 
 // Minimal stub: the asset routes never touch the session, so a thrown
 // getter is fine — it makes accidental coupling fail loudly.
@@ -244,6 +244,33 @@ describe("buildRoutes — watch context", () => {
       expect((await handler.POST(new Request(`http://127.0.0.1${endpoint}?t=test-credential`, { method: "POST", headers: { origin: "http://127.0.0.1" } }))).ok).toBe(true);
     }
     expect(calls).toBe(2);
+  });
+  test("folder listing keeps the credential and origin gates and maps listing outcomes", async () => {
+    const requested: unknown[] = [];
+    const routes = buildFontTestRoutes(undefined, (() => ({
+      listFolder: async (rootId: string, relative: string) => {
+        requested.push([rootId, relative]);
+        if (relative === "gone") return { status: "missing", revision: 7 };
+        if (relative === "docs") throw new FolderListingError(404, "not an ignored folder");
+        if (relative === "../x") throw new FolderListingError(400, "invalid folder path");
+        return { status: "listed", revision: 6 };
+      },
+    })) as never);
+    const handler = routes["/api/index/folder"] as { POST: (request: Request) => Promise<Response> };
+    const post = (body: unknown, headers: Record<string, string> = { origin: "http://127.0.0.1" }, credential = "?t=test-credential") =>
+      handler.POST(new Request(`http://127.0.0.1/api/index/folder${credential}`, { method: "POST", headers, body: JSON.stringify(body) }));
+    expect((await post({ rootId: "/r", path: "build" }, {}, "")).status).toBe(401);
+    expect((await post({ rootId: "/r", path: "build" }, { origin: "http://127.0.0.1:9999" })).status).toBe(403);
+    expect((await post({ rootId: "/r" })).status).toBe(400);
+    const listed = await post({ rootId: "/r", path: "build" });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ status: "listed", revision: 6 });
+    const missing = await post({ rootId: "/r", path: "gone" });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ status: "missing", revision: 7 });
+    expect((await post({ rootId: "/r", path: "docs" })).status).toBe(404);
+    expect((await post({ rootId: "/r", path: "../x" })).status).toBe(400);
+    expect(requested).toHaveLength(4);
   });
   test("lets the session normalize a stale file scope", async () => {
     let receivedScope: unknown;

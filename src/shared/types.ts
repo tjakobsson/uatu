@@ -16,11 +16,25 @@ export type DocumentMeta = {
   revision?: number;
 };
 
+// A folder Git ignores as a whole (node_modules/, build/). Its contents are
+// read one level at a time when a client lists it, like VS Code's Explorer.
+// `relativePath` ends in "/". `listed` says whether that level's files and
+// subfolders are in the index; files written while it is unlisted can be too.
+export type FolderEntry = {
+  id: string;
+  rootId: string;
+  relativePath: string;
+  listed: boolean;
+  revision: number;
+};
+
 export type RootGroup = {
   id: string;
   label: string;
   path: string;
   docs: DocumentMeta[];
+  // Git-ignored folders of this root (absent when there are none).
+  folders?: FolderEntry[];
   // Number of files filtered by user-controlled exposure exclusions.
   // Git-ignore classification is separate browsing metadata. Excludes the built-in
   // directory denylist — those are infrastructure, not user choices, and we

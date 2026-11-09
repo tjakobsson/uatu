@@ -43,14 +43,24 @@ describe("loadIgnoreMatcher properties", () => {
     );
   });
 
-  test("built-in defaults hold at any depth", async () => {
+  test("VS Code's files.exclude defaults hold at any depth", async () => {
     const matcher = await makeMatcher();
     const prefix = fc.array(segment, { maxLength: 3 });
     const suffix = fc.array(segment, { maxLength: 3 });
     fc.assert(
-      fc.property(prefix, fc.constantFrom("node_modules", ".git", "dist"), suffix, (before, builtIn, after) => {
+      fc.property(prefix, fc.constantFrom(".git", ".svn", ".hg", ".jj", ".DS_Store", "Thumbs.db", ".GIT"), suffix, (before, builtIn, after) => {
         const candidate = [...before, builtIn, ...after].join("/");
         expect(matcher.shouldIgnore(candidate)).toBe(true);
+      }),
+    );
+  });
+
+  test("no other name is excluded by default", async () => {
+    const matcher = await makeMatcher();
+    const builtIns = new Set([".git", ".svn", ".hg", ".jj", ".ds_store", "thumbs.db"]);
+    fc.assert(
+      fc.property(relativePath.filter(candidate => !candidate.split("/").some(part => builtIns.has(part.toLowerCase()))), candidate => {
+        expect(matcher.shouldIgnore(candidate)).toBe(false);
       }),
     );
   });

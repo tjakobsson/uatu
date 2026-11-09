@@ -17,7 +17,7 @@ async function wait(predicate: () => boolean) {
 }
 async function init(cwd: string) { const child = Bun.spawn(["git", "init", "-q"], { cwd, stdout: "ignore", stderr: "ignore" }); expect(await child.exited).toBe(0); }
 
-test("mixed writes nominate separate per-client candidates, metadata never writes or replays Follow", async () => {
+test("an ignored file is never a Follow candidate in any client, and Git metadata never writes or replays Follow", async () => {
   const cwd = await fixture(); await init(cwd);
   await writeFile(path.join(cwd, ".gitignore"), "ignored.md\n");
   const visible = path.join(cwd, "visible.md"), ignored = path.join(cwd, "ignored.md");
@@ -40,44 +40,46 @@ test("mixed writes nominate separate per-client candidates, metadata never write
       void (async () => { for (;;) { const value = await reader.read(); if (value.done) return; const text = new TextDecoder().decode(value.value); if (text.startsWith("event: state")) frames[i]!.push(JSON.parse(text.split("data: ")[1]!)); } })();
     });
     await wait(() => frames.every(list => list.length > 0));
-    // Inject one normalized multi-file batch in a deterministic event order.
+    // One normalized batch: the ignored edit comes last but is never followed.
     watcher!.emit("all", "change", visible);
     watcher!.emit("all", "change", ignored);
-    await wait(() => frames[0]!.some(frame => frame.changedId === ignored) && frames[1]!.some(frame => frame.changedId === visible));
-    expect(frames[1]!.some(frame => frame.changedId === ignored)).toBe(false);
+    await wait(() => frames.every(list => list.some(frame => frame.changedId === visible)));
+    await Bun.sleep(300);
+    expect(frames.flat().some(frame => frame.changedId === ignored)).toBe(false);
+    // Shown or hidden, the ignored file stays browsable.
     expect(session.getRoots(contexts[1]).flatMap(root => root.docs).some(doc => doc.id === ignored)).toBe(true);
     expect(isDocumentVisible(session.findDocument(ignored)!, false)).toBe(false);
     const before = session.findDocument(ignored)!;
-    const count = frames[0]!.filter(frame => frame.changedId).length;
     await writeFile(path.join(cwd, ".gitignore"), "");
     await wait(() => session.findDocument(ignored)?.gitIgnoreStatus === "not-ignored");
     const after = session.findDocument(ignored)!;
+    // Reclassification is metadata: no new revision, no rebuild, no Follow.
     expect(after.revision).toBe(before.revision); expect(after.mtimeMs).toBe(before.mtimeMs);
-    expect(frames[0]!.filter(frame => frame.changedId === ignored).length).toBe(1);
-    expect(frames[0]!.filter(frame => frame.changedId).length).toBeGreaterThanOrEqual(count);
     expect(session._internalWatcher()).toBe(watcher);
-    const index = new DocumentStateIndex(); index.apply(session.getStatePayload(null, contexts[1]));
-    expect(unseenSnapshotChange(index, session.getStatePayload(null, contexts[0]))).toBeNull();
+    expect(frames.flat().some(frame => frame.changedId === ignored)).toBe(false);
+    for (const context of contexts) {
+      const index = new DocumentStateIndex(); index.apply(session.getStatePayload(null, context));
+      expect(index.latestChange?.id).toBe(visible);
+    }
   } finally { await Promise.all(readers.map(reader => reader.cancel())); await session.stop(); }
 });
 
-test.each([false, true])("future output includes and runtime add/remove share index and direct policy, polling=%s", async usePolling => {
+test.each([false, true])("output folders appear without configuration and runtime exclusions share index and direct policy, polling=%s", async usePolling => {
   const cwd = await fixture();
-  await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"], exclude: ["build/renders/private/**"] } }));
   const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { usePolling });
   try {
     await session.start();
     await mkdir(path.join(cwd, "build/renders"), { recursive: true });
     await mkdir(path.join(cwd, "build/objects"));
-    const file = path.join(cwd, "build/renders/out.wav");
-    await writeFile(file, "audio"); await writeFile(path.join(cwd, "build/objects/no.o"), "object");
-    await wait(() => !!session.findDocument(file));
-    expect(session.getUnscopedRoots().flatMap(root => root.docs).some(doc => doc.relativePath.includes("objects"))).toBe(false);
-    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { include: [] } }));
-    await wait(() => !session.findDocument(file));
-    expect(await session.ensureDocument(file)).toBeUndefined();
-    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"] } }));
-    await wait(() => !!session.findDocument(file));
+    const file = path.join(cwd, "build/renders/out.wav"), object = path.join(cwd, "build/objects/main.o");
+    await writeFile(file, "audio"); await writeFile(object, "object");
+    await wait(() => !!session.findDocument(file) && !!session.findDocument(object));
+    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["build/objects/"] } }));
+    await wait(() => !session.findDocument(object));
+    expect(session.findDocument(file)).toBeDefined();
+    expect(await session.ensureDocument(object)).toBeUndefined();
+    await writeFile(path.join(cwd, ".uatu.json"), JSON.stringify({ ignore: { exclude: [] } }));
+    await wait(() => !!session.findDocument(object));
   } finally { await session.stop(); }
 }, 15_000);
 

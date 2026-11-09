@@ -334,7 +334,7 @@ describe("watchSession scope", () => {
     expect(DOCUMENT_KEEPALIVE_MS).toBe(15_000);
   });
 
-  test("file scopes reject unknown, ignored, secret-like, and binary document ids", async () => {
+  test("file scopes reject unknown, excluded, and binary document ids but accept secret-like files", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-invalid-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
@@ -355,7 +355,8 @@ describe("watchSession scope", () => {
       await session.start();
       const pinned = (id: string) => session.getStatePayload(null, { scope: { kind: "file", documentId: id }, compareTarget: "base" }).scope.kind === "file";
       expect(pinned(readme)).toBe(true);
-      for (const id of [path.join(tempDirectory, "missing.md"), ignored, secret, binary]) expect(pinned(id)).toBe(false);
+      expect(pinned(secret)).toBe(true);
+      for (const id of [path.join(tempDirectory, "missing.md"), ignored, binary]) expect(pinned(id)).toBe(false);
     } finally { await session.stop(); }
   });
 

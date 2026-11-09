@@ -644,11 +644,21 @@ Changing visibility replaces only the document topic's context and protects
 selection from old Follow nominations in its baseline. Direct authenticated
 delivery still enforces exposure policy regardless of row visibility.
 
-Root `.uatu.json` `ignore.include` names literal output directories beneath
-build/dist, admitting only their subtrees and necessary traversal ancestors.
-Explicit Uatu exclusions, mandatory denied paths, and containment remain
-authoritative. Discovery, observation, index membership, and delivery share
-that policy; a client visibility toggle does not rebuild watchers.
+Built-in exposure exclusions are only VS Code's `files.exclude` defaults
+(`ignore/exposure.ts`); everything else is excluded only by an explicit
+`.uatu.json` `ignore.exclude`. Discovery, observation, index membership, and
+delivery share that policy; a client visibility toggle does not rebuild
+watchers. Folders Git ignores as a whole come from one `git ls-files
+--others --ignored --directory` call per root (`server/git-ignore.ts`) and
+become `FolderEntry` rows that discovery does not read (`server/ignored-folders.ts`).
+`POST /api/index/folder` lists one level into the shared index, which every
+client receives as an ordinary patch. The native watcher still reports writes
+inside unlisted levels; `FileIndex` keeps the newest 2,000 per root (pinned
+when a client requests them) and publishes everything inside ignored folders
+on its own 1 s / 5 s lane in patches of up to 1,024 entries, classified and
+never followed. The watcher queues those paths behind ordinary ones. A
+`.gitignore` edit rebuilds a root only when the set of whole-ignored folders
+changes.
 
 A representative path: the SPA needs the rendered HTML for `guides/setup.md`.
 
