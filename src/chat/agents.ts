@@ -809,23 +809,30 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
 class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
   private cancelled = false;
+  private closed = false;
   constructor(
     private readonly source: ChatEventSubscription,
     private readonly map: (event: ChatEvent) => ChatEvent[] | Promise<ChatEvent[]>,
-    private readonly onCancel: () => void = () => {},
+    private readonly onClose: () => void = () => {},
   ) {}
 
   cancel(): void {
     if (this.cancelled) return;
     this.cancelled = true;
-    this.onCancel();
+    this.close();
+  }
+
+  private close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.onClose();
     this.source.cancel();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<ChatEvent> {
-    // Consumer return()/throw() unwinds this generator's for-await, which
-    // returns the source iterator — cancellation propagates without a
-    // separate teardown path.
+    // Natural source closure drains every queued native and mapped event.
+    // Consumer return()/throw(), unlike exhaustion, cancels queued delivery.
+    let exhausted = false;
     try {
       for await (const event of this.source) {
         if (this.cancelled) return;
@@ -834,7 +841,11 @@ class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
           yield mapped;
         }
       }
-    } finally { this.cancel(); }
+      exhausted = true;
+    } finally {
+      if (exhausted) this.close();
+      else this.cancel();
+    }
   }
 }
 

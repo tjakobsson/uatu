@@ -179,8 +179,14 @@ test("files a client opens or is served stay indexed when later writes overflow 
     await wait(() => !!session.findDocument(render("opened.md")) && !!session.findDocument(render("served.png")), "windowed renders");
     expect(await session.ensureDocument(render("opened.md"))).toBeDefined();
     session.pinDocument(render("served.png"));
-    for (const name of ["a.wav", "b.wav", "c.wav"]) { await writeFile(render(name), "x"); await Bun.sleep(30); }
-    await wait(() => !!session.findDocument(render("c.wav")), "later renders");
+    for (const name of ["a.wav", "b.wav", "c.wav"]) {
+      await writeFile(render(name), "x");
+      // Synchronize on observed writes rather than assuming a 30ms pause
+      // establishes observer/classifier order under CI load.
+      await wait(() => !!session.findDocument(render(name)), `later render ${name}`);
+    }
+    // The newest upsert and the older removal may arrive in separate patches.
+    await wait(() => !session.findDocument(render("a.wav")), "older unpinned render eviction");
     expect(session.findDocument(render("opened.md"))).toBeDefined();
     expect(session.findDocument(render("served.png"))).toBeDefined();
     // Unpinned older writes left the window.

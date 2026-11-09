@@ -1366,13 +1366,16 @@ describe("qualification of snapshots and events", () => {
     const { events } = await service.subscribe("claude:ses_1");
     const received: ChatEvent[] = [];
     const consume = (async () => {
-      for (const _ of [1, 2]) {
-        for await (const event of events) { received.push(event); break; }
-      }
+      // One stream: breaking a for-await loop is an explicit iterator return,
+      // not a request to pause and resume with another iterator.
+      for await (const event of events) received.push(event);
     })();
     b.replay!.push({ generation: "g1", sequence: 1, conversationId: "ses_1", type: "conversation.updated", conversation: summary("ses_1") });
     b.replay!.push({ generation: "g1", sequence: 2, conversationId: "ses_1", type: "item.upsert", item: { id: "tool:t1", type: "tool", createdAt: 1, name: "task", status: "running", childConversationId: "kid" } });
+    b.replay!.cancel(); // Native closure retains queued events for draining.
     await consume;
+    expect(received).toHaveLength(2);
+    expect(received.map(event => [event.type, event.generation, event.sequence])).toEqual([["conversation.updated", "g1", 1], ["item.upsert", "g1", 2]]);
     expect(received[0]).toEqual(expect.objectContaining({
       conversationId: "claude:ses_1",
       conversation: expect.objectContaining({ id: "claude:ses_1", agent: { id: "claude", name: "Claude Code" } }),
@@ -1381,6 +1384,60 @@ describe("qualification of snapshots and events", () => {
       conversationId: "claude:ses_1",
       item: expect.objectContaining({ childConversationId: "claude:kid" }),
     }));
+  });
+
+  test("a naturally closed finite source drains all queued events and releases enrollment exactly once", async () => {
+    const { service, b } = fixture();
+    let cleanups = 0;
+    const source = new ReplaySubscription(() => { cleanups++; });
+    b.subscribe = async id => ({ snapshot: snapshot(id), events: source });
+    const { events } = await service.subscribe("claude:ses_1");
+    const native: ChatEvent[] = [
+      { generation: "g1", sequence: 1, conversationId: "ses_1", type: "conversation.status", status: "running" },
+      { generation: "g1", sequence: 2, conversationId: "ses_1", type: "item.text_delta", itemId: "answer", delta: "exact text" },
+      { generation: "g1", sequence: 3, conversationId: "ses_1", type: "conversation.status", status: "completed" },
+    ];
+    const registrations = () => (service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers;
+    try {
+      for (const event of native) source.push(event);
+      source.cancel();
+      expect(cleanups).toBe(1);
+      expect(registrations().get("claude:ses_1")?.size).toBe(1);
+      const received: ChatEvent[] = [];
+      for await (const event of events) received.push(event);
+      expect(received).toEqual(native.map(event => ({ ...event, conversationId: "claude:ses_1" })));
+      expect(registrations().size).toBe(0);
+      expect(cleanups).toBe(1);
+      expect(await events[Symbol.asyncIterator]().next()).toEqual({ value: undefined, done: true });
+      events.cancel();
+      expect(cleanups).toBe(1);
+    } finally { events.cancel(); await service.dispose(); }
+  });
+
+  test.each(["cancel", "abort", "return", "dispose"] as const)("%s stops remaining queued delivery even after native source closure and releases enrollment", async stop => {
+    const { service, b } = fixture();
+    let cleanups = 0;
+    const source = new ReplaySubscription(() => { cleanups++; });
+    b.subscribe = async id => ({ snapshot: snapshot(id), events: source });
+    const abort = new AbortController();
+    const { events } = await service.subscribe("claude:ses_1", { signal: abort.signal });
+    const iterator = events[Symbol.asyncIterator]();
+    const first: ChatEvent = { generation: "g1", sequence: 1, conversationId: "ses_1", type: "conversation.status", status: "running" };
+    const second: ChatEvent = { generation: "g1", sequence: 2, conversationId: "ses_1", type: "item.text_delta", itemId: "answer", delta: "must not arrive" };
+    try {
+      source.push(first);
+      source.push(second);
+      source.cancel();
+      expect(await iterator.next()).toEqual({ value: { ...first, conversationId: "claude:ses_1" }, done: false });
+      if (stop === "cancel") events.cancel();
+      else if (stop === "abort") abort.abort();
+      else if (stop === "return") await iterator.return?.();
+      else await service.dispose();
+      expect(await iterator.next()).toEqual({ value: undefined, done: true });
+      expect(await events[Symbol.asyncIterator]().next()).toEqual({ value: undefined, done: true });
+      expect((service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers.size).toBe(0);
+      expect(cleanups).toBe(1);
+    } finally { events.cancel(); await service.dispose(); }
   });
 
   test("cancelling the qualified subscription cancels the source", async () => {
