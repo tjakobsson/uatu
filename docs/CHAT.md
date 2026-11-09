@@ -929,7 +929,8 @@ not imported. A Git ignore rule alone does not exclude a file from exposure;
 use Uatu's `ignore.exclude` policy for that. Symlinked workspace roots work,
 but symlinks below a watched root cannot bypass these checks. Additional watched
 roots do not expand the agent workspace's capture boundary. A named-file watch
-authorizes only that file; a directory watch inside the workspace can separately
+authorizes only that file and uses the static-file policy's single-file ignore
+scope; a directory watch inside the workspace can separately
 authorize images. Finish writing a file before embedding it. Image content
 returned only inside a tool result is not automatically displayed.
 

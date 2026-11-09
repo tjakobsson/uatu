@@ -43,7 +43,7 @@ export function createWatchedVisualReader(entries: WatchEntry[], respectGitignor
       // A file entry authorizes its named file, not every file in its parent.
       if (entry.kind === "file" && path.resolve(root, relative) !== entry.absolutePath) continue;
       if (shouldDenyPath(relative)) throw new VisualReadError();
-      const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: respectGitignore ?? DEFAULT_RESPECT_GITIGNORE });
+      const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
       if (matcher.shouldIgnore(relative)) throw new VisualReadError();
       let currentPath = root;
       for (const segment of relative.split(path.sep)) {

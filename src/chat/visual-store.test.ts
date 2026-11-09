@@ -434,6 +434,27 @@ describe("immutable visual snapshots", () => {
 });
 
 describe("watched-root bounded reader", () => {
+  test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("single-file capture preserves static-file ignore scope ($name)", async ({ aliased }) => {
+    const root = path.join(directory, "workspace");
+    await fs.mkdir(root);
+    await fs.writeFile(path.join(root, "diagram.svg"), svg);
+    await fs.writeFile(path.join(root, "a.md"), "Explicit document");
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["diagram.svg", "a.md"] } }));
+    const watched = aliased ? path.join(directory, "alias") : root;
+    if (aliased) await fs.symlink(root, watched);
+    const entries = [{ kind: "file" as const, absolutePath: path.join(watched, "diagram.svg"), parentDir: watched }];
+    const workspace = await selectCanonicalChatRoot(entries);
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "diagram.svg") });
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("diagram.svg", workspace))).toBe(svg);
+    await expect(createWatchedVisualReader([{ kind: "dir", absolutePath: watched }])("diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+    await expect(reader("a.md", workspace)).rejects.toMatchObject({ missing: false });
+    const documentEntries = await resolveWatchRoots([path.join(watched, "a.md")], directory);
+    expect(new TextDecoder().decode(await createWatchedVisualReader(documentEntries)("a.md", workspace))).toBe("Explicit document");
+    const store = new VisualStore(workspace, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    expect(await store.capture("a:c", "explicit-file", file("diagram.svg"), true)).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+  });
   test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("unrelated single-file roots do not mask a later directory root ($name)", async ({ aliased }) => {
     const workspace = path.join(directory, "workspace");
     const images = path.join(workspace, "images");
