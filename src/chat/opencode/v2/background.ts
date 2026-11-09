@@ -1331,7 +1331,7 @@ export class BackgroundWorkers {
 
   /** A typed native outcome may settle one proven interval. A bare idle only
    * fences activity; missing/straddling windows never identify its execution. */
-  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>): NormalizedProviderUpdate[] {
+  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot()): NormalizedProviderUpdate[] {
     if (!this.budget.executionHistory) return [];
     const updates: NormalizedProviderUpdate[] = [];
     for (const [child, results] of outcomes ?? []) {
@@ -1342,14 +1342,15 @@ export class BackgroundWorkers {
         const previous = ends.filter(end => end < result.at).reduce<number | undefined>((latest, end) => latest === undefined || end > latest ? end : latest, undefined);
         // Every potentially overlapping occurrence competes, including unknown
         // windows and already reported results. Uncertainty is not exclusion.
-        const candidates = [...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent"
-          && task.evidence.launches.some(launch => {
+        const candidates = [...competitors.values()].filter(occurrence => occurrence.worker === child && occurrence.kind === "agent"
+          && occurrence.launches.some(launch => {
             const window = this.admissionWindow(launch);
             const start = launch.ran ?? launch.created;
             return !window ? start === undefined || start <= result.at : window.start <= result.at && (previous === undefined || window.end >= previous);
           }));
-        const task = candidates.length === 1 ? candidates[0] : undefined;
-        if (!task || task.item.status !== "running" || task.evidence.uncertain || task.item.stateUncertain || !task.evidence.launches.every(launch => {
+        const occurrence = candidates.length === 1 ? candidates[0] : undefined;
+        const task = occurrence && this.tasks.get(occurrence.taskId);
+        if (!occurrence || !task || task.item.status !== "running" || occurrence.uncertain || task.evidence.uncertain || task.item.stateUncertain || !occurrence.launches.every(launch => {
           const window = this.admissionWindow(launch);
           return window && window.end < result.at && (previous === undefined || window.start > previous);
         })) continue;

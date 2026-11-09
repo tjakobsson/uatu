@@ -26,6 +26,9 @@ unchanged historical idle outcome usable. Changes to consumed idle records,
 execution boundaries, removals and reverts still fence publication. A fresh
 scoped child record that reveals a changed revert boundary revokes the earlier
 outcome source even before the corresponding native event arrives.
+Staging a parent revert hides rows without removing their native occurrence
+evidence from child-outcome attribution. A hidden overlapping launch therefore
+still prevents an ambiguous outcome from authorizing dismissal of a visible row.
 
 ## Browser consistency and recovery
 

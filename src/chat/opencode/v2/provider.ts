@@ -430,7 +430,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     const { boundaryId, boundaryIndex, visible } = storedHistoryVisibility(complete, info);
     const version = historyVersion([visible, boundaryId]);
     const end = historyPageEnd(cursor, version, visible.length);
-    const normalized = await this.backgroundHistory(sessionId, visible, signal, controlRead, true, optionalEnrichment);
+    const normalized = await this.backgroundHistory(sessionId, visible, signal, controlRead, true, optionalEnrichment, complete);
     const allNormalized = boundaryIndex >= 0 ? await this.backgroundHistory(sessionId, complete, signal, controlRead, true, optionalEnrichment) : normalized;
     // An optional prefix omission is not native visibility evidence. A full
     // fold may recover that metadata, but only rows first introduced by the
@@ -472,7 +472,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     return boundary;
   }
 
-  private async backgroundHistory(sessionId: string, visible: StoredMessage[], signal = this.readSignal(), controlRead?: ControlRead, overlay = true, optionalEnrichment = false) {
+  private async backgroundHistory(sessionId: string, visible: StoredMessage[], signal = this.readSignal(), controlRead?: ControlRead, overlay = true, optionalEnrichment = false, competitionHistory = visible) {
     const transcriptSignal = signal;
     // Child enrichment has its own lifetime. Its deadline must leave time to
     // return the required parent transcript, and never turn missing metadata
@@ -607,7 +607,18 @@ export class OpenCodeV2Provider implements ChatProvider {
         normalized.set(item.id, { item: unavailable && item.type === "background_task" ? { ...item, stateUncertain: true } : item, index });
       }
     });
-    for (const update of workers.finishHistory(executionOutcomes)) if (update.kind === "upsert") {
+    // Visibility hides rows, not native competitors for a child's outcome. Fold
+    // the complete parent occurrence set under the same verified ownership and
+    // child intervals, without publishing hidden rows or granting them controls.
+    let competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> | undefined;
+    if (competitionHistory !== visible) {
+      const completeWorkers = new BackgroundWorkers({ entries: Infinity, bytes: Infinity, executionHistory });
+      for (const child of verified) completeWorkers.verifyChild(child, sessionId);
+      for (const [child, ends] of executionHistory) for (const end of ends) completeWorkers.executionEnded(child, end);
+      for (const message of competitionHistory) normalizeStoredMessage(message, true, { workers: completeWorkers, parent: sessionId });
+      competitors = completeWorkers.evidenceSnapshot();
+    }
+    for (const update of workers.finishHistory(executionOutcomes, competitors)) if (update.kind === "upsert") {
       const entry = normalized.get(update.item.id);
       if (entry) normalized.set(update.item.id, { ...entry, item: update.item });
     }

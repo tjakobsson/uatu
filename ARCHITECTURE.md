@@ -1180,7 +1180,11 @@ complete scoped child history and exactly one occurrence whose entire admission
 window lies after the previous idle and before this first enclosing idle.
 Missing-clock, tied, straddling and already-terminal competing occurrences still
 block attribution. Unknown outcomes remain boundaries only. This history-only
-fallback invents neither result text nor a parent result ID. Before reading a
+attribution counts the complete native parent's competing occurrences even when
+a staged parent revert hides their rows. Prefix visibility cannot turn an
+ambiguous child outcome into a terminal result; launches proven to belong to
+separate child intervals or other children do not compete for that outcome.
+This fallback invents neither result text nor a parent result ID. Before reading a
 child transcript, recovery registers it on the parent's bounded read-owned
 source. When explicit outcomes are present, a fresh scoped child record supplies
 their current revert boundary: only

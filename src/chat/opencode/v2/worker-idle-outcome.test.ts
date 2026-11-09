@@ -2,6 +2,63 @@ import { expect, test } from "bun:test";
 import { createOpenCodeV2Provider } from "./provider";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+for (const scenario of ["straddling", "separate-intervals", "different-child"] as const)
+test(`${read} cannot gain a child outcome by hiding a competing parent launch (${scenario})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, otherChild: string | undefined, staged = false;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0];
+      first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const competitor = structuredClone(first);
+      competitor.id = "hidden-launch"; competitor.time = { created: 15 };
+      competitor.content[0].id = "competing-call";
+      competitor.content[0].time = scenario === "separate-intervals"
+        ? { created: 30, ran: 31, completed: 32 } : { created: 15, ran: 16, completed: 25 };
+      if (scenario === "different-child") competitor.content[0].state.metadata.sessionID = otherChild;
+      return Response.json({ data: [first, competitor], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-outcome", type: "idle", time: { created: 20 }, outcome: "succeeded" },
+      ...(scenario === "separate-intervals" ? [{ id: "second-outcome", type: "idle", time: { created: 40 }, outcome: "failed" }] : []),
+    ], cursor: {} });
+    if (staged && route === `/api/session/${parent}`) {
+      const body = await response.json(); body.data.revert = { messageID: "hidden-launch" };
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  try {
+    parent = (await provider.createSession("Hidden competing admission")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    if (scenario === "different-child") {
+      otherChild = fake.launchRequestWorker(parent).childId;
+      fake.settleWorker(otherChild, "completed", "No unrelated parent report");
+    }
+    fake.settleWorker(child, "completed", "No parent report");
+    const tasks = async () => read === "listMessages"
+      ? (await provider.listMessages(parent!, { limit: 100 })).items.filter(item => item.type === "background_task")
+      : await provider.reconcileBackgroundTasks!(parent!, { fresh: true });
+    const complete = await tasks();
+    expect(complete).toHaveLength(2);
+    const status = scenario === "straddling" ? "running" : "completed";
+    expect(complete.find(task => task.taskId === worker.taskId)?.status).toBe(status);
+    expect(complete.find(task => task.toolUseId === "competing-call")?.status).toBe(scenario === "separate-intervals" ? "failed" : "running");
+    staged = true;
+    const prefix = await tasks();
+    expect(prefix).toHaveLength(1);
+    expect(prefix[0]).toMatchObject({ taskId: worker.taskId, status, stateUncertain: status === "running" });
+    expect(prefix[0]?.control?.available).not.toBe(true);
+    expect(prefix[0]?.resultId).toBeUndefined();
+    expect(prefix[0]?.summary).toBeUndefined();
+  } finally { await provider.dispose!(); await fake.stop(); }
+});
+
 // @opencode/client SessionMessageIdle records an explicit native outcome. This
 // is stronger evidence than quiet/absent activity or an untyped legacy idle.
 for (const [outcome, status] of [["succeeded", "completed"], ["failed", "failed"], ["interrupted", "stopped"]] as const)
