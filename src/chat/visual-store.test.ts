@@ -115,10 +115,12 @@ describe("immutable visual snapshots", () => {
     const restarted = new VisualStore("/workspace", directory);
     let slotReads = 0;
     const originalReadFile = fs.readFile.bind(fs);
-    const readFile = spyOn(fs, "readFile").mockImplementation((...args: Parameters<typeof fs.readFile>) => {
-      if (String(args[0]).includes(".slot-")) slotReads++;
-      return originalReadFile(...args);
-    });
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]).includes(".slot-")) slotReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
     try {
       expect(await restarted.captureMany("a:c", "native-message", rejected, true)).toEqual([]);
       expect(slotReads).toBe(8);
@@ -136,10 +138,12 @@ describe("immutable visual snapshots", () => {
     store.setReader(async () => { sourceReads++; return png; });
     const requests = Array.from({ length: 8 }, (_, index) => ({ messageId: "first-part", input: file(`image-${index}.png`, index) }));
     const originalReadFile = fs.readFile.bind(fs);
-    const readFile = spyOn(fs, "readFile").mockImplementation((...args: Parameters<typeof fs.readFile>) => {
-      if (String(args[0]).includes(".slot-")) slotReads++;
-      return originalReadFile(...args);
-    });
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]).includes(".slot-")) slotReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
     try {
       const first = await store.captureMany("a:c", "native-message", requests, true);
       expect(first.every(snapshot => snapshot.status === "ready")).toBe(true);
