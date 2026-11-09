@@ -918,6 +918,119 @@ describe("watched-root bounded reader", () => {
     expect(await createWatchedVisualReader(entries, false)("ignored.png", workspace)).toEqual(png);
     await expect(createWatchedVisualReader(entries, false)("excluded.png", workspace)).rejects.toMatchObject({ missing: false });
   });
+  test.each([".git", "ordinary", "outside"].flatMap(target => [
+    { target, aliased: false }, { target, aliased: true },
+  ]))("parent swaps after the symlink walk cannot read or capture $target bytes (watch alias: $aliased)", async ({ target, aliased }) => {
+    const root = path.join(directory, "workspace");
+    const publicDirectory = path.join(root, "public");
+    const parkedDirectory = path.join(root, "parked");
+    const targetDirectory = target === "outside" ? path.join(directory, "outside") : path.join(root, target);
+    await fs.mkdir(publicDirectory, { recursive: true });
+    await fs.mkdir(targetDirectory);
+    const publicSource = "<svg><text>public</text></svg>";
+    const targetSource = `<svg><text>${target} target must not be captured</text></svg>`;
+    await fs.writeFile(path.join(publicDirectory, "diagram.svg"), publicSource);
+    await fs.writeFile(path.join(targetDirectory, "diagram.svg"), targetSource);
+    const watched = aliased ? path.join(directory, "alias") : root;
+    if (aliased) await fs.symlink(root, watched);
+    const workspace = await fs.realpath(root);
+    const entries = await resolveWatchRoots([watched], directory);
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("public/diagram.svg", workspace))).toBe(publicSource);
+    if (target === ".git") await expect(reader(".git/diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+    if (target === "ordinary") expect(new TextDecoder().decode(await reader("ordinary/diagram.svg", workspace))).toBe(targetSource);
+    if (target === "outside") await expect(reader(path.join(targetDirectory, "diagram.svg"), workspace)).rejects.toMatchObject({ missing: false });
+    for (const mode of ["read", "capture"] as const) {
+      let leafChecks = 0, swaps = 0;
+      const opened: string[] = [];
+      const originalLstat = fs.lstat.bind(fs);
+      const originalOpen = fs.open.bind(fs);
+      const lstat = spyOn(fs, "lstat").mockImplementation(new Proxy(originalLstat, {
+        async apply(original, thisArg, args) {
+          if (String(args[0]) === path.join(watched, "public", "diagram.svg") && ++leafChecks === 2) {
+            // The walk already checked the real parent and leaf. Swap only
+            // when the shared resolver begins its own leaf check, so it sees
+            // the redirected realpath rather than the walked candidate.
+            await fs.rename(publicDirectory, parkedDirectory);
+            await fs.symlink(targetDirectory, publicDirectory);
+            swaps++;
+          }
+          return Reflect.apply(original, thisArg, args);
+        },
+      }));
+      const open = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+        opened.push(String(args[0]));
+        return originalOpen(...args);
+      });
+      try {
+        if (mode === "read") {
+          await expect(reader("public/diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+        } else {
+          const store = new VisualStore(workspace, path.join(directory, "capture-state"));
+          store.setReader(reader);
+          const captured = await store.capture("a:c", "swapped-parent", file("public/diagram.svg"), false);
+          expect(captured).toMatchObject({ status: "unavailable" });
+          expect(captured.id).toBeUndefined();
+          const records = (await fs.readdir(store.directory)).filter(name => /^[a-f\d]{64}\.json$/.test(name));
+          expect(records).toHaveLength(1);
+          const record = JSON.parse(await fs.readFile(path.join(store.directory, records[0]!), "utf8"));
+          expect(record.snapshot).toEqual(captured);
+          expect(record).not.toHaveProperty("bytes");
+          expect(record).not.toHaveProperty("sourceBytes");
+        }
+        expect(swaps).toBe(1);
+        expect(opened).toEqual([]);
+      } finally {
+        lstat.mockRestore();
+        open.mockRestore();
+        if (swaps) {
+          await fs.unlink(publicDirectory);
+          await fs.rename(parkedDirectory, publicDirectory);
+        }
+      }
+    }
+  });
+  test.each(["parent symlink", "new inode"] as const)("a %s replacement after open is refused before any bytes are read", async replacement => {
+    const root = path.join(directory, "workspace");
+    const publicDirectory = path.join(root, "public");
+    const targetDirectory = path.join(root, ".git");
+    await fs.mkdir(publicDirectory, { recursive: true });
+    await fs.mkdir(targetDirectory);
+    const filename = path.join(publicDirectory, "diagram.svg");
+    await fs.writeFile(filename, svg);
+    await fs.writeFile(path.join(targetDirectory, "diagram.svg"), "<svg><text>denied</text></svg>");
+    const reader = createWatchedVisualReader(await resolveWatchRoots([root], directory));
+    const canonicalFilename = await fs.realpath(filename);
+    let reads = 0, swaps = 0, closed = false;
+    const originalOpen = fs.open.bind(fs);
+    const open = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (String(args[0]) !== canonicalFilename) return handle;
+      if (replacement === "parent symlink") {
+        await fs.rename(publicDirectory, path.join(root, "parked"));
+        await fs.symlink(targetDirectory, publicDirectory);
+      } else {
+        await fs.rename(filename, path.join(publicDirectory, "old.svg"));
+        await fs.writeFile(filename, "<svg><text>replacement</text></svg>");
+      }
+      swaps++;
+      return new Proxy(handle, { get(target, property) {
+        if (property === "read") return async (buffer: Uint8Array, offset: number, length: number, position: number) => {
+          reads++;
+          return target.read(buffer, offset, length, position);
+        };
+        if (property === "close") return async () => { closed = true; return target.close(); };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    });
+    try {
+      await expect(reader("public/diagram.svg", root)).rejects.toBeInstanceOf(VisualReadError);
+      expect(swaps).toBe(1);
+      expect(reads).toBe(0);
+      expect(closed).toBe(true);
+    } finally { open.mockRestore(); }
+  });
   test("tiny-file buffers track observed size plus one, and growth during reading is refused", async () => {
     const root = path.join(directory, "root");
     await fs.mkdir(root);

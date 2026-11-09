@@ -582,12 +582,19 @@ describe("streaming and session signals (D10, D11)", () => {
     const memory = createClaudeEventMemory();
     const started = normalizeClaudeMessage(stream("s1", 0, { type: "message_start", message: { id: "msg_1" } }), memory, "live");
     expect(started.outcome).toBe("ignored");
-    const textIdentity = { [CLAUDE_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1" };
     const opened = normalizeClaudeMessage(stream("s2", 0, { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }), memory, "live");
+    const openedUpdate = opened.updates[0];
+    if (openedUpdate?.kind !== "upsert") throw new Error("expected opened text block");
+    const turn = (openedUpdate.item as typeof openedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    expect(turn).toEqual({ completed: false });
+    const textIdentity = { [CLAUDE_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1", [CLAUDE_TURN]: turn };
     expect(opened.updates).toEqual([{ kind: "upsert", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     const first = normalizeClaudeMessage(stream("s3", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Autumn brings" } }), memory, "live");
     const second = normalizeClaudeMessage(stream("s4", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " a crisp chill." } }), memory, "live");
     expect(first.updates).toEqual([{ kind: "text", itemId: "message:stream:msg_1:0", identity: "message:stream:msg_1:0", mode: "incremental", text: "Autumn brings", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
+    const firstUpdate = first.updates[0];
+    if (firstUpdate?.kind !== "text" || !firstUpdate.item) throw new Error("expected text delta identity");
+    expect((firstUpdate.item as typeof firstUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
     expect(second.updates[0]).toEqual(expect.objectContaining({ kind: "text", itemId: "message:stream:msg_1:0", text: " a crisp chill." }));
     // Thinking deltas and a subagent's stream stay out.
     expect(normalizeClaudeMessage(stream("s5", 1, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }), memory, "live").outcome).toBe("ignored");
@@ -596,6 +603,10 @@ describe("streaming and session signals (D10, D11)", () => {
     const completed = normalizeClaudeMessage({ type: "assistant", uuid: "a1", timestamp: at(2), message: { id: "msg_1", role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "Autumn brings a crisp chill." }], usage: { input_tokens: 5, output_tokens: 9 } } }, memory, "live");
     expect(completed.updates[0]).toEqual({ kind: "remove", itemId: "message:stream:msg_1:0" });
     expect(completed.updates[1]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "message:a1", type: "assistant_message", markdown: "Autumn brings a crisp chill." }) });
+    const completedUpdate = completed.updates[1];
+    if (completedUpdate?.kind !== "upsert") throw new Error("expected completed text block");
+    expect((completedUpdate.item as typeof completedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
+    expect(turn.completed).toBe(false); // A text-block stop is not a turn end.
     // A second text block of the same API message consumes the next streamed index.
     normalizeClaudeMessage(stream("s7", 3, { type: "content_block_start", index: 2, content_block: { type: "text", text: "" } }), memory, "live");
     const next = normalizeClaudeMessage({ type: "assistant", uuid: "a2", timestamp: at(4), message: { id: "msg_1", role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "Second." }] } }, memory, "live");

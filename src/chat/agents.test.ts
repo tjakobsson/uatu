@@ -11,7 +11,7 @@ import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ConversationReplay, ReplaySubscription } from "./replay";
-import { applyChatEvent, projectionFromSnapshot } from "./projection";
+import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
 import { createWatchedVisualReader, VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
@@ -278,6 +278,159 @@ test.each(["status-error", "updated"] as const)("visual terminal refresh preserv
     expect(first.projection.status).toBe(kind === "status-error" ? "failed" : "completed");
     if (kind === "updated") expect(first.projection.conversation?.title).toBe("Renamed by provider");
     expect(applyChatEvent(first.projection, delivered[1]!).outcome).toBe("resync");
+  } finally { await h.cleanup(); }
+});
+
+test.each(["result", "updated", "footer"] as const)("paged-in Claude pending rows flush for every active subscriber on %s without another history retry", async completion => {
+  const h = await visualSubscriptionHarness("claude", [{ id: "newest-tool", type: "tool", createdAt: 10, name: "Write", status: "running" }]);
+  const second = await h.service.subscribe("claude:c");
+  const secondIterator = second.events[Symbol.asyncIterator]();
+  const entries = [
+    { kind: "assistant", uuid: "old", timestamp: 1, message: { id: "old-native", content: [{ type: "text", text: "![Old](old.png)" }] } },
+    { kind: "system", subtype: "turn_duration", uuid: "old-end", timestamp: 2, message: {} },
+    { kind: "assistant", uuid: "paged", timestamp: 3, message: { id: "paged-native", content: [{ type: "text", text: "![Current](later.png)" }] } },
+  ].map(entry => ({ ...entry, kind: entry.kind as "assistant" | "system", parentUuid: null, isSidechain: false, parentToolUseId: null }));
+  const page = normalizeTranscriptEntries(entries).items;
+  h.provider.history = async (_id, options) => {
+    // The adapter seeds a newly fetched older page silently: neither active
+    // subscriber receives an upsert for the assistant absent at handoff.
+    if (options?.cursor) h.projection.seed(page);
+    return { ...h.current(), items: options?.cursor ? page : h.projection.items().slice(-1) };
+  };
+  try {
+    expect(h.subscription.snapshot.items.map(item => item.id)).toEqual(["newest-tool"]);
+    expect(second.snapshot.items.map(item => item.id)).toEqual(["newest-tool"]);
+    const before = h.replay.latestCursor();
+    const loaded = await h.service.history("claude:c", { cursor: "older-running-turn" });
+    expect(h.replay.latestCursor()).toBe(before); // Enrollment publishes nothing.
+    const old = loaded.items.find(item => item.id === "message:old") as AssistantMessageItem;
+    const pending = loaded.items.find(item => item.id === "message:paged") as AssistantMessageItem;
+    expect(old.visuals?.[0]?.status).toBe("unavailable");
+    expect(pending.visuals?.[0]?.status).toBe("pending");
+    expect(h.files.reads).toBe(2);
+    let client = prependSnapshot(projectionFromSnapshot(h.subscription.snapshot), loaded);
+    h.files.available = true;
+    let terminal: ChatEvent | undefined;
+    if (completion === "updated") terminal = h.projection.conversationUpdate({ ...summary("c"), status: "completed", title: "Finished" });
+    else if (completion === "footer") terminal = h.projection.upsert({ id: "turn:done", type: "turn_status", createdAt: 20, status: "completed" });
+    else {
+      for (const update of normalizeClaudeMessage({ type: "result", uuid: "native-end", timestamp: 20, subtype: "success" }, createClaudeEventMemory(), "live").updates) terminal = h.projection.apply(update);
+    }
+    const delivered = await deliveredBatch(h.replay, h.iterator, event => {
+      const applied = applyChatEvent(client, event);
+      expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+      client = applied.projection;
+    });
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toEqual({ ...terminal!, conversationId: "claude:c", ...(terminal?.type === "conversation.updated" ? { conversation: { ...terminal.conversation, id: "claude:c", agent: { id: "claude", name: "claude" } } } : {}) });
+    expect(delivered[1]).toEqual({ generation: terminal!.generation, sequence: terminal!.sequence, conversationId: "claude:c", type: "resync", reason: "conversation-rewritten" });
+    expect((await secondIterator.next()).value).toEqual(delivered[0]);
+    expect((await secondIterator.next()).value).toEqual(delivered[1]);
+    expect(h.files.reads).toBe(3); // Completion, not the next history read, retried.
+    h.files.available = false;
+    const ready = await h.service.history("claude:c", { cursor: "older-running-turn" });
+    const current = ready.items.find(item => item.id === "message:paged") as AssistantMessageItem;
+    expect(current.markdown).toBe(pending.markdown);
+    expect(current.visuals?.[0]?.status).toBe("ready");
+    expect((ready.items.find(item => item.id === old.id) as AssistantMessageItem).visuals).toEqual(old.visuals);
+    expect(h.files.reads).toBe(3); // No retroactive capture of the completed old turn.
+    expect((await h.service.resolveVisual(current.visuals![0]!.id!))?.bytes).toEqual(Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]));
+  } finally { second.events.cancel(); await h.cleanup(); }
+});
+
+test("completion waits for an in-flight older page and cancellation releases its enrollment", async () => {
+  const h = await visualSubscriptionHarness("claude");
+  const abort = new AbortController();
+  const cancelled = await h.service.subscribe("claude:c", { signal: abort.signal });
+  const iterator = cancelled.events[Symbol.asyncIterator]();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const page = normalizeTranscriptEntries([{ kind: "assistant", uuid: "paged", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null, message: { id: "paged-native", content: [{ type: "text", text: "![Current](later.png)" }] } }]).items;
+  const readSnapshot = { ...h.current(), items: page };
+  h.provider.history = async () => { await gate; h.projection.seed(page); return readSnapshot; };
+  h.store.setReader(async () => {
+    h.files.reads++;
+    if (h.files.reads === 1) throw new VisualReadError(true);
+    return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  });
+  const registrations = () => (h.service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers;
+  try {
+    const loading = h.service.history("claude:c", { cursor: "older-running-turn" });
+    const terminal = h.projection.statusUpdate("completed");
+    const next = h.iterator.next(); // Begin mapping completion while history waits.
+    abort.abort();
+    expect(await iterator.next()).toEqual({ done: true, value: undefined });
+    expect(registrations().get("claude:c")?.size).toBe(1);
+    release();
+    expect(((await loading).items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+    expect((await next).value).toEqual({ ...terminal, conversationId: "claude:c" });
+    expect((await h.iterator.next()).value).toMatchObject({ type: "resync", sequence: terminal.sequence });
+    expect(h.files.reads).toBe(2);
+    await h.iterator.return?.();
+    expect(registrations().size).toBe(0);
+  } finally { release(); cancelled.events.cancel(); await h.cleanup(); }
+});
+
+test("history enrollment is conversation scoped and explicit cancellation removes only that subscriber", async () => {
+  const h = await visualSubscriptionHarness("claude");
+  const otherReplay = new ConversationReplay("g", "other", 1_000_000);
+  const otherProjection = new ConversationProjection(otherReplay);
+  otherProjection.status = "running";
+  const originalSubscribe = h.provider.subscribe;
+  h.provider.subscribe = async (id, options) => {
+    if (id !== "other") return originalSubscribe(id, options);
+    const handoff = otherReplay.handoff(cursor => ({ ...snapshot("other"), generation: "g", cursor, conversation: { ...summary("other"), status: otherProjection.status } }), options?.cursor, options?.signal);
+    return { snapshot: handoff.snapshot, events: handoff.subscription };
+  };
+  const other = await h.service.subscribe("claude:other");
+  const page = normalizeTranscriptEntries([{ kind: "assistant", uuid: "paged", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null, message: { id: "paged-native", content: [{ type: "text", text: "![Current](later.png)" }] } }]).items;
+  h.provider.history = async () => ({ ...h.current(), items: page });
+  const registrations = () => (h.service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers;
+  try {
+    await h.service.history("claude:c", { cursor: "older-running-turn" });
+    expect(h.files.reads).toBe(1);
+    h.files.available = true;
+    const terminal = otherProjection.statusUpdate("completed");
+    expect(await deliveredBatch(otherReplay, other.events[Symbol.asyncIterator]())).toEqual([{ ...terminal, conversationId: "claude:other" }]);
+    expect(h.files.reads).toBe(1); // Another conversation cannot flush c's row.
+    h.subscription.events.cancel();
+    expect(registrations().has("claude:c")).toBe(false);
+    expect(registrations().get("claude:other")?.size).toBe(1);
+    h.projection.statusUpdate("completed");
+    expect(await h.iterator.next()).toEqual({ done: true, value: undefined });
+    expect(h.files.reads).toBe(1); // Cancelled subscriptions cannot retry it.
+    other.events.cancel();
+    expect(registrations().size).toBe(0);
+  } finally { other.events.cancel(); await h.cleanup(); }
+});
+
+test("a paged assistant's replay fence delivers one same-sequence upsert without duplicating covered text", async () => {
+  const h = await visualSubscriptionHarness("claude");
+  const markdown = "![Current](later.png) ";
+  const page = normalizeTranscriptEntries([{ kind: "assistant", uuid: "paged", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null, message: { id: "paged-native", content: [{ type: "text", text: markdown }] } }]).items;
+  h.projection.seed(page);
+  const covered = h.projection.apply({ kind: "text", itemId: "message:paged", identity: "message:paged", mode: "incremental", text: "covered " })!;
+  h.provider.history = async () => h.current();
+  try {
+    const loaded = await h.service.history("claude:c", { cursor: "older-running-turn" });
+    expect((loaded.items[0] as AssistantMessageItem).markdown).toBe(markdown + "covered ");
+    let client = prependSnapshot(projectionFromSnapshot(h.subscription.snapshot), loaded);
+    const alreadyCovered = await deliveredBatch(h.replay, h.iterator, event => {
+      const applied = applyChatEvent(client, event);
+      expect(applied.outcome).toBe("applied");
+      client = applied.projection;
+    });
+    expect(alreadyCovered).toHaveLength(1);
+    expect(alreadyCovered[0]).toMatchObject({ generation: covered.generation, sequence: covered.sequence, conversationId: "claude:c", type: "item.upsert", item: { markdown: markdown + "covered " } });
+    expect((client.items[0] as AssistantMessageItem).markdown).toBe(markdown + "covered ");
+    const text = "![Second](second.png)";
+    const original = h.projection.apply({ kind: "text", itemId: "message:paged", identity: "message:paged", mode: "incremental", text })!;
+    const delivered = await deliveredBatch(h.replay, h.iterator);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ type: "item.upsert", sequence: original.sequence, item: { markdown: markdown + "covered " + text, visuals: [{ status: "pending" }, { status: "pending" }] } });
+    const applied = applyChatEvent(client, delivered[0]!);
+    expect(applied.outcome).toBe("applied");
+    expect((applied.projection.items[0] as AssistantMessageItem).markdown).toBe(markdown + "covered " + text);
   } finally { await h.cleanup(); }
 });
 

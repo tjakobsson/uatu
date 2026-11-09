@@ -59,14 +59,20 @@ export function createWatchedVisualReader(entries: WatchEntry[], respectGitignor
         const stat = await visualLstat(candidate);
         throw new VisualReadError(stat === null);
       }
-      if (!containsVisualFile(canonicalWorkspace, await fs.realpath(resolved.filePath))) throw new VisualReadError();
+      // The shared resolver permits contained symlinks for static files, but
+      // captures do not. Bind its result to the candidate whose descendants
+      // passed the no-symlink walk, even if a parent changed during resolution.
+      if (resolved.filePath !== canonicalCandidate) throw new VisualReadError();
+      const resolvedRealPath = await fs.realpath(resolved.filePath);
+      if (resolvedRealPath !== canonicalCandidate || !containsVisualFile(canonicalWorkspace, resolvedRealPath)) throw new VisualReadError();
       const handle = await fs.open(resolved.filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const before = await handle.stat();
         if (!before.isFile() || before.size > VISUAL_MAX_BYTES) throw new VisualReadError();
         const again = await resolveStaticFileRequest(pathname, [entry], { respectGitignore });
         if (again.status !== "found" || again.filePath !== resolved.filePath) throw new VisualReadError();
-        if (!containsVisualFile(canonicalWorkspace, await fs.realpath(again.filePath))) throw new VisualReadError();
+        const currentRealPath = await fs.realpath(again.filePath);
+        if (currentRealPath !== canonicalCandidate || !containsVisualFile(canonicalWorkspace, currentRealPath)) throw new VisualReadError();
         const current = await fs.stat(again.filePath);
         if (current.dev !== before.dev || current.ino !== before.ino) throw new VisualReadError();
         // One extra byte detects growth without allocating the full limit for

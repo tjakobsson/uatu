@@ -87,6 +87,11 @@ concurrent image reads.
 - **THEN** no file content is imported or served as a visual
 - **AND** chat preserves an inert reference and an explanation
 
+#### Scenario: A parent directory changes during capture
+- **WHEN** a checked image path is redirected through a replacement parent symlink before resolution or reading
+- **THEN** resolution and revalidation must still identify the canonical symlink-checked candidate
+- **AND** redirected bytes are not imported into an immutable capture, even when the target remains inside the workspace
+
 #### Scenario: A reply exceeds the visual bounds
 - **WHEN** an image exceeds 10 MiB or a reply contains more than eight visual occurrences
 - **THEN** excess content is refused with an explanation
@@ -213,6 +218,11 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **WHEN** history is loaded while a newer Claude turn is running
 - **THEN** visuals in completed turns are terminal independently of the current conversation status
 - **AND** text-block completion does not finalize visuals in the still-running turn, even when that turn spans cursor pages
+
+#### Scenario: A pending visual is paged in after subscribing
+- **WHEN** a client loads an older page containing a pending visual in the current turn after its subscription handoff
+- **THEN** the real turn's completion still performs its one completion retry and signals the visual update
+- **AND** unrelated completed turns and cancelled subscriptions are not enrolled for that retry
 
 #### Scenario: A shorthand image reference completes before a long-running tool
 - **WHEN** a supported shorthand reference closes during the streaming enrichment cadence
