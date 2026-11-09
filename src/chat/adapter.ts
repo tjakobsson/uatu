@@ -1798,6 +1798,18 @@ export class ChatAdapter {
       const item = items[index]!;
       if (item.type !== "background_task" || item.status !== "running") continue;
       const current = projection.find(candidate => candidate.id === item.id);
+      // A covered current occurrence can withdraw a history-only outcome.
+      // Retained completion is not a parent report, and sparse upsert merging
+      // must not restore it after the provider withholds that exact inference.
+      const source = page.workerSource && page.completeItems?.find(candidate => candidate.id === item.id);
+      if (coverage && !coverage.changed(item.id) && current?.type === "background_task" && current.status !== "running"
+        && !current.resultId && current.summary === undefined && current.terminalReportedAt === undefined
+        && source?.type === "background_task" && source.status === "running" && source.stateUncertain
+        && source.childConversationId === current.childConversationId && source.activity?.kind === "unavailable"
+        && source.activity.executionId !== undefined && source.activity.executionId === current.activity?.executionId) {
+        revokedRows.add(item.id);
+        continue;
+      }
       if (current?.type === "background_task" && current.status !== "running" && (!options.workers || coverage?.changed(item.id))) items[index] = current;
     }
     // Likewise the wakeup snapshot: a wakeup that fired or was cancelled

@@ -1184,6 +1184,17 @@ attribution counts the complete native parent's competing occurrences even when
 a staged parent revert hides their rows. Prefix visibility cannot turn an
 ambiguous child outcome into a terminal result; launches proven to belong to
 separate child intervals or other children do not compete for that outcome.
+Foreground subagent invocations also supply negative interval evidence for the
+same owned child, without becoming worker rows or outcome targets. Read-owned
+sources retain the consumed parent launch inventory: a processed new or changed
+relevant launcher revokes dependent outcome recovery before publication, while
+ordinary parent text and unchanged launch replays do not.
+The adapter also retracts an already cached history-only completion when the
+covered complete source returns the same qualified execution as unresolved.
+That replacement clears stale terminal fields instead of merging them back.
+Explicit parent reports and terminal updates received during the read retain
+their existing precedence; an unguarded provider or ambiguous identity supplies
+no such replacement authority.
 This fallback invents neither result text nor a parent result ID. Before reading a
 child transcript, recovery registers it on the parent's bounded read-owned
 source. When explicit outcomes are present, a fresh scoped child record supplies
@@ -1208,7 +1219,9 @@ mutations. Boundary-only folds release their outcome dependency so
 compatible live activity and accounting can advance. History-only launches
 retain a separate fence against newly processed terminal execution events;
 retained native occurrences instead project their current lifecycle at
-publication. Other folds' positive
+publication. Terminal markers are source-owned data shared with the snapshot,
+not per-read function identities; their lifetime remains bounded by source
+leases. Other folds' positive
 outcome dependencies remain retained. Dependencies retire with their owning leases. Existing
 ownership, stream-generation and Stop fences remain required.
 Staged-parent visibility rereads own an additional bounded source lease, since

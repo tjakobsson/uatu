@@ -3,6 +3,50 @@ import { createOpenCodeV2Provider } from "./provider";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 
 for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+for (const scenario of ["overlapping", "separate-interval", "different-child"] as const)
+test(`${read} counts a ${scenario} foreground invocation only as child-outcome counterevidence`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, otherChild: string | undefined;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0];
+      first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const foreground = structuredClone(first); foreground.id = "foreground-message"; foreground.time = { created: 15 };
+      const tool = foreground.content[0]; tool.id = "foreground-call";
+      tool.time = scenario === "separate-interval" ? { created: 30, ran: 31, completed: 32 } : { created: 15, ran: 16, completed: 25 };
+      tool.state.input.background = false; tool.state.metadata.status = "completed";
+      if (scenario === "different-child") tool.state.metadata.sessionID = otherChild;
+      return Response.json({ data: [first, foreground], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-outcome", type: "idle", time: { created: 20 }, outcome: "succeeded" },
+      ...(scenario === "separate-interval" ? [{ id: "second-outcome", type: "idle", time: { created: 40 }, outcome: "failed" }] : []),
+    ], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  try {
+    parent = (await provider.createSession("Foreground outcome competition")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    fake.settleWorker(child, "completed", "No parent report");
+    if (scenario === "different-child") {
+      otherChild = fake.launchRequestWorker(parent).childId;
+      fake.settleWorker(otherChild, "completed", "No unrelated parent report");
+    }
+    const tasks = read === "listMessages" ? (await provider.listMessages(parent, { limit: 100 })).items.filter(item => item.type === "background_task")
+      : await provider.reconcileBackgroundTasks!(parent, { fresh: true });
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ taskId: worker.taskId, status: scenario === "overlapping" ? "running" : "completed", stateUncertain: scenario === "overlapping" });
+    expect(tasks[0]?.control?.available).not.toBe(true);
+    expect(tasks[0]?.resultId).toBeUndefined();
+    expect(tasks[0]?.summary).toBeUndefined();
+  } finally { await provider.dispose!(); await fake.stop(); }
+});
+
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
 for (const scenario of ["straddling", "separate-intervals", "different-child"] as const)
 test(`${read} cannot gain a child outcome by hiding a competing parent launch (${scenario})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

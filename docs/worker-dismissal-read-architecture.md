@@ -34,6 +34,14 @@ still retains a terminal-event fence when no native occurrence was retained.
 Staging a parent revert hides rows without removing their native occurrence
 evidence from child-outcome attribution. A hidden overlapping launch therefore
 still prevents an ambiguous outcome from authorizing dismissal of a visible row.
+Overlapping foreground invocations of the same owned child also withhold outcome
+attribution without adding worker rows. Processed changes to the consumed parent
+launch inventory revoke dependent outcome sources; ordinary parent output and
+unchanged launcher replays do not require a quiet window.
+A previously cached child-history completion cannot override a current covered
+unresolved row for that exact execution. The adapter replaces that report-free
+inference rather than merging its terminal fields back; explicit parent reports
+and concurrent terminal updates keep their existing precedence.
 
 ## Browser consistency and recovery
 
