@@ -1160,6 +1160,19 @@ When following is paused, layout changes elsewhere SHALL preserve the unchanged 
 - **AND** actual native movement, renewed gestures, direction changes and layout corrections still capture fresh intent where needed
 - **AND** upward input interrupts a new latest-content request immediately
 
+#### Scenario: History geometry avoids measuring every loaded row
+- **WHEN** browser hit testing can resolve the viewport's reading row
+- **THEN** semantic geometry measures the viewport row, retained row and explicitly activated row rather than all loaded history
+- **AND** offscreen retained and explicitly activated rows remain available for anchoring
+- **AND** unavailable or unusable hit testing falls back without discarding the reading anchor
+
+#### Scenario: Manual arrival settles at the native bottom
+- **WHEN** a manual flick reaches the newest message with elastic overscroll or subpixel settling
+- **THEN** idle follow frames do not clamp or round that native motion
+- **AND** elastic rebound alone does not pause following
+- **AND** deliberate upward input still pauses immediately
+- **AND** subsequent appended content follows normally
+
 #### Scenario: Shell output initially follows independently
 - **WHEN** a shell viewport first shows output and further output arrives
 - **THEN** it shows the bottom of its scrollback
@@ -2777,7 +2790,7 @@ Cancelling the turn SHALL leave pending steers with the agent and SHALL present 
 
 The pending card SHALL have an always-visible count header outside its own contained content scrollport. Worker and pending cards SHALL share only a height budget, never an aggregate scroller, as specified by Desktop work shares measured panel space. With both cards collapsed, desktop normally uses 40% of measured panel height capped at 25rem; touch normally uses 35% of visual height, 25% at tablet widths from 48rem, or 24% during hardware editing. With either expanded, the measured expanded-card policy in Desktop work shares measured panel space SHALL supersede these caps and the earlier 40% phone/35% tablet transcript reserves. The pending list SHALL show a bottom fade only while content remains below. Entries SHALL retain distinct Steer/Queue badges, Paused chips and existing timing labels. Pending actions SHALL retain the approved compact 32px touch / 36px desktop targets, independent 8px gaps, visible focus outlines and contextual accessible names. Successful mutations SHALL not add confirmation notices; refusals and unknown receipts SHALL retain operation-scoped feedback without duplicate red errors.
 
-When pending messages exist, software-keyboard mode or short touch landscape SHALL collapse the work dock to a pending-count summary rather than hide it. Any paused-steer batch Send action SHALL retain a 44px target, and the count-only replacement warning SHALL remain readable while typing or editing a pending entry. Entry details and the routine model-at-delivery note MAY be hidden in this compact state; the replacement warning SHALL NOT be hidden. Dock growth SHALL reserve its final bounded layout height before a visual reveal, respect reduced motion, and preserve a remote-update reading anchor and deliberate bottom pinning. Sending a prompt SHALL retain the existing explicit jump-to-latest behavior.
+When pending messages exist, software-keyboard mode or short touch landscape SHALL collapse the work dock to a pending-count summary rather than hide it. Any paused-steer batch Send action SHALL retain a 44px target, and the count-only replacement warning SHALL remain readable while typing or editing a pending entry. Entry details and the routine model-at-delivery note MAY be hidden in this compact state; the replacement warning SHALL NOT be hidden. Dock growth SHALL reserve its final bounded layout height before a visual reveal, respect reduced motion, and preserve a remote-update reading anchor and deliberate bottom pinning. Sending a prompt SHALL preserve the current reading position and follow intent: paused readers remain paused, while readers already following continue to follow latest content.
 
 When the workspace attaches to a conversation, or reconnects to the agent, it SHALL reconcile the pending steers with the agent's own list, so the dock shows steers raised while the stream was interrupted or by another client.
 
@@ -3954,11 +3967,11 @@ Compact desktop density SHALL require selected desktop UI mode and a primary fin
 - **AND** idle or non-choice drafts SHALL show ordinary send/newline guidance without changing pointer hold timing
 
 ### Requirement: Desktop expanded work retains a useful conversation band
-Compact desktop expanded cards SHALL prefer 35% of measured remaining layout height for conversation, bounded to 200–280px, rather than the comfortable 20%/32–96px reserve above. Whole measured headers/actions MAY reduce this reserve to the existing lesser-of-16px-or-10% emergency floor. Independent panel scrolling, headers, selected-pane short-window priority and reachable composer/Stop SHALL remain intact. Comfortable/touch expanded allocation SHALL remain unchanged.
+Compact desktop expanded cards SHALL prefer 50% of measured remaining layout height for conversation, bounded to 200–420px, rather than the comfortable 20%/32–96px reserve above. Whole measured headers/actions MAY reduce this reserve to the existing lesser-of-16px-or-10% emergency floor. Independent panel scrolling, headers, selected-pane short-window priority and reachable composer/Stop SHALL remain intact. Comfortable/touch expanded allocation SHALL remain unchanged.
 
 #### Scenario: Expanded desktop work shares remaining space with conversation
 - **WHEN** two long work panels expand with 720px remaining after fixed chrome and fitting action minima
-- **THEN** conversation retains 252px and the cards share 468px through separate scrollports
+- **THEN** conversation retains 360px and the cards share 360px through separate scrollports
 - **AND** short windows yield conversation space to measured whole headers/actions rather than clipping Stop
 
 ### Requirement: Side answers minimise without losing their answer

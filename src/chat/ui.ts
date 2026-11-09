@@ -865,12 +865,12 @@ export function initChat(api = new ChatApiClient()): void {
   const questionOwnershipKey = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>) =>
     `${item.conversationId ?? source.conversationId}\u0000${item.requestId}`;
 
-  const geometry = (preserveAnchor = true): AnchorGeometry => timelineGeometry(timeline, items, preserveAnchor ? anchor.currentAnchor() : null);
+  const geometry = (preserveAnchor = true, preferredItemId?: string): AnchorGeometry => timelineGeometry(timeline, items, preserveAnchor ? anchor.currentAnchor() : null, preferredItemId);
   // Every caller sits behind a guard on the drill-down elements existing
   // (renderChild and the wiring at the bottom), so the assertions cannot
   // fire — and a fallback to the parent's scroller would anchor the child
   // against the wrong geometry if they somehow did.
-  const childGeometry = (preserveAnchor = true): AnchorGeometry => timelineGeometry(drilldownTimeline!, drilldownItems!, preserveAnchor ? childAnchor.currentAnchor() : null);
+  const childGeometry = (preserveAnchor = true, preferredItemId?: string): AnchorGeometry => timelineGeometry(drilldownTimeline!, drilldownItems!, preserveAnchor ? childAnchor.currentAnchor() : null, preferredItemId);
   // The pinned fast path. Pinned means "keep the end in view", which needs
   // the scroll extents and nothing per item — and the per-item pass is a
   // forced layout of the whole transcript (a rect per item). During a
@@ -882,7 +882,7 @@ export function initChat(api = new ChatApiClient()): void {
   const extentsOf = (scroller: HTMLElement): AnchorGeometry =>
     ({ scrollTop: scroller.scrollTop, clientHeight: scroller.clientHeight, scrollHeight: scroller.scrollHeight, items: [] });
   const parentScroll = new CoordinatedScrollOwner(timeline, {
-    anchor, measure: (includeItems, preserveAnchor) => includeItems ? geometry(preserveAnchor) : extentsOf(timeline), active: chatSurfaceActive,
+    anchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? geometry(preserveAnchor, preferredItemId) : extentsOf(timeline), active: chatSurfaceActive,
     followMotion: scrollFollowMotion,
     onChange: () => {
       if (projection) {
@@ -905,7 +905,7 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownTimeline.after(childLatest);
   }
   const childScroll = drilldownTimeline ? new CoordinatedScrollOwner(drilldownTimeline, {
-    anchor: childAnchor, measure: (includeItems, preserveAnchor) => includeItems ? childGeometry(preserveAnchor) : extentsOf(drilldownTimeline),
+    anchor: childAnchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? childGeometry(preserveAnchor, preferredItemId) : extentsOf(drilldownTimeline),
     active: () => chatSurfaceActive() && !!child,
     followMotion: scrollFollowMotion,
     onChange: () => { if (childLatest) childLatest.hidden = !childAnchor.hasUnseen(); },

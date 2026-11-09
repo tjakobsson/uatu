@@ -8,7 +8,7 @@ export interface CoordinatedScrollOptions {
   anchor: CoordinatedScrollAnchor;
   /** Include semantic items when requested, even if pinned. Preserve the
    * retained reading location by default; false captures fresh reader intent. */
-  measure: (includeItems: boolean, preserveAnchor?: boolean) => AnchorGeometry;
+  measure: (includeItems: boolean, preserveAnchor?: boolean, preferredItemId?: string) => AnchorGeometry;
   active?: () => boolean;
   onChange?: () => void;
   /** Defaults to instant. Read each frame so reduced-motion changes finish an in-flight follow. */
@@ -85,7 +85,9 @@ export class CoordinatedScrollOwner {
   }
 
   private active(): boolean { return !this.disposed && (this.options.active?.() ?? true); }
-  private measure(): AnchorGeometry { return this.options.measure(!this.options.anchor.isPinned()); }
+  private measure(preferredItemId?: string): AnchorGeometry {
+    return this.options.measure(!this.options.anchor.isPinned(), undefined, preferredItemId);
+  }
 
   /** Coalesces render, resize, toggle and viewport work. Reads geometry at execution. */
   request(hasNewContent = false): void {
@@ -112,9 +114,29 @@ export class CoordinatedScrollOwner {
     this.frame = null;
     const geometry = this.measure();
     const following = this.options.anchor.isPinned();
+    // WebKit exposes native rubber-banding beyond the bottom through scrollTop.
+    // A follow correction there clamps the compositor's excursion and kills its
+    // settling motion. Explicit placement and control reveals still take over.
+    if (following && geometry.scrollTop > Math.max(0, geometry.scrollHeight - geometry.clientHeight)
+      && this.positioned && !this.instantNext && !this.revealTarget && !this.heldTarget) {
+      this.motion = null;
+      this.newContent = false;
+      this.previous = geometry;
+      this.options.onChange?.();
+      return;
+    }
     const target = this.options.anchor.afterMutation(geometry, this.newContent);
     this.newContent = false;
-    const destination = Math.max(0, Math.min(target, geometry.scrollHeight - geometry.clientHeight));
+    const limit = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
+    // A paused anchor can also be inside native rubber-banding. If layout
+    // asks for no movement, clamping its unchanged position is still a write
+    // that would interrupt the gesture. Actual corrections remain bounded.
+    const unchangedElastic = this.positioned && !this.instantNext && !this.revealTarget && !this.heldTarget
+      // Subtracting a fractional retained offset can introduce roundoff even
+      // with unchanged geometry; a millionth of a CSS pixel is not movement.
+      && Math.abs(target - geometry.scrollTop) < 1e-6 && (target < 0 || target > limit);
+    const destination = unchangedElastic ? target : Math.max(0, Math.min(target, limit));
+    const exactPlacement = !this.positioned || this.instantNext || this.motion !== null;
     let top = destination;
     if (this.positioned && !this.instantNext && !this.revealTarget && !this.heldTarget
       && following && this.options.followMotion?.() === "smooth"
@@ -142,7 +164,7 @@ export class CoordinatedScrollOwner {
     const reveal = this.resolveReveal(top);
     top = reveal.top;
     if (Math.abs(this.scroller.scrollTop - top) > 0.5
-      || (!this.motion && this.options.anchor.isPinned() && this.scroller.scrollTop !== top)) {
+      || (exactPlacement && !this.motion && this.options.anchor.isPinned() && this.scroller.scrollTop !== top)) {
       this.lastCorrectionFrame = timestamp;
       this.scroller.scrollTop = top;
     }
@@ -302,7 +324,7 @@ export class CoordinatedScrollOwner {
     if (this.active() && !this.options.anchor.isPinned()) {
       this.touchPaused = false;
       // Do not overwrite the pre-mutation anchor while a correction is waiting.
-      if (this.frame === null) this.options.anchor.beforeMutation(this.measure(), preferredItemId);
+      if (this.frame === null) this.options.anchor.beforeMutation(this.measure(preferredItemId), preferredItemId);
     }
   }
 
@@ -359,8 +381,13 @@ export class CoordinatedScrollOwner {
     const geometry = this.options.measure(false);
     const previous = this.previous;
     const changedExtent = geometry.scrollHeight !== previous.scrollHeight || geometry.clientHeight !== previous.clientHeight;
-    const movement = geometry.scrollTop < previous.scrollTop - 0.5 ? "up"
-      : geometry.scrollTop > previous.scrollTop + 0.5 ? "down" : "none";
+    const bottom = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
+    // Elastic rebound is not upward reader intent. Compare positions inside
+    // their native ranges; explicit wheel/touch/key intent still pauses first.
+    const currentTop = Math.max(0, Math.min(geometry.scrollTop, bottom));
+    const previousTop = Math.max(0, Math.min(previous.scrollTop, previous.scrollHeight - previous.clientHeight));
+    const movement = currentTop < previousTop - 0.5 ? "up"
+      : currentTop > previousTop + 0.5 ? "down" : "none";
     if (this.heldTarget) {
       // The held control's position is the one this scroller has. A scroll we
       // did not write — WebKit's autoscroll as the caret is dragged to the
@@ -374,8 +401,11 @@ export class CoordinatedScrollOwner {
       this.previous = geometry;
       return;
     }
-    const bottom = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
-    const clamped = changedExtent && bottom < previous.scrollTop - 0.5 && Math.abs(geometry.scrollTop - bottom) <= 1;
+    // A shrinking extent can leave WebKit beyond its new bottom until native
+    // rebound finishes. Keep existing follow intent; explicit upward input has
+    // already paused the anchor before this event.
+    const clamped = changedExtent && bottom < previous.scrollTop - 0.5
+      && (Math.abs(geometry.scrollTop - bottom) <= 1 || (this.options.anchor.isPinned() && geometry.scrollTop > bottom));
     if (clamped) {
       // A pending upward gesture can have no native movement at a boundary.
       // It must not turn a later maximize/layout clamp into a new anchor.
@@ -394,7 +424,8 @@ export class CoordinatedScrollOwner {
       // Catch-up leaves room for a reader to move toward latest themselves.
       // Only upward intent pauses following; rebase from their new position
       // so an older animation curve cannot pull their forward progress back.
-      if (this.motion) {
+      if (geometry.scrollTop >= bottom - 0.5) this.motion = null;
+      else if (this.motion) {
         this.motion.from = geometry.scrollTop;
         this.motion.started = this.motion.sampled;
       }

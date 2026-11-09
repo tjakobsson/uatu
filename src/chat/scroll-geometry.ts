@@ -168,19 +168,116 @@ function insideClosedDetails(element: HTMLElement): boolean {
   return false;
 }
 
-/** Read geometry only; the coordinated owner remains the sole scroll writer. */
-export function timelineGeometry(scroller: HTMLElement, container: HTMLElement, retained: TimelineAnchor | null): AnchorGeometry {
+const ROW_SELECTOR = "[data-chat-item-id]";
+
+function presentedRow(element: HTMLElement): boolean {
+  return !element.closest(".chat-shell-output") && !insideClosedDetails(element);
+}
+
+/**
+ * Discover the first presented row without walking old history. Point lookup
+ * uses the content band's edges, including inset/narrow aligned messages;
+ * ancestors preserve the existing document-order choice of an activity group
+ * before its nested tool rows. At most three columns in four text-line bands
+ * are probed; later hits require a nonvisible immediate predecessor as proof.
+ * No usable hit (hidden/occluded surface or an older DOM) means full fallback,
+ * not empty geometry: losing a reader's anchor is worse than a slow read.
+ */
+function viewportRow(scroller: HTMLElement, container: HTMLElement, bounds: DOMRect, measure: (element: HTMLElement) => DOMRect): HTMLElement | null {
+  const document = scroller.ownerDocument;
+  if (typeof document.elementsFromPoint !== "function" && typeof document.elementFromPoint !== "function") return null;
+  const view = document.defaultView;
+  const content = container.getBoundingClientRect();
+  const clientLeft = bounds.left + (scroller.clientLeft || 0), clientTop = bounds.top + (scroller.clientTop || 0);
+  const viewportTop = Math.max(0, clientTop);
+  const top = Math.max(viewportTop, content.top), bottom = Math.min(clientTop + scroller.clientHeight, view?.innerHeight ?? bounds.bottom, content.bottom);
+  const left = Math.max(0, clientLeft, content.left), right = Math.min(clientLeft + (scroller.clientWidth || bounds.width), content.right, view?.innerWidth ?? bounds.right);
+  if (bottom <= top || right <= left) return null;
+  const inset = Math.min(1, (right - left) / 4);
+  const xs = [(left + right) / 2, right - inset, left + inset];
+  const firstY = top + Math.min(0.01, (bottom - top) / 2);
+  // Only consult computed style for a gap, not the usual top-band hit.
+  let lineHeight = 0;
+  for (let band = 0; band < 4; band++) {
+    if (band === 1) {
+      const style = view?.getComputedStyle?.(scroller);
+      lineHeight = Number.parseFloat(style?.lineHeight ?? "") || Number.parseFloat(style?.fontSize ?? "");
+    }
+    if (band > 0 && !(lineHeight > 0)) break;
+    const y = firstY + band * lineHeight;
+    if (y >= bottom) break;
+    for (const x of xs) {
+      const hits = typeof document.elementsFromPoint === "function"
+        ? document.elementsFromPoint(x, y) : [document.elementFromPoint(x, y)];
+      for (const hit of hits) {
+        if (!hit || !container.contains(hit)) continue;
+        let row: HTMLElement | null = null;
+        for (let element: Element | null = hit; element && element !== container; element = element.parentElement) {
+          if (element.matches(ROW_SELECTOR) && presentedRow(element as HTMLElement)) row = element as HTMLElement;
+        }
+        if (!row) continue;
+        // Overflowing controls remain hit-testable after their owning row has
+        // left the viewport (for example the user bubble's Revert action).
+        // A descendant hit alone is not evidence of a visible reading row.
+        const candidate = measure(row);
+        if (candidate.bottom <= candidate.top || candidate.bottom <= viewportTop || candidate.top >= bottom) continue;
+        if (band === 0) return row;
+        // A hit below the reading edge may have skipped a narrow message.
+        // Check one adjacent root row only: never descend into closed groups
+        // or walk backwards through old history. Uncertain structure falls
+        // back to the original scan instead of choosing the wrong anchor.
+        if (row.parentElement !== container) return null;
+        const previous = row.previousElementSibling as HTMLElement | null;
+        if (!previous) return row;
+        if (!previous.matches(ROW_SELECTOR) || !presentedRow(previous)) return null;
+        const rect = measure(previous);
+        return rect.bottom > rect.top && rect.bottom <= viewportTop ? row : null;
+      }
+    }
+  }
+  return null;
+}
+
+/** Read geometry only; the coordinated owner remains the sole scroll writer.
+ * Normal reads measure the viewport row, retained row and explicit control row,
+ * plus one adjacent witness in a gap. Offscreen retained keys remain resolvable
+ * without materializing history. Rectangle reuse lasts for this read only.
+ */
+export function timelineGeometry(scroller: HTMLElement, container: HTMLElement, retained: TimelineAnchor | null, preferredItemId?: string): AnchorGeometry {
   const bounds = scroller.getBoundingClientRect();
-  const rows = Array.from(container.querySelectorAll<HTMLElement>("[data-chat-item-id]"))
+  // Nearby-row validation and the final projection share each rectangle read.
+  const measured = new Map<HTMLElement, DOMRect>();
+  const measure = (element: HTMLElement): DOMRect => {
+    let rect = measured.get(element);
+    if (!rect) {
+      const finish = measureChatWork("item-geometry");
+      rect = element.getBoundingClientRect();
+      finish();
+      measured.set(element, rect);
+    }
+    return rect;
+  };
+  const visibleRow = viewportRow(scroller, container, bounds, measure);
+  const selected = new Set<HTMLElement>();
+  if (visibleRow) {
+    selected.add(visibleRow);
+    for (const id of [retained?.itemId, preferredItemId]) {
+      if (!id) continue;
+      // Hex escapes also handle quotes, backslashes and unusual provider IDs;
+      // no global CSS.escape dependency in older embedded DOMs.
+      const escaped = Array.from(id, character => `\\${character.codePointAt(0)!.toString(16)} `).join("");
+      for (const row of container.querySelectorAll<HTMLElement>(`[data-chat-item-id="${escaped}"]`)) selected.add(row);
+    }
+  }
+  const rows = (visibleRow ? Array.from(selected).sort((a, b) => a.compareDocumentPosition(b) & 4 ? -1 : 1)
+    : Array.from(container.querySelectorAll<HTMLElement>(ROW_SELECTOR)))
     // Check structural presentation, not checkVisibility(contentVisibilityAuto):
     // offscreen auto rows still matter for retained anchors. This also works
     // without the optional checkVisibility API, and preserves a closed row's
     // own summary and descendants inside an ancestor's first summary.
-    .filter(element => !element.closest(".chat-shell-output") && !insideClosedDetails(element))
+    .filter(presentedRow)
     .map(element => {
-      const finish = measureChatWork("item-geometry");
-      const rect = element.getBoundingClientRect();
-      finish();
+      const rect = measure(element);
       return { element, id: element.dataset.chatItemId!, top: rect.top - bounds.top, bottom: rect.bottom - bounds.top };
     }).filter(row => row.bottom > row.top);
   const visible = rows.find(row => row.bottom > 0 && row.top < scroller.clientHeight);

@@ -1068,6 +1068,10 @@ Touch work tracks share `#chat-work-dock`, bounded by `--chat-visual-height`
 independent Workers/Pending content scrollers separate from the transcript.
 Desktop queue height uses 40% of the measured panel height, not a fixed rem
 estimate of the viewport.
+Expanded fine-pointer desktop cards instead share the measured remaining space:
+the transcript prefers half, bounded to 200–420px. Measured work/action floors
+and short-window emergency behavior still take precedence. Comfortable/touch
+allocation is unchanged; cards retain independent scrolling and visible headers.
 Short visual bands compact the header/composer; keyboard/short-landscape mode
 keeps both cards available with compact chrome. The outer surface normally
 cannot scroll; only physically insufficient bands allow native scrolling to
@@ -1104,6 +1108,10 @@ Reading geometry excludes descendants hidden by closed disclosure groups, even
 when content-visibility supplies nonzero placeholder boxes. A closed row's own
 summary remains eligible; offscreen retained rows are not discarded merely
 because the browser skips their rendering work.
+When browser hit testing is usable, geometry resolves the first viewport row,
+the retained row and any explicitly activated row directly instead of measuring
+all loaded history. Unavailable or unusable hit testing retains the full-scan
+fallback; Markdown and character anchors use the same geometry in either path.
 Following measures only scroll extents, not transcript items or markdown blocks.
 Native history scrolling classifies movement from extents before taking at most
 one semantic measurement for that event. Continuous upward touch movement captures
@@ -1114,6 +1122,10 @@ Following uses bounded, interruptible movement rather than repeatedly restarting
 native smooth scrolling. Reduced motion disables animation; initial presentation
 and saved-position restoration are direct. Each conversation/task view retains
 its own reading anchor and follow intent within the client session.
+Native bottom settling remains browser-owned: follow frames do not clamp an
+elastic excursion or round an idle subpixel arrival to the exact bottom.
+Rebound alone does not pause following; deliberate upward input still does.
+Initial placement, control reveals and requested instant placement remain direct.
 
 Run the focused unit/UI and browser checks with:
 
@@ -1121,7 +1133,8 @@ Run the focused unit/UI and browser checks with:
 bun test src/chat/anchor.test.ts src/chat/coordinated-scroll.test.ts \
   src/chat/ui.test.ts src/chat/shell-output.test.ts src/chat/shell-output-window.test.ts
 bun run test:e2e:perf -- tests/e2e/chat-scroll-contract.e2e.ts \
-  tests/e2e/chat-follow-stability.e2e.ts tests/e2e/chat-sync-scroll.e2e.ts
+  tests/e2e/chat-history-scroll.e2e.ts tests/e2e/chat-follow-stability.e2e.ts \
+  tests/e2e/chat-sync-scroll.e2e.ts
 ```
 
 The contract suite measures actual intermediate positions,
@@ -1136,6 +1149,8 @@ movement caused by the handoff itself.
 Synthetic fixtures make regression checks repeatable without paid model calls;
 read-only real-session inspection is supplementary, not a deterministic CI
 guarantee or proof about every device's frame rate.
+History-work cases bound row measurements in real browser layout; synthetic touch
+and elastic-position tests do not reproduce physical iPhone Safari inertia.
 
 A Claude Code conversation's session lifetime (`src/chat/claude/provider.ts`) follows the work, not the first result: the SDK session is retired on a turn's result only when no accepted prompt is pending, no unprompted follow-up is in flight, and the background set (`background_tasks_changed`, ambient tasks excluded) is empty. While the set is non-empty the conversation reports `background`. When a backgrounded task settles the CLI starts a follow-up turn by itself (see the D9 spike in the change's design notes); the provider reports that turn as running and completed like any other. A set that empties with no follow-up returns the conversation to idle after a short grace window. Scheduled wakeups from `ScheduleWakeup`, `CronCreate`, and `/loop` hold the session the same way. The SDK sends no stream message for them, so the provider registers a `Stop` hook and level-sets the session's wakeups from its `session_crons`. The hook fires before the turn's `result`, so the set is current when retirement is decided. A result with wakeups pending and no background work reports `scheduled`. With both, `background` wins. A fired wakeup's turn reaches the host only as a `UserPromptSubmit` hook, with no `user` message on the stream, so the provider mints that turn's opening `user_message` itself, with `origin: "wakeup"`. It attributes the turn by the hook's `source`, or by the prompt matching a pending wakeup while no accepted prompt is outstanding. A cron missing from the next `Stop` fired if a turn was attributed to it. Otherwise the agent cancelled it. Resuming a session makes the CLI rebuild its `CronCreate` crons from the transcript, while a `ScheduleWakeup` never outlives its process. So when the stream ends or the workspace shuts down, a pending `ScheduleWakeup` is marked lost and a `CronCreate` cron paused. The provider tells them apart by the `CronCreate` result's `id` and the `ScheduleWakeup` call's prompt. The provider enforces a cancel itself, because the SDK has no call that deletes a cron. Cancelled ids live per conversation in its durable state, never hold a session, and have their fires answered with `decision: "block"` at the `UserPromptSubmit` hook. The `init`, `informational`, and `result` frames a blocked fire produces are swallowed. The per-wakeup cancel is `POST /api/chat/conversations/:id/wakeups/:wakeupId/cancel`. Release, `POST /api/chat/conversations/:id/release`, cancels every wakeup and retires the session. A conversation opened without a live session lists its paused crons, derived from the transcript by `transcriptCrons()` in `src/chat/claude/transcript.ts`: `CronCreate` results minus `CronDelete`d ids, fired or lapsed one-shots, and crons past the 7-day expiry. Nothing starts a session to keep a schedule running. Conversation titles follow the transcript's own entries: a user rename (`custom-title`) outranks Claude Code's generated title (`ai-title`), which outranks the first prompt.
 

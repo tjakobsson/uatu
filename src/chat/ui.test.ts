@@ -35,6 +35,211 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat reversible-history composer", () => {
+  for (const overflowAction of [false, true]) test(overflowAction
+    ? "an overflowing Revert action does not hide the first visible assistant row"
+    : "a narrow right-aligned first visible bubble keeps its position when it grows", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>("#chat-timeline")!;
+    const container = document.querySelector<HTMLElement>("#chat-items")!;
+    const rect = (left: number, top: number, width: number, height: number) => ({
+      left, right: left + width, top, bottom: top + height, width, height, x: left, y: top, toJSON() {},
+    }) as DOMRect;
+    let growth = 0, rowReads = 0, pointQueries = 0, actionHits = 0;
+    const additionalRows = overflowAction ? 100 : 0;
+    const contentHeight = () => 2_000 + additionalRows * 100 + growth;
+    const originalStyle = window.getComputedStyle;
+    if (overflowAction) window.getComputedStyle = ((element: HTMLElement) => ({
+      lineHeight: "normal", fontSize: "16px", getPropertyValue: (name: string) => element.style.getPropertyValue(name),
+    })) as typeof window.getComputedStyle;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: contentHeight },
+    });
+    timeline.scrollTop = 0;
+    timeline.getBoundingClientRect = () => rect(0, 0, 640, 400);
+    // Match the real 1rem content inset and fit-content, auto-left-margin
+    // user bubble. Browser geometry, not a private row-selection fixture.
+    container.getBoundingClientRect = () => rect(16, -timeline.scrollTop, 608, contentHeight());
+    const rowRect = (id: string) => id === "message:user"
+      ? rect(524, 100 - timeline.scrollTop, 100, 80 + growth)
+      : id === "message:assistant" ? rect(16, (overflowAction ? 220 : 196) + growth - timeline.scrollTop, 608, 300)
+      : id === "message:tail" ? rect(16, 600 + growth - timeline.scrollTop, 608, 1_400)
+      : rect(16, 2_000 + Number(id.split(":")[2]) * 100 + growth - timeline.scrollTop, 608, 100);
+    const actionRect = () => rect(590, rowRect("message:user").bottom + 3.2, 34, 32);
+    const prototype = window.HTMLElement.prototype;
+    const originalBounds = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function () {
+      const row = this.closest("#chat-items [data-chat-item-id]") as HTMLElement | null;
+      if (!row) return originalBounds.call(this);
+      if (row === this) rowReads++;
+      if (overflowAction && this.closest(".chat-message-actions")) return actionRect();
+      return rowRect(row.dataset.chatItemId!);
+    };
+    Object.defineProperty(document, "elementsFromPoint", { configurable: true, value: (x: number, y: number) => {
+      pointQueries++;
+      const action = container.querySelector<HTMLButtonElement>('[data-history-revert="message:user"]');
+      const actionBox = actionRect();
+      if (overflowAction && action && x >= actionBox.left && x < actionBox.right && y >= actionBox.top && y < actionBox.bottom) {
+        actionHits++;
+        return [action, action.parentElement!, action.closest(".chat-user-message")!, container, timeline, document.body];
+      }
+      const rows = Array.from(container.querySelectorAll<HTMLElement>("[data-chat-item-id]"));
+      const hit = rows.find(row => {
+        const box = rowRect(row.dataset.chatItemId!);
+        return x >= box.left && x < box.right && y >= box.top && y < box.bottom;
+      });
+      return hit ? [hit, container, timeline, document.body] : [container, timeline, document.body];
+    } });
+    const api = questionApi(document, { capabilities: overflowAction ? ["reversible-history"] : [], items: () => [
+      { id: "message:user", type: "user_message", createdAt: 1, text: "A short request" },
+      { id: "message:assistant", type: "assistant_message", createdAt: 2, markdown: "The following full-width answer." },
+      { id: "message:tail", type: "assistant_message", createdAt: 3, markdown: "Later history." },
+      ...Array.from({ length: additionalRows }, (_, index) => ({
+        id: `message:history:${index}`, type: "assistant_message", createdAt: index + 4, markdown: `Later history ${index}.`,
+      })),
+    ] });
+    const { initChat } = await import(`./ui.ts?narrow-first-visible=${Date.now()}`);
+    initChat(api);
+    try {
+      await waitUntil(() => container.children.length === 3 + additionalRows && timeline.scrollTop === contentHeight() - 400);
+      if (overflowAction) {
+        const action = container.querySelector('[data-history-revert="message:user"]');
+        expect(action?.closest(".chat-message-actions")?.parentElement?.getAttribute("data-chat-item-id")).toBe("message:user");
+      }
+      timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+      const readingTop = overflowAction ? 190 : 120;
+      timeline.scrollTop = readingTop;
+      rowReads = 0; pointQueries = 0; actionHits = 0;
+      timeline.dispatchEvent(new window.Event("scroll"));
+      const captureWork = { rowReads, pointQueries };
+      if (overflowAction) expect(actionHits).toBeGreaterThan(0);
+      // The bubble occupies x524..624, y-20..60. Only the later assistant
+      // moves when the bubble grows: anchoring that later row wrongly pans us.
+      document.dispatchEvent(new window.Event("uatu:before-surface-change"));
+      growth = 80;
+      window.dispatchEvent(new window.Event("resize"));
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      // With Revert, the row itself is y-90..-10 but its real action extends
+      // to y25.2. The assistant at y30, not that offscreen row, must be held.
+      expect(timeline.scrollTop, JSON.stringify(captureWork)).toBe(readingTop + (overflowAction ? 80 : 0));
+      expect(captureWork.rowReads).toBeGreaterThan(0);
+      expect(captureWork.rowReads).toBeLessThanOrEqual(4);
+      expect(captureWork.pointQueries).toBeGreaterThan(0);
+      expect(captureWork.pointQueries).toBeLessThanOrEqual(12);
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      prototype.getBoundingClientRect = originalBounds;
+      Reflect.deleteProperty(document, "elementsFromPoint");
+      if (overflowAction) {
+        if (originalStyle) window.getComputedStyle = originalStyle;
+        else Reflect.deleteProperty(window, "getComputedStyle");
+      }
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
+  for (const target of ["parent", "child"] as const) for (const hitTesting of ["available", "unavailable", "occluded", "preferred-control", "gap", "wide-gap"] as const) test(`${target} manual history scrolling retains its row after offscreen growth with hit testing ${hitTesting}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const containerSelector = target === "parent" ? "#chat-items" : "#chat-drilldown-items";
+    const timeline = document.querySelector<HTMLElement>(target === "parent" ? "#chat-timeline" : "#chat-drilldown-timeline")!;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, left: 0, right: 640, width: 640, height, x: 0, y: top, toJSON() {} }) as DOMRect;
+    let growth = 0;
+    const originalStyle = window.getComputedStyle;
+    const gap = hitTesting === "gap" || hitTesting === "wide-gap";
+    if (gap) window.getComputedStyle = ((element: HTMLElement) => ({
+      lineHeight: hitTesting === "wide-gap" ? "normal" : "24px", fontSize: "16px",
+      getPropertyValue: (name: string) => element.style.getPropertyValue(name),
+    })) as typeof window.getComputedStyle;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: () => 20_000 + growth },
+    });
+    timeline.scrollTop = 0;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    document.querySelector<HTMLElement>(containerSelector)!.getBoundingClientRect = () => rect(-timeline.scrollTop, 20_000 + growth);
+    const prototype = window.HTMLElement.prototype;
+    const originalBounds = prototype.getBoundingClientRect;
+    let reads = 0, queries = 0;
+    const rowHeight = hitTesting === "wide-gap" ? 60 : hitTesting === "gap" ? 84 : 100;
+    prototype.getBoundingClientRect = function () {
+      const row = this.closest(`${containerSelector} [data-chat-item-id]`) as HTMLElement | null;
+      if (!row) return originalBounds.call(this);
+      if (this === row) reads++;
+      const index = row.dataset.chatItemId === "question:q1" ? 150 : Number(row.dataset.chatItemId!.split(":")[1]);
+      return rect(index * 100 + (hitTesting !== "preferred-control" || index >= 120 ? growth : 0) - timeline.scrollTop, rowHeight);
+    };
+    // Public browser layout fixture: point lookup returns actual rendered nodes,
+    // independently of the geometry module's row selection.
+    if (hitTesting !== "unavailable") Object.defineProperty(document, "elementsFromPoint", { configurable: true, value: (_x: number, y: number) => {
+      queries++;
+      if (hitTesting === "occluded") return [document.body];
+      const position = timeline.scrollTop + y;
+      if (hitTesting === "preferred-control" && position >= 12_000 && position < 12_000 + growth) return [timeline, document.body];
+      const id = Math.floor((position - (hitTesting !== "preferred-control" || position >= 12_000 ? growth : 0)) / 100);
+      if (gap && (position - growth) % 100 >= rowHeight) return [timeline, document.body];
+      const row = document.querySelector(`${containerSelector} [data-chat-item-id="${id === 150 && hitTesting === "preferred-control" ? "question:q1" : `history:${id}`}"]`);
+      return row ? [row, timeline, document.body] : [timeline, document.body];
+    } });
+    const api = questionApi(document, { capabilities: ["subagents"], items: id => target === "child" && id === "one" ? [{
+      id: "tool:agent1", type: "tool", createdAt: 1, name: "task", status: "completed",
+      input: JSON.stringify({ description: "Read child", subagent_type: "explore", prompt: "go" }), childConversationId: "child",
+    }] : Array.from({ length: 200 }, (_, index) => hitTesting === "preferred-control" && index === 150 ? {
+      id: "question:q1", type: "question", createdAt: 151, requestId: "q1", status: "pending",
+      questions: [{ prompt: "Which branch?", header: "Branch", multiple: false, allowFreeForm: true,
+        options: [{ label: "main", description: "" }] }],
+    } : ({
+      id: `history:${index}`, type: "assistant_message", createdAt: index + 1, markdown: `History ${index}`,
+    })) });
+    const { initChat } = await import(`./ui.ts?viewport-geometry=${Date.now()}`);
+    initChat(api);
+    try {
+      if (target === "child") {
+        await waitUntil(() => !!document.querySelector('[data-worker-item="tool:agent1"]'));
+        document.querySelector('[data-worker-item="tool:agent1"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      }
+      await waitUntil(() => document.querySelectorAll(`${containerSelector} [data-chat-item-id]`).length === 200 && timeline.scrollTop === 19_600);
+      timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+      const readingTop = hitTesting === "wide-gap" ? 10_065 : hitTesting === "gap" ? 10_090 : 10_050;
+      timeline.scrollTop = readingTop;
+      reads = 0; queries = 0;
+      timeline.dispatchEvent(new window.Event("scroll"));
+      expect(reads).toBeGreaterThan(0);
+      if (hitTesting === "available" || hitTesting === "preferred-control" || gap) expect(reads).toBeLessThanOrEqual(4);
+      else expect(reads).toBe(200);
+      expect(queries).toBeLessThanOrEqual(12);
+      expect(timeline.scrollTop).toBe(readingTop);
+      // The retained row moves entirely below the viewport. It must still be
+      // measured and restored, rather than replaced by the newly visible row.
+      if (hitTesting === "preferred-control") {
+        // Explicit control handoff must win even though this card is well
+        // below the viewport. Growth is below the visible row, above the card.
+        const card = document.querySelector(`${containerSelector} [data-chat-item-id="question:q1"]`)!;
+        const toggle = card.querySelector<HTMLInputElement>("[data-question-custom-toggle]")!;
+        Object.defineProperty(toggle, "form", { configurable: true, value: card.querySelector("form[data-question-form]") });
+        toggle.checked = true;
+        toggle.dispatchEvent(new window.Event("change", { bubbles: true }));
+      } else document.dispatchEvent(new window.Event("uatu:before-surface-change"));
+      growth = 500;
+      window.dispatchEvent(new window.Event("resize"));
+      await waitUntil(() => timeline.scrollTop === readingTop + 500);
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      prototype.getBoundingClientRect = originalBounds;
+      Reflect.deleteProperty(document, "elementsFromPoint");
+      if (originalStyle) window.getComputedStyle = originalStyle;
+      else Reflect.deleteProperty(window, "getComputedStyle");
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
   const rewrapCases = (["parent", "child"] as const).flatMap(target => (["position", "range"] as const).flatMap(caretApi =>
     (["settled", "batched"] as const).map(cadence => ({ target, caretApi, cadence, readerMove: false, closedGroup: false }))));
   rewrapCases.push({ target: "parent", caretApi: "position", cadence: "batched", readerMove: true, closedGroup: false });

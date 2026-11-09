@@ -64,6 +64,110 @@ function withVisibleBand(band: { height: number; offsetTop: number }, run: () =>
 }
 
 describe("coordinated scrolling", () => {
+  test("native elastic scrolling beyond latest is not snapped back by follow frames", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    const before = f.writes.length;
+    // Safari exposes the compositor's elastic excursion through scrollTop.
+    // Native movement can exceed the range; a script assignment clamps it.
+    f.move(330); f.event("scroll");
+    f.flush(16); f.flush(32);
+    expect(f.writes.slice(before)).toEqual([]);
+    expect(f.element.scrollTop).toBe(330);
+  });
+  test("shrinking layout during bottom rebound preserves follow intent and explicit upward pauses", () => {
+    for (const paused of [false, true]) {
+      const f = fixture(() => "smooth");
+      f.owner.request(); f.flush(0);
+      f.move(330); f.event("scroll"); f.flush(16);
+      if (paused) f.event("wheel", { deltaY: -1 });
+      // The native excursion can outlive the extent that started it.
+      f.grow(550); f.move(265); f.event("scroll"); f.flush(32);
+      expect(f.anchor.isPinned()).toBe(!paused);
+      expect(f.element.scrollTop).toBe(265);
+      expect(f.writes).toEqual([]);
+      f.move(250); f.event("scroll"); f.flush(48);
+      expect(f.anchor.isPinned()).toBe(!paused);
+      f.grow(650); f.owner.request(true); f.flush(64); f.flush(304);
+      expect(f.element.scrollTop).toBe(paused ? 250 : 350);
+    }
+  });
+  test("native bottom rebound keeps following until real upward input takes over", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.move(100); f.owner.pause();
+    f.move(90); f.event("scroll");
+    f.move(330); f.event("scroll"); f.flush(16);
+    for (const top of [320, 305, 300]) {
+      f.move(top); f.event("scroll"); f.flush(32 + top);
+      expect(f.anchor.isPinned()).toBe(true);
+      expect(f.element.scrollTop).toBe(top);
+    }
+    expect(f.writes).toEqual([]);
+    f.grow(700); f.owner.request(true); f.flush(400); f.flush(640);
+    expect(f.element.scrollTop).toBe(400);
+    f.move(430); f.event("scroll"); f.flush(660);
+    f.event("wheel", { deltaY: -1 });
+    f.move(390); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.grow(800); f.owner.request(true); f.flush(700);
+    expect(f.element.scrollTop).toBe(390);
+  });
+  test("native fractional bottom arrival is not rounded by an automatic follow write", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.move(100); f.owner.pause(); f.move(90); f.event("scroll");
+    f.move(299.75); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    f.flush(16); f.flush(32);
+    expect(f.writes).toEqual([]);
+    expect(f.element.scrollTop).toBe(299.75);
+    f.grow(700); f.owner.request(true); f.flush(48); f.flush(288);
+    expect(f.element.scrollTop).toBe(400);
+  });
+  test("native fractional arrival also retires an in-flight catch-up without a final write", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(900); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    const before = f.writes.length;
+    f.move(599.75); f.event("scroll"); f.flush(64); f.flush(304);
+    expect(f.writes.slice(before)).toEqual([]);
+    expect(f.element.scrollTop).toBe(599.75);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+  test("paused elastic excursions are not clamped by unchanged layout work", () => {
+    for (const [excursion, rowOffset] of [[-30, 0], [330, 0], [-30.1, 200.3], [330.1, 200.3]] as const) {
+      const f = fixture(() => "smooth");
+      f.owner.request(); f.flush(0);
+      f.shift(rowOffset);
+      f.move(excursion); f.event("scroll");
+      f.event("wheel", { deltaY: -1 });
+      expect(f.anchor.isPinned()).toBe(false);
+      const before = f.writes.length;
+      f.owner.request(); f.flush(16);
+      expect(f.writes.slice(before)).toEqual([]);
+      expect(f.element.scrollTop).toBe(excursion);
+      f.move(excursion < 0 ? 0 : 300); f.event("scroll");
+      f.owner.request(); f.flush(32);
+      expect(f.anchor.isPinned()).toBe(false);
+      expect(f.writes.slice(before)).toEqual([]);
+    }
+  });
+  test("a targeted geometry adapter keeps the explicitly activated row anchored", () => {
+    const f = fixture();
+    f.move(100); f.owner.pause();
+    const measure = f.options.measure;
+    f.options.measure = (includeItems, preserveAnchor, preferredItemId?: string) => {
+      const geometry = measure(includeItems, preserveAnchor);
+      if (includeItems && preferredItemId === "control") {
+        geometry.items.push({ id: "control", top: 120, bottom: 150 });
+      }
+      return geometry;
+    };
+    f.owner.beforeMutation("control");
+    expect(f.anchor.currentAnchor()).toEqual({ itemId: "control", offset: 120 });
+  });
   test("renewed upward touch interrupts latest and holds and recaptures after bottom arrival or a new direction", () => {
     for (const renewal of ["queued latest", "moving latest", "hold", "bottom", "direction", "new touch"] as const) {
       const f = fixture(() => "smooth");

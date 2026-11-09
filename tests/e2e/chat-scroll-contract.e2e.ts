@@ -20,6 +20,38 @@ async function frames(page: Page, count = 3) {
   }), count);
 }
 
+/** Arm in the page before triggering motion; send input as soon as it is live,
+ * without waiting for an API acknowledgement or a retried text assertion. */
+async function inputDuringMotion(timeline: Locator, from: number, message: string,
+  trigger: () => Promise<unknown>, input: () => Promise<void>) {
+  const observer = await timeline.evaluateHandle((el, from) => {
+    const state = { active: true, result: Promise.resolve(false) };
+    state.result = new Promise<boolean>(resolve => {
+      let remaining = 60;
+      const sample = () => {
+        if (!state.active) resolve(false);
+        else if (el.scrollTop > from + 1 && el.scrollHeight - el.clientHeight - el.scrollTop > 2) resolve(true);
+        else if (--remaining === 0) resolve(false);
+        else requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    return state;
+  }, from);
+  try {
+    await Promise.all([
+      observer.evaluate(state => state.result).then(async intermediate => {
+        expect(intermediate, message).toBe(true);
+        await input();
+      }),
+      trigger(),
+    ]);
+  } finally {
+    await observer.evaluate(state => { state.active = false; });
+    await observer.dispose();
+  }
+}
+
 async function seed(request: APIRequestContext, title = "Scroll contract", child = false) {
   const snapshot = await control(request, { action: "seed", title, child, items: Array.from({ length: 40 }, (_, i) => ({
     id: `contract:${title}:${i}`, type: "assistant_message", createdAt: i + 1,
@@ -32,18 +64,78 @@ async function seed(request: APIRequestContext, title = "Scroll contract", child
 }
 
 async function open(page: Page, request: APIRequestContext, touch: boolean, child = false) {
-  const { token } = await request.get("/__e2e/terminal-token").then(response => response.json());
-  await page.goto(`/?t=${encodeURIComponent(token)}`);
-  if (touch) await page.locator("#touch-tab-chat").click();
-  else await openChatPanel(page);
-  if (child) {
-    await openChatWorkers(page);
-    await page.locator(".chat-worker-inspect").filter({ has: page.locator(".chat-worker-name", { hasText: /^Scroll contract child$/ }) }).click();
+  // Opt-in because even passive geometry sampling adds work to a perf fixture.
+  // Record no transcript text, item identifiers, URLs, or token-bearing data.
+  const diagnostics = process.env.UATU_E2E_SCROLL_OPEN_DIAGNOSTICS === "1";
+  const diagnosticKey = "__e2eScrollOpenDiagnostics";
+  if (diagnostics) await page.addInitScript(key => {
+    const state = { active: true, counts: {} as Record<string, number>, samples: [] as Array<{
+      time: number; event: string; top: number; extent: number; height: number; items: number; focusTag: string | null;
+    }> };
+    Reflect.set(window, key, state);
+    const started = performance.now();
+    const previous = new Map<string, string>();
+    const record = (event: string) => {
+      if (!state.active) return;
+      for (const id of ["chat-timeline", "chat-drilldown-timeline"]) {
+        const el = document.getElementById(id);
+        if (!el || !el.clientHeight) continue;
+        const geometry = { top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight,
+          items: el.querySelectorAll("[data-chat-item-id]").length, focusTag: document.activeElement?.tagName ?? null };
+        const signature = JSON.stringify(geometry);
+        if ((event !== "frame" || signature !== previous.get(id)) && state.samples.length < 160) {
+          state.samples.push({ time: performance.now() - started, event: `${id}:${event}`, ...geometry });
+        }
+        previous.set(id, signature);
+      }
+    };
+    for (const name of ["scroll", "wheel", "touchstart", "touchmove", "keydown", "focusin"]) {
+      document.addEventListener(name, () => {
+        if (!state.active) return;
+        state.counts[name] = (state.counts[name] ?? 0) + 1;
+        record(name);
+      }, { capture: true, passive: true });
+    }
+    const sample = () => {
+      if (!state.active) return;
+      record("frame");
+      if (performance.now() - started < 15_000) requestAnimationFrame(sample);
+      else state.active = false;
+    };
+    requestAnimationFrame(sample);
+  }, diagnosticKey);
+  let failed = true;
+  try {
+    const { token } = await request.get("/__e2e/terminal-token").then(response => response.json());
+    await page.goto(`/?t=${encodeURIComponent(token)}`);
+    if (touch) await page.locator("#touch-tab-chat").click();
+    else await openChatPanel(page);
+    if (child) {
+      await openChatWorkers(page);
+      await page.locator(".chat-worker-inspect").filter({ has: page.locator(".chat-worker-name", { hasText: /^Scroll contract child$/ }) }).click();
+    }
+    const timeline = page.locator(child ? "#chat-drilldown-timeline" : "#chat-timeline");
+    await expect(timeline).toContainText("Message 39");
+    await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
+    failed = false;
+    return timeline;
+  } finally {
+    if (diagnostics) {
+      try {
+        const evidence = await page.evaluate(key => {
+          const state = Reflect.get(window, key) as { active: boolean; counts: Record<string, number>; samples: unknown[] } | undefined;
+          if (!state) return null;
+          state.active = false;
+          Reflect.deleteProperty(window, key);
+          return { counts: state.counts, samples: state.samples };
+        }, diagnosticKey);
+        if (failed) await test.info().attach("initial-scroll-chronology.json", { body: JSON.stringify(evidence), contentType: "application/json" });
+      } catch {
+        // A closed/crashed page or failed attachment must not replace the
+        // original navigation/assertion error with an optional diagnostic error.
+      }
+    }
   }
-  const timeline = page.locator(child ? "#chat-drilldown-timeline" : "#chat-timeline");
-  await expect(timeline).toContainText("Message 39");
-  await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
-  return timeline;
 }
 
 async function pause(page: Page, timeline: Locator, touch: boolean) {
@@ -128,32 +220,26 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       });
       try {
         await frames(page);
+        if (!touch) await timeline.hover();
         const beforeStream = await timeline.evaluate(el => el.scrollTop);
-        await control(request, { action: "delta", conversationId: conversation.id, itemId: "contract:stream",
-          delta: Array.from({ length: 18 }, (_, i) => `\n\nStreamed paragraph ${i}: ${"New output. ".repeat(8)}`).join("") });
+        await inputDuringMotion(timeline, beforeStream, "Streaming never exposed an intermediate position",
+          () => control(request, { action: "delta", conversationId: conversation.id, itemId: "contract:stream",
+            delta: Array.from({ length: 18 }, (_, i) => `\n\nStreamed paragraph ${i}: ${"New output. ".repeat(8)}`).join("") }),
+          async () => {
+            if (touch) await timeline.evaluate(el => {
+              for (const [name, y] of [["touchstart", 104], ["touchmove", 100]] as const) {
+                const event = new Event(name, { bubbles: true });
+                Object.defineProperty(event, "touches", { value: [{ identifier: 1, clientY: y }] });
+                el.dispatchEvent(event);
+              }
+              el.scrollTop += 4;
+              el.dispatchEvent(new Event("touchend", { bubbles: true }));
+            });
+            else await page.mouse.wheel(0, 4);
+          });
         await expect(timeline).toContainText("Streamed paragraph 17");
-        await timeline.evaluate((el, from) => new Promise<void>((resolve, reject) => {
-          let remaining = 60;
-          const sample = () => {
-            if (el.scrollTop > from + 1 && el.scrollHeight - el.clientHeight - el.scrollTop > 2) resolve();
-            else if (--remaining === 0) reject(new Error("Streaming never exposed an intermediate position"));
-            else requestAnimationFrame(sample);
-          };
-          requestAnimationFrame(sample);
-        }), beforeStream);
-        if (touch) await timeline.evaluate(el => {
-          for (const [name, y] of [["touchstart", 104], ["touchmove", 100]] as const) {
-            const event = new Event(name, { bubbles: true });
-            Object.defineProperty(event, "touches", { value: [{ identifier: 1, clientY: y }] });
-            el.dispatchEvent(event);
-          }
-          el.scrollTop += 4;
-          el.dispatchEvent(new Event("touchend", { bubbles: true }));
-        });
-        else { await timeline.hover(); await page.mouse.wheel(0, 4); }
         await frames(page, 24);
         const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
-        await testInfo.attach("smooth-stream-frames.json", { body: JSON.stringify(samples), contentType: "application/json" });
         const growth = samples.findIndex((sample, i) => i > 0 && sample.extent > samples[i - 1]!.extent + 2);
         expect(growth, "fixture must produce actual transcript growth").toBeGreaterThan(0);
         const moving = samples.slice(growth).filter((sample, i) => {
@@ -181,26 +267,20 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         const readingTop = await timeline.evaluate(el => el.scrollTop);
         // Keep the mouse over the timeline for native wheel interruption. The
         // button's action is exercised without moving the pointer away from it.
-        await latest.evaluate(button => (button as HTMLButtonElement).click());
-        await timeline.evaluate((el, from) => new Promise<void>((resolve, reject) => {
-          let remaining = 60;
-          const sample = () => {
-            if (el.scrollTop > from + 1 && el.scrollHeight - el.clientHeight - el.scrollTop > 2) resolve();
-            else if (--remaining === 0) reject(new Error("Latest never exposed an interruptible intermediate position"));
-            else requestAnimationFrame(sample);
-          };
-          requestAnimationFrame(sample);
-        }), readingTop);
-        if (touch) await timeline.evaluate(el => {
-          for (const [name, y] of [["touchstart", 100], ["touchmove", 104]] as const) {
-            const event = new Event(name, { bubbles: true });
-            Object.defineProperty(event, "touches", { value: [{ identifier: 1, clientY: y }] });
-            el.dispatchEvent(event);
-          }
-          el.scrollTop -= 4;
-          el.dispatchEvent(new Event("touchend", { bubbles: true }));
-        });
-        else await page.mouse.wheel(0, -4);
+        await inputDuringMotion(timeline, readingTop, "Latest never exposed an interruptible intermediate position",
+          () => latest.evaluate(button => (button as HTMLButtonElement).click()),
+          async () => {
+            if (touch) await timeline.evaluate(el => {
+              for (const [name, y] of [["touchstart", 100], ["touchmove", 104]] as const) {
+                const event = new Event(name, { bubbles: true });
+                Object.defineProperty(event, "touches", { value: [{ identifier: 1, clientY: y }] });
+                el.dispatchEvent(event);
+              }
+              el.scrollTop -= 4;
+              el.dispatchEvent(new Event("touchend", { bubbles: true }));
+            });
+            else await page.mouse.wheel(0, -4);
+          });
         await frames(page, 4);
         const interrupted = await timeline.evaluate(el => el.scrollTop);
         await control(request, { action: "delta", conversationId: conversation.id, itemId: "contract:stream", delta: "\n\nIncoming after interrupted latest." });
@@ -209,8 +289,10 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         expect(Math.abs(await timeline.evaluate(el => el.scrollTop) - interrupted), "new output must not restart interrupted animation").toBeLessThanOrEqual(2);
         await expect(latest).toBeVisible();
       } finally {
-        await trace.evaluate(state => { state.active = false; });
-        await trace.dispose();
+        try {
+          const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
+          await testInfo.attach("smooth-stream-frames.json", { body: JSON.stringify(samples), contentType: "application/json" });
+        } finally { await trace.dispose(); }
       }
     } finally {
       await browser.close();
@@ -253,7 +335,6 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         await expect(viewport.locator(".chat-shell-lines > span")).toHaveCount(140);
         await frames(page, 24);
         const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
-        await testInfo.attach("smooth-shell-frames.json", { body: JSON.stringify(samples), contentType: "application/json" });
         const growth = samples.findIndex((sample, i) => i > 0 && sample.extent > samples[i - 1]!.extent + 2);
         expect(growth).toBeGreaterThan(0);
         const moving = samples.slice(growth).filter((sample, i) => sample.top > samples[growth + i - 1]!.top + 0.5);
@@ -270,8 +351,10 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         expect(settled!.time - samples[lastGrowth]!.time).toBeLessThanOrEqual(300);
         expect(Math.abs(await fixture.timeline.evaluate(el => el.scrollTop) - outerTop), "inner output growth must not move the outer reading position").toBeLessThanOrEqual(2);
       } finally {
-        await trace.evaluate(state => { state.active = false; });
-        await trace.dispose();
+        try {
+          const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
+          await testInfo.attach("smooth-shell-frames.json", { body: JSON.stringify(samples), contentType: "application/json" });
+        } finally { await trace.dispose(); }
       }
     } finally {
       await browser.close();

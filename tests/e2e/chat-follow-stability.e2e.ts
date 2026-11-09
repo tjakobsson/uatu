@@ -39,6 +39,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
     const errors: string[] = [];
+    const interruptSteps: unknown[] = [];
     page.on("pageerror", error => errors.push(error.message));
     try {
       let instrumented = false;
@@ -138,8 +139,34 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         expect(await following()).toBe(false);
       };
       const interrupt = async (pendingLatest = false) => {
+        const probe = async (step: string) => {
+          interruptSteps.push(await viewport.evaluate((el, args) => {
+            const outer = document.getElementById(args.outerId)!;
+            const geometry = (node: HTMLElement) => {
+              const rect = node.getBoundingClientRect();
+              return { top: node.scrollTop, extent: node.scrollHeight, height: node.clientHeight,
+                rectTop: rect.top, rectBottom: rect.bottom,
+                pinned: window.__coordinatedOwners.get(node)!.anchor.isPinned() };
+            };
+            return { step: args.step, pendingLatest: args.pendingLatest, time: performance.now(),
+              frame: window.__shellFrameTrace.frame, phase: window.__shellFrameTrace.phase,
+              outer: geometry(outer), inner: geometry(el as HTMLElement), focusTag: document.activeElement?.tagName ?? null };
+          }, { step, pendingLatest, outerId: child ? "chat-drilldown-timeline" : "chat-timeline" }));
+        };
+        if (!touch && !pendingLatest) {
+          await probe("before-hover");
+          // Hover may scroll an offscreen shell into view. Finish that deliberate
+          // test navigation before measuring independence of the nested wheel.
+          await viewport.hover();
+          await probe("after-hover-before-wheel");
+          await settleScroll(timeline);
+          await probe("after-navigation-settle");
+        }
         const outerBefore = await outerIntent();
-        if (!touch && !pendingLatest) { await viewport.hover(); await page.mouse.wheel(0, -4); }
+        if (!touch && !pendingLatest) {
+          await page.mouse.wheel(0, -4);
+          await probe("after-wheel");
+        }
         else await viewport.evaluate((el, pending) => {
           if (pending) el.closest(".chat-shell-output")!.querySelectorAll<HTMLButtonElement>("button").forEach(button => {
             if (button.textContent?.includes("Latest output")) button.click();
@@ -154,6 +181,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         }, pendingLatest);
         await expect.poll(following).toBe(false);
         await settleFrames(page);
+        await probe("after-settle");
         expect(await outerIntent()).toBe(outerBefore);
         return (await position(viewport)).top;
       };
@@ -265,6 +293,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
       expect(errors).toEqual([]);
       console.log(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} shell trace ${JSON.stringify(summaries)}`);
     } finally {
+      await testInfo.attach("shell-interrupt-steps.json", { body: JSON.stringify({ engine: browser.version(), steps: interruptSteps }, null, 2), contentType: "application/json" });
       const trace = await page.evaluate(() => window.__shellFrameTrace).catch(() => undefined);
       if (trace) {
         const observations = await page.evaluate(() => window.__shellObservations);

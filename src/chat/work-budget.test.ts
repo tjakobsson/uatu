@@ -2,10 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { expandedWorkBudget } from "./work-budget";
 
 describe("expanded work capacity", () => {
+  test("desktop balances expanded work with conversation reading room", () => {
+    expect(expandedWorkBudget(600, 150, "desktop")).toEqual({ reading: 300, capacity: 300 });
+  });
+  test("desktop transitions from its reading floor through balance to its cap", () => {
+    expect(expandedWorkBudget(398, 150, "desktop")).toEqual({ reading: 200, capacity: 198 });
+    expect(expandedWorkBudget(400, 150, "desktop")).toEqual({ reading: 200, capacity: 200 });
+    expect(expandedWorkBudget(402, 150, "desktop")).toEqual({ reading: 201, capacity: 201 });
+    expect(expandedWorkBudget(838, 150, "desktop")).toEqual({ reading: 419, capacity: 419 });
+    expect(expandedWorkBudget(840, 150, "desktop")).toEqual({ reading: 420, capacity: 420 });
+    expect(expandedWorkBudget(842, 150, "desktop")).toEqual({ reading: 420, capacity: 422 });
+  });
   test("desktop reserves a useful reading band and yields in short windows", () => {
-    expect(expandedWorkBudget(720, 150, "desktop").reading).toBeCloseTo(252);
-    expect(expandedWorkBudget(720, 150, "desktop").capacity).toBeCloseTo(468);
-    expect(expandedWorkBudget(1000, 150, "desktop")).toEqual({ reading: 280, capacity: 720 });
+    expect(expandedWorkBudget(720, 150, "desktop")).toEqual({ reading: 360, capacity: 360 });
+    expect(expandedWorkBudget(1000, 150, "desktop")).toEqual({ reading: 420, capacity: 580 });
     expect(expandedWorkBudget(240, 150, "desktop")).toEqual({ reading: 90, capacity: 150 });
     expect(expandedWorkBudget(100, 160, "desktop")).toEqual({ reading: 10, capacity: 90 });
   });

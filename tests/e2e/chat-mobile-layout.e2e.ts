@@ -688,6 +688,9 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`mobile layo
       await captureScreenshot(page, testInfo, `desktop-${engine}-work-sheet-closed`);
     });
     test("live workers and pending steer share the short desktop budget", async ({ page, request }, testInfo) => {
+      // Canonical provider roundtrips, three viewport/focus/screenshot passes,
+      // and replacement-warning stability share this functional workload budget.
+      test.slow();
       const id = await boot(page, request);
       for (let index = 1; index <= 3; index++) {
         await submit(page, `Historical question ${index}`);
@@ -714,12 +717,12 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`mobile layo
           expect(box.y + box.height).toBeLessThanOrEqual(height);
           expect(await control.evaluate(node => { const rect = node.getBoundingClientRect(); const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2); return hit === node || node.contains(hit); })).toBe(true);
         }
-        // Expanded desktop uses 35% of remaining space (200–280px), yielding
-        // only to measured work minima, not 35% of the whole viewport.
+        // Expanded desktop balances remaining space (200–420px), yielding
+        // only to measured work minima, not a share of the whole viewport.
         await expect.poll(() => page.locator("#chat-surface").evaluate(n => {
           const reading = parseFloat(n.style.getPropertyValue("--chat-expanded-reading"));
           const area = n.querySelector<HTMLElement>(".chat-transcript-area")!;
-          return reading > 0 && reading <= 280 && area.clientHeight >= reading - 1;
+          return reading > 0 && reading <= 420 && area.clientHeight >= reading - 1;
         })).toBe(true);
         await expect(page.locator("#chat-input")).toBeFocused();
         await expect(page.locator("#chat-input")).toHaveValue("Keep this desktop draft");
