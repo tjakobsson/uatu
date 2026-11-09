@@ -53,11 +53,13 @@ function hashSuffix(input: string): string {
 }
 
 export type TranscriptEntry = {
-  // `system` is admitted for two subtypes only: the compaction boundary,
+  // `system` is admitted for the compaction boundary,
   // which the timeline marks (spec: the timeline marks where compaction
   // happened) and the readout resets on, live and on reload alike; and a
   // local command's output (`local_command`), which is the store's only
-  // record of what a typed command such as a review printed (design D15).
+  // record of what a typed command such as a review printed (design D15),
+  // and `turn_duration`, the native agent-turn completion boundary. The
+  // latter supplies internal turn metadata, not a timeline row or duration.
   kind: "user" | "assistant" | "system";
   uuid: string;
   parentUuid: string | null;
@@ -136,9 +138,10 @@ function validateEntry(value: unknown): TranscriptEntry | null {
   const record = value as Record<string, unknown>;
   const compaction = record.type === "system" && record.subtype === "compact_boundary";
   const localCommand = record.type === "system" && record.subtype === "local_command" && typeof record.content === "string";
-  if (record.type !== "user" && record.type !== "assistant" && !compaction && !localCommand) return null;
+  const turnComplete = record.type === "system" && record.subtype === "turn_duration";
+  if (record.type !== "user" && record.type !== "assistant" && !compaction && !localCommand && !turnComplete) return null;
   if (typeof record.uuid !== "string" || !record.uuid) return null;
-  const message = compaction || localCommand ? (record.message ?? {}) : record.message;
+  const message = compaction || localCommand || turnComplete ? (record.message ?? {}) : record.message;
   if (!message || typeof message !== "object" || Array.isArray(message)) return null;
   const timestamp = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
   if (Number.isNaN(timestamp)) return null;
@@ -156,6 +159,7 @@ function validateEntry(value: unknown): TranscriptEntry | null {
       },
     } : {}),
     ...(localCommand ? { subtype: "local_command", content: record.content as string } : {}),
+    ...(turnComplete ? { subtype: "turn_duration" } : {}),
     uuid: record.uuid,
     parentUuid: typeof record.parentUuid === "string" ? record.parentUuid : null,
     timestamp,

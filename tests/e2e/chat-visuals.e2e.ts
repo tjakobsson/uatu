@@ -280,6 +280,13 @@ test.describe("agent inline visuals", () => {
     const originalUrl = await image.getAttribute("src");
     await fs.writeFile(workspacePath("b.svg"), SVG.replace("Readable inline", "Changed source"));
     await control(request, { action: "delta", conversationId, itemId: "reference-style", delta: "\n\n[ref]: a.svg" });
+    // A reference destination at the end of a live definition is provisional:
+    // the next token could still extend its filename. Terminate the line before
+    // expecting capture, without changing the already captured second image.
+    await expect(page.locator("#chat-items .chat-visual-reference")).toContainText(["a.svg"]);
+    await expect(page.locator("#chat-items .chat-visual img")).toHaveCount(1);
+    await expect(image).toHaveAttribute("src", originalUrl!);
+    await control(request, { action: "delta", conversationId, itemId: "reference-style", delta: "\n" });
     await expect(page.locator("#chat-items .chat-visual img")).toHaveCount(2);
     await expect(image).toHaveAttribute("src", originalUrl!);
     const second = page.locator("#chat-items .chat-visual").filter({ has: page.locator('img[alt="Second"]') });

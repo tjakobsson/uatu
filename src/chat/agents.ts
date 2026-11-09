@@ -2,7 +2,7 @@ import { createAttachmentStore, type AttachmentStore, type StoredAttachment } fr
 import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-store";
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
-import { CLAUDE_TEXT_BLOCKS, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
+import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
 import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
 import { isLiveConversationStatus } from "./types";
@@ -381,7 +381,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       streaming = isLiveConversationStatus(current.conversation.status);
       const lastTurn = current.items.findLastIndex(item => item.type === "turn_status");
       for (const [index, item] of current.items.entries()) {
-        if (item.type === "assistant_message") items.set(item.id, { item, live: streaming && index > lastTurn, enrichedAt: -Infinity });
+        if (item.type === "assistant_message") {
+          const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
+          items.set(item.id, { item, live: streaming && (turn ? !turn.completed : index > lastTurn), enrichedAt: -Infinity });
+        }
       }
     };
     seed(qualified);
@@ -402,7 +405,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       };
       return completes(/(?:`{3,}|~{3,})[ \t]*svg\b/gi)
         || (Boolean(previous.visuals?.some(visual => visual.status === "pending")) && completes(/`{3}|~{3}/g))
-        || completes(/!\[[^\]\n]*\](?:\([^\)\n]*\)|\[[^\]\n]*\])/g)
+        // A closed label also completes shorthand images when a preceding
+        // reference definition exists. Parsing decides whether it resolves;
+        // this bounded trigger deliberately admits false positives.
+        || completes(/!\[[^\]\n]*\](?:\([^\)\n]*\)|\[[^\]\n]*\])?/g)
         || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[^\n]*\r?\n/g)
         || completes(/<(?:img|image)\b[^>]*>/gi);
     };
@@ -567,18 +573,22 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // turn: a subsequent tool can still create the referenced file. OpenCode's
     // native parent-message completedAt, in contrast, really seals its parts.
     const identity = item as typeof item & ClaudeTextIdentity;
+    if (identity[CLAUDE_TURN]) return streaming && !identity[CLAUDE_TURN].completed;
     const claudeBlock = Boolean(identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:"));
     return streaming && (claudeBlock || item.completedAt === undefined);
   }
 
   private async enrichSnapshot(snapshot: AgentConversationSnapshot, newestPage = true): Promise<AgentConversationSnapshot> {
-    // Only the newest requested page can contain a growing turn. A footer on
-    // an older page says nothing about whether its trailing rows are live.
-    // A steer is not a completion boundary on either page.
+    // Native Claude turn metadata is computed before pagination: an older
+    // page can still belong to the same running turn. Without authoritative
+    // metadata, keep older pages terminal rather than inferring from a user
+    // row or a page-local footer.
     const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
     const items: ConversationItem[] = [];
     for (const [index, item] of snapshot.items.entries()) {
-      items.push(await this.enrichItem(snapshot.conversation.id, item, newestPage && index > lastTurn && isLiveConversationStatus(snapshot.conversation.status)));
+      const turn = item.type === "assistant_message" ? (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN] : undefined;
+      const live = isLiveConversationStatus(snapshot.conversation.status) && (turn ? !turn.completed : newestPage && index > lastTurn);
+      items.push(await this.enrichItem(snapshot.conversation.id, item, live));
     }
     return { ...snapshot, items };
   }

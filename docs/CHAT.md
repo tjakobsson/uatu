@@ -989,6 +989,10 @@ Steering does not finish the current reply or consume its completion retry;
 reloading or opening another client while it continues preserves pending visuals.
 Native OpenCode completion timestamps also keep older finished answers terminal
 when their history is opened during a newer running turn.
+Claude uses native turn-end records rather than text-block completion: completed
+turns stay terminal, while a live turn retains its pending visuals across history
+pages. Streaming shorthand references can preview once their already-terminated
+reference definition resolves, without waiting for later text or a tool to finish.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain

@@ -123,12 +123,22 @@ describe("chat Markdown security", () => {
   });
 
   test("incomplete SVG has a generating placeholder and copyable inert source", () => {
-    const html = renderChatMarkdown('```svg\n<svg onload="bad()"><text>&amp;</text>', { streaming: true, visuals: [] });
+    const html = renderChatMarkdown('```svg\n<svg onload="bad()"><text>&amp;</text>', {
+      streaming: true,
+      visuals: [{ index: 0, status: "pending" }],
+    });
     const { document } = parseHTML(html);
     expect(document.querySelector("svg")).toBeNull();
     expect(document.querySelector("img")).toBeNull();
     expect(document.querySelector(".chat-visual-preview")?.textContent).toContain("Generating image…");
     expect(document.querySelector(".chat-visual-source code")?.textContent).toBe('<svg onload="bad()"><text>&amp;</text>');
+  });
+
+  test("an unadmitted incomplete SVG cannot bypass the native-message image budget", () => {
+    const { document } = parseHTML(renderChatMarkdown("```svg\n<svg/>", { streaming: true, visuals: [] }));
+    expect(document.querySelector(".chat-visual-preview")?.textContent).toContain("At most 8 images");
+    expect(document.querySelector("img, svg")).toBeNull();
+    expect(document.querySelector(".chat-visual-source code")?.textContent).toBe("<svg/>");
   });
 
   test("linked images do not navigate away and source panels stay inside their visual", () => {

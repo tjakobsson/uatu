@@ -68,7 +68,7 @@ part of the revised workflow. Future upstream integration uses merge commits
 and ordinary pushes, not rebases or force pushes.
 
 - [ ] 6.1 Preserve status/updated payloads and composer side effects before separate visual resyncs; ensure enriched content is not dropped as a duplicate sequence by the actual client projection.
-- [ ] 6.2 Reseed assistant-only subscription state after provider resync and treat older history pages as terminal.
+- [ ] 6.2 Reseed assistant-only subscription state after provider resync and distinguish completed historical turns from a live turn spanning multiple history pages.
 - [ ] 6.3 Keep Claude text-block completion distinct from turn completion while honoring true native OpenCode parent-message completion.
 - [ ] 6.4 Keep SVG code visible/copyable and image references inert on aside, plan, and subagent surfaces without captured snapshots.
 - [ ] 6.5 Bound streamed enrichment cadence, flush syntax/turn completion, and preserve ordered text, control events and cancellation.
@@ -77,6 +77,8 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.8 Share parsing/presentation caches across streaming completion and defer unfinished reference-definition destinations without changing completed captures.
 - [ ] 6.9 Use shared HTML escaping and visual-ID validation helpers with imports grouped at the top.
 - [ ] 6.10 Verify this complete follow-up batch through GitHub CI and Codex; publish a maintainer-response summary only after text approval.
+- [ ] 6.11 Address Codex findings on `9aae687a`: retain actual Claude turn boundaries in history (including cursor pages) and flush supported shorthand image references within the streaming cadence. Preserve text-block/turn distinction, immutable captures and existing wire contracts.
+- [ ] 6.12 Correct GitHub-evidenced test fixtures without relaxing behavior: consume preserved status events before visual resyncs; distinguish missing-record probes from large canonical reads; supply pending admission metadata for generating SVG; leave a moving window slot beside pinned files and give the watcher integration an outer deadline longer than its bounded waits. Renew all checks on the resulting head.
 
 ## Historical checkpoint evidence (current status is tracked above)
 

@@ -1,7 +1,7 @@
 import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import { claudeWindowAnswer } from "./context-window";
-import { CLAUDE_TEXT_BLOCKS, claudeTextBlockId, type ClaudeTextBlock } from "./normalization-types";
+import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeTextBlockId, type ClaudeTextBlock, type ClaudeTurn } from "./normalization-types";
 import { nativeVisualMessageIdentity } from "../visual-identity";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import { LOGIN_FAILED_NOTICE_CODE as LOGIN_FAILED_CODE, RATE_LIMIT_ITEM_ID, REAUTHENTICATING_NOTICE_CODE as REAUTHENTICATING_CODE, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
@@ -69,6 +69,9 @@ export type ClaudeEventMemory = {
   // the tool and reasoning rows it produced and not only its text.
   frameItems: Map<string, string[]>;
   currentStream?: string;
+  // Text-block completion is not an agent-turn boundary. All rows of the
+  // actual turn share this internal token, sealed by result/turn_duration.
+  visualTurn?: ClaudeTurn;
   // A named working state the turn is in (retrying, compacting); cleared —
   // with a `running` status — by the next message that shows the turn moved.
   transient?: "retrying" | "compacting";
@@ -340,6 +343,10 @@ function normalizeMessage(
   if (!type) return { ...base, outcome: "unparseable" };
 
   if (type === "system") {
+    if (record.subtype === "turn_duration") {
+      completeVisualTurn(memory);
+      return { ...base, outcome: "handled", updates: [] };
+    }
     // The init message names the session's model; remember it for usage
     // attribution and report it as the conversation's configuration.
     const reportedInit = typeof record.model === "string" ? record.model : undefined;
@@ -514,14 +521,14 @@ function normalizeMessage(
     const itemId = `message:stream:${memory.currentStream}:${index}`;
     if (event.type === "content_block_start" && asRecord(event.content_block).type === "text") {
       stream.textBlocks.push(index);
-      return { ...base, outcome: "handled", updates: [...resumed, { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt: envelope.createdAt, markdown: "", ...streamTextIdentity(memory.currentStream!, stream, index) } }] };
+      return { ...base, outcome: "handled", updates: [...resumed, { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt: envelope.createdAt, markdown: "", ...streamTextIdentity(memory.currentStream!, stream, index), ...visualTurnIdentity(memory) } }] };
     }
     if (event.type === "content_block_delta" && asRecord(event.delta).type === "text_delta" && typeof asRecord(event.delta).text === "string" && stream.textBlocks.includes(index)) {
       const text = asRecord(event.delta).text as string;
       if (!text) return { ...base, outcome: "ignored", updates: resumed };
       return { ...base, outcome: "handled", updates: [...resumed, {
         kind: "text", itemId, identity: itemId, mode: "incremental", text,
-        item: { id: itemId, type: "assistant_message", createdAt: stream.createdAt, markdown: "", ...streamTextIdentity(memory.currentStream!, stream, index) },
+        item: { id: itemId, type: "assistant_message", createdAt: stream.createdAt, markdown: "", ...streamTextIdentity(memory.currentStream!, stream, index), ...visualTurnIdentity(memory) },
       }] };
     }
     return { ...base, outcome: resumed.length ? "handled" : "ignored", updates: resumed };
@@ -805,6 +812,7 @@ function normalizeMessage(
   if (type === "result") {
     const envelope = envelopeIdentity(record);
     if (!envelope) return { ...base, outcome: "unparseable" };
+    completeVisualTurn(memory);
     const failed = record.is_error === true;
     // The result's usage is the turn's SUM over every API call ("MAIN AGENT
     // LOOP ONLY … per-turn" in the SDK's words). It is neither a window
@@ -893,6 +901,15 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
 }
 
 type Envelope = { uuid: string; createdAt: number; reportedAt?: number };
+
+function visualTurnIdentity(memory: ClaudeEventMemory) {
+  return { [CLAUDE_TURN]: memory.visualTurn ??= { completed: false } };
+}
+
+function completeVisualTurn(memory: ClaudeEventMemory): void {
+  if (memory.visualTurn) memory.visualTurn.completed = true;
+  memory.visualTurn = undefined;
+}
 
 function envelopeIdentity(record: RecordValue): Envelope | null {
   const uuid = typeof record.uuid === "string" && record.uuid ? record.uuid : null;
@@ -999,6 +1016,7 @@ function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: Cla
       completedAt: envelope.createdAt,
       ...(textBlocks.length ? { [CLAUDE_TEXT_BLOCKS]: textBlocks } : {}),
       ...nativeVisualMessageIdentity("claude", identity?.apiMessageId),
+      ...(identity ? visualTurnIdentity(memory) : {}),
     } });
   }
   return updates;

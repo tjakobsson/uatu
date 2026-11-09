@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { createClaudeEventMemory, describeSessionScopedUpdates, normalizeClaudeMessage, normalizeTranscriptEntries, sessionScopedSuggestions } from "./normalization";
-import { CLAUDE_TEXT_BLOCKS, claudeVisualIdentity, type ClaudeTextIdentity } from "./normalization-types";
+import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./normalization-types";
 import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "../visual-identity";
 import { parseConversationItem } from "../validation";
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
@@ -35,6 +35,51 @@ describe("Claude native text-block capture identity", () => {
     expect(history.items.find(item => item.id === "message:joined")).toEqual(item);
     // The JSON contract keeps native timeline IDs and carries no internal identity.
     expect(JSON.parse(JSON.stringify(item))).toEqual({ id: "message:joined", type: "assistant_message", createdAt: 1, markdown: "![one](one.png)\n\n![two](two.svg)", completedAt: 1 });
+  });
+});
+
+describe("Claude native turn boundaries", () => {
+  test("text completion, tool results and later user records do not end a turn; result does", () => {
+    const memory = createClaudeEventMemory();
+    const normalize = (frame: Record<string, unknown>) => normalizeClaudeMessage({ uuid: "frame", timestamp: 1, ...frame }, memory, "live");
+    const first = normalize({ type: "assistant", message: { id: "native-first", content: [{ type: "text", text: "![shot](later.png)" }] } }).updates.find(update => update.kind === "upsert" && update.item.type === "assistant_message");
+    if (first?.kind !== "upsert") throw new Error("expected text item");
+    const turn = (first.item as typeof first.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    expect(first.item).toHaveProperty("completedAt");
+    expect(turn.completed).toBe(false);
+    normalize({ type: "assistant", message: { content: [{ type: "tool_use", id: "write", name: "Write", input: {} }] } });
+    normalize({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "write", content: "written" }] } });
+    normalize({ type: "user", message: { content: "A steer is not a boundary" } });
+    expect(turn.completed).toBe(false);
+    normalize({ type: "result", subtype: "success" });
+    expect(turn.completed).toBe(true);
+    const next = normalize({ type: "assistant", uuid: "next", message: { id: "native-next", content: [{ type: "text", text: "next turn" }] } }).updates.find(update => update.kind === "upsert" && update.item.type === "assistant_message");
+    if (next?.kind !== "upsert") throw new Error("expected next text item");
+    expect((next.item as typeof next.item & ClaudeTextIdentity)[CLAUDE_TURN]).not.toBe(turn);
+    expect((next.item as typeof next.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect(JSON.stringify(first.item)).not.toContain("completed\":true");
+  });
+
+  test("native transcript completion survives disk normalization without inventing timeline footers", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "uatu-claude-turns-"));
+    const file = path.join(directory, "session.jsonl");
+    const row = (value: Record<string, unknown>, index: number) => JSON.stringify({ uuid: `row-${index}`, timestamp: `2026-09-01T12:00:0${index}Z`, ...value });
+    try {
+      writeFileSync(file, [
+        { type: "assistant", message: { id: "old", content: [{ type: "text", text: "old" }] } },
+        { type: "system", subtype: "turn_duration", durationMs: 1000 },
+        { type: "assistant", message: { id: "running", content: [{ type: "text", text: "pending" }] } },
+        { type: "user", message: { content: "steer" } },
+        { type: "assistant", message: { id: "tool", content: [{ type: "tool_use", id: "write", name: "Write", input: {} }] } },
+      ].map(row).join("\n") + "\n");
+      const { entries, skipped } = await readSessionTranscript(file);
+      expect(skipped).toEqual({});
+      expect(entries[1]).toMatchObject({ kind: "system", subtype: "turn_duration" });
+      const { items } = normalizeTranscriptEntries(entries);
+      const texts = items.filter(item => item.type === "assistant_message");
+      expect(texts.map(item => (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed)).toEqual([true, false]);
+      expect(items.some(item => item.type === "turn_status")).toBe(false);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 });
 

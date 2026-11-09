@@ -9,7 +9,7 @@ import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { CLAUDE_TEXT_BLOCKS } from "./normalization-types";
+import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, type ClaudeTextIdentity } from "./normalization-types";
 import { CHAT_VISUAL_MESSAGE } from "../visual-identity";
 import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
@@ -149,6 +149,32 @@ test("verified Claude history avoids repeated processing and reconciles native f
     await expect(provider.listMessages("reuse-session", { limit: 10 })).rejects.toThrow("unknown Claude conversation");
     expect(queries).toHaveLength(0);
   } finally { globalThis.__uatuChatPerformance = previous; await provider.dispose(); }
+});
+
+test("native turn metadata survives provider history pagination and cached reads", async () => {
+  const { provider, configDir, workspace, queries } = fixture();
+  const file = path.join(claudeProjectDir(workspace, configDir), "turn-pages.jsonl");
+  const rows = [
+    { type: "assistant", message: { id: "old", content: [{ type: "text", text: "![Old](old.png)" }] } },
+    { type: "system", subtype: "turn_duration", durationMs: 1000 },
+    { type: "user", message: { content: "New turn" } },
+    { type: "assistant", message: { id: "current", content: [{ type: "text", text: "![Current](later.png)" }] } },
+    { type: "assistant", message: { id: "write", content: [{ type: "tool_use", id: "write", name: "Write", input: {} }] } },
+  ];
+  writeFileSync(file, rows.map((row, index) => JSON.stringify({ uuid: `row-${index}`, timestamp: `2026-09-01T12:00:0${index}Z`, ...row })).join("\n") + "\n");
+  try {
+    const newest = await provider.listMessages("turn-pages", { limit: 1 });
+    expect(newest.items.map(item => item.id)).toEqual(["tool:write"]);
+    const sameTurn = await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor });
+    expect(sameTurn.items.map(item => item.id)).toEqual(["message:row-3"]);
+    const current = sameTurn.items[0]!;
+    expect((current as typeof current & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    const oldPage = await provider.listMessages("turn-pages", { limit: 10, cursor: sameTurn.nextCursor });
+    const old = oldPage.items.find(item => item.id === "message:row-0")!;
+    expect((old as typeof old & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor })).items).toEqual(sameTurn.items);
+    expect(queries).toHaveLength(0);
+  } finally { await provider.dispose(); }
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {

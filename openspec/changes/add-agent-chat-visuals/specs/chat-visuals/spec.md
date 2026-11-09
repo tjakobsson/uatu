@@ -209,6 +209,15 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **THEN** replay does not duplicate already-applied text or recapture terminal visuals
 - **AND** the client can recover newly available references through the existing resync protocol
 
+#### Scenario: Completed and live Claude turns appear in paged history
+- **WHEN** history is loaded while a newer Claude turn is running
+- **THEN** visuals in completed turns are terminal independently of the current conversation status
+- **AND** text-block completion does not finalize visuals in the still-running turn, even when that turn spans cursor pages
+
+#### Scenario: A shorthand image reference completes before a long-running tool
+- **WHEN** a supported shorthand reference closes during the streaming enrichment cadence
+- **THEN** its terminated reference definition can be captured without waiting for later assistant text or turn completion
+
 ### Requirement: Managed agents receive scoped presentation guidance
 Managed Claude Code and OpenCode sessions SHALL attempt to add native presentation
 guidance describing supported embeds, limits, immutable capture, and resource

@@ -416,7 +416,7 @@ describe("immutable visual snapshots", () => {
     const store = new VisualStore("/workspace", directory);
     const largePng = new Uint8Array(VISUAL_MAX_BYTES);
     largePng.set(png);
-    let sourceReads = 0, canonicalReads = 0, previewReads = 0, svgSourceReads = 0;
+    let sourceReads = 0, canonicalReads = 0, canonicalMisses = 0, canonicalRecordReads = 0, previewReads = 0, svgSourceReads = 0;
     store.setReader(async () => { sourceReads++; return largePng; });
     const inputs = [file(), { ...inline("<svg><text>original</text></svg>"), index: 1 }, { ...inline('<svg onload="alert(1)"/>'), index: 2 }];
     const requests = inputs.map(input => ({ messageId: "m", input }));
@@ -424,16 +424,27 @@ describe("immutable visual snapshots", () => {
     const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
       apply(target, thisArg, args) {
         const filename = path.basename(String(args[0]));
-        if (/^[a-f\d]{64}\.json$/.test(filename)) canonicalReads++;
+        const canonical = /^[a-f\d]{64}\.json$/.test(filename);
+        if (canonical) canonicalReads++;
         if (filename.endsWith(".preview.bin")) previewReads++;
         if (filename.endsWith(".source.bin")) svgSourceReads++;
-        return Reflect.apply(target, thisArg, args);
+        return Reflect.apply(target, thisArg, args).then((value: string | Buffer) => {
+          if (canonical) canonicalRecordReads++;
+          return value;
+        }, (error: NodeJS.ErrnoException) => {
+          if (canonical && error.code === "ENOENT") canonicalMisses++;
+          throw error;
+        });
       },
     }));
     try {
       const captured = await store.captureMany("a:c", "m", requests, false);
       expect(captured.map(snapshot => snapshot.status)).toEqual(["ready", "ready", "unavailable"]);
-      expect(canonicalReads).toBe(0);
+      // Each new occurrence probes for a legacy canonical winner before
+      // capture. ENOENT supplies no JSON to parse; successful reads would.
+      expect(canonicalReads).toBe(inputs.length);
+      expect(canonicalMisses).toBe(inputs.length);
+      expect(canonicalRecordReads).toBe(0);
       expect(sourceReads).toBe(1);
       for (const snapshot of captured) {
         const metadata = await fs.readFile(path.join(store.directory, `${snapshot.id}.metadata.json`), "utf8");
@@ -451,8 +462,12 @@ describe("immutable visual snapshots", () => {
         expect(new TextDecoder().decode(restored[1]?.sourceBytes)).toBe(inputs[1]!.source);
         expect(restored[2]?.bytes).toBeUndefined();
         expect(new TextDecoder().decode(restored[2]?.sourceBytes)).toBe(inputs[2]!.source);
+        // Neither cold metadata reads nor repeated byte delivery may add
+        // canonical probes, including failed ones, after initial capture.
+        expect(canonicalReads).toBe(inputs.length);
+        expect(canonicalMisses).toBe(inputs.length);
+        expect(canonicalRecordReads).toBe(0);
       }
-      expect(canonicalReads).toBe(0);
       expect(previewReads).toBe(6);
       expect(svgSourceReads).toBe(6);
       expect(sourceReads).toBe(1);
@@ -1118,14 +1133,17 @@ test("genuine history and streamed deltas capture immediately, terminal status r
   expect(update.sequence).toBe(1);
   expect(parseChatEvent(update)).toEqual(update);
   exists = true;
-  events.push({ generation: "g", sequence: 2, conversationId: "c", type: "conversation.status", status: "completed" });
-  const complete = (await iterator.next()).value!;
-  expect(complete.type).toBe("resync");
-  expect(complete.sequence).toBe(2);
+  const nativeStatus: ChatEvent = { generation: "g", sequence: 2, conversationId: "c", type: "conversation.status", status: "completed" };
+  events.push(nativeStatus);
+  const complete = (await iterator.next()).value as ChatEvent;
+  expect(complete).toEqual({ ...nativeStatus, conversationId: "a:c" });
   expect(parseChatEvent(complete)).toEqual(complete);
+  const resync = (await iterator.next()).value as ChatEvent;
+  expect(parseChatEvent(resync)).toEqual({ type: "resync", reason: "conversation-rewritten", generation: nativeStatus.generation, conversationId: "a:c", sequence: nativeStatus.sequence });
   snapshot.items = [{ ...message, markdown: message.markdown + "\n![second](second.png)" }];
   snapshot.conversation.status = "completed";
   const terminal = await service.history("a:c");
+  expect((terminal.items[0] as AssistantMessageItem).markdown).toBe(message.markdown + "\n![second](second.png)");
   expect((terminal.items[0] as AssistantMessageItem).visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
   snapshot.conversation.status = "running";
   exists = false;
@@ -1205,7 +1223,7 @@ test("terminal cursor replay resyncs once when snapshot enrichment alone turns a
   const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
   const cached = await service.history("a:c");
   expect((cached.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
-  replay.publish({ type: "item.text_delta", itemId: "m", delta: " done" });
+  const nativeDelta = replay.publish({ type: "item.text_delta", itemId: "m", delta: " done" });
   const terminal = replay.publish({ type: "conversation.status", status: "completed" });
   current = { ...current, conversation: { ...current.conversation, status: "completed" }, items: [{ ...message, markdown: message.markdown + " done" }] };
   exists = true;
@@ -1213,16 +1231,22 @@ test("terminal cursor replay resyncs once when snapshot enrichment alone turns a
   expect((subscription.snapshot.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
   const iterator = subscription.events[Symbol.asyncIterator]();
   const delta = (await iterator.next()).value as ChatEvent;
-  expect(delta.type).toBe("item.text_delta");
+  expect(delta).toEqual({ ...nativeDelta, conversationId: "a:c" });
   expect(delta).not.toHaveProperty("item");
+  const status = (await iterator.next()).value as ChatEvent;
+  expect(status).toEqual({ ...terminal, conversationId: "a:c" });
+  expect(parseChatEvent(status)).toEqual(status);
   const resync = (await iterator.next()).value as ChatEvent;
-  expect(parseChatEvent(resync)).toEqual({ type: "resync", reason: "conversation-rewritten", generation: "g", conversationId: "a:c", sequence: terminal.sequence });
+  expect(parseChatEvent(resync)).toEqual({ type: "resync", reason: "conversation-rewritten", generation: terminal.generation, conversationId: "a:c", sequence: terminal.sequence });
   subscription.events.cancel();
   const fresh = await service.history("a:c");
+  expect(fresh.cursor).toBe(replay.latestCursor());
+  expect(fresh.generation).toBe(terminal.generation);
+  expect((fresh.items[0] as AssistantMessageItem).markdown).toBe(message.markdown + " done");
   expect((fresh.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
   const resumed = await service.subscribe("a:c", { cursor: fresh.cursor });
-  replay.publish({ type: "conversation.status", status: "completed" });
-  expect(((await resumed.events[Symbol.asyncIterator]().next()).value as ChatEvent).type).toBe("conversation.status");
+  const liveStatus = replay.publish({ type: "conversation.status", status: "completed" });
+  expect((await resumed.events[Symbol.asyncIterator]().next()).value).toEqual({ ...liveStatus, conversationId: "a:c" });
   resumed.events.cancel();
   await service.dispose();
 });

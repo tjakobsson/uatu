@@ -114,6 +114,11 @@ can use a full native-sequenced item replacement. Completion retries and
 reconnect enrichment use the existing resync mechanism. Snapshot-seeded state
 must not append replayed text twice. Captured bytes do not ride events; original
 fenced SVG remains part of provider-authored Markdown.
+Claude text rows carry internal turn metadata, shared across the native turn
+and sealed only by native `result` or transcript `turn_duration` records. It
+survives item spreads and history pagination, but is not serialized onto the
+public wire. This distinguishes completed historical turns from a live turn
+spanning pages without treating a later user row as a completion boundary.
 
 ### Keep visual interaction within the existing chat surface
 

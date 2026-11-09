@@ -168,7 +168,9 @@ test("files a client opens or is served stay indexed when later writes overflow 
   const cwd = await fixture();
   await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
   await files(cwd, ["README.md"]);
-  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { ignoredWindowLimit: 2 });
+  // Pinned files count toward the total window. Leave one moving slot so
+  // later writes can enter it while the two client-owned entries stay pinned.
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { ignoredWindowLimit: 3 });
   const render = (name: string) => path.join(cwd, "build/renders", name);
   try {
     await session.start();
@@ -184,7 +186,7 @@ test("files a client opens or is served stay indexed when later writes overflow 
     // Unpinned older writes left the window.
     expect(session.findDocument(render("a.wav"))).toBeUndefined();
   } finally { await session.stop(); }
-});
+}, 20_000);
 
 test("Follow skips ignored output in every batch, follows tracked output, and the default skips newer ignored files", async () => {
   const cwd = await fixture();

@@ -288,8 +288,9 @@ test.each([false, true])("provider resync reseeds rewritten assistant text befor
     { id: "tool", type: "tool", createdAt: 3, name: "Read", status: "running", output: "large tool output" },
   ]);
   try {
-    h.projection.seed([{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "rewritten answer " }]);
-    h.replay.publish({ type: "resync", reason: "conversation-rewritten" });
+    // seed() is additive recovery, not a history rewrite. Use the same
+    // atomic replacement/text reset that a provider rewrite uses.
+    h.projection.replace([{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "rewritten answer " }]);
     if (covered) h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: "already covered " });
     const reset = await deliveredBatch(h.replay, h.iterator);
     expect(reset[0]).toMatchObject({ type: "resync", reason: "conversation-rewritten" });
@@ -344,6 +345,74 @@ test("only the newest history request treats trailing rows as live, regardless o
   } finally { await h.cleanup(); }
 });
 
+test("native Claude completed turns stay sealed while a running turn spans older history pages", async () => {
+  const h = await visualSubscriptionHarness("claude");
+  const file = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "opencode", "claude-turn-history-")), "session.jsonl");
+  const rows = [
+    { type: "assistant", message: { id: "old-native", content: [{ type: "text", text: "![Old](old.png)\n\n```svg\n<svg>" }] } },
+    { type: "system", subtype: "turn_duration", durationMs: 1000 },
+    { type: "user", message: { content: "Next turn" } },
+    { type: "assistant", message: { id: "current-native", content: [{ type: "text", text: "![Current](later.png)\n\n```svg\n<svg>" }] } },
+    { type: "user", message: { content: "Keep working: this steer is not a boundary" } },
+    { type: "assistant", message: { id: "write-native", content: [{ type: "tool_use", id: "write", name: "Write", input: {} }] } },
+  ];
+  await fs.writeFile(file, rows.map((row, index) => JSON.stringify({ uuid: `row-${index}`, timestamp: `2026-09-01T12:00:0${index}Z`, ...row })).join("\n") + "\n");
+  const items = normalizeTranscriptEntries((await readSessionTranscript(file)).entries).items;
+  const old = items.find(item => item.id === "message:row-0")!;
+  const current = items.find(item => item.id === "message:row-3")!;
+  h.provider.history = async (_id, options) => ({ ...h.current(), items: options?.cursor === "old-turn" ? [old] : options?.cursor === "same-running-turn" ? [current] : items.slice(-2) });
+  try {
+    // Both rows carry completedAt from their API text block, but only the
+    // native turn_duration sealed the old one. Neither page has a footer.
+    expect(old).toHaveProperty("completedAt");
+    expect(current).toHaveProperty("completedAt");
+    const terminal = (await h.service.history("claude:c", { cursor: "old-turn" })).items[0] as AssistantMessageItem;
+    expect(terminal.visuals?.map(visual => visual.status)).toEqual(["unavailable", "unavailable"]);
+    const pending = (await h.service.history("claude:c", { cursor: "same-running-turn" })).items[0] as AssistantMessageItem;
+    expect(pending.visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
+    expect(h.files.reads).toBe(2);
+    h.files.available = true;
+    expect(((await h.service.history("claude:c", { cursor: "old-turn" })).items[0] as AssistantMessageItem).visuals).toEqual(terminal.visuals);
+    expect(((await h.service.history("claude:c", { cursor: "same-running-turn" })).items[0] as AssistantMessageItem).visuals).toEqual(pending.visuals);
+    expect(h.files.reads).toBe(2); // No wrong-byte capture of the old path.
+    h.projection.status = "completed";
+    const completed = (await h.service.history("claude:c", { cursor: "same-running-turn" })).items[0] as AssistantMessageItem;
+    expect(completed.visuals?.map(visual => visual.status)).toEqual(["ready", "unavailable"]);
+    expect(h.files.reads).toBe(3);
+    expect(((await h.service.history("claude:c", { cursor: "old-turn" })).items[0] as AssistantMessageItem).visuals).toEqual(terminal.visuals);
+  } finally { await h.cleanup(); await fs.rm(path.dirname(file), { recursive: true, force: true }); }
+});
+
+test("a shorthand image completed inside the cadence enriches the same native event immediately", async () => {
+  const h = await visualSubscriptionHarness("test");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const result = applyChatEvent(client, event);
+    expect(result.outcome).toBe("applied");
+    client = result.projection;
+  };
+  try {
+    // Keep the definition outside the bounded syntax suffix: recognizing a
+    // closed shorthand label must not require rescanning all prior Markdown.
+    const prefix = "[shot]: result.png\n\n" + "ordinary prose\n".repeat(50);
+    h.projection.upsert({ id: "answer", type: "assistant_message", createdAt: 1, markdown: prefix });
+    await deliveredBatch(h.replay, h.iterator, project);
+    h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: "![sho" });
+    const incomplete = await deliveredBatch(h.replay, h.iterator, project);
+    expect(incomplete).toHaveLength(1);
+    expect((client.items[0] as AssistantMessageItem).visuals).toBeUndefined();
+    const original = h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: "t]" })!;
+    const completed = await deliveredBatch(h.replay, h.iterator, project);
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ type: "item.upsert", sequence: original.sequence, generation: original.generation, item: { markdown: prefix + "![shot]", visuals: [{ status: "pending" }] } });
+    expect((client.items[0] as AssistantMessageItem).markdown).toBe(prefix + "![shot]");
+    expect((client.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+    expect(h.projection.status).toBe("running");
+    expect(h.files.reads).toBe(1);
+  } finally { clock.mockRestore(); await h.cleanup(); }
+});
+
 test.each([
   { fence: "```", chunks: ["```"] },
   { fence: "```", chunks: ["`", "`", "`"] },
@@ -361,21 +430,26 @@ test.each([
     client = result.projection;
   };
   try {
-    const open: AssistantMessageItem = { id: "answer", type: "assistant_message", createdAt: 1, markdown: `${fence}svg\n<svg><rect width="10"/></svg>\n`, contextKey: "original-context", model: { providerId: "test", modelId: "original-model" } };
+    const open: AssistantMessageItem = { id: "answer", type: "assistant_message", createdAt: 1, markdown: `${fence}svg\n<svg>`, contextKey: "original-context", model: { providerId: "test", modelId: "original-model" } };
     const original = h.projection.upsert(open)!;
     const opening = await deliveredBatch(h.replay, h.iterator, project);
     expect(opening).toHaveLength(1);
     expect(opening[0]).toMatchObject({ type: "item.upsert", sequence: original.sequence, item: open });
     expect((client.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+    // Establish an actual incremental stream. Immediately after a seeded
+    // upsert the reconciler legitimately drops covered delimiter stragglers.
+    const body = '<rect width="10"/></svg>\n';
+    h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: body });
+    expect(await deliveredBatch(h.replay, h.iterator, project)).toHaveLength(1);
     let last: ChatEvent[] = [];
     for (const text of chunks) {
       h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text });
       last = await deliveredBatch(h.replay, h.iterator, project);
       expect(last).toHaveLength(1);
     }
-    expect(last[0]).toMatchObject({ type: "item.upsert", item: { markdown: open.markdown + fence, contextKey: open.contextKey, model: open.model } });
+    expect(last[0]).toMatchObject({ type: "item.upsert", item: { markdown: open.markdown + body + fence, contextKey: open.contextKey, model: open.model } });
     const displayed = client.items[0] as AssistantMessageItem;
-    expect(displayed.markdown).toBe(open.markdown + fence);
+    expect(displayed.markdown).toBe(open.markdown + body + fence);
     expect(displayed.visuals?.[0]?.status).toBe("ready");
     expect(outcomes).not.toContain("duplicate");
     expect(h.projection.status).toBe("running"); // No tool, footer, status or elapsed cadence needed.
