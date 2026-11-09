@@ -85,6 +85,7 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.16 Address Codex on `05e0a156`: queued live Claude prefixes must remain provisional until the subscription consumes the ordered turn boundary, even when the provider has already completed its shared native turn token. Keep history completion authoritative and preserve immutable capture identity.
 - [ ] 6.17 Diagnose the persistent ignored-window CI failure from source and correct its real fixture or implementation cause; the sequential-observation/eviction wait alone did not establish a fix. Preserve both pinned-file retention and oldest-unpinned eviction assertions.
 - [ ] 6.18 Address Codex on `36a0dd81`: a terminal visual refresh must recover when the client receives terminal status, misses its additional same-sequence resync, and reconnects at exactly that cursor. Cover the real cursor-only HTTP open frame without inventing native sequence numbers or refetching ordinary text-only history.
+- [ ] 6.19 Diagnose the `d6e932c5` WebKit desktop-parent following failure: initial bottom distance is 16 px on all three CI attempts. Preserve the strict bottom assertion; collect pre-activation trace, geometry, fonts and following state through CI before proposing a production change.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including
