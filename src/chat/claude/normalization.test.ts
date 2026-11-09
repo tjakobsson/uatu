@@ -25,8 +25,10 @@ describe("Claude native text-block capture identity", () => {
     if (update.kind !== "upsert") throw new Error("expected stopped text block");
     expect(update.item).toMatchObject({ id: opened.item.id, type: "assistant_message", markdown: "", completedAt: 4 });
     expect(claudeVisualIdentity(update.item, "offset:0")).toEqual({ messageId: "claude:text:native-block:0", key: "offset:0" });
-    const turn = (update.item as typeof update.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
-    expect(turn).toBe((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]);
+    const turn = (update.item as typeof update.item & ClaudeTextIdentity)[CLAUDE_TURN];
+    const openedTurn = (opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN];
+    if (!turn || !openedTurn) throw new Error("expected native turn metadata on both block frames");
+    expect(turn).toBe(openedTurn);
     expect(turn.completed).toBe(false);
     expect(opened.item).not.toHaveProperty("completedAt"); // No later mutation of queued prefixes.
     stream({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "write", name: "Write" } });
