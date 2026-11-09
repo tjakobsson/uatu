@@ -169,6 +169,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   private readonly order: RegisteredChatAgent[];
   private readonly attachmentStore: AttachmentStore;
   private readonly visualStore: VisualStore;
+  // Completion tokens can change while another snapshot row awaits capture.
+  // Keep boundary-time decisions out of the wire and reuse them when seeding
+  // the ordered live accumulator after snapshot enrichment finishes.
+  private readonly snapshotVisualLiveness = new WeakMap<AgentConversationSnapshot, ReadonlyMap<string, boolean>>();
   // Entries exist only while a conversation has active event subscriptions.
   // History contributes pending assistant rows, never a second event stream.
   private readonly visualHistorySubscribers = new Map<string, Set<VisualHistorySubscriber>>();
@@ -405,11 +409,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const seed = (current: AgentConversationSnapshot) => {
       items.clear();
       streaming = isLiveConversationStatus(current.conversation.status);
-      const lastTurn = current.items.findLastIndex(item => item.type === "turn_status");
-      for (const [index, item] of current.items.entries()) {
+      const liveness = this.snapshotVisualLiveness.get(current)!;
+      for (const item of current.items) {
         if (item.type === "assistant_message") {
-          const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
-          items.set(item.id, { item, live: streaming && (turn ? !turn.completed : index > lastTurn), enrichedAt: -Infinity });
+          items.set(item.id, { item, live: liveness.get(item.id) ?? false, enrichedAt: -Infinity });
         }
       }
     };
@@ -488,7 +491,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const enrich = async (tracked: Tracked, force = false) => {
       if (!force && Date.now() - tracked.enrichedAt < enrichmentCadenceMs) return false;
       const previous = tracked.item;
-      tracked.item = await this.enrichItem(id, previous, tracked.live, true) as Assistant;
+      const live = this.visualItemLive(previous, tracked.live, true);
+      tracked.item = await this.enrichItem(id, previous, live, true) as Assistant;
       tracked.enrichedAt = tracked.item.markdown.length ? Date.now() : -Infinity;
       return JSON.stringify(previous.visuals) !== JSON.stringify(tracked.item.visuals);
     };
@@ -670,9 +674,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   configureVisualReader(reader: VisualFileReader): void { this.visualStore.setReader(reader); }
   resolveVisual(id: string): Promise<StoredVisual | null> { return this.visualStore.resolve(id); }
 
-  private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean, orderedTurnState = false): Promise<ConversationItem> {
+  private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean, resolvedLiveness = false): Promise<ConversationItem> {
     if (item.type !== "assistant_message") return item;
-    const live = this.visualItemLive(item, streaming, orderedTurnState);
+    const live = resolvedLiveness ? streaming : this.visualItemLive(item, streaming);
     // Deliberately overinclusive: any image opener or Markdown fence may
     // produce a visual, including reference syntax, raw HTML, nested/indented
     // fences and whitespace before the SVG info string. Plain prose needs no
@@ -713,13 +717,27 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // metadata, keep older pages terminal rather than inferring from a user
     // row or a page-local footer.
     const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
+    const streaming = isLiveConversationStatus(snapshot.conversation.status);
+    // Plan every row synchronously before the first await. In particular,
+    // token completion must describe the same boundary as this row's text,
+    // not a later result processed while an earlier file read was blocked.
+    const liveness = new Map<string, boolean>();
+    const planned = snapshot.items.map((item, index) => {
+      if (item.type !== "assistant_message") return { item, live: false };
+      const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
+      const live = this.visualItemLive(item, streaming && (Boolean(turn) || newestPage && index > lastTurn));
+      liveness.set(item.id, live);
+      return { item, live };
+    });
     const items: ConversationItem[] = [];
-    for (const [index, item] of snapshot.items.entries()) {
-      const turn = item.type === "assistant_message" ? (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN] : undefined;
-      const live = isLiveConversationStatus(snapshot.conversation.status) && (turn ? !turn.completed : newestPage && index > lastTurn);
-      items.push(await this.enrichItem(snapshot.conversation.id, item, live));
+    for (const { item, live } of planned) {
+      // This is now a final decision, just like ordered replay state: avoid a
+      // second mutable-token completion read inside enrichItem.
+      items.push(await this.enrichItem(snapshot.conversation.id, item, live, true));
     }
-    return { ...snapshot, items };
+    const enriched = { ...snapshot, items };
+    this.snapshotVisualLiveness.set(enriched, liveness);
+    return enriched;
   }
 
   async renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: AgentConversationSummary }> {

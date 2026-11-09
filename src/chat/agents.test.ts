@@ -362,6 +362,110 @@ test.each(["completed", "failed", "interrupted"] as const)("delayed Claude drain
   } finally { clock.mockRestore(); await restarted?.dispose(); await h.cleanup(); }
 });
 
+test.each([
+  { entry: "subscribe", missing: false }, { entry: "subscribe", missing: true },
+  { entry: "history", missing: false }, { entry: "history", missing: true },
+] as const)("$entry freezes all Claude snapshot row decisions before an earlier capture awaits (missing=$missing)", async ({ entry, missing }) => {
+  const h = await visualSubscriptionHarness("claude");
+  const memory = createClaudeEventMemory();
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const prefix = '```svg\n<svg><rect width="10"';
+  const close = '/></svg>\n```';
+  const svg = '<svg><rect width="10"/></svg>\n';
+  let frame = 0;
+  const emit = (value: Record<string, unknown>) => {
+    const normalized = normalizeClaudeMessage({ uuid: `frame-${++frame}`, timestamp: frame, ...value }, memory, "live");
+    return normalized.updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+  };
+  const stream = (event: Record<string, unknown>) => emit({ type: "stream_event", event });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let started!: () => void;
+  const firstReadStarted = new Promise<void>(resolve => { started = resolve; });
+  const reads = { old: 0, current: 0 };
+  h.store.setReader(async source => {
+    if (source === "old.png") { reads.old++; throw new VisualReadError(true); }
+    expect(source).toBe("first.png");
+    reads.current++;
+    if (reads.current === 1) {
+      started();
+      await gate;
+      if (missing) throw new VisualReadError(true);
+    }
+    return png;
+  });
+  let subscribed: { cancel(): void } | undefined;
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    // An actually completed historical turn must remain terminal. Only the
+    // current turn's token changes after this snapshot's boundary is taken.
+    emit({ type: "assistant", uuid: "old", message: { id: "old-native", content: [{ type: "text", text: "![Old](old.png)\n\n```svg\n<svg>" }] } });
+    emit({ type: "result", subtype: "success" });
+    h.projection.statusUpdate("running");
+    emit({ type: "assistant", uuid: "first", message: { id: "first-native", content: [{ type: "text", text: "![First](first.png)" }] } });
+    stream({ type: "message_start", message: { id: "svg-native" } });
+    const opened = stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })[0]!;
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: prefix } });
+    const boundaryCursor = h.replay.latestCursor();
+    const loading = entry === "subscribe"
+      ? h.service.subscribe("claude:c").then(value => ({ snapshot: value.snapshot, events: value.events }))
+      : h.service.history("claude:c", { cursor: "older-page-of-current-turn" }).then(snapshot => ({ snapshot, events: h.subscription.events }));
+    await firstReadStarted;
+    // The first row is blocked in file capture, but the last row's text still
+    // belongs to the unfinished snapshot prefix. The provider now seals the
+    // same shared token before that last row gets its enrichment turn.
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: close } });
+    stream({ type: "content_block_stop", index: 0 });
+    emit({ type: "assistant", uuid: "durable-svg", message: { id: "svg-native", content: [{ type: "text", text: prefix + close }] } });
+    const terminal = emit({ type: "result", subtype: "success" })[0]!;
+    if (opened.type !== "item.upsert") throw new Error("expected native open text item");
+    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    release();
+    const loaded = await loading;
+    subscribed = loaded.events;
+    expect(loaded.snapshot.cursor).toBe(boundaryCursor);
+    expect(loaded.snapshot.conversation.status).toBe("running");
+    const initialSvg = loaded.snapshot.items.find(item => item.id === opened.item.id) as AssistantMessageItem;
+    expect(initialSvg.markdown).toBe(prefix);
+    expect(initialSvg.visuals?.[0]?.status).toBe("pending");
+    const initialOld = loaded.snapshot.items.find(item => item.id === "message:old") as AssistantMessageItem;
+    expect(initialOld.visuals?.map(visual => visual.status)).toEqual(["unavailable", "unavailable"]);
+    const initialFile = loaded.snapshot.items.find(item => item.id === "message:first") as AssistantMessageItem;
+    expect(initialFile.visuals?.[0]?.status).toBe(missing ? "pending" : "ready");
+    expect(reads).toEqual({ old: 1, current: 1 });
+
+    let client = entry === "subscribe"
+      ? projectionFromSnapshot(loaded.snapshot)
+      : prependSnapshot(projectionFromSnapshot(h.subscription.snapshot), loaded.snapshot);
+    const iterator = entry === "subscribe" ? loaded.events[Symbol.asyncIterator]() : h.iterator;
+    const delivered = await deliveredBatch(h.replay, iterator, event => {
+      const applied = applyChatEvent(client, event);
+      expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+      client = applied.projection;
+    });
+    expect(delivered.some(event => event.type === "item.upsert" && event.item.type === "assistant_message" && event.item.markdown === prefix + close && event.item.visuals?.[0]?.status === "ready")).toBe(true);
+    expect(delivered.find(event => event.type === "conversation.status" && event.sequence === terminal.sequence)).toEqual({ ...terminal, conversationId: "claude:c" });
+    expect(client.status).toBe("completed");
+    const finalSvg = client.items.find(item => item.id === "message:durable-svg") as AssistantMessageItem;
+    expect(finalSvg.markdown).toBe(prefix + close);
+    expect(finalSvg.visuals?.[0]?.status).toBe("ready");
+    expect(initialSvg.visuals?.[0]?.status).toBe("pending"); // The handed-off snapshot did not mutate.
+    expect(reads).toEqual({ old: 1, current: missing ? 2 : 1 });
+    const capturedSvg = await h.service.resolveVisual(finalSvg.visuals![0]!.id!);
+    expect(new TextDecoder().decode(capturedSvg?.sourceBytes)).toBe(svg);
+    const completed = await h.service.history("claude:c");
+    expect((completed.items.find(item => item.id === "message:first") as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
+    expect((completed.items.find(item => item.id === "message:old") as AssistantMessageItem).visuals).toEqual(initialOld.visuals);
+    const store = new VisualStore("/workspace", h.directory);
+    store.setReader(async () => { throw new Error("completed snapshots must not reread image files"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:durable-svg") as AssistantMessageItem;
+    expect(reloaded.visuals).toEqual(finalSvg.visuals);
+    expect(await restarted.resolveVisual(reloaded.visuals![0]!.id!)).toEqual(capturedSvg);
+    expect(reads).toEqual({ old: 1, current: missing ? 2 : 1 });
+  } finally { release(); subscribed?.cancel(); await restarted?.dispose(); await h.cleanup(); }
+});
+
 test.each(["status-error", "updated"] as const)("visual terminal refresh preserves the original %s before its additional resync", async kind => {
   const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Missing](later.png)" }]);
   try {
