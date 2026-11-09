@@ -7,6 +7,7 @@ import { ConversationProjection } from "../../adapter";
 import { parseConversationItem } from "../../validation";
 import { visualAdmissionIdentity } from "../../visual-identity";
 import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "../normalization-types";
+import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "../../projection";
 
 test("native and classic text events plus both history shapes retain the parent admission identity outside JSON", () => {
   const messageId = "native:api:id";
@@ -36,6 +37,68 @@ test("native and classic text events plus both history shapes retain the parent 
 });
 
 describe("OpenCode provider completion timestamps", () => {
+  test.each([
+    { name: "ordinary reply", initial: "Answer", final: "Answer completed" },
+    { name: "visual reply", initial: "![shot][ref]\n\n[ref]: result.p", final: "![shot][ref]\n\n[ref]: result.png" },
+  ])("classic $name completion preserves its original start before a later steer in server and browser history", ({ initial, final }) => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const emit = (timestamp: number, value: string, ended = false) => normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp, part: { id: "p", messageID: "m", type: "text", text: value, ...(ended ? { time: { end: timestamp } } : {}) } } }, memory).updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+    const snapshot = () => ({ conversation: { id: "s", title: "s", createdAt: 1, updatedAt: 1, status: "running" as const }, configuration: {}, generation: "g", cursor: projection.replay.latestCursor(), items: projection.items() });
+    emit(10, initial);
+    expect(emit(15, initial)).toEqual([]); // Repeated cumulative frames do not advance the start or replay.
+    projection.upsert({ id: "message:steer", type: "user_message", createdAt: 20, text: "Keep going" });
+    const before = snapshot();
+    const completed = emit(30, final, true);
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ type: "item.upsert", generation: "g", conversationId: "s", sequence: 3, item: { id: "part:p", createdAt: 10, markdown: final } });
+    const item = projection.items()[0]!;
+    expect(item).not.toHaveProperty("completedAt");
+    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(visualAdmissionIdentity(item)).toBe("opencode:message:m");
+    expect(projection.items().map(item => [item.id, item.createdAt])).toEqual([["part:p", 10], ["message:steer", 20]]);
+    const applied = applyChatEvent(projectionFromSnapshot(before), completed[0]!);
+    expect(applied.outcome).toBe("applied");
+    expect(applied.projection.items[0]).toMatchObject({ id: "part:p", createdAt: 10, markdown: final });
+    const merged = prependSnapshot(applied.projection, snapshot());
+    expect(merged.items.map(item => [item.id, item.createdAt])).toEqual([["part:p", 10], ["message:steer", 20]]);
+  });
+  test.each([
+    { name: "numeric message creation", message: { time: 10 }, time: { end: 30 }, expected: 10 },
+    { name: "structured message creation", message: { time: { created: 10 } }, time: { end: 30 }, expected: 10 },
+    { name: "native part start without initial streaming", message: undefined, time: { start: 10, end: 30 }, expected: 10 },
+    { name: "only the first observed frame when creation is unknown", message: undefined, time: { end: 30 }, expected: 30 },
+  ])("first-seen classic completion uses $name rather than inventing a start", ({ message, time, expected }) => {
+    const normalized = normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 30, ...(message ? { message } : {}), part: { id: "p", messageID: "m", type: "text", text: "Final", time } } }, createProviderEventMemory());
+    const update = normalized.updates[0]!;
+    expect(update).toMatchObject({ kind: "upsert", item: { id: "part:p", createdAt: expected, markdown: "Final" } });
+    if (update.kind !== "upsert") throw new Error("expected native completion upsert");
+    expect((update.item as typeof update.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(update.item).not.toHaveProperty("completedAt");
+  });
+  test("a history-loaded row uses native message creation without requiring an initial text stream", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const info = { id: "m", role: "assistant", sessionID: "s", time: { created: 10 } };
+    projection.seed(normalizeProviderMessage({ info, parts: [{ id: "p", type: "text", text: "Initial" }] }));
+    projection.upsert({ id: "message:steer", type: "user_message", createdAt: 20, text: "Keep going" });
+    // The classic message update is authoritative creation metadata, not a
+    // text phase and not a synthetic replay publication.
+    expect(normalizeProviderEvent({ type: "message.updated", properties: { sessionID: "s", timestamp: 25, info } }, memory).updates).toEqual([]);
+    const normalized = normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 30, part: { id: "p", messageID: "m", type: "text", text: "Final", time: { end: 30 } } } }, memory);
+    const emitted = normalized.updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({ type: "item.upsert", sequence: 2, item: { createdAt: 10, markdown: "Final" } });
+    expect(projection.items().map(item => item.id)).toEqual(["part:p", "message:steer"]);
+  });
+  test("classic completion reuses the native stream's start and explicit message creation outranks frame-time fallbacks", () => {
+    const memory = createProviderEventMemory();
+    normalizeProviderEvent({ type: "session.next.text.started", properties: { sessionID: "s", timestamp: 10, textID: "p", assistantMessageID: "m" } }, memory);
+    const classic = (partId: string, timestamp: number, time: unknown, message?: Record<string, unknown>) => normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp, ...(message ? { message } : {}), part: { id: partId, messageID: "m", type: "text", text: "Final", time } } }, memory).updates[0]!;
+    expect(classic("p", 30, { end: 30 })).toMatchObject({ kind: "upsert", item: { createdAt: 10 } });
+    classic("other", 15, undefined);
+    expect(classic("other", 30, { end: 30 }, { time: { created: 10 } })).toMatchObject({ kind: "upsert", item: { createdAt: 10 } });
+  });
   test("validated classic text-part ends flush unchanged text without sealing the parent", () => {
     for (const end of [0, 30]) {
       const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));

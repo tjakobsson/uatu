@@ -37,7 +37,7 @@ export type ProviderEventMemory = {
   // The newest user message seen per session: the prompt an assistant message
   // answers when the event does not name it (the v2 record has no `parentID`).
   prompts: Map<string, string>;
-  // Preserve the text row's start time when its authoritative end is upserted.
+  // Bounded text/parent start times, shared by native and classic text paths.
   textStarts?: Map<string, number>;
 };
 
@@ -308,7 +308,10 @@ export function normalizeEventEnvelopeWith<Memory extends ProviderEventMemory>(e
         matched = normalizeCanonicalEvent(canonical.type, canonical.data, eventContext(event, canonical.data), memory);
       }
     }
-    if (matched) return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle || matched.revertLifecycle ? "handled" : "ignored", eventType };
+    if (matched) {
+      matched = preserveClassicTextStarts(matched, eventType, data, context, memory);
+      return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle || matched.revertLifecycle ? "handled" : "ignored", eventType };
+    }
     return {
       conversationId: conversationIdOf(event),
       updates: [],
@@ -320,6 +323,41 @@ export function normalizeEventEnvelopeWith<Memory extends ProviderEventMemory>(e
     // never rethrown: the caller must keep consuming the stream.
     return { conversationId: conversationIdOf(event), updates: [], outcome: "unparseable", eventType };
   }
+}
+
+function preserveClassicTextStarts(matched: KnownEvent, type: string, data: RecordValue, context: EventContext, memory?: ProviderEventMemory): KnownEvent {
+  if (type === "message.updated" && memory) {
+    const info = record(data.info ?? data.message);
+    const id = optionalString(info.id);
+    const created = completionTime(record(info.time).created).completedAt;
+    if (id && created !== undefined) {
+      const starts = memory.textStarts ??= new Map<string, number>();
+      remember(starts, JSON.stringify(["message", context.conversationId ?? optionalString(info.sessionID), id]), created);
+    }
+  }
+  const part = record(data.part);
+  if (type !== "message.part.updated" || part.type !== "text") return matched;
+  const partId = optionalString(part.id);
+  if (!partId) return matched;
+  const sessionId = context.conversationId ?? optionalString(part.sessionID);
+  const starts = memory ? memory.textStarts ??= new Map<string, number>() : undefined;
+  const key = JSON.stringify([sessionId, partId]);
+  const messageId = optionalString(part.messageID);
+  const messageTime = record(data.message).time;
+  const messageStart = completionTime(record(messageTime).created).completedAt ?? completionTime(messageTime).completedAt
+    ?? (messageId ? starts?.get(JSON.stringify(["message", sessionId, messageId])) : undefined);
+  return { ...matched, updates: matched.updates.map<NormalizedProviderUpdate>(update => {
+    if (update.kind !== "text" && update.kind !== "upsert") return update;
+    const item = update.item;
+    if (!item || item.type !== "assistant_message" || item.id !== `part:${partId}`) return update;
+    // Explicit native message creation is authoritative. Otherwise retain the
+    // first observed start, including a native-stream start for this same part.
+    // A first-seen completed part can use its own genuine start, but never
+    // invent an earlier timestamp when no creation evidence exists.
+    const createdAt = messageStart ?? starts?.get(key) ?? completionTime(record(part.time).start).completedAt ?? item.createdAt;
+    if (starts) remember(starts, key, createdAt);
+    return { ...update, item: { ...item, createdAt } };
+  }) };
 }
 
 function conversationIdOf(value: unknown): string | undefined {

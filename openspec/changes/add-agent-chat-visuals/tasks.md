@@ -93,6 +93,7 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.24 Address Codex on `197c9bc3`: native Claude text-block completion must disambiguate Markdown syntax immediately, independently of turn completion, so an existing reference image is captured before later tools can change it. A genuinely missing file still retains its turn-completion retry.
 - [ ] 6.25 Address Codex on `d552238f`: classic OpenCode `message.part.updated` text-part end must provide the same syntax-only boundary as the newer native text-ended event, without implying parent-message completion or consuming a missing-file turn retry.
 - [ ] 6.26 Keep a possible SVG closing fence at the current text end provisional until its line terminates or authoritative text completion confirms it. A later label continuation inside valid SVG must not turn an earlier prefix into an immutable refusal; preserve shared parsing caches and exact final bytes.
+- [ ] 6.27 Preserve classic OpenCode reply start timestamps in syntax-only completion upserts. An answer started before a steer must not move after it when a later frame lacks authoritative message creation metadata; cover real normalization and projection ordering without dropping final text or syntax markers.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including
