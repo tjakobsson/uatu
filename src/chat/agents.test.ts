@@ -10,7 +10,7 @@ import { CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./cl
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
-import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "./opencode/normalization-types";
+import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ConversationReplay, decodeReplayCursor, ReplaySubscription } from "./replay";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
@@ -35,7 +35,7 @@ test.each([
     assistant,
     { id: "message:steer", type: "user_message", createdAt: 3, text: "Use a smaller rectangle" },
   ] satisfies ConversationItem[]) projection.upsert(item);
-  const current = (): ConversationSnapshot => ({ ...snapshot("c"), generation: "g", cursor: replay.latestCursor(), conversation: { ...summary("c"), status: projection.status }, items: projection.items() });
+  const current = (): ConversationSnapshot => ({ ...snapshot("c"), generation: "g", cursor: replay.latestCursor(), conversation: projection.withVisualStatus({ ...summary("c"), status: projection.status }), items: projection.items() });
   const provider = {
     history: async () => current(),
     subscribe: async () => { const handoff = replay.handoff(cursor => ({ ...current(), cursor })); return { snapshot: handoff.snapshot, events: handoff.subscription }; },
@@ -199,7 +199,7 @@ async function visualSubscriptionHarness(agentId: string, initial: ConversationI
   const projection = new ConversationProjection(replay);
   projection.status = "running";
   for (const item of initial) projection.upsert(item);
-  const current = (): ConversationSnapshot => ({ ...snapshot("c"), generation: "g", cursor: replay.latestCursor(), conversation: { ...summary("c"), status: projection.status }, items: projection.items() });
+  const current = (): ConversationSnapshot => ({ ...snapshot("c"), generation: "g", cursor: replay.latestCursor(), conversation: projection.withVisualStatus({ ...summary("c"), status: projection.status }), items: projection.items() });
   const provider = {
     history: async (_id?: string, _options?: { cursor?: string }) => current(),
     subscribe: async (_id: string, options?: { cursor?: string; signal?: AbortSignal }) => {
@@ -566,6 +566,53 @@ test.each(["status-error", "updated"] as const)("visual terminal refresh preserv
     expect(first.projection.status).toBe(kind === "status-error" ? "failed" : "completed");
     if (kind === "updated") expect(first.projection.conversation?.title).toBe("Renamed by provider");
     expect(applyChatEvent(first.projection, delivered[1]!).outcome).toBe("resync");
+  } finally { await h.cleanup(); }
+});
+
+test("queued native step failure stays capture-live even when the provider has already ended execution before draining", async () => {
+  const h = await visualSubscriptionHarness("opencode");
+  const normalize = createOpenCodeV2Normalizer("/workspace");
+  const memory = createOpenCodeV2Memory();
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  h.store.setReader(async () => { h.files.reads++; if (h.files.reads === 1) throw new VisualReadError(true); return png; });
+  const published: ChatEvent[] = [];
+  let frame = 0;
+  const emit = (type: string, data: Record<string, unknown>) => {
+    const normalized = normalize({ id: `frame-${++frame}`, type, created: frame, location: { directory: "/workspace" }, data: { sessionID: "c", ...data } }, memory);
+    const events = normalized.updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+    published.push(...events);
+    return events;
+  };
+  try {
+    emit("session.execution.started", {});
+    emit("session.text.started", { assistantMessageID: "native", ordinal: 0, text: "" });
+    emit("session.text.delta", { assistantMessageID: "native", ordinal: 0, delta: "![Generated](later.png)" });
+    const failed = emit("session.step.failed", { assistantMessageID: "native", error: { message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
+    emit("session.retry.scheduled", { message: "Retrying" });
+    const terminal = emit("session.execution.succeeded", {}).find(event => event.type === "conversation.status")!;
+    expect(h.projection.status).toBe("completed");
+    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    let client = projectionFromSnapshot(h.subscription.snapshot);
+    const received = await deliveredBatch(h.replay, h.iterator, event => {
+      const applied = applyChatEvent(client, event);
+      expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+      client = applied.projection;
+      if (event.type === "conversation.status" && (event.status === "failed" || event.status === "retrying")) {
+        expect(h.files.reads).toBe(1);
+        expect((client.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+      }
+    });
+    expect(received.find(event => event.type === "conversation.status" && event.status === "failed")).toEqual({ ...failed, conversationId: "opencode:c" });
+    expect(received.filter(event => event.type !== "resync").map(event => event.sequence)).toEqual(published.map(event => event.sequence));
+    expect(received.slice(-2)).toEqual([
+      { ...terminal, conversationId: "opencode:c" },
+      { generation: terminal.generation, sequence: terminal.sequence, conversationId: "opencode:c", type: "resync", reason: "conversation-rewritten" },
+    ]);
+    expect(h.files.reads).toBe(2);
+    const completed = (await h.service.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+    expect(completed.visuals?.[0]?.status).toBe("ready");
+    expect((await h.service.resolveVisual(completed.visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(h.files.reads).toBe(2);
   } finally { await h.cleanup(); }
 });
 

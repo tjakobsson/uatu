@@ -3,10 +3,9 @@ import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
 import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
-import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "./opencode/normalization-types";
+import { isVisualTurnLive, OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
-import { isLiveConversationStatus } from "./types";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import { NotificationFeed } from "./notification-feed";
 import type { ChatActionContext, AutomaticBackgroundFeedback } from "./types";
@@ -405,10 +404,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const cancelledPages = new Promise<void>(resolve => { cancelPendingPages = resolve; });
     let closed = false;
     let historyEpoch = 0;
-    let streaming = isLiveConversationStatus(snapshot.conversation.status);
+    let streaming = isVisualTurnLive(qualified.conversation);
     const seed = (current: AgentConversationSnapshot) => {
       items.clear();
-      streaming = isLiveConversationStatus(current.conversation.status);
+      streaming = isVisualTurnLive(current.conversation);
       const liveness = this.snapshotVisualLiveness.get(current)!;
       for (const item of current.items) {
         if (item.type === "assistant_message") {
@@ -559,7 +558,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         const resync: ChatEvent = { ...base, type: "resync", reason: "conversation-rewritten" };
         if (event.type === "item.remove") items.delete(event.itemId);
         if (event.type === "conversation.status" || event.type === "conversation.updated") {
-          streaming = isLiveConversationStatus(event.type === "conversation.status" ? event.status : event.conversation.status);
+          streaming = isVisualTurnLive(event.type === "conversation.status" ? event : event.conversation);
           // Status errors, /reload refreshes and label changes are authoritative
           // events, not replaceable invalidations. Visual resync is additional.
           if (!streaming && await finish(event)) return [event, resync];
@@ -612,7 +611,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       read: page => {
         const epoch = historyEpoch;
         const pending: Promise<void> = page.then(current => {
-          if (closed || epoch !== historyEpoch || !isLiveConversationStatus(current.conversation.status)) return;
+          if (closed || epoch !== historyEpoch || !isVisualTurnLive(current.conversation)) return;
           const cursor = decodeReplayCursor(current.cursor);
           if (boundary && cursor && cursor.generation !== boundary.generation) return;
           for (const item of current.items) {
@@ -727,7 +726,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // metadata, keep older pages terminal rather than inferring from a user
     // row or a page-local footer.
     const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
-    const streaming = isLiveConversationStatus(snapshot.conversation.status);
+    const streaming = isVisualTurnLive(snapshot.conversation);
     // Plan every row synchronously before the first await. In particular,
     // token completion must describe the same boundary as this row's text,
     // not a later result processed while an earlier file read was blocked.

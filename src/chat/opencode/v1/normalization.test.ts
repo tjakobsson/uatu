@@ -6,7 +6,7 @@ import { ProviderTextReconciler } from "../../text-reconciler";
 import { ConversationProjection } from "../../adapter";
 import { parseConversationItem } from "../../validation";
 import { visualAdmissionIdentity } from "../../visual-identity";
-import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "../normalization-types";
+import { isVisualTurnLive, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "../../projection";
 
 test("native and classic text events plus both history shapes retain the parent admission identity outside JSON", () => {
@@ -37,6 +37,23 @@ test("native and classic text events plus both history shapes retain the parent 
 });
 
 describe("OpenCode provider completion timestamps", () => {
+  test("native step failure stays live for capture, but classic session.error and idle remain terminal", () => {
+    const status = (type: string) => {
+      const normalized = normalizeProviderEvent({ type, properties: { sessionID: "s", timestamp: 1, assistantMessageID: "m", error: { message: "Rate limited" } } });
+      const update = normalized.updates.find(update => update.kind === "status");
+      if (update?.kind !== "status") throw new Error("expected native status");
+      return update as typeof update & OpenCodeStepStatus;
+    };
+    const step = status("session.next.step.failed");
+    expect(JSON.parse(JSON.stringify(step))).toEqual({ kind: "status", status: "failed", message: "Rate limited" });
+    expect(step[OPENCODE_STEP_LIVE]).toBe(true);
+    expect(isVisualTurnLive(step)).toBe(true);
+    const error = status("session.error");
+    expect(error).toEqual({ kind: "status", status: "failed", message: "Rate limited" });
+    expect(isVisualTurnLive(error)).toBe(false);
+    expect(isVisualTurnLive(status("session.idle"))).toBe(false);
+    expect(step[OPENCODE_STEP_LIVE]).toBe(true); // Later ends never mutate the earlier frame.
+  });
   test.each([
     { name: "ordinary reply", initial: "Answer", final: "Answer completed" },
     { name: "visual reply", initial: "![shot][ref]\n\n[ref]: result.p", final: "![shot][ref]\n\n[ref]: result.png" },

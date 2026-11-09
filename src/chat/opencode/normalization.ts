@@ -3,7 +3,7 @@ import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-sto
 import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, LOGIN_FAILED_NOTICE_CODE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
 import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
 import { nativeVisualMessageIdentity } from "../visual-identity";
-import { OPENCODE_TEXT_END } from "./normalization-types";
+import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus } from "./normalization-types";
 
 /**
  * The normalization core both OpenCode generations share.
@@ -309,6 +309,13 @@ export function normalizeEventEnvelopeWith<Memory extends ProviderEventMemory>(e
       }
     }
     if (matched) {
+      // The classic session-level error aliases the step reader, but unlike
+      // an actual native step failure it is a terminal session failure.
+      if (eventType === "session.error") matched = { ...matched, updates: matched.updates.map(update => {
+        if (update.kind !== "status") return update;
+        const { [OPENCODE_STEP_LIVE]: _step, ...terminal } = update as typeof update & OpenCodeStepStatus;
+        return terminal;
+      }) };
       matched = preserveClassicTextStarts(matched, eventType, data, context, memory);
       return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle || matched.revertLifecycle ? "handled" : "ignored", eventType };
     }
@@ -539,13 +546,12 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
       const message = errorMessage(data.error) || text(data.message) || "The turn failed";
       return { conversationId, updates: [
         { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message, ...(isLoginError(data.error) ? { code: LOGIN_FAILED_NOTICE_CODE } : {}) } },
-        { kind: "status", status: "failed", message },
+        { kind: "status", status: "failed", message, ...{ [OPENCODE_STEP_LIVE]: true as const } },
       ] };
     }
     case "session.retry.scheduled":
-      // The failed step that precedes this ended the turn as failed; the
-      // retry means it is still live, and a live turn holds prompts and
-      // stays in the workspace's activity.
+      // Preserve the public failed -> retrying transition. A native step
+      // failure is not itself the authoritative execution end for capture.
       return { conversationId, updates: [
         { kind: "upsert", item: {
           id: `notice:${eventId}`,

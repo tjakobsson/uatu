@@ -10,7 +10,7 @@ import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../pr
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
 import { visualAdmissionIdentity } from "../../visual-identity";
-import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "../normalization-types";
+import { isVisualTurnLive, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
 
 test("native shell exit evidence uses the typed identity and terminal process status", () => {
   const normalize = createOpenCodeV2Normalizer("/ws");
@@ -861,12 +861,21 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     const base = { created: 5, location: { directory: WORKSPACE } };
     const at = (type: string, data: Record<string, unknown>) => normalize({ ...base, id: `e_${type}`, type, data: { sessionID: "ses_r", ...data } }, memory);
     at("session.execution.started", {});
-    expect(at("session.step.failed", { assistantMessageID: "msg_r", error: { type: "rate-limit", message: "Rate limited" } }).updates).toContainEqual({ kind: "status", status: "failed", message: "Rate limited" });
+    const failed = at("session.step.failed", { assistantMessageID: "msg_r", error: { type: "rate-limit", message: "Rate limited" } });
+    expect(failed.updates).toContainEqual({ kind: "status", status: "failed", message: "Rate limited", [OPENCODE_STEP_LIVE]: true });
+    const failedStatus = failed.updates.find(update => update.kind === "status");
+    if (failedStatus?.kind !== "status") throw new Error("expected failed step status");
+    expect(isVisualTurnLive(failedStatus as typeof failedStatus & OpenCodeStepStatus)).toBe(true);
     const retry = at("session.retry.scheduled", { message: "Retrying in 3s" });
     expect(retry.updates).toEqual([
       { kind: "upsert", item: expect.objectContaining({ type: "notice", level: "warning", message: "Retrying in 3s" }) },
       { kind: "status", status: "retrying" },
     ]);
+    const terminal = at("session.execution.failed", { error: { message: "Rate limited" } }).updates.find(update => update.kind === "status");
+    if (terminal?.kind !== "status") throw new Error("expected execution failure");
+    expect(terminal).toEqual({ kind: "status", status: "failed", message: "Rate limited" });
+    expect(isVisualTurnLive(terminal)).toBe(false);
+    expect((failedStatus as typeof failedStatus & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
   });
 
   test("a stored assistant record ended by a Stop carries no failure notice; a real error still does", () => {

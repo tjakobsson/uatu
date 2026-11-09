@@ -15,6 +15,7 @@ import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
 import { isLiveConversationStatus } from "./types";
+import { OPENCODE_STEP_LIVE, type OpenCodeStepStatus } from "./opencode/normalization-types";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
@@ -2009,7 +2010,7 @@ export class ChatAdapter {
       projection.statusUpdate("scheduled");
     }
     return {
-      conversation: { ...(coverage?.conversation() ?? this.summary(session, projection.status)), status: projection.status },
+      conversation: projection.withVisualStatus({ ...(coverage?.conversation() ?? this.summary(session, projection.status)), status: projection.status }),
       configuration: coverage ? this.configurations.get(id) ?? configuration : configuration,
       generation: this.generation,
       // Keep final covered-read merge through cursor capture await-free.
@@ -6597,7 +6598,9 @@ export class ChatAdapter {
   }
 
   private summary(session: ProviderSession, status: ConversationStatus = this.projections.get(session.id)?.status ?? this.liveTurns.get(session.id) ?? this.stoppingTurns.get(session.id)?.status ?? "idle"): ConversationSummary {
-    return { id: session.id, title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt, status };
+    const summary = { id: session.id, title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt, status };
+    const projection = this.projections.get(session.id);
+    return projection?.status === status ? projection.withVisualStatus(summary) : summary;
   }
 }
 
@@ -7042,7 +7045,7 @@ export class ConversationProjection {
     // provider's own queue semantics and OpenCode holds it until the active
     // turn actually ends; only removability is lost early. Without turn
     // identity on status events the two cases cannot be told apart here.
-    if (update.kind === "status") return this.statusUpdate(update.status, update.message);
+    if (update.kind === "status") return this.statusUpdate(update.status, update.message, true, update as typeof update & OpenCodeStepStatus);
     // An inbox delta is the adapter's, applied to its pending-steer map
     // before updates reach a projection; one that arrives here is a no-op.
     if (update.kind === "inbox") return undefined;
@@ -7118,10 +7121,21 @@ export class ConversationProjection {
     this.historyChanged(expected.id);
   }
 
-  statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true): ChatEvent {
+  private stepVisualLive = false;
+
+  /** Copy the current primitive hint into this snapshot, never a shared token. */
+  withVisualStatus(summary: ConversationSummary): ConversationSummary & OpenCodeStepStatus {
+    const { [OPENCODE_STEP_LIVE]: _previous, ...current } = summary as typeof summary & OpenCodeStepStatus;
+    return this.stepVisualLive && this.status === "failed" && summary.status === "failed"
+      ? { ...current, [OPENCODE_STEP_LIVE]: true }
+      : current;
+  }
+
+  statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true, native?: OpenCodeStepStatus): ChatEvent {
     this.status = status;
+    this.stepVisualLive = status === "failed" && native?.[OPENCODE_STEP_LIVE] === true;
     this.onStatus?.(status, sourceTransition);
-    return this.replay.publish({ type: "conversation.status", status, message });
+    return this.replay.publish({ type: "conversation.status", status, message, ...(this.stepVisualLive ? { [OPENCODE_STEP_LIVE]: true as const } : {}) });
   }
 
   conversationUpdate(conversation: ConversationSummary): ChatEvent {

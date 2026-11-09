@@ -229,6 +229,11 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **THEN** the real turn's completion still performs its one completion retry and signals the visual update
 - **AND** unrelated completed turns and cancelled subscriptions are not enrolled for that retry
 
+#### Scenario: OpenCode retries after a step failure
+- **WHEN** a pending visual's native OpenCode step fails before the execution has ended
+- **THEN** the original failure status and error remain visible without consuming the completion retry
+- **AND** history and resync retain the still-live capture until authoritative execution completion or failure
+
 #### Scenario: A shorthand image reference completes before a long-running tool
 - **WHEN** following syntax or an authoritative text end disambiguates a supported shorthand reference during the streaming enrichment cadence
 - **THEN** its terminated reference definition can be captured without waiting for turn completion

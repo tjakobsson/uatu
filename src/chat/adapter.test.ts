@@ -1,6 +1,8 @@
 import { describe, expect, test, spyOn, jest } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { realpath } from "node:fs/promises";
+import { realpath, mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage } from "./claude/normalization";
@@ -34,6 +36,150 @@ import type { LiveEnvelope } from "../shared/live-protocol";
 import { buildRoutes } from "../server/routes";
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
+import { isVisualTurnLive, OPENCODE_STEP_LIVE, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { MultiAgentChatService } from "./agents";
+import { VisualReadError, VisualStore } from "./visual-store";
+import type { WorkspaceChatService } from "./service";
+import type { AssistantMessageItem } from "./types";
+
+test("native step-live hints are immutable on ordered status frames and adapter snapshots, not public status changes", async () => {
+  const provider = new FakeProvider();
+  provider.sessions = [fixtureSession("step-live")];
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+  const projection = adapter.projectionForTests("step-live");
+  const normalize = createOpenCodeV2Normalizer(process.cwd());
+  const memory = createOpenCodeV2Memory();
+  let frame = 0;
+  const emit = (type: string, data: Record<string, unknown>) => normalize({ id: `frame-${++frame}`, type, created: frame, location: { directory: process.cwd() }, data: { sessionID: "step-live", ...data } }, memory).updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+  try {
+    emit("session.execution.started", {});
+    const failed = emit("session.step.failed", { assistantMessageID: "m", error: { message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
+    expect(JSON.parse(JSON.stringify(failed))).toMatchObject({ type: "conversation.status", status: "failed", message: "Rate limited" });
+    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    const snapshot = await adapter.subscribe("step-live");
+    snapshot.events.cancel();
+    expect(snapshot.snapshot.conversation.status).toBe("failed");
+    expect(isVisualTurnLive(snapshot.snapshot.conversation)).toBe(true);
+    const history = await adapter.history("step-live");
+    expect(history.conversation.status).toBe("failed");
+    expect(isVisualTurnLive(history.conversation)).toBe(true);
+    const terminal = emit("session.execution.failed", { error: { message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
+    expect(JSON.parse(JSON.stringify(terminal))).toMatchObject({ type: "conversation.status", status: "failed", message: "Rate limited" });
+    expect((terminal as typeof terminal & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBeUndefined();
+    const ended = await adapter.history("step-live");
+    expect(isVisualTurnLive(ended.conversation)).toBe(false);
+    expect(isVisualTurnLive(history.conversation)).toBe(true);
+    expect(isVisualTurnLive(snapshot.snapshot.conversation)).toBe(true);
+    expect((failed as typeof failed & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
+    expect(isVisualTurnLive(projection.withVisualStatus(history.conversation))).toBe(false); // No stale coverage hint.
+    const generic = projection.statusUpdate("failed", "Unannotated terminal failure");
+    expect((generic as typeof generic & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBeUndefined();
+    expect(isVisualTurnLive(projection.withVisualStatus(history.conversation))).toBe(false);
+  } finally { await adapter.dispose(); }
+});
+
+test.each([
+  { terminal: "succeeded", created: true }, { terminal: "failed", created: true },
+  { terminal: "interrupted", created: true }, { terminal: "failed", created: false },
+] as const)("native V2 failed-step recovery preserves capture until execution $terminal (file created=$created)", async ({ terminal, created }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, "step-live-capture-"));
+  const provider = new FakeProvider();
+  provider.sessions = [fixtureSession("capture")];
+  const markdown = "![Generated](later.png)";
+  provider.pages.set("first", { items: [{ info: { id: "native", role: "assistant", time: { created: 1 } }, parts: [{ id: "native:text:0", type: "text", text: markdown }] }] });
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  const projection = adapter.projectionForTests("capture");
+  const normalize = createOpenCodeV2Normalizer(process.cwd());
+  const memory = createOpenCodeV2Memory();
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  let available = false;
+  let reads = 0;
+  const store = new VisualStore(process.cwd(), directory);
+  store.setReader(async source => { expect(source).toBe("later.png"); reads++; if (!available) throw new VisualReadError(true); return png; });
+  const service = {
+    history: (id: string, options?: { cursor?: string; limit?: number }) => adapter.history(id, options),
+    subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
+    dispose: () => adapter.dispose(),
+  } as unknown as WorkspaceChatService;
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+  let frame = 0;
+  const emit = (type: string, data: Record<string, unknown>) => {
+    const normalized = normalize({ id: `frame-${++frame}`, type, created: frame, location: { directory: process.cwd() }, data: { sessionID: "capture", ...data } }, memory);
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+  };
+  let subscription: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    emit("session.execution.started", {});
+    emit("session.text.started", { assistantMessageID: "native", ordinal: 0, text: "" });
+    emit("session.text.delta", { assistantMessageID: "native", ordinal: 0, delta: markdown });
+    subscription = await router.subscribe("opencode:capture");
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    const drain = async () => {
+      const marker = projection.replay.publish({ type: "conversation.configuration", configuration: {} });
+      const received: ChatEvent[] = [];
+      while (true) {
+        const event = await iterator.next();
+        if (event.done) throw new Error("stream ended before native drain barrier");
+        if (event.value.sequence === marker.sequence && event.value.type === marker.type) return received;
+        received.push(event.value);
+      }
+    };
+    const answer = (snapshot: { items: ConversationItem[] }) => snapshot.items.find(item => item.id === "part:native:text:0") as AssistantMessageItem;
+    expect(answer(subscription.snapshot).visuals?.[0]?.status).toBe("pending");
+    expect(reads).toBe(1);
+    const step = emit("session.step.failed", { assistantMessageID: "native", error: { type: "rate-limit", message: "Rate limited" } }).find(event => event.type === "conversation.status")!;
+    const failed = await drain();
+    expect(failed.find(event => event.type === "conversation.status")).toEqual({ ...step, conversationId: "opencode:capture" });
+    expect(failed.some(event => event.type === "resync")).toBe(false);
+    expect(reads).toBe(1); // No terminal retry at the failed step.
+    const failedHistory = await router.history("opencode:capture");
+    expect(failedHistory.conversation.status).toBe("failed");
+    expect(isVisualTurnLive(failedHistory.conversation)).toBe(true);
+    expect(answer(failedHistory).visuals?.[0]?.status).toBe("pending");
+    const failedAttach = await router.subscribe("opencode:capture");
+    expect(answer(failedAttach.snapshot).visuals?.[0]?.status).toBe("pending");
+    failedAttach.events.cancel();
+    projection.replay.publish({ type: "resync", reason: "conversation-rewritten" });
+    expect((await drain()).some(event => event.type === "resync")).toBe(true);
+    expect(answer(await router.history("opencode:capture")).visuals?.[0]?.status).toBe("pending");
+    expect(reads).toBe(1); // Transient failed history/resync still represents the same execution.
+    emit("session.retry.scheduled", { message: "Retrying in 3s" });
+    expect((await drain()).some(event => event.type === "conversation.status" && event.status === "retrying")).toBe(true);
+    const retrying = await router.history("opencode:capture");
+    expect(retrying.conversation.status).toBe("retrying");
+    expect(answer(retrying).visuals?.[0]?.status).toBe("pending");
+    available = created;
+    emit("session.tool.input.started", { assistantMessageID: "native", id: "write", name: "Write" });
+    emit("session.tool.called", { assistantMessageID: "native", id: "write", input: { file_path: "later.png" } });
+    emit("session.tool.success", { assistantMessageID: "native", id: "write", content: [{ type: "text", text: "Write finished" }], metadata: {}, executed: true });
+    await drain();
+    expect(reads).toBe(1);
+    const ended = emit(`session.execution.${terminal}`, terminal === "failed" ? { error: { type: "unknown", message: "Execution failed" } } : {}).find(event => event.type === "conversation.status")!;
+    const final = await drain();
+    expect(final.slice(-2)).toEqual([
+      { ...ended, conversationId: "opencode:capture" },
+      { generation: ended.generation, sequence: ended.sequence, conversationId: "opencode:capture", type: "resync", reason: "conversation-rewritten" },
+    ]);
+    expect(reads).toBe(2); // Exactly one retry at the authoritative execution end.
+    expect(isVisualTurnLive(failedHistory.conversation)).toBe(true); // Earlier snapshots are immutable.
+    available = true;
+    const complete = await router.history("opencode:capture");
+    expect(isVisualTurnLive(complete.conversation)).toBe(false);
+    expect(answer(complete).visuals?.[0]?.status).toBe(created ? "ready" : "unavailable");
+    if (created) expect((await router.resolveVisual(answer(complete).visuals![0]!.id!))?.bytes).toEqual(png);
+    const restartedStore = new VisualStore(process.cwd(), directory);
+    restartedStore.setReader(async () => { reads++; throw new Error("sealed captures must not reread after reload"); });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: restartedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    const reloaded = await restarted.history("opencode:capture");
+    expect(answer(reloaded).visuals).toEqual(answer(complete).visuals);
+    if (created) expect((await restarted.resolveVisual(answer(reloaded).visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(reads).toBe(2);
+  } finally { subscription?.events.cancel(); await restarted?.dispose(); await router.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("real V2 history replacement commits its required removals and one terminal marker together", async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

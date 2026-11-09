@@ -95,6 +95,7 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.26 Keep a possible SVG closing fence at the current text end provisional until its line terminates or authoritative text completion confirms it. A later label continuation inside valid SVG must not turn an earlier prefix into an immutable refusal; preserve shared parsing caches and exact final bytes.
 - [ ] 6.27 Preserve classic OpenCode reply start timestamps in syntax-only completion upserts. An answer started before a steer must not move after it when a later frame lacks authoritative message creation metadata; cover real normalization and projection ordering without dropping final text or syntax markers.
 - [ ] 6.28 Preserve the existing usage-before-first-part ordering while fixing classic text start times: metadata-only usage reported earlier must retain its place when the first text part and later syntax completion arrive. Keep the original ordering assertions and the steer regression.
+- [ ] 6.29 Address the late Codex finding on `1ea1c7b8`: OpenCode retryable step failures must not consume the missing-image turn-completion retry. Preserve the original failure status/error, keep retrying-turn snapshots live, and finalize only at authoritative execution completion or failure.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

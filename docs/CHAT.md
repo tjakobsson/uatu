@@ -1003,6 +1003,8 @@ text end can flush that preview before a tool finishes without consuming the
 missing-file retry reserved for turn completion.
 Claude's native text-block completion likewise finalizes image syntax without
 finishing the turn or consuming a genuinely missing file's completion retry.
+OpenCode step failures that can retry also leave pending visuals live; only the
+actual execution end consumes that retry. Failure messages still appear normally.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain
