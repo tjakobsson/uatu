@@ -69,23 +69,25 @@ describe("OpenCode provider completion timestamps", () => {
     { name: "native part start without initial streaming", message: undefined, time: { start: 10, end: 30 }, expected: 10 },
     { name: "only the first observed frame when creation is unknown", message: undefined, time: { end: 30 }, expected: 30 },
   ])("first-seen classic completion uses $name rather than inventing a start", ({ message, time, expected }) => {
-    const normalized = normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 30, ...(message ? { message } : {}), part: { id: "p", messageID: "m", type: "text", text: "Final", time } } }, createProviderEventMemory());
+    const memory = createProviderEventMemory();
+    normalizeProviderEvent({ type: "message.updated", properties: { sessionID: "s", timestamp: 3, info: { id: "m", sessionID: "s", role: "assistant", time: { created: 3 }, tokens: { input: 100 } } } }, memory);
+    const normalized = normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 30, ...(message ? { message } : {}), part: { id: "p", messageID: "m", type: "text", text: "Final", time } } }, memory);
     const update = normalized.updates[0]!;
     expect(update).toMatchObject({ kind: "upsert", item: { id: "part:p", createdAt: expected, markdown: "Final" } });
     if (update.kind !== "upsert") throw new Error("expected native completion upsert");
     expect((update.item as typeof update.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
     expect(update.item).not.toHaveProperty("completedAt");
   });
-  test("a history-loaded row uses native message creation without requiring an initial text stream", () => {
+  test("a history-loaded row uses creation explicitly attached to its first part frame without requiring an initial text stream", () => {
     const memory = createProviderEventMemory();
     const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
     const info = { id: "m", role: "assistant", sessionID: "s", time: { created: 10 } };
     projection.seed(normalizeProviderMessage({ info, parts: [{ id: "p", type: "text", text: "Initial" }] }));
     projection.upsert({ id: "message:steer", type: "user_message", createdAt: 20, text: "Keep going" });
-    // The classic message update is authoritative creation metadata, not a
-    // text phase and not a synthetic replay publication.
+    // A separate parent message update does not establish a part's start.
+    // Explicit creation on the part frame can recover it after history load.
     expect(normalizeProviderEvent({ type: "message.updated", properties: { sessionID: "s", timestamp: 25, info } }, memory).updates).toEqual([]);
-    const normalized = normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 30, part: { id: "p", messageID: "m", type: "text", text: "Final", time: { end: 30 } } } }, memory);
+    const normalized = normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 30, message: { time: info.time }, part: { id: "p", messageID: "m", type: "text", text: "Final", time: { end: 30 } } } }, memory);
     const emitted = normalized.updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
     expect(emitted).toHaveLength(1);
     expect(emitted[0]).toMatchObject({ type: "item.upsert", sequence: 2, item: { createdAt: 10, markdown: "Final" } });
@@ -711,6 +713,37 @@ describe("token usage", () => {
       expect.objectContaining({ id: "usage:msg", markdown: "", usage }),
       expect.objectContaining({ id: "part:prt", type: "assistant_message", markdown: "The answer." }),
     ]);
+  });
+
+  test.each([
+    { name: "ordinary", initial: "Answer", final: "Answer completed" },
+    { name: "visual", initial: "![shot][ref]\n\n[ref]: result.p", final: "![shot][ref]\n\n[ref]: result.png" },
+  ])("usage arriving before a $name part retains its own clock while text completion stays before the steer", ({ initial, final }) => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const emit = (type: string, timestamp: number, data: Record<string, unknown>) => normalizeProviderEvent({ type, properties: { sessionID: "s", timestamp, ...data } }, memory).updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+    const info = (input: number) => ({ id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens: { input } });
+    const snapshot = () => ({ conversation: { id: "s", title: "s", createdAt: 1, updatedAt: 1, status: "running" as const }, configuration: {}, generation: "g", cursor: projection.replay.latestCursor(), items: projection.items() });
+    emit("message.updated", 3, { info: info(100) });
+    emit("message.part.updated", 10, { part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: initial } });
+    expect(projection.items().map(item => [item.id, item.createdAt])).toEqual([["usage:msg", 3], ["part:prt", 10]]);
+    projection.upsert({ id: "message:steer", type: "user_message", createdAt: 20, text: "Keep going" });
+    emit("message.updated", 25, { info: info(180) });
+    const before = snapshot();
+    const completed = emit("message.part.updated", 30, { part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: final, time: { end: 30 } } });
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ type: "item.upsert", generation: "g", conversationId: "s", sequence: 5, item: { id: "part:prt", createdAt: 10, markdown: final } });
+    const ordered = [["usage:msg", 3], ["part:prt", 10], ["message:steer", 20]];
+    expect(projection.items().map(item => [item.id, item.createdAt])).toEqual(ordered);
+    expect(projection.items()[0]).toMatchObject({ id: "usage:msg", markdown: "", usage: { input: 180 }, createdAt: 3 });
+    const part = projection.items()[1]!;
+    expect(part).toMatchObject({ id: "part:prt", markdown: final, createdAt: 10 });
+    expect(part).not.toHaveProperty("usage");
+    expect(part).not.toHaveProperty("completedAt");
+    expect((part as typeof part & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    const applied = applyChatEvent(projectionFromSnapshot(before), completed[0]!);
+    expect(applied.outcome).toBe("applied");
+    expect(prependSnapshot(applied.projection, snapshot()).items.map(item => [item.id, item.createdAt])).toEqual(ordered);
   });
 
   test("a message with no text part still reports its usage for attribution", () => {
