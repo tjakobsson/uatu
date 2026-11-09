@@ -1196,12 +1196,19 @@ source leases carry that dependency through final publication:
 processed changes to consumed idle records, new execution boundaries, removals
 and reverts revoke dependent results even after the inventory transport retires.
 Fresh scoped session records also revoke an outcome view when they reveal a
-different child revert boundary, without waiting for SSE. Append-only assistant
+different child revert boundary, without waiting for SSE. A later nonoverlapping
+child-history read also revokes consumed idle evidence when its records change
+or disappear, even if the child revert boundary stays null. Conflicting
+overlapping responses cannot supersede an already consumed observation; their
+own recovery source abstains. Append-only assistant
 output does not change the historical outcome or its interval and requires no
 quiet window for parent recovery. Unrelated conversations do not revoke those
 sources; consumed execution-event replays do not represent new transcript
 mutations. Boundary-only folds release their outcome dependency so
-compatible live activity and accounting can advance; other folds' positive
+compatible live activity and accounting can advance. History-only launches
+retain a separate fence against newly processed terminal execution events;
+retained native occurrences instead project their current lifecycle at
+publication. Other folds' positive
 outcome dependencies remain retained. Dependencies retire with their owning leases. Existing
 ownership, stream-generation and Stop fences remain required.
 Staged-parent visibility rereads own an additional bounded source lease, since

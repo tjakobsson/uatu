@@ -26,6 +26,11 @@ unchanged historical idle outcome usable. Changes to consumed idle records,
 execution boundaries, removals and reverts still fence publication. A fresh
 scoped child record that reveals a changed revert boundary revokes the earlier
 outcome source even before the corresponding native event arrives.
+Later nonoverlapping history reads also fence changed or missing idle evidence;
+an unchanged null revert boundary does not preserve a removed outcome. A
+conflicting overlapping response cannot revoke the later consumed source or
+authorize its own stale evidence. Outcome-free history used to recover activity
+still retains a terminal-event fence when no native occurrence was retained.
 Staging a parent revert hides rows without removing their native occurrence
 evidence from child-outcome attribution. A hidden overlapping launch therefore
 still prevents an ambiguous outcome from authorizing dismissal of a visible row.
