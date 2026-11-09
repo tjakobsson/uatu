@@ -8,7 +8,9 @@ describe("chat visual controls", () => {
   test("copy waits for source loading, not for network work inside the copy click", async () => {
     const oldFetch = globalThis.fetch;
     let finish!: (response: Response) => void;
-    globalThis.fetch = (() => new Promise<Response>(resolve => { finish = resolve; })) as typeof fetch;
+    globalThis.fetch = new Proxy(oldFetch, {
+      apply() { return new Promise<Response>(resolve => { finish = resolve; }); },
+    });
     try {
       const { document, window } = parseHTML(`<div id="root">${renderChatMarkdown("![Diagram](./slow.svg)", {
         visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }],
