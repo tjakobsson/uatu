@@ -862,7 +862,10 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     const at = (type: string, data: Record<string, unknown>) => normalize({ ...base, id: `e_${type}`, type, data: { sessionID: "ses_r", ...data } }, memory);
     at("session.execution.started", {});
     const failed = at("session.step.failed", { assistantMessageID: "msg_r", error: { type: "rate-limit", message: "Rate limited" } });
-    expect(failed.updates).toContainEqual({ kind: "status", status: "failed", message: "Rate limited", [OPENCODE_STEP_LIVE]: true });
+    const expectedFailedStatus: Extract<NormalizedProviderUpdate, { kind: "status" }> & OpenCodeStepStatus = {
+      kind: "status", status: "failed", message: "Rate limited", [OPENCODE_STEP_LIVE]: true,
+    };
+    expect(failed.updates).toContainEqual(expectedFailedStatus);
     const failedStatus = failed.updates.find(update => update.kind === "status");
     if (failedStatus?.kind !== "status") throw new Error("expected failed step status");
     expect(isVisualTurnLive(failedStatus as typeof failedStatus & OpenCodeStepStatus)).toBe(true);
