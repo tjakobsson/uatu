@@ -119,6 +119,8 @@ export interface MultiAgentWorkspaceChatService {
   subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal; reconnect?: boolean }): Promise<{
     snapshot: AgentConversationSnapshot;
     events: ChatEventSubscription;
+    /** Internal transport hint: a visual resync is owed at this native cursor. */
+    replayVisualResyncCursor?: string;
   }>;
   prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string): Promise<{
     messageId: string;
@@ -371,6 +373,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal; reconnect?: boolean }): Promise<{
     snapshot: AgentConversationSnapshot;
     events: ChatEventSubscription;
+    replayVisualResyncCursor?: string;
   }> {
     const { agent, conversationId } = this.resolve(id);
     const { snapshot, events } = await agent.service.subscribe(conversationId, options);
@@ -630,7 +633,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const onAbort = () => wrapped.cancel();
     options?.signal?.addEventListener("abort", onAbort, { once: true });
     if (options?.signal?.aborted) wrapped.cancel();
-    return { snapshot: qualified, events: wrapped };
+    return { snapshot: qualified, events: wrapped,
+      ...(replayNeedsVisualResync || initialVisualResync ? { replayVisualResyncCursor: snapshot.cursor } : {}) };
   }
 
   async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) {

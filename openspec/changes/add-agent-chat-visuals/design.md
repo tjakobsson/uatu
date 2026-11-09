@@ -127,6 +127,15 @@ Claude text-block completion provides the same syntax-only boundary: it emits
 an updated row even when the final block text is unchanged, without marking
 the entire turn complete or mutating already-queued prefix frames.
 
+Hub replay catch-up uses the optional child-response header
+`x-uatu-chat-replay-resync-cursor` to identify an owed visual resync at the
+existing opaque cursor. The broker validates the hint against its generation
+and origin, preserves the original status before reconciliation, and does not
+merge early. A non-extendable 10-second trailer watchdog starts only once the
+origin is reached; expiry cancels/releases catch-up before requesting recovery,
+never declaring success from elapsed time. Children without the hint retain
+the existing merge path. Public JSON and native sequence numbers are unchanged.
+
 ### Keep visual interaction within the existing chat surface
 
 The renderer generates opaque preview/source URLs and escaped controls.

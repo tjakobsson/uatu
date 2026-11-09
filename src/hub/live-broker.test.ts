@@ -8,6 +8,7 @@ import type { DocumentSnapshot, DocumentPatch } from "../shared/document-updates
 import { BUILD_SUMMARY, createWatchSession } from "../server/watch-session";
 import {
   createRepeatFoldingDiagnosticSink,
+  CHILD_CONVERSATION_REPLAY_RESYNC_HEADER,
   LiveBroker,
   setLiveUpstreamDiagnostics,
   type LiveSessionChange,
@@ -36,7 +37,7 @@ type FakeUpstream = {
   readonly cancelled: boolean;
 };
 
-function fakeSource(options: { running?: Set<string>; workspaces?: string[]; refuse?: (path: string) => Response | Error | null } = {}) {
+function fakeSource(options: { running?: Set<string>; workspaces?: string[]; refuse?: (path: string) => Response | Error | null; headers?: (path: string) => Record<string, string> } = {}) {
   const running = options.running ?? new Set(["ws"]);
   const opened: FakeUpstream[] = [];
   const listeners = new Set<(change: LiveSessionChange) => void>();
@@ -87,7 +88,7 @@ function fakeSource(options: { running?: Set<string>; workspaces?: string[]; ref
         }
       }, { once: true });
       opened.push(upstream);
-      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      return new Response(body, { headers: { "content-type": "text/event-stream", ...options.headers?.(path) } });
     },
     onSessionChange(listener) {
       listeners.add(listener);
@@ -141,6 +142,44 @@ function broker(source: LiveUpstreamSource, options: ConstructorParameters<typeo
   const created = new LiveBroker(source, { lingerMs: 60, retryMinMs: 30, retryMaxMs: 120, inventoryOpenGraceMs: 20, ...options });
   brokers.push(created);
   return created;
+}
+
+function trailerClock() {
+  let nextId = 0;
+  const timers = new Map<number, { run(): void; ms: number }>();
+  return {
+    timers,
+    clock: {
+      setTimer(run: () => void, ms: number) { const id = ++nextId; timers.set(id, { run, ms }); return id; },
+      clearTimer(timer: unknown) { timers.delete(timer as number); },
+    },
+    fire() { const pending = [...timers.values()]; timers.clear(); for (const timer of pending) timer.run(); },
+  };
+}
+
+const replayFrame = <T extends { generation: string; sequence: number }>(data: T, event = "chat") =>
+  `id: ${cursorOf(data.generation, data.sequence)}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+async function visualCatchUp(hintedCursor: string | null = cursorOf("g1", 5)) {
+  const before = cursorOf("g1", 2), boundary = cursorOf("g1", 5);
+  const replayPath = `?cursor=${encodeURIComponent(before)}`;
+  const child = fakeSource({ headers: (pathname): Record<string, string> => pathname.includes(replayPath) && hintedCursor !== null
+    ? { [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: hintedCursor } : {} });
+  const clock = trailerClock();
+  const live = broker(child.source, { catchUpTrailerClock: clock.clock });
+  const opener = sink();
+  live.subscribe(opener, "ws", { topic: "conversation", key: "c" });
+  await waitFor(() => child.opened.length === 1, "shared conversation upstream");
+  const shared = child.opened[0]!;
+  shared.push(`event: open\ndata: ${JSON.stringify({ cursor: boundary })}\n\n`);
+  await waitFor(() => kinds(opener.envelopes).includes("ready"), "shared origin ready");
+  const behind = sink();
+  const attachment = live.subscribe(behind, "ws", { topic: "conversation", key: "c", cursor: before });
+  await waitFor(() => child.byPath(replayPath).length === 1, "private visual replay");
+  const replay = child.byPath(replayPath)[0]!;
+  const status = { type: "conversation.status", status: "failed", message: "Provider failed after generating the image", generation: "g1", sequence: 5, conversationId: "c" };
+  const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 5, conversationId: "c" };
+  return { child, clock, live, opener, shared, behind, replay, attachment, before, boundary, status, resync };
 }
 
 // Failures are part of what these tests stage; the default sink's log line
@@ -243,6 +282,135 @@ describe("refcounted upstreams (2.1)", () => {
 });
 
 describe("cursors, replay, and topic-scoped resync (2.2)", () => {
+  test.each(["same chunk", "separate chunks"] as const)("visual catch-up preserves status then its same-cursor resync across %s before fresh reattachment is ready", async chunks => {
+    const h = await visualCatchUp();
+    expect(h.clock.timers.size).toBe(0); // No deadline during fetch/early replay.
+    h.replay.push(`event: open\ndata: ${JSON.stringify({ cursor: h.boundary })}\n\n`);
+    const delta = { type: "item.text_delta", generation: "g1", sequence: 3, conversationId: "c", itemId: "answer", delta: " generated" };
+    h.replay.push(replayFrame(delta));
+    await waitFor(() => h.behind.envelopes.length === 1, "early native delta");
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.behind.envelopes[0]!.event).toEqual({ kind: "data", data: delta });
+    const secondDelta = { ...delta, sequence: 4, delta: " image" };
+    h.replay.push(replayFrame(secondDelta));
+    await waitFor(() => h.behind.envelopes.length === 2, "contiguous native replay");
+    const ordinary = sink();
+    h.live.subscribe(ordinary, "ws", { topic: "conversation", key: "c", cursor: h.boundary });
+    expect(kinds(ordinary.envelopes)).toEqual(["ready"]);
+    if (chunks === "same chunk") h.replay.push(replayFrame(h.status) + replayFrame(h.resync, "resync"));
+    else {
+      h.replay.push(replayFrame(h.status));
+      await waitFor(() => h.behind.envelopes.length === 3, "terminal status without its trailer");
+      expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "data"]);
+      expect(h.replay.cancelled).toBe(false);
+      expect([...h.clock.timers.values()].map(timer => timer.ms)).toEqual([10_000]);
+      const another = sink();
+      h.live.subscribe(another, "ws", { topic: "conversation", key: "c", cursor: h.before });
+      expect(kinds(another.envelopes)).toEqual(["resync"]);
+      expect(h.child.opened).toHaveLength(2); // Still one private replay.
+      h.replay.push(replayFrame(h.resync, "resync"));
+    }
+    await waitFor(() => kinds(h.behind.envelopes).includes("resync"), "visual reconciliation before any ready");
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "data", "resync"]);
+    expect(h.behind.envelopes[2]).toMatchObject({ cursor: h.boundary, event: { kind: "data", data: h.status } });
+    expect(h.behind.envelopes[3]).toMatchObject({ cursor: h.boundary, event: { kind: "resync", data: h.resync } });
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+    expect(h.shared.cancelled).toBe(false);
+    h.clock.fire();
+    expect(h.behind.envelopes).toHaveLength(4);
+    // The client has now read the enriched snapshot at this cursor. Only its
+    // explicit fresh attachment may report ready; it must not resync-loop.
+    const resumed = h.live.subscribe(h.behind, "ws", { topic: "conversation", key: "c", cursor: h.boundary });
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "data", "resync", "ready"]);
+    const next = { ...delta, sequence: 6, delta: " next turn" };
+    h.shared.push(replayFrame(next));
+    await waitFor(() => h.behind.envelopes.length === 6 && ordinary.envelopes.length === 2, "normal shared delivery after recovery");
+    expect(h.behind.envelopes.filter(envelope => envelope.event.kind === "data").map(envelope => envelope.cursor)).toEqual([3, 4, 5, 6].map(sequence => cursorOf("g1", sequence)));
+    expect(h.behind.envelopes.at(-1)!.event).toEqual({ kind: "data", data: next });
+    expect(h.child.opened).toHaveLength(2);
+    resumed.detach(); h.attachment.detach(); h.live.dispose();
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.live.upstreamCount()).toBe(0);
+  });
+
+  test.each([null, "not-a-cursor", cursorOf("foreign", 5), cursorOf("g1", 1), cursorOf("g1", 4)])("nonvisual or inapplicable visual hint %s retains immediate normal merge without a timer", async hint => {
+    const h = await visualCatchUp(hint);
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => kinds(h.behind.envelopes).includes("ready"), "ordinary merge");
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "ready"]);
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+  });
+
+  test("the trailer-only deadline releases the replay before one failure resync, never ready", async () => {
+    const h = await visualCatchUp();
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "trailer watchdog armed at the origin");
+    const overdue = [...h.clock.timers.values()][0]!;
+    expect(overdue.ms).toBe(10_000);
+    const write = h.behind.write;
+    // This subscriber's sink also proves cancellation precedes recovery.
+    h.behind.write = envelope => { if (envelope.event.kind === "resync") expect(h.replay.cancelled).toBe(true); write(envelope); };
+    h.clock.fire();
+    expect(h.replay.cancelled).toBe(true);
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "resync"]);
+    expect(h.behind.envelopes[1]!.event).toEqual({ kind: "resync" });
+    overdue.run(); // A stale callback cannot cause a second recovery.
+    h.replay.push(replayFrame(h.resync, "resync"));
+    expect(h.behind.envelopes).toHaveLength(2);
+    h.live.subscribe(h.behind, "ws", { topic: "conversation", key: "c", cursor: h.boundary });
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "resync", "ready"]);
+    expect(h.child.opened).toHaveLength(2);
+    expect(h.clock.timers.size).toBe(0);
+  });
+
+  test("a later hinted boundary cannot extend the lease once replay reaches the shared origin", async () => {
+    const h = await visualCatchUp(cursorOf("g1", 7));
+    h.replay.push(`event: open\ndata: ${JSON.stringify({ cursor: cursorOf("g1", 7) })}\n\n`);
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "origin reached before the later hinted boundary");
+    expect(kinds(h.behind.envelopes)).toEqual(["data"]);
+    const deadline = [...h.clock.timers.keys()][0]!;
+    h.replay.push(replayFrame({ ...h.status, sequence: 6 }));
+    await waitFor(() => h.behind.envelopes.length === 2, "one later native event");
+    expect([...h.clock.timers.keys()]).toEqual([deadline]); // Never re-arm on progress.
+    h.clock.fire();
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "resync"]);
+    expect(h.replay.cancelled).toBe(true);
+  });
+
+  test.each(["source end", "wrong cursor", "wrong generation", "wrong conversation", "missing trailer", "generation changed"] as const)("a hinted replay's %s releases its watchdog and uses existing recovery", async failure => {
+    const h = await visualCatchUp();
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "awaiting hinted trailer");
+    if (failure === "source end") h.replay.end();
+    else if (failure === "wrong cursor") h.replay.push(replayFrame({ ...h.resync, sequence: 6 }, "resync"));
+    else if (failure === "wrong generation") h.replay.push(replayFrame({ ...h.resync, generation: "foreign" }, "resync"));
+    else if (failure === "wrong conversation") h.replay.push(replayFrame({ ...h.resync, conversationId: "another" }, "resync"));
+    else if (failure === "missing trailer") h.replay.push(": keepalive\n\n");
+    else h.shared.push(replayFrame({ ...h.status, generation: "new-generation", sequence: 1 }));
+    await waitFor(() => kinds(h.behind.envelopes).includes("resync"), "bounded topic recovery");
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "resync"]);
+    expect(h.behind.envelopes.at(-1)!.event).toEqual({ kind: "resync" });
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+    h.clock.fire();
+    expect(h.behind.envelopes).toHaveLength(2);
+  });
+
+  test.each(["detach", "dispose"] as const)("%s cancels a hinted trailer wait without late recovery or leaked timers", async action => {
+    const h = await visualCatchUp();
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "waiting on the trailer");
+    const stale = [...h.clock.timers.values()][0]!;
+    if (action === "detach") h.attachment.detach(); else h.live.dispose();
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+    stale.run(); h.clock.fire();
+    expect(kinds(h.behind.envelopes)).toEqual(["data"]);
+    if (action === "dispose") expect(h.live.upstreamCount()).toBe(0);
+  });
   for (const catchUp of [false, true]) {
     test(`disposing during a ${catchUp ? "private catch-up" : "shared live"} burst stops the remainder after its yield`, async () => {
       const child = fakeSource();

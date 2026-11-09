@@ -12,7 +12,7 @@ import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
 import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
-import { ConversationReplay, decodeReplayCursor, ReplaySubscription } from "./replay";
+import { ConversationReplay, decodeReplayCursor, encodeReplayCursor, ReplaySubscription } from "./replay";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
 import { createWatchedVisualReader, VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
@@ -802,6 +802,8 @@ test("a visual-bearing replay boundary retains its original updated event before
   const original = h.projection.conversationUpdate({ ...summary("c"), status: "running", title: "Replay this title" });
   const reconnect = await h.service.subscribe("test:c", { cursor });
   try {
+    expect(h.subscription.replayVisualResyncCursor).toBeUndefined();
+    expect(reconnect.replayVisualResyncCursor).toBe(reconnect.snapshot.cursor);
     const delivered = await deliveredBatch(h.replay, reconnect.events[Symbol.asyncIterator]());
     expect(delivered).toHaveLength(2);
     expect(delivered[0]).toMatchObject({ type: "conversation.updated", sequence: original.sequence, conversation: { id: "test:c", title: "Replay this title" } });
@@ -834,6 +836,7 @@ test.each(["ready", "unavailable", "pending"] as const)("equal-cursor transport 
     for (let attempt = 0; attempt < 2; attempt++) {
       const resumed = await h.service.subscribe("test:c", { cursor, reconnect: true });
       try {
+        expect(resumed.replayVisualResyncCursor).toBe(cursor);
         const event = (await resumed.events[Symbol.asyncIterator]().next()).value;
         expect(event).toEqual({ type: "resync", reason: "conversation-rewritten", conversationId: "test:c", generation: snapshot.generation, sequence: decodeReplayCursor(cursor)!.sequence });
         expect(applyChatEvent(projectionFromSnapshot(resumed.snapshot), event!).outcome).toBe("resync");
@@ -843,11 +846,32 @@ test.each(["ready", "unavailable", "pending"] as const)("equal-cursor transport 
     }
     const fresh = await h.service.subscribe("test:c", { cursor, reconnect: false });
     try {
+      expect(fresh.replayVisualResyncCursor).toBeUndefined();
       // A native marker is a finite barrier, not a timeout-based no-event check.
       expect(await deliveredBatch(h.replay, fresh.events[Symbol.asyncIterator]())).toEqual([]);
       expect(h.files.reads).toBe(reads);
     } finally { fresh.events.cancel(); }
   } finally { await h.cleanup(); }
+});
+
+test("plain terminal replay preserves its native status and offers no visual-resync transport hint", async () => {
+  const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "Plain terminal answer" }]);
+  const cursor = h.replay.latestCursor();
+  const terminal = h.projection.statusUpdate("failed");
+  const resumed = await h.service.subscribe("test:c", { cursor });
+  try {
+    expect(resumed.replayVisualResyncCursor).toBeUndefined();
+    expect(await deliveredBatch(h.replay, resumed.events[Symbol.asyncIterator]())).toEqual([{ ...terminal, conversationId: "test:c" }]);
+  } finally { resumed.events.cancel(); await h.cleanup(); }
+});
+
+test.each(["invalid-cursor", encodeReplayCursor({ generation: "another-generation", sequence: 0 })])("an unplaceable replay cursor %s cannot acquire a visual-resync hint", async cursor => {
+  const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Image](later.png)" }]);
+  const resumed = await h.service.subscribe("test:c", { cursor });
+  try {
+    expect(resumed.replayVisualResyncCursor).toBeUndefined();
+    expect((await resumed.events[Symbol.asyncIterator]().next()).value).toMatchObject({ type: "resync", conversationId: "test:c" });
+  } finally { resumed.events.cancel(); await h.cleanup(); }
 });
 
 test("only the newest history request treats trailing rows as live, regardless of an older page's footer", async () => {

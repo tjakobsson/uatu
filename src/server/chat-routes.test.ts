@@ -16,6 +16,8 @@ import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from ".
 import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
+import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, LiveBroker } from "../hub/live-broker";
+import type { LiveEnvelope } from "../shared/live-protocol";
 import type { ChatActionContext } from "../chat/types";
 import { createWatchedVisualReader, VisualReadError, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
 
@@ -1250,6 +1252,74 @@ describe("workspace chat routes", () => {
     expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual(expect.objectContaining({ type: "conversation.status", sequence: 1 }));
     await reader.cancel();
   });
+  test("authenticated child replay carries terminal status and visual reconciliation through the Hub before fresh ready", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-hub-replay-"));
+    const service = new FakeChatService();
+    const store = new VisualStore("/workspace", directory);
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false, reads = 0, opens = 0;
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return png; });
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const timers = new Set<() => void>();
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        opens++;
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(opens === 1 ? null : service.replay.latestCursor());
+        return response;
+      },
+    }, { catchUpTrailerClock: {
+      setTimer(run, ms) { expect(ms).toBe(10_000); timers.add(run); return run; },
+      clearTimer(timer) { timers.delete(timer as () => void); },
+    } });
+    try {
+      const cached = await getHistory();
+      expect(cached.items[0].visuals[0].status).toBe("pending");
+      available = true;
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after image generation" });
+      const terminalCursor = service.replay.latestCursor();
+      const originReady = Promise.withResolvers<void>();
+      live.subscribe({ write(envelope) { if (envelope.event.kind === "ready") originReady.resolve(); } }, "ws", { topic: "conversation", key: "opencode:local" });
+      await originReady.promise;
+      const received: LiveEnvelope[] = [];
+      const reconciled = Promise.withResolvers<void>();
+      const sink = { write(envelope: LiveEnvelope) { received.push(envelope); if (envelope.event.kind === "resync") reconciled.resolve(); } };
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: cached.cursor });
+      await reconciled.promise;
+      expect(received.map(envelope => envelope.event.kind)).toEqual(["data", "resync"]);
+      expect(received[0]).toMatchObject({ cursor: terminalCursor, event: { kind: "data", data: { ...terminal, conversationId: "opencode:local" } } });
+      expect(received[1]).toMatchObject({ cursor: terminalCursor, event: { kind: "resync", data: {
+        type: "resync", reason: "conversation-rewritten", generation: terminal.generation, sequence: terminal.sequence, conversationId: "opencode:local",
+      } } });
+      expect(service.replay.subscriberCount()).toBe(1); // Only the shared child stream remains.
+      expect(timers.size).toBe(0);
+      const fresh = await getHistory();
+      expect(fresh.cursor).toBe(terminalCursor);
+      expect(fresh.items[0].visuals[0].status).toBe("ready");
+      expect((await store.resolve(fresh.items[0].visuals[0].id))?.bytes).toEqual(png);
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: fresh.cursor });
+      expect(received.map(envelope => envelope.event.kind)).toEqual(["data", "resync", "ready"]);
+      expect(opens).toBe(2);
+      expect(reads).toBe(2);
+      expect(service.replay.latestCursor()).toBe(terminalCursor);
+    } finally {
+      live.dispose();
+      expect(timers.size).toBe(0);
+      expect(service.replay.subscriberCount()).toBe(0);
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("HTTP cursor-only reconnect finishes terminal visual replay with a boundary resync and no resubscribe loop", async () => {
     const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
     await fs.mkdir(scratch, { recursive: true });
@@ -1264,7 +1334,11 @@ describe("workspace chat routes", () => {
       service.items = [{ id: "m", type: "assistant_message", createdAt: 1, markdown }];
       const table = routes(service, "/", undefined, undefined, undefined, new VisualStore("/workspace", directory));
       const handler = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+      const denied = await handler.GET(Object.assign(new Request("http://127.0.0.1:4711/api/chat/conversations/opencode:local/events"), { params: { conversationId: "opencode:local" } }));
+      expect(denied.status).toBe(401);
+      expect(denied.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
       const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
+      expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(service.replay.latestCursor());
       const reader = response.body!.getReader();
       const opening = new TextDecoder().decode((await reader.read()).value);
       expect(opening).toMatch(CONVERSATION_OPEN_FRAME);
@@ -1287,6 +1361,7 @@ describe("workspace chat routes", () => {
       expect(snapshot.items[0].markdown).toBe(markdown);
       expect(snapshot.items[0].visuals[0].status).toBe("ready");
       const resumed = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": boundaryCursor } }, { conversationId: "opencode:local" }));
+      expect(resumed.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
       const resumedReader = resumed.body!.getReader();
       await resumedReader.read();
       const liveStatus = service.replay.publish({ type: "conversation.status", status: "completed" });
@@ -1320,6 +1395,7 @@ describe("workspace chat routes", () => {
     const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
     const open = async (cursor: string, reconnect: boolean) => {
       const response = await events.GET(request(`/api/chat/conversations/opencode:local/events?reconnect=${reconnect ? "1" : "0"}`, { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
+      expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(reconnect ? cursor : null);
       const reader = response.body!.getReader();
       readers.push(reader);
       const opening = new TextDecoder().decode((await reader.read()).value);
@@ -1390,6 +1466,7 @@ describe("workspace chat routes", () => {
     const handler = routes(service, "/", undefined, undefined, undefined, store)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
     store.setReader(async () => { reads++; throw new Error("plain text must not read files"); });
     const response = await handler.GET(request("/api/chat/conversations/opencode:local/events?reconnect=1", { headers: { "last-event-id": service.replay.latestCursor() } }, { conversationId: "opencode:local" }));
+    expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
     const reader = response.body!.getReader();
     try {
       expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);

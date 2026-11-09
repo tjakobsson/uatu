@@ -41,6 +41,7 @@ import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
 import { joinBasePath, stripBasePath } from "../shared/base-path";
 import { DOCUMENT_NOT_READABLE_ERROR } from "../shared/document-errors";
 import { CHILD_POLICY_HEADER, CHAT_ACTION_BODY_BYTES, isChildPolicyAction, type readChildPolicyBootstrap } from "../hub/child-policy";
+import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER } from "../hub/live-broker";
 import { CHAT_OPERATION_RECEIPT_HEADER, validChatOperationReceipt } from "../shared/chat-operation-receipt";
 import type { ChatActionContext } from "../chat/types";
 import { SideGenerationUnsupportedError } from "../chat/adapter";
@@ -952,7 +953,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const onAbort = () => abort.abort();
         request.signal.addEventListener("abort", onAbort, { once: true });
         try {
-          const { snapshot, events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal, reconnect: url.searchParams.get("reconnect") === "1" });
+          const { snapshot, events, replayVisualResyncCursor } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal, reconnect: url.searchParams.get("reconnect") === "1" });
           const encoder = new TextEncoder();
           const iterator = events[Symbol.asyncIterator]();
           let pending = iterator.next();
@@ -1024,6 +1025,9 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
               "cache-control": "no-cache, no-transform",
               "content-type": "text/event-stream; charset=utf-8",
               "x-accel-buffering": "no",
+              // Child transport metadata only: no public JSON/event change.
+              // The hint cannot name another snapshot or conversation cursor.
+              ...(replayVisualResyncCursor === snapshot.cursor ? { [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: replayVisualResyncCursor } : {}),
             },
           });
         } catch (error) {

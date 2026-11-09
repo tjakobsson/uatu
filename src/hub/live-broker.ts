@@ -66,11 +66,17 @@ import {
   type LiveTopic,
   type WorkspaceActivity,
   CHILD_CONVERSATION_OPEN_EVENT,
+  LIVE_MAX_CURSOR_BYTES,
 } from "../shared/live-protocol";
 import { SseFrameParser, type SseFrame } from "./live-sse";
 import { statusCategoryOf, type ProxyStatusCategory } from "./proxy";
 import { DocumentStateIndex, type DocumentUpdate } from "../shared/document-updates";
 import { PRESENCE_GRACE_MS, type Presence, type PresenceSource } from "./presence";
+
+// Child-response metadata, never a public event/body field. The native event
+// at this cursor is followed by a separate, same-cursor visual resync.
+export const CHILD_CONVERSATION_REPLAY_RESYNC_HEADER = "x-uatu-chat-replay-resync-cursor";
+const CATCH_UP_TRAILER_TIMEOUT_MS = 10_000;
 
 // Where upstream bytes come from. The hub implements it over the session
 // manager and the brokered child token; unit tests and the e2e harness
@@ -106,6 +112,8 @@ export type LiveAttachment = {
 };
 
 export type LiveBrokerOptions = {
+  // Internal test seam for the trailer-only watchdog, not user configuration.
+  catchUpTrailerClock?: { setTimer(run: () => void, ms: number): unknown; clearTimer(timer: unknown): void };
   observeConversation?(workspaceId: string, conversationId: string, data: unknown): void;
   lingerMs?: number;
   replayBufferBytes?: number;
@@ -282,6 +290,7 @@ type Subscriber = {
   // — the subscriber already holds them from its snapshot or catch-up.
   skip: ReplayCursor | null;
   catchUp: AbortController | null;
+  catchUpTrailer?: { generation: string; recover(): void };
   notifiedUnavailable: boolean;
   detached: boolean;
 };
@@ -921,9 +930,31 @@ export class LiveBroker implements PresenceSource {
     upstream.catchUpOwner = subscriber;
     const controller = new AbortController();
     subscriber.catchUp = controller;
+    const requested = subscriber.cursor ? decodeReplayCursor(subscriber.cursor) : null;
+    const originCursor = upstream.head || upstream.originCursor;
+    const origin = originCursor ? decodeReplayCursor(originCursor) : null;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let trailerTimer: unknown;
+    let timerArmed = false;
+    const clock = this.options.catchUpTrailerClock ?? {
+      setTimer(run: () => void, ms: number) { const timer = setTimeout(run, ms); timer.unref?.(); return timer; },
+      clearTimer(timer: unknown) { clearTimeout(timer as ReturnType<typeof setTimeout>); },
+    };
+    const clearTrailerTimer = () => {
+      if (!timerArmed) return;
+      timerArmed = false;
+      clock.clearTimer(trailerTimer);
+    };
+    controller.signal.addEventListener("abort", () => {
+      clearTrailerTimer();
+      if (subscriber.catchUp === controller) { subscriber.catchUp = null; subscriber.catchUpTrailer = undefined; }
+      if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
+      void reader?.cancel().catch(() => undefined);
+    }, { once: true });
     const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}`;
     const release = () => {
-      subscriber.catchUp = null;
+      clearTrailerTimer();
+      if (subscriber.catchUp === controller) { subscriber.catchUp = null; subscriber.catchUpTrailer = undefined; }
       if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
       controller.abort();
     };
@@ -962,27 +993,68 @@ export class LiveBroker implements PresenceSource {
         finishWithoutMerging();
         return;
       }
+      if (controller.signal.aborted || subscriber.detached) {
+        await response.body.cancel().catch(() => undefined);
+        return;
+      }
+      const hintedCursor = response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER);
+      const hint = hintedCursor && Buffer.byteLength(hintedCursor) <= LIVE_MAX_CURSOR_BYTES ? decodeReplayCursor(hintedCursor) : null;
+      // A hint is authority only within this requested replay and shared
+      // origin. Stale/foreign hints retain the ordinary, nonvisual merge path.
+      const owed = hint && requested && origin && hint.generation === requested.generation && hint.generation === origin.generation
+        && requested.sequence < hint.sequence && origin.sequence <= hint.sequence ? hint : null;
+      let awaitingTrailer = false;
+      if (owed) subscriber.catchUpTrailer = { generation: owed.generation, recover: finishWithoutMerging };
       const parser = new SseFrameParser();
-      const reader = response.body.getReader();
+      const streamReader = response.body.getReader();
+      reader = streamReader;
       let batchBytes = 0;
       try {
         for (;;) {
-          const next = await reader.read();
+          const next = await streamReader.read();
           if (next.done) break;
           for (const frame of parser.push(next.value)) {
-            if ("comment" in frame) continue;
             if (controller.signal.aborted || subscriber.detached) return;
+            if ("comment" in frame) {
+              // Once the boundary was delivered, any non-trailer frame is a
+              // broken promise, not evidence that visual reconciliation ran.
+              if (awaitingTrailer) { finishWithoutMerging(); return; }
+              continue;
+            }
+            const data = parseJson(frame.data);
             if (frame.event === "resync") {
-              finishWithResync(parseJson(frame.data));
+              if (owed) {
+                const event = data as { type?: unknown; generation?: unknown; sequence?: unknown; conversationId?: unknown } | undefined;
+                if (frame.id !== hintedCursor || event?.type !== "resync" || event.generation !== owed.generation
+                  || event.sequence !== owed.sequence || event.conversationId !== upstream.key) {
+                  finishWithoutMerging(); return;
+                }
+              }
+              finishWithResync(data);
               return;
             }
+            if (awaitingTrailer) { finishWithoutMerging(); return; }
+            if (owed && frame.event === CHILD_CONVERSATION_OPEN_EVENT && (data as { cursor?: unknown } | undefined)?.cursor !== hintedCursor) {
+              finishWithoutMerging(); return;
+            }
             if (frame.event !== "chat" || frame.id === undefined) continue;
-            const data = parseJson(frame.data);
+            const at = owed ? decodeReplayCursor(frame.id) : null;
+            if (owed && (!at || at.generation !== owed.generation || at.sequence > owed.sequence)) { finishWithoutMerging(); return; }
             this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
             this.emitData(subscriber, data, frame.id);
-            if (this.mergeCatchUp(upstream, subscriber, frame.id)) {
+            if (controller.signal.aborted || subscriber.detached) return;
+            if (owed && at?.sequence === owed.sequence) {
+              awaitingTrailer = true;
+            }
+            if (owed && at && !timerArmed && at.sequence >= origin!.sequence) {
+              // A deadline is failure recovery only. It never certifies a
+              // replay, and never covers initial network/capture/replay work.
+              timerArmed = true;
+              trailerTimer = clock.setTimer(() => { timerArmed = false; finishWithoutMerging(); }, CATCH_UP_TRAILER_TIMEOUT_MS);
+            }
+            if (!owed && this.mergeCatchUp(upstream, subscriber, frame.id)) {
               release();
-              await reader.cancel().catch(() => undefined);
+              await streamReader.cancel().catch(() => undefined);
               return;
             }
             batchBytes += Buffer.byteLength(frame.data);
@@ -1214,6 +1286,11 @@ export class LiveBroker implements PresenceSource {
       }
       case "conversation": {
         const data = parseJson(frame.data);
+        const observedCursor = frame.event === "chat" ? frame.id
+          : frame.event === CHILD_CONVERSATION_OPEN_EVENT ? (data as { cursor?: unknown } | undefined)?.cursor : undefined;
+        const observed = typeof observedCursor === "string" ? decodeReplayCursor(observedCursor) : null;
+        const trailer = upstream.catchUpOwner?.catchUpTrailer;
+        if (observed && trailer && observed.generation !== trailer.generation) trailer.recover();
         if (frame.event === "resync") {
           for (const subscriber of [...upstream.subscribers]) {
             subscriber.catchUp?.abort();

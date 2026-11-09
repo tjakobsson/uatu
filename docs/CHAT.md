@@ -1005,6 +1005,9 @@ Claude's native text-block completion likewise finalizes image syntax without
 finishing the turn or consuming a genuinely missing file's completion retry.
 OpenCode step failures that can retry also leave pending visuals live; only the
 actual execution end consumes that retry. Failure messages still appear normally.
+Hub reconnects also reconcile visual updates missed at a terminal cursor. If a
+replay's promised update never arrives, bounded recovery requests a fresh
+snapshot rather than leaving the image pending indefinitely.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain

@@ -219,6 +219,11 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **THEN** reconnecting at that exact native cursor still signals reconciliation of terminal visual metadata
 - **AND** no newer native event or manual history refresh is required
 
+#### Scenario: Hub replay catch-up reaches a terminal shared-stream origin
+- **WHEN** a catch-up replay reaches the shared origin with a known visual resync still owed
+- **THEN** the original terminal status and visual reconciliation are delivered before recovery is considered complete
+- **AND** an absent reconciliation trailer triggers bounded cancellation and fresh-snapshot recovery rather than a successful merge
+
 #### Scenario: Completed and live Claude turns appear in paged history
 - **WHEN** history is loaded while a newer Claude turn is running
 - **THEN** visuals in completed turns are terminal independently of the current conversation status
