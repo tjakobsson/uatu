@@ -44,7 +44,7 @@ export function createWatchedVisualReader(entries: WatchEntry[], respectGitignor
       if (entry.kind === "file" && path.resolve(root, relative) !== entry.absolutePath) continue;
       if (shouldDenyPath(relative)) throw new VisualReadError();
       const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
-      if (matcher.shouldIgnore(relative)) throw new VisualReadError();
+      if (matcher.shouldIgnore(relative)) continue;
       let currentPath = root;
       for (const segment of relative.split(path.sep)) {
         currentPath = path.join(currentPath, segment);
@@ -203,6 +203,8 @@ export class VisualStore {
   private readonly waitingOperations: Array<() => void> = [];
   // Repeated text deltas need only immutable metadata, not multi-MiB bytes.
   private readonly terminalMetadata = new Map<string, Pick<RecordState, "sourceHash" | "snapshot">>();
+  // Only complete ledgers are immutable; partial groups must observe new slots.
+  private readonly fullAdmissions = new Map<string, ReadonlySet<string>>();
   constructor(private readonly workspacePath: string, root = path.join(path.dirname(resolveAttachmentStateRoot()), "visuals")) {
     this.directory = path.join(root, hash(path.resolve(workspacePath)));
   }
@@ -244,16 +246,27 @@ export class VisualStore {
   // no-overwrite semantics serialize independent processes without stale locks:
   // a crash keeps the reservation, never frees a slot for a ninth occurrence.
   private async reserve(conversationId: string, messageId: string, id: string): Promise<boolean> {
-    await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
     const group = hash(JSON.stringify([conversationId, messageId]));
+    const cached = this.fullAdmissions.get(group);
+    if (cached) return cached.has(id);
+    await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const owners = new Set<string>();
     for (let slot = 0; slot < VISUAL_MAX_COUNT; slot++) {
       const filename = path.join(this.directory, `${group}.slot-${slot}.json`);
+      let owner: string;
       try {
-        if (await fs.readFile(filename, "utf8") === id) return true;
-        continue;
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      await this.publishIfAbsent(filename, id);
-      if (await fs.readFile(filename, "utf8") === id) return true;
+        owner = await fs.readFile(filename, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await this.publishIfAbsent(filename, id);
+        owner = await fs.readFile(filename, "utf8");
+      }
+      owners.add(owner);
+      if (slot === VISUAL_MAX_COUNT - 1) {
+        if (this.fullAdmissions.size >= 512) this.fullAdmissions.delete(this.fullAdmissions.keys().next().value!);
+        this.fullAdmissions.set(group, owners);
+      }
+      if (owner === id) return true;
     }
     return false;
   }

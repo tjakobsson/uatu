@@ -102,6 +102,72 @@ test("history remains readable if permanent admission cannot be persisted, and r
 });
 
 describe("immutable visual snapshots", () => {
+  test("a full admission ledger is read once for rejected later parts and repeated deltas", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let sourceReads = 0;
+    store.setReader(async () => { sourceReads++; return png; });
+    const requests = Array.from({ length: 8 }, (_, index) => ({ messageId: "first-part", input: file(`image-${index}.png`, index) }));
+    const first = await store.captureMany("a:c", "native-message", requests, true);
+    expect(first).toHaveLength(8);
+    const rejected = Array.from({ length: 1024 }, (_, index) => ({ messageId: "later-part", input: file(`later-${index}.png`, index) }));
+    // A fresh store must discover all eight immutable slots, but not reread
+    // them for each rejected occurrence or each subsequent enrichment delta.
+    const restarted = new VisualStore("/workspace", directory);
+    let slotReads = 0;
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation((...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]).includes(".slot-")) slotReads++;
+      return originalReadFile(...args);
+    });
+    try {
+      expect(await restarted.captureMany("a:c", "native-message", rejected, true)).toEqual([]);
+      expect(slotReads).toBe(8);
+      expect(await restarted.captureMany("a:c", "native-message", rejected, true)).toEqual([]);
+      expect(slotReads).toBe(8);
+      // Full does not mean stop iterating: admitted IDs may follow refusals.
+      expect(await restarted.captureMany("a:c", "native-message", [...rejected, ...requests], false)).toEqual(first);
+      expect(slotReads).toBe(8);
+      expect(sourceReads).toBe(8);
+    } finally { readFile.mockRestore(); }
+  });
+  test("filling a blank ledger caches its complete membership before captures reserve again", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let sourceReads = 0, slotReads = 0;
+    store.setReader(async () => { sourceReads++; return png; });
+    const requests = Array.from({ length: 8 }, (_, index) => ({ messageId: "first-part", input: file(`image-${index}.png`, index) }));
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation((...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]).includes(".slot-")) slotReads++;
+      return originalReadFile(...args);
+    });
+    try {
+      const first = await store.captureMany("a:c", "native-message", requests, true);
+      expect(first.every(snapshot => snapshot.status === "ready")).toBe(true);
+      // 36 occupied-slot reads (1 + ... + 8), plus eight initial ENOENTs.
+      expect(slotReads).toBe(44);
+      const rejected = Array.from({ length: 1024 }, (_, index) => ({ messageId: "later-part", input: file(`later-${index}.png`, index) }));
+      expect(await store.captureMany("a:c", "native-message", rejected, true)).toEqual([]);
+      expect(await store.captureMany("a:c", "native-message", [...rejected, ...requests], false)).toEqual(first);
+      expect(await store.capture("a:c", "later-part", file("ninth.png"), false, "native-message")).toMatchObject({ status: "unavailable", message: "Image limit exceeded" });
+      expect(slotReads).toBe(44);
+      expect(sourceReads).toBe(8);
+    } finally { readFile.mockRestore(); }
+  });
+  test("partial admissions observe another store filling slots and full caches stay group-local", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const other = new VisualStore("/workspace", directory);
+    for (const instance of [store, other]) instance.setReader(async () => png);
+    const first = await store.capture("a:c", "first-part", file(), true, "native-message");
+    const requests = Array.from({ length: 7 }, (_, index) => ({ messageId: "other-part", input: file(`other-${index}.png`, index) }));
+    const others = await other.captureMany("a:c", "native-message", requests, true);
+    expect(others).toHaveLength(7);
+    const ninth = { messageId: "later-part", input: file() };
+    expect(await store.captureMany("a:c", "native-message", [ninth, ...requests], false)).toEqual(others);
+    expect(await store.capture("a:c", "first-part", file(), false, "native-message")).toEqual(first);
+    expect(await store.capture("a:c", "later-part", file(), false, "native-message")).toMatchObject({ message: "Image limit exceeded" });
+    expect((await store.captureMany("a:c", "different-message", [ninth], false))[0]?.status).toBe("ready");
+    expect((await store.captureMany("b:c", "native-message", [ninth], false))[0]?.status).toBe("ready");
+  });
   test("first processing establishes admissions without prioritizing or mutating pre-ledger capture records", async () => {
     const names = ["old-0.png", "safe.svg", "unsafe.svg", ...Array.from({ length: 5 }, (_, i) => `old-${i + 3}.png`)];
     const prefix = '<table><tr><td>' + names.map(name => `<img src="${name}">`).join("") + '</td></tr>';
@@ -434,6 +500,31 @@ describe("immutable visual snapshots", () => {
 });
 
 describe("watched-root bounded reader", () => {
+  test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("nested watch roots can authorize a parent-excluded visual ($name)", async ({ aliased }) => {
+    const root = path.join(directory, "workspace");
+    await fs.mkdir(path.join(root, "images"), { recursive: true });
+    for (const name of ["diagram.svg", "blocked.svg", ".env"]) await fs.writeFile(path.join(root, "images", name), svg);
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["images/"] } }));
+    await fs.writeFile(path.join(root, "images", ".uatu.json"), JSON.stringify({ ignore: { exclude: ["blocked.svg"] } }));
+    await fs.writeFile(path.join(directory, "outside.svg"), svg);
+    await fs.symlink(path.join(directory, "outside.svg"), path.join(root, "images", "escape.svg"));
+    const watched = aliased ? path.join(directory, "alias") : root;
+    if (aliased) await fs.symlink(root, watched);
+    const entries = await resolveWatchRoots([watched, path.join(watched, "images")], directory);
+    const workspace = await fs.realpath(root);
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "images", "diagram.svg") });
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("images/diagram.svg", workspace))).toBe(svg);
+    expect(new TextDecoder().decode(await createWatchedVisualReader([...entries].reverse())("images/diagram.svg", workspace))).toBe(svg);
+    await expect(createWatchedVisualReader([entries[0]!])("images/diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+    for (const source of ["images/blocked.svg", "images/.env", "images/escape.svg", path.join(directory, "outside.svg")]) {
+      await expect(reader(source, workspace)).rejects.toMatchObject({ missing: false });
+    }
+    await expect(reader("images/missing.svg", workspace)).rejects.toMatchObject({ missing: true });
+    const store = new VisualStore(workspace, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    expect(await store.capture("a:c", "overlapping-roots", file("images/diagram.svg"), true)).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+  });
   test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("single-file capture preserves static-file ignore scope ($name)", async ({ aliased }) => {
     const root = path.join(directory, "workspace");
     await fs.mkdir(root);
