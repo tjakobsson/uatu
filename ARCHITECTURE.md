@@ -100,7 +100,9 @@ coverage, not a cached browser projection. Transcript text and tool output never
 enter the compact evidence response. Legacy incomplete sources retain a bounded
 fallback and fail closed on exhaustion. See
 [the dismissal protocol guide](api/guides/worker-dismissals.md) for bounds,
-failure behavior and remaining provider-read costs.
+failure behavior and remaining provider-read costs, and
+[dismissal read architecture](docs/worker-dismissal-read-architecture.md) for
+storage ownership, evidence deadlines and browser-cache recovery.
 
 ## The 30-second map
 
@@ -1149,15 +1151,57 @@ window, not an exact job start: `time.ran` precedes permission approval, while
 accepted-running tool success (`time.completed`, or its native success-event
 clock) bounds admission from above. Input-content order can differ from call
 order. Aliases require complete child history placing both windows wholly within
-one interval, with distinct native start coordinates. A boundary strictly between
-the incoming window and every prior alias's window preserves that separate
-occurrence for later aliases, rather than superseding it by content position.
+one interval, with distinct native start coordinates. A boundary strictly after
+one complete window and before another invocation's native start preserves their
+separate occurrences, rather than superseding by content position. Excluding the
+later invocation does not require its acceptance clock and does not prove aliasing.
 Missing, tied, reversed or boundary-straddling windows cannot supply this proof.
 This history-only exception preserves parent transcript order; live supersession
 and retained control revocations are unchanged.
 
-An idle boundary alone never completes a worker. Explicit reports remain readable
-when their occurrence is ambiguous; in particular, a report before or tied to a
+Activity recovery is independent of Stop authorization. A fresh, complete,
+workspace-owned agent transcript plus active-session inventory can verify the
+single unambiguous running occurrence after any stream reconnect. Finished
+occurrences do not compete with that current run; ambiguous running occurrences
+still do. Missing child history, foreign ownership, a later idle boundary,
+or retained live contradictions still withhold Working. Shells retain their
+cold-start generation fence because their history cannot reconstruct equivalent
+execution intervals. None of these activity reads restores revoked Stop proof.
+
+Pending notifications are folded after stored messages, not necessarily in their
+native chronological order. During complete-history recovery, a dated report
+cannot invalidate an occurrence whose launch begins after that report. It may
+settle its eligible earlier occurrence; undated reports remain conservative.
+
+A bare idle boundary alone never completes a worker. Native child idle records
+with an explicit `succeeded`, `failed` or `interrupted` outcome can recover the
+corresponding terminal status when a parent notification is missing. This requires
+complete scoped child history and exactly one occurrence whose entire admission
+window lies after the previous idle and before this first enclosing idle.
+Missing-clock, tied, straddling and already-terminal competing occurrences still
+block attribution. Unknown outcomes remain boundaries only. This history-only
+fallback invents neither result text nor a parent result ID. Before reading a
+child transcript, recovery registers it on the parent's bounded read-owned
+source. When explicit outcomes are present, a fresh scoped child record supplies
+their current revert boundary: only
+outcomes in the visible prefix can settle work. A staged suffix is not positive
+outcome evidence; clearing it restores eligibility, while committing removes it.
+Complete stored idle boundaries still supply conservative admission/control
+vetoes, and unavailable ownership or visibility withholds inference. Retained
+source leases carry that dependency through final publication:
+processed native child transcript changes, removals and reverts revoke dependent
+results even after the inventory transport retires. Unrelated conversations do
+not revoke those sources; consumed execution-event replays do not represent new
+transcript mutations. Boundary-only folds release their outcome dependency so
+compatible live activity and accounting can advance; other folds' positive
+outcome dependencies remain retained. Dependencies retire with their owning leases. Existing
+ownership, stream-generation and Stop fences remain required.
+Staged-parent visibility rereads own an additional bounded source lease, since
+their visible/full-history folds can first consume an outcome after the inventory
+source is captured. That lease is published to source observers and checked
+alongside inventory authority before returning the reconciled workers.
+
+Explicit reports remain readable when their occurrence is ambiguous; in particular, a report before or tied to a
 known accepted-running success cannot settle that launch, and an ambiguous
 admission window cannot justify report assignment. A unique explicit report may
 still settle a legacy launch without a recorded acceptance clock, but missing

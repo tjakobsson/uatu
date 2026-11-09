@@ -144,7 +144,9 @@ async function fixture() {
     nextRead = { entered, waiting };
     return { readEntered, release };
   };
-  const child = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+  // The delayed-evidence regression exceeds Bun's default ten-second idle
+  // timeout; leave the Hub's evidence deadline as the boundary under test.
+  const child = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 60, async fetch(request) {
     if (request.method !== "GET") { nativeMutations++; return new Response(null, { status: 405 }); }
     const url = new URL(request.url); reads++;
     if (!["/s/project/api/chat/conversations/opencode%3Aparent", "/s/project/api/chat/conversations/opencode%3Aparent/worker-evidence"].includes(url.pathname) || url.searchParams.get("t") !== "synthetic-token") return new Response(null, { status: 404 });
@@ -168,6 +170,26 @@ async function fixture() {
   const post = (executionId: string, expectedRevision = 0, id = alice.id, extra = {}, requestOrigin = origin) => fetch(url, { method: "POST", headers: { cookie: cookie(id), origin: requestOrigin }, body: JSON.stringify({ version: 1, conversationId: "opencode:parent", operation: "dismiss", executionId, expectedRevision, ...extra }) });
   return { get, post, url, origin, alice, aliceOther, bob, cookie, items, extraItems, workerDismissals, root, registry, personalState, sessions, blockRead, reads: () => reads, mutations: () => nativeMutations, foreign: () => { foreign = true; } };
 }
+
+test("personal dismissal GET accepts complete evidence that arrives within the child history budget", async () => {
+  const f = await fixture();
+  const blocked = f.blockRead();
+  const pending = f.get();
+  await blocked.readEntered;
+  // Deliberately exceed the former 10-second Hub deadline while staying well
+  // within the child's 25-second covered-history budget. This delay is the
+  // fault under test, not a wait for unrelated state to settle.
+  const timer = setTimeout(blocked.release, 10_200);
+  try {
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ version: 1, conversationId: "opencode:parent", entries: [
+      { executionId: "one", revision: 0, dismissed: false },
+      { executionId: "two", revision: 0, dismissed: false },
+    ] });
+    expect(f.mutations()).toBe(0);
+  } finally { clearTimeout(timer); blocked.release(); }
+}, 20_000);
 
 test("notification-only public DTO dismisses through the real Hub and disk reload without hiding an unproven late launch", async () => {
   const f = await fixture(), provisional = await recoveredNotification();

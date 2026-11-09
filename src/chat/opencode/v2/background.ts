@@ -17,6 +17,7 @@ export type LauncherEvidence = Readonly<{
 }>;
 export type WorkerOccurrenceEvidence = Readonly<{ key: string; parent: string; worker: string; kind?: "agent" | "shell"; taskId: string; launches: readonly LauncherEvidence[]; executionStart?: NativeProof; executionEnd?: NativeProof; uncertain?: boolean }>;
 export type WorkerRequestSource = Readonly<{ message: string; tool: string }>;
+export type WorkerHistoryOutcome = Readonly<{ at: number; status: "completed" | "failed" | "stopped" }>;
 type RequestTool = { source: WorkerRequestSource; proof: NativeProof; execution: NativeProof };
 type PrelaunchRequests = { tools: readonly RequestTool[]; request?: { id: string; kind: "permission" | "question"; source: WorkerRequestSource };
   resolved?: readonly { id: string; kind: "permission" | "question" }[]; closed?: true };
@@ -1253,10 +1254,14 @@ export class BackgroundWorkers {
     return !!previous?.occurrence && sameProof(previous.proof, proof);
   }
 
-  observeNotification(parent: string, id: string, prepared: PreparedNotification | undefined, proof?: NativeProof): void {
+  observeNotification(parent: string, id: string, prepared: PreparedNotification | undefined, proof?: NativeProof, terminalReportedAt?: number | null): void {
     if (this.recoveryOnly || !prepared?.valid || !prepared.status || this.notificationReplay(parent, id, proof)) return;
     for (const task of this.tasks.values()) if (task.parent === parent && task.worker === prepared.worker
-      && task.item.taskType === (prepared.source === "shell" ? "shell" : "agent") && task.item.status === "running") this.uncertain(task, false);
+      && task.item.taskType === (prepared.source === "shell" ? "shell" : "agent") && task.item.status === "running"
+      // Pending reports are folded after stored history, even when they belong
+      // to an earlier execution. Their native clock cannot invalidate a launch
+      // that had not yet begun. Live observation keeps its existing fences.
+      && !(this.budget.executionHistory && terminalReportedAt != null && task.item.createdAt > terminalReportedAt)) this.uncertain(task, false);
     this.bound();
   }
 
@@ -1324,10 +1329,35 @@ export class BackgroundWorkers {
     this.bound();
   }
 
-  /** End the transient history fold without treating an idle as a result. */
-  finishHistory(): NormalizedProviderUpdate[] {
+  /** A typed native outcome may settle one proven interval. A bare idle only
+   * fences activity; missing/straddling windows never identify its execution. */
+  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>): NormalizedProviderUpdate[] {
     if (!this.budget.executionHistory) return [];
     const updates: NormalizedProviderUpdate[] = [];
+    for (const [child, results] of outcomes ?? []) {
+      const ends = this.budget.executionHistory.get(child);
+      if (!ends) continue;
+      for (const result of results) {
+        if (ends.filter(end => end === result.at).length !== 1 || results.some(other => other.at === result.at && other.status !== result.status)) continue;
+        const previous = ends.filter(end => end < result.at).reduce<number | undefined>((latest, end) => latest === undefined || end > latest ? end : latest, undefined);
+        // Every potentially overlapping occurrence competes, including unknown
+        // windows and already reported results. Uncertainty is not exclusion.
+        const candidates = [...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent"
+          && task.evidence.launches.some(launch => {
+            const window = this.admissionWindow(launch);
+            const start = launch.ran ?? launch.created;
+            return !window ? start === undefined || start <= result.at : window.start <= result.at && (previous === undefined || window.end >= previous);
+          }));
+        const task = candidates.length === 1 ? candidates[0] : undefined;
+        if (!task || task.item.status !== "running" || task.evidence.uncertain || task.item.stateUncertain || !task.evidence.launches.every(launch => {
+          const window = this.admissionWindow(launch);
+          return window && window.end < result.at && (previous === undefined || window.start > previous);
+        })) continue;
+        task.item = { ...task.item, status: result.status, stateUncertain: false };
+        this.set(this.tasks, task.item.taskId, task);
+        updates.push({ kind: "upsert", item: task.item });
+      }
+    }
     for (const task of this.tasks.values()) if (task.item.taskType === "agent" && task.item.status === "running"
       && this.ended.get(task.worker)?.some(end => end >= task.item.createdAt)) {
       this.uncertain(task);
@@ -1357,8 +1387,11 @@ export class BackgroundWorkers {
 
   private separateHistoricalIntervals(child: string, previous: LauncherEvidence, next: LauncherEvidence): boolean {
     const ends = this.budget.executionHistory?.get(child), left = this.historicalAdmission(child, previous), right = this.historicalAdmission(child, next);
-    return ends !== undefined && left !== undefined && right !== undefined
-      && ends.some(end => end > left.end && end < right.start || end > right.end && end < left.start);
+    const leftStart = previous.ran ?? previous.created, rightStart = next.ran ?? next.created;
+    // Excluding a later invocation from an earlier interval needs its native
+    // lower bound, not a future acceptance clock. This does not prove aliasing.
+    return ends !== undefined && ends.some(end => left !== undefined && rightStart !== undefined && end > left.end && end < rightStart
+      || right !== undefined && leftStart !== undefined && end > right.end && end < leftStart);
   }
 
   private historicalReportCompatible(child: string, launches: readonly LauncherEvidence[], at?: number): boolean {
@@ -1497,7 +1530,7 @@ export class BackgroundWorkers {
     if (this.recoveryOnly) {
       return prepared ? [] : undefined;
     }
-    this.observeNotification(parent, id, prepared, proof);
+    this.observeNotification(parent, id, prepared, proof, terminalReportedAt);
     if (this.recoveryOnly) return prepared ? [] : undefined;
     if (prepared?.userShell && prepared.worker && this.isUserShell(parent, prepared.worker)) return [];
     const result = prepared ? this.foldNotification(parent, id, prepared, at, terminalReportedAt, proof) : undefined;

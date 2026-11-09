@@ -469,7 +469,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     // fake OpenCode's controls (`opencode` action).
     stack?: "opencode-v2";
     backgroundPreview?: boolean;
-    op?: "step" | "finish" | "raceDeliverOnCancel" | "state" | "resync" | "launchWorker" | "launchRequestWorker" | "workerObservation" | "workerRequest" | "settleWorker" | "workerReport" | "disconnect" | "pauseEvents" | "reconnectEvents" | "externalRevert" | "appendHistory" | "holdNextMessageRead" | "releaseMessageRead" | "loseBackgroundResponse" | "loseWorkerResponse" | "launchShell" | "shellPhase" | "wakeParent" | "losePromptResponse" | "unknownPromptBeforeAdmission" | "loseResumeResponse" | "refuseBackground" | "launchShellOnNextSteer";
+    op?: "step" | "finish" | "raceDeliverOnCancel" | "state" | "resync" | "launchWorker" | "launchRequestWorker" | "workerObservation" | "workerRequest" | "settleWorker" | "settleWorkerWithoutReport" | "workerReport" | "disconnect" | "pauseEvents" | "reconnectEvents" | "externalRevert" | "appendHistory" | "holdNextMessageRead" | "releaseMessageRead" | "loseBackgroundResponse" | "loseWorkerResponse" | "launchShell" | "shellPhase" | "wakeParent" | "losePromptResponse" | "unknownPromptBeforeAdmission" | "loseResumeResponse" | "refuseBackground" | "launchShellOnNextSteer";
     requestKind?: "permission" | "question";
     observed?: boolean;
     revertMessageId?: string | null;
@@ -480,6 +480,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     shellPhase?: "exit" | "capture" | "captureBeforeRemove";
     background?: boolean;
     workerState?: "completed" | "error" | "cancelled";
+    idleOutcome?: Parameters<ReturnType<typeof startOpenCodeV2Fake>["settleWorkerWithoutReport"]>[1];
     childId?: string;
     inboxId?: string;
   };
@@ -561,6 +562,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
           break;
         case "settleWorker":
           if (body.childId) { openCodeV2Fake.settleWorker(body.childId, body.workerState ?? "completed", body.text ?? "Fixture checked."); return Response.json({ ok: true }); }
+          break;
+        case "settleWorkerWithoutReport":
+          if (body.childId && body.idleOutcome) { openCodeV2Fake.settleWorkerWithoutReport(body.childId, body.idleOutcome, body.text ?? "Native child finished."); return Response.json({ ok: true }); }
           break;
         case "workerReport":
           if (body.childId) { openCodeV2Fake.workerReport(body.childId, body.usedModel ?? "Fixture Model", body.usedEffort, body.costUsd); return Response.json({ ok: true }); }
