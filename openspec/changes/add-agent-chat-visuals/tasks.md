@@ -86,6 +86,7 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.17 Diagnose the persistent ignored-window CI failure from source and correct its real fixture or implementation cause; the sequential-observation/eviction wait alone did not establish a fix. Preserve both pinned-file retention and oldest-unpinned eviction assertions.
 - [ ] 6.18 Address Codex on `36a0dd81`: a terminal visual refresh must recover when the client receives terminal status, misses its additional same-sequence resync, and reconnects at exactly that cursor. Cover the real cursor-only HTTP open frame without inventing native sequence numbers or refetching ordinary text-only history.
 - [ ] 6.19 Diagnose the `d6e932c5` WebKit desktop-parent following failure: initial bottom distance is 16 px on all three CI attempts. Preserve the strict bottom assertion; collect pre-activation trace, geometry, fonts and following state through CI before proposing a production change.
+- [ ] 6.20 Correct the two `bd1d5189` equal-cursor regression fixtures that start unavailable rather than pending, and diagnose the Hub hung-observation coalescing assertion (expected one write, observed two) without weakening the original requirements. Obtain latest-head clean CI and reconcile Codex's no-major-issues receipt with its still-unresolved summary.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

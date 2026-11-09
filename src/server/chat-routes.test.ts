@@ -1309,10 +1309,12 @@ describe("workspace chat routes", () => {
     let bytes = png;
     let reads = 0;
     const store = new VisualStore("/workspace", directory);
-    store.setReader(async source => { expect(source).toBe("result.png"); reads++; if (!available) throw new VisualReadError(true); return bytes; });
     service.conversation.status = "running";
     service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
     const table = routes(service, "/", undefined, undefined, undefined, store);
+    // buildRoutes installs its session-policy reader. Replace it afterwards
+    // so this test controls file arrival rather than calling unused getSession.
+    store.setReader(async source => { expect(source).toBe("result.png"); reads++; if (!available) throw new VisualReadError(true); return bytes; });
     const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
     const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
     const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
@@ -1385,8 +1387,8 @@ describe("workspace chat routes", () => {
     const terminal = service.replay.publish({ type: "conversation.status", status: "completed" });
     const store = new VisualStore("/workspace");
     let reads = 0;
-    store.setReader(async () => { reads++; throw new Error("plain text must not read files"); });
     const handler = routes(service, "/", undefined, undefined, undefined, store)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    store.setReader(async () => { reads++; throw new Error("plain text must not read files"); });
     const response = await handler.GET(request("/api/chat/conversations/opencode:local/events?reconnect=1", { headers: { "last-event-id": service.replay.latestCursor() } }, { conversationId: "opencode:local" }));
     const reader = response.body!.getReader();
     try {
