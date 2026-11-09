@@ -21,4 +21,4 @@
 ## 4. Publication
 
 - [x] 4.1 Inspect the target repository's candidate issues and latest stable release, review public content and Git identity, and obtain approval for PR text, issue associations and draft/ready state. Approved as ready for review with non-closing references to #589, #555 and #592; the Release Please override records unreleased-feature stabilization.
-- [ ] 4.2 Commit and publish the approved branch and PR into tjakobsson/uatu main; verify the resulting URL, head commit, base branch and draft state. Deployment and live screenshot confirmation remain separate follow-up work.
+- [x] 4.2 Commit and publish the approved branch and PR into tjakobsson/uatu main; verify the resulting URL, head commit, base branch and draft state. Published [PR #625](https://github.com/tjakobsson/uatu/pull/625) as ready for review from `addiberra:fix/unresolved-opencode-tasks` to `tjakobsson:main`; GitHub confirmed the implementation head and non-draft state. Deployment and live screenshot confirmation remain separate follow-up work.
