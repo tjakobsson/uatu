@@ -50,8 +50,8 @@ no new dependency, sharing tool, mandatory skill, or extraction of native
 tool-result images is proposed. Repository/global instructions are unchanged.
 
 The initial review baseline is upstream `71e4700`, integrated by merge
-`331661b`. The current integration base is upstream `14b60e7`
-(final rebase on 2026-11-09).
+`331661b`. The current integration base is upstream `8894d92`
+(latest rebase on 2026-11-09).
 At the planning-approval checkpoint, generated-input safety tests,
 independent fix review, and pinned-SDK validation remained outstanding.
 See [tasks.md](tasks.md) for current verification and blockers. A narrow

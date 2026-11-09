@@ -12,6 +12,7 @@ and safety stash are preserved; no feature commit or publication is implied.
 - [x] 1.3 Obtain separate approval before refreshing dependencies or tools to the merged pins; verify Bun and installed SDK versions and a frozen-lockfile install without unintended manifest changes. Approved 2026-10-30: task-local Bun 1.4.3 verified against the release asset SHA-256; frozen restore supplies client 2.1.2 and leaves both manifest/lockfile hashes unchanged.
 - [x] 1.4 Refresh the task-local runtime and dependencies for the 2026-11-08 rebase with separate approval: Bun 1.4.4 archive SHA-256 matches the GitHub release asset digest; the frozen restore supplies Claude SDK 0.3.316, OpenCode SDK 1.19.5 and client 2.2.5 without changing the upstream manifest or lockfile.
 - [x] 1.5 Integrate the two later upstream commits at `14b60e7` without conflicts. Reuse the approved task-local Bun 1.4.4 frozen restore for upstream's Claude SDK 0.3.319 patch; all other package pins and API revisions are unchanged, and manifest/lockfile hashes remain unchanged by the restore. Preserve pre-rebase head `00dd13d1` in a separate backup branch.
+- [x] 1.6 Rebase the subsequent Codex fixes onto upstream `8894d92` without conflicts. This upstream commit updates only `@pierre/diffs` to 1.6.4 and its lockfile entries; no local dependency restore or CI was run under the revised workflow. Preserve pre-rebase head `93d11403` in `backup/image-support-before-codex-rebase-20261109`; await GitHub CI for the new head.
 
 ## 2. Markdown preparation and safety
 

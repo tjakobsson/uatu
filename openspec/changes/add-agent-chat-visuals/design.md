@@ -6,7 +6,7 @@ See [proposal.md](proposal.md) for motivation and
 [the capability delta](specs/chat-visuals/spec.md) for acceptance behavior.
 The initial implementation was uncommitted on top of merge `331661b`, which
 integrated upstream `71e4700`. The current integration base is upstream
-`14b60e7` (final rebase on 2026-11-09). Retrospective planning was approved on
+`8894d92` (latest rebase on 2026-11-09). Retrospective planning was approved on
 2026-10-30; implementation presence still does not establish final acceptance.
 
 The shared chat model owns presentation while native agent transcripts own
