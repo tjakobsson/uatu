@@ -11,7 +11,7 @@ import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
-import { ConversationReplay, ReplaySubscription } from "./replay";
+import { ConversationReplay, decodeReplayCursor, ReplaySubscription } from "./replay";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
 import { createWatchedVisualReader, VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
@@ -579,6 +579,37 @@ test("cancelling between a status and its additional resync stops both the wrapp
     expect((await h.iterator.next()).value).toEqual({ ...original, conversationId: "test:c" });
     h.subscription.events.cancel();
     expect(await h.iterator.next()).toEqual({ value: undefined, done: true });
+  } finally { await h.cleanup(); }
+});
+
+test.each(["ready", "unavailable", "pending"] as const)("equal-cursor transport recovery reconciles %s visual metadata, but fresh snapshot attachments do not loop", async state => {
+  const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Image](later.png)" }]);
+  try {
+    if (state === "ready") h.files.available = true;
+    if (state !== "pending") {
+      h.projection.statusUpdate("completed");
+      await deliveredBatch(h.replay, h.iterator);
+    }
+    const snapshot = await h.service.history("test:c");
+    expect((snapshot.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe(state);
+    const reads = h.files.reads;
+    const cursor = h.replay.latestCursor();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const resumed = await h.service.subscribe("test:c", { cursor, reconnect: true });
+      try {
+        const event = (await resumed.events[Symbol.asyncIterator]().next()).value;
+        expect(event).toEqual({ type: "resync", reason: "conversation-rewritten", conversationId: "test:c", generation: snapshot.generation, sequence: decodeReplayCursor(cursor)!.sequence });
+        expect(applyChatEvent(projectionFromSnapshot(resumed.snapshot), event!).outcome).toBe("resync");
+      } finally { resumed.events.cancel(); }
+      expect(h.replay.latestCursor()).toBe(cursor);
+      expect(h.files.reads).toBe(reads); // Cached snapshots still need reconnect repair.
+    }
+    const fresh = await h.service.subscribe("test:c", { cursor, reconnect: false });
+    try {
+      // A native marker is a finite barrier, not a timeout-based no-event check.
+      expect(await deliveredBatch(h.replay, fresh.events[Symbol.asyncIterator]())).toEqual([]);
+      expect(h.files.reads).toBe(reads);
+    } finally { fresh.events.cancel(); }
   } finally { await h.cleanup(); }
 });
 

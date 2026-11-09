@@ -115,7 +115,8 @@ export interface MultiAgentWorkspaceChatService {
   createConversation(agentId?: string): Promise<AgentConversationSnapshot>;
   history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot>;
   workerEvidence?(id: string): Promise<import("./worker-dismissal-evidence").WorkerEvidenceSnapshot>;
-  subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }): Promise<{
+  // The existing transport-recovery hint is false for fresh history attachments.
+  subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal; reconnect?: boolean }): Promise<{
     snapshot: AgentConversationSnapshot;
     events: ChatEventSubscription;
   }>;
@@ -363,7 +364,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     return { ...snapshot, conversationId: id };
   }
 
-  async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }): Promise<{
+  async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal; reconnect?: boolean }): Promise<{
     snapshot: AgentConversationSnapshot;
     events: ChatEventSubscription;
   }> {
@@ -378,9 +379,18 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     }
     let boundary = decodeReplayCursor(snapshot.cursor);
     const requestedCursor = options?.cursor ? decodeReplayCursor(options.cursor) : null;
+    const hasVisualMetadata = qualified.items.some(item => item.type === "assistant_message" && item.visuals?.length);
     let replayNeedsVisualResync = Boolean(boundary && requestedCursor
       && boundary.generation === requestedCursor.generation && requestedCursor.sequence < boundary.sequence
-      && qualified.items.some(item => item.type === "assistant_message" && item.visuals?.length));
+      && hasVisualMetadata);
+    // A terminal status and its visual resync deliberately share a native
+    // sequence. Losing the latter leaves an equal cursor but stale visuals.
+    // Only transport recovery needs this initial invalidation: a fresh stream
+    // opened from enriched history at the same cursor must not resync-loop.
+    const initialVisualResync: ChatEvent | undefined = options?.reconnect && boundary && requestedCursor
+      && boundary.generation === requestedCursor.generation && requestedCursor.sequence === boundary.sequence && hasVisualMetadata
+      ? { generation: boundary.generation, sequence: boundary.sequence, conversationId: qualified.conversation.id, type: "resync", reason: "conversation-rewritten" }
+      : undefined;
     type Assistant = Extract<ConversationItem, { type: "assistant_message" }>;
     type Tracked = { item: Assistant; live: boolean; enrichedAt: number; historyBoundary?: ReturnType<typeof decodeReplayCursor> };
     // No tool output or other timeline rows belong in the visual accumulator.
@@ -583,7 +593,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         options?.signal?.removeEventListener("abort", onAbort);
         subscribers.delete(historySubscriber);
         if (!subscribers.size) this.visualHistorySubscribers.delete(id);
-      });
+      }, initialVisualResync);
     const subscribers = this.visualHistorySubscribers.get(id) ?? new Set<VisualHistorySubscriber>();
     const historySubscriber: VisualHistorySubscriber = {
       read: page => {
@@ -856,6 +866,7 @@ class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
     private readonly source: ChatEventSubscription,
     private readonly map: (event: ChatEvent) => ChatEvent[] | Promise<ChatEvent[]>,
     private readonly onClose: () => void = () => {},
+    private initial?: ChatEvent,
   ) {}
 
   cancel(): void {
@@ -876,6 +887,9 @@ class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
     // Consumer return()/throw(), unlike exhaustion, cancels queued delivery.
     let exhausted = false;
     try {
+      const initial = this.initial;
+      this.initial = undefined;
+      if (initial && !this.cancelled) yield initial;
       for await (const event of this.source) {
         if (this.cancelled) return;
         for (const mapped of await this.map(event)) {

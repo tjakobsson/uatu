@@ -17,7 +17,7 @@ import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
 import type { ChatActionContext } from "../chat/types";
-import { createWatchedVisualReader, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
+import { createWatchedVisualReader, VisualReadError, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
 
 const TOKEN = "chat-test-token";
 // The conversation route opens with an `open` event naming the cursor its
@@ -1296,6 +1296,110 @@ describe("workspace chat routes", () => {
       await resumedReader.cancel();
       expect(service.replay.subscriberCount()).toBe(0);
     } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  });
+
+  test.each(["ready", "unavailable"] as const)("HTTP exact-terminal-cursor recovery repairs a lost visual resync (%s), including repeated cached reconnects", async state => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-equal-cursor-route-"));
+    const service = new FakeChatService();
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false;
+    let bytes = png;
+    let reads = 0;
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async source => { expect(source).toBe("result.png"); reads++; if (!available) throw new VisualReadError(true); return bytes; });
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const open = async (cursor: string, reconnect: boolean) => {
+      const response = await events.GET(request(`/api/chat/conversations/opencode:local/events?reconnect=${reconnect ? "1" : "0"}`, { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
+      const reader = response.body!.getReader();
+      readers.push(reader);
+      const opening = new TextDecoder().decode((await reader.read()).value);
+      expect(opening).toMatch(CONVERSATION_OPEN_FRAME);
+      expect(opening).not.toContain("visuals");
+      return reader;
+    };
+    try {
+      const pending = await getHistory();
+      expect(pending.items[0].visuals[0].status).toBe("pending");
+      expect(reads).toBe(1);
+      const first = await open(pending.cursor, false);
+      available = state === "ready";
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after image generation" });
+      const statusFrame = new TextDecoder().decode((await first.read()).value);
+      const terminalCursor = statusFrame.match(/id: (.+)\n/)![1]!;
+      expect(terminalCursor).toBe(service.replay.latestCursor());
+      expect(statusFrame).toContain("event: chat\n");
+      expect(statusFrame).not.toContain("event: resync\n");
+      expect(JSON.parse(statusFrame.match(/data: (.+)\n/)![1]!)).toEqual({ ...terminal, conversationId: "opencode:local" });
+      await first.cancel(); // Acknowledge status, deliberately never read its visual resync.
+      expect(service.replay.subscriberCount()).toBe(0);
+      expect(reads).toBe(2);
+      available = true;
+      bytes = Uint8Array.from([...png.slice(0, -1), 2]); // Later source bytes cannot replace a sealed capture.
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const resumed = await open(terminalCursor, true);
+        const frame = new TextDecoder().decode((await resumed.read()).value);
+        expect(frame).toContain(`id: ${terminalCursor}\nevent: resync\n`);
+        expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual({ type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local", generation: terminal.generation, sequence: terminal.sequence });
+        expect((await resumed.read()).done).toBe(true);
+        const snapshot = await getHistory();
+        expect(snapshot.cursor).toBe(terminalCursor);
+        expect(snapshot.generation).toBe(terminal.generation);
+        expect(snapshot.items[0].visuals[0].status).toBe(state);
+        if (state === "ready") expect((await store.resolve(snapshot.items[0].visuals[0].id))?.bytes).toEqual(png);
+        expect(service.replay.latestCursor()).toBe(terminalCursor); // No synthetic native sequence.
+        expect(reads).toBe(2); // Even a second reconnect after a cached history read must repair.
+      }
+
+      // The resync owner's fresh post-history attachment must not repeat the
+      // invalidation. A real native frame proves progress without timing out.
+      const fresh = await open(terminalCursor, false);
+      const barrier = service.replay.publish({ type: "conversation.configuration", configuration: {} });
+      const next = new TextDecoder().decode((await fresh.read()).value);
+      expect(next).toContain("event: chat\n");
+      expect(next).not.toContain("event: resync\n");
+      expect(JSON.parse(next.match(/data: (.+)\n/)![1]!)).toEqual({ ...barrier, conversationId: "opencode:local" });
+      expect(reads).toBe(2);
+      await fresh.cancel();
+      expect(service.replay.subscriberCount()).toBe(0);
+    } finally {
+      await Promise.all(readers.map(reader => reader.cancel().catch(() => undefined)));
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("HTTP equal-cursor transport recovery of plain terminal text needs no visual resync or file reads", async () => {
+    const service = new FakeChatService();
+    service.conversation.status = "completed";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "Plain terminal answer" }];
+    const terminal = service.replay.publish({ type: "conversation.status", status: "completed" });
+    const store = new VisualStore("/workspace");
+    let reads = 0;
+    store.setReader(async () => { reads++; throw new Error("plain text must not read files"); });
+    const handler = routes(service, "/", undefined, undefined, undefined, store)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const response = await handler.GET(request("/api/chat/conversations/opencode:local/events?reconnect=1", { headers: { "last-event-id": service.replay.latestCursor() } }, { conversationId: "opencode:local" }));
+    const reader = response.body!.getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
+      const barrier = service.replay.publish({ type: "conversation.configuration", configuration: {} });
+      const frame = new TextDecoder().decode((await reader.read()).value);
+      expect(frame).toContain("event: chat\n");
+      expect(frame).not.toContain("event: resync\n");
+      expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual({ ...barrier, conversationId: "opencode:local" });
+      expect(barrier.sequence).toBe(terminal.sequence + 1);
+      expect(reads).toBe(0);
+    } finally { await reader.cancel(); await service.dispose(); }
+    expect(service.replay.subscriberCount()).toBe(0);
   });
 });
 

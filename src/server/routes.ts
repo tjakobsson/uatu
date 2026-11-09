@@ -952,7 +952,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const onAbort = () => abort.abort();
         request.signal.addEventListener("abort", onAbort, { once: true });
         try {
-          const { snapshot, events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal });
+          const { snapshot, events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal, reconnect: url.searchParams.get("reconnect") === "1" });
           const encoder = new TextEncoder();
           const iterator = events[Symbol.asyncIterator]();
           let pending = iterator.next();

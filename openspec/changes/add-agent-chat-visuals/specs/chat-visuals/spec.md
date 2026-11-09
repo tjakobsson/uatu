@@ -214,6 +214,11 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **THEN** replay does not duplicate already-applied text or recapture terminal visuals
 - **AND** the client can recover newly available references through the existing resync protocol
 
+#### Scenario: A reconnect uses the terminal cursor after missing a visual refresh
+- **WHEN** a client receives terminal status but disconnects before its additional visual resync
+- **THEN** reconnecting at that exact native cursor still signals reconciliation of terminal visual metadata
+- **AND** no newer native event or manual history refresh is required
+
 #### Scenario: Completed and live Claude turns appear in paged history
 - **WHEN** history is loaded while a newer Claude turn is running
 - **THEN** visuals in completed turns are terminal independently of the current conversation status
