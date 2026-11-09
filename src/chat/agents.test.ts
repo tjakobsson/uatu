@@ -6,6 +6,7 @@ import path from "node:path";
 import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId, UnknownAgentError, type RegisteredChatAgent } from "./agents";
 import { ConversationProjection } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
+import { CLAUDE_TURN, type ClaudeTextIdentity } from "./claude/normalization-types";
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
@@ -216,7 +217,7 @@ async function visualSubscriptionHarness(agentId: string, initial: ConversationI
   const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: agentId, name: agentId }, service: provider as unknown as WorkspaceChatService }] });
   const subscription = await service.subscribe(`${agentId}:c`);
   return {
-    replay, projection, current, provider, store, files, service, subscription,
+    replay, projection, current, provider, store, files, service, subscription, directory,
     iterator: subscription.events[Symbol.asyncIterator](),
     cleanup: async () => { subscription.events.cancel(); await service.dispose(); await fs.rm(directory, { recursive: true, force: true }); },
   };
@@ -261,6 +262,103 @@ test.each(["footer", "result"] as const)("Claude text stop stays pending through
     expect(finished.visuals?.[0]?.status).toBe("ready");
     expect(h.files.reads).toBe(2);
   } finally { await h.cleanup(); }
+});
+
+test.each(["completed", "failed", "interrupted"] as const)("delayed Claude draining keeps queued prefixes live until the ordered native %s result", async status => {
+  const h = await visualSubscriptionHarness("claude");
+  const failed = status === "failed";
+  const memory = createClaudeEventMemory();
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const prefix = '![Generated](later.png)\n\n```svg\n<svg><rect width="10"';
+  const close = '/></svg>\n```';
+  const markdown = prefix + close;
+  const svg = '<svg><rect width="10"/></svg>\n';
+  const published: ChatEvent[] = [];
+  let frame = 0;
+  const emit = (value: Record<string, unknown>) => {
+    const normalized = normalizeClaudeMessage({ uuid: `frame-${++frame}`, timestamp: frame, ...value }, memory, "live");
+    // Match the provider's attribution of the user's interruption to the
+    // native result, after normalization has sealed its shared turn token.
+    const updates = status === "interrupted" && normalized.eventType === "result"
+      ? normalized.updates.map(update => update.kind === "status" ? { kind: "status" as const, status: "interrupted" as const } : update)
+      : normalized.updates;
+    const emitted = updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+    published.push(...emitted);
+    return emitted;
+  };
+  const stream = (event: Record<string, unknown>) => emit({ type: "stream_event", event });
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    // The provider gets all the way through result before the subscriber pulls
+    // even its first event. Earlier items now hold the sealed shared token.
+    stream({ type: "message_start", message: { id: "delayed-native" } });
+    const opened = stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })[0]!;
+    const prefixEvent = stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: prefix } })[0]!;
+    const closeEvent = stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: close } })[0]!;
+    stream({ type: "content_block_stop", index: 0 });
+    emit({ type: "assistant", uuid: "durable", message: { id: "delayed-native", content: [{ type: "text", text: markdown }] } });
+    emit({ type: "assistant", message: { id: "write-native", content: [{ type: "tool_use", id: "write-image", name: "Write", input: { file_path: "later.png" } }] } });
+    emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "write-image", content: "Created later.png" }] } });
+    const terminal = emit({ type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, ...(failed ? { errors: ["Turn failed after Write"] } : {}) })[0]!;
+    if (opened.type !== "item.upsert") throw new Error("expected native opened text");
+    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect(h.files.reads).toBe(0);
+
+    let client = projectionFromSnapshot(h.subscription.snapshot);
+    let prefixSeen = false;
+    let closeSeen = false;
+    let durableSeen = false;
+    const received = await deliveredBatch(h.replay, h.iterator, event => {
+      const applied = applyChatEvent(client, event);
+      expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+      client = applied.projection;
+      if (event.sequence === prefixEvent.sequence) {
+        expect(event).toMatchObject({ type: "item.upsert", item: { markdown: prefix, visuals: [{ status: "pending" }, { status: "pending" }] } });
+        prefixSeen = true;
+      }
+      if (event.sequence === closeEvent.sequence) {
+        expect(event).toMatchObject({ type: "item.upsert", item: { markdown, visuals: [{ status: "pending" }, { status: "ready" }] } });
+        closeSeen = true;
+      }
+      if (event.type === "item.upsert" && event.item.id === "message:durable") {
+        expect(event.item).toMatchObject({ markdown, visuals: [{ status: "pending" }, { status: "ready" }] });
+        durableSeen = true;
+      }
+      // The fake file appears at the ordered Write result, not when the
+      // provider has already mutated the queued text frames' shared token.
+      if (event.type === "item.upsert" && event.item.type === "tool" && event.item.status === "completed") h.files.available = true;
+    });
+    expect([prefixSeen, closeSeen, durableSeen]).toEqual([true, true, true]);
+    expect(received.filter(event => event.type !== "resync").map(event => event.sequence)).toEqual(published.map(event => event.sequence));
+    expect(received.slice(-2)).toEqual([
+      { ...terminal, conversationId: "claude:c" },
+      { generation: terminal.generation, sequence: terminal.sequence, conversationId: "claude:c", type: "resync", reason: "conversation-rewritten" },
+    ]);
+    expect(client.status).toBe(status);
+    expect(h.files.reads).toBe(2); // Initial missing-file attempt plus one completion retry.
+
+    const completed = (await h.service.history("claude:c")).items.find(item => item.id === "message:durable") as AssistantMessageItem;
+    expect(completed.visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
+    const capturedSvg = await h.service.resolveVisual(completed.visuals![1]!.id!);
+    const capturedFile = await h.service.resolveVisual(completed.visuals![0]!.id!);
+    expect(new TextDecoder().decode(capturedSvg?.sourceBytes)).toBe(svg);
+    expect(capturedFile?.bytes).toEqual(Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]));
+
+    const nativeHistory = normalizeTranscriptEntries([
+      { kind: "assistant", uuid: "durable", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null, message: { id: "delayed-native", content: [{ type: "text", text: markdown }] } },
+      { kind: "system", subtype: "turn_duration", uuid: "turn-end", timestamp: 2, parentUuid: null, isSidechain: false, parentToolUseId: null, message: {} },
+    ]).items;
+    h.provider.history = async () => ({ ...h.current(), items: nativeHistory });
+    const store = new VisualStore("/workspace", h.directory);
+    store.setReader(async () => { h.files.reads++; throw new Error("immutable completed captures must not reread source files"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:durable") as AssistantMessageItem;
+    expect(reloaded.markdown).toBe(markdown);
+    expect(reloaded.visuals).toEqual(completed.visuals);
+    expect(await restarted.resolveVisual(reloaded.visuals![1]!.id!)).toEqual(capturedSvg);
+    expect(await restarted.resolveVisual(reloaded.visuals![0]!.id!)).toEqual(capturedFile);
+    expect(h.files.reads).toBe(2);
+  } finally { clock.mockRestore(); await restarted?.dispose(); await h.cleanup(); }
 });
 
 test.each(["status-error", "updated"] as const)("visual terminal refresh preserves the original %s before its additional resync", async kind => {

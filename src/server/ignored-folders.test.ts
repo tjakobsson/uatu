@@ -167,14 +167,18 @@ test("listed levels survive recovery while their folder is still ignored", async
 test("files a client opens or is served stay indexed when later writes overflow the window", async () => {
   const cwd = await fixture();
   await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
-  await files(cwd, ["README.md"]);
+  // Seed an existing ignored tree so discovery establishes its unlisted
+  // status before any writes. Creating it later races asynchronous directory
+  // classification: files admitted in the ordinary lane do not use the window.
+  await files(cwd, ["README.md", "build/renders/.keep"]);
   // Pinned files count toward the total window. Leave one moving slot so
   // later writes can enter it while the two client-owned entries stay pinned.
   const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { ignoredWindowLimit: 3 });
   const render = (name: string) => path.join(cwd, "build/renders", name);
   try {
     await session.start();
-    await mkdir(path.join(cwd, "build/renders"), { recursive: true });
+    expect(folders(rootOf(session))).toEqual(["build/"]);
+    expect(paths(rootOf(session))).not.toContain("build/renders/.keep");
     for (const name of ["opened.md", "served.png"]) await writeFile(render(name), "x");
     await wait(() => !!session.findDocument(render("opened.md")) && !!session.findDocument(render("served.png")), "windowed renders");
     expect(await session.ensureDocument(render("opened.md"))).toBeDefined();
@@ -191,6 +195,8 @@ test("files a client opens or is served stay indexed when later writes overflow 
     expect(session.findDocument(render("served.png"))).toBeDefined();
     // Unpinned older writes left the window.
     expect(session.findDocument(render("a.wav"))).toBeUndefined();
+    expect(session.findDocument(render("c.wav"))).toBeDefined();
+    expect(folders(rootOf(session))).toEqual(["build/"]);
   } finally { await session.stop(); }
 }, 20_000);
 

@@ -471,7 +471,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const enrich = async (tracked: Tracked, force = false) => {
       if (!force && Date.now() - tracked.enrichedAt < enrichmentCadenceMs) return false;
       const previous = tracked.item;
-      tracked.item = await this.enrichItem(id, previous, tracked.live) as Assistant;
+      tracked.item = await this.enrichItem(id, previous, tracked.live, true) as Assistant;
       tracked.enrichedAt = tracked.item.markdown.length ? Date.now() : -Infinity;
       return JSON.stringify(previous.visuals) !== JSON.stringify(tracked.item.visuals);
     };
@@ -557,7 +557,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
             const appended = previous && event.item.markdown.startsWith(previous.item.markdown)
               ? event.item.markdown.slice(previous.item.markdown.length) : undefined;
             const syntaxCompleted = previous && (appended === undefined || completesVisualSyntax(previous.item, appended));
-            await enrich(tracked, !this.visualItemLive(event.item, tracked.live) || Boolean(syntaxCompleted));
+            await enrich(tracked, !this.visualItemLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
             // Normal events are sequence-deduplicated by the client. Enrich
             // this one native upsert, retaining all its text and other fields.
             return [{ ...event, item: tracked.item }];
@@ -652,9 +652,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   configureVisualReader(reader: VisualFileReader): void { this.visualStore.setReader(reader); }
   resolveVisual(id: string): Promise<StoredVisual | null> { return this.visualStore.resolve(id); }
 
-  private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean): Promise<ConversationItem> {
+  private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean, orderedTurnState = false): Promise<ConversationItem> {
     if (item.type !== "assistant_message") return item;
-    const live = this.visualItemLive(item, streaming);
+    const live = this.visualItemLive(item, streaming, orderedTurnState);
     // Deliberately overinclusive: any image opener or Markdown fence may
     // produce a visual, including reference syntax, raw HTML, nested/indented
     // fences and whitespace before the SVG info string. Plain prose needs no
@@ -675,12 +675,15 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     return { ...item, visuals };
   }
 
-  private visualItemLive(item: Extract<ConversationItem, { type: "assistant_message" }>, streaming: boolean): boolean {
+  private visualItemLive(item: Extract<ConversationItem, { type: "assistant_message" }>, streaming: boolean, orderedTurnState = false): boolean {
     // Claude's completedAt closes a text block/API response, not the agent
     // turn: a subsequent tool can still create the referenced file. OpenCode's
     // native parent-message completedAt, in contrast, really seals its parts.
     const identity = item as typeof item & ClaudeTextIdentity;
-    if (identity[CLAUDE_TURN]) return streaming && !identity[CLAUDE_TURN].completed;
+    // Queued Claude frames share a token the provider may already have sealed.
+    // Live projection must instead wait for its ordered status/turn boundary;
+    // history/snapshot reads still use the authoritative native token.
+    if (identity[CLAUDE_TURN]) return streaming && (orderedTurnState || !identity[CLAUDE_TURN].completed);
     const claudeBlock = Boolean(identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:"));
     return streaming && (claudeBlock || item.completedAt === undefined);
   }

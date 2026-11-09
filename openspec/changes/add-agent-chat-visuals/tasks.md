@@ -82,6 +82,8 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.13 Address Codex findings on `b685e77f`: bind resolved visual reads to the canonical symlink-checked candidate and enroll pending visuals paged in after subscription for the actual turn's completion flush. Correct the remaining exact Claude streaming expectation for its internal turn token, retaining block identity and text assertions.
 - [ ] 6.14 Correct GitHub-evidenced failures on `02cd1a87`: drain queued subscription events on natural source completion while retaining immediate cancellation/cleanup, and await observed watcher writes and eviction patches rather than fixed sleeps or an unrelated upsert. Keep all original qualification, pinning and eviction assertions.
 - [ ] 6.15 Address the late Codex finding from `02cd1a87`: nested image labels must trigger completion enrichment within the cadence, without waiting for later text or turn completion and without unbounded per-token parsing.
+- [ ] 6.16 Address Codex on `05e0a156`: queued live Claude prefixes must remain provisional until the subscription consumes the ordered turn boundary, even when the provider has already completed its shared native turn token. Keep history completion authoritative and preserve immutable capture identity.
+- [ ] 6.17 Diagnose the persistent ignored-window CI failure from source and correct its real fixture or implementation cause; the sequential-observation/eviction wait alone did not establish a fix. Preserve both pinned-file retention and oldest-unpinned eviction assertions.
 
 ## Historical checkpoint evidence (current status is tracked above)
 
