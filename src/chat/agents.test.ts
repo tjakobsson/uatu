@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,7 @@ import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ConversationReplay, ReplaySubscription } from "./replay";
+import { applyChatEvent, projectionFromSnapshot } from "./projection";
 import { createWatchedVisualReader, VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
@@ -71,15 +72,22 @@ test.each([
     const iterator = second.events[Symbol.asyncIterator]();
     const delta = '/></svg>\n```';
     projection.apply({ kind: "text", itemId: assistant.id, identity: "answer", mode: "incremental", text: delta });
-    const finishedFence = (await iterator.next()).value as ChatEvent;
+    const fenceEvents = await deliveredBatch(replay, iterator);
+    expect(fenceEvents).toHaveLength(1);
+    const finishedFence = fenceEvents.at(-1)!;
     if (finishedFence.type !== "item.upsert" || finishedFence.item.type !== "assistant_message") throw new Error("expected completed SVG capture");
+    expect(finishedFence.item.markdown).toBe(assistant.markdown + delta);
     expect(finishedFence.item.visuals?.map(visual => visual.status)).toEqual(["pending", "ready"]);
+    const appliedFence = applyChatEvent(projectionFromSnapshot(second.snapshot), finishedFence);
+    expect(appliedFence.outcome).toBe("applied");
+    expect((appliedFence.projection.items.find(item => item.id === assistant.id) as AssistantMessageItem).visuals).toEqual(finishedFence.item.visuals);
     expect(reads).toBe(1);
     available = true;
     if (completion === "message") projection.upsert({ ...assistant, markdown: assistant.markdown + delta, completedAt: 4 });
     else projection.statusUpdate("completed");
-    const terminal = (await iterator.next()).value as ChatEvent;
-    expect(terminal.type).toBe(completion === "message" ? "item.upsert" : "resync");
+    const terminalEvents = await deliveredBatch(replay, iterator);
+    expect(terminalEvents[0]!.type).toBe(completion === "message" ? "item.upsert" : "conversation.status");
+    expect(terminalEvents.at(-1)!.type).toBe(completion === "message" ? "item.upsert" : "resync");
     const completed = answer(await restarted.history("opencode:c"));
     expect(completed.visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
     expect(reads).toBe(2);
@@ -177,6 +185,244 @@ test.each([
     for (const service of services) await service.dispose();
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+// These regressions use the real replay/projection and provider normalizer;
+// the file reader is the only fake at the visual-capture boundary.
+async function visualSubscriptionHarness(agentId: string, initial: ConversationItem[] = []) {
+  const root = path.join(os.tmpdir(), "opencode");
+  await fs.mkdir(root, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(root, "agent-enrichment-"));
+  const replay = new ConversationReplay("g", "c", 1_000_000);
+  const projection = new ConversationProjection(replay);
+  projection.status = "running";
+  for (const item of initial) projection.upsert(item);
+  const current = (): ConversationSnapshot => ({ ...snapshot("c"), generation: "g", cursor: replay.latestCursor(), conversation: { ...summary("c"), status: projection.status }, items: projection.items() });
+  const provider = {
+    history: async (_id?: string, _options?: { cursor?: string }) => current(),
+    subscribe: async (_id: string, options?: { cursor?: string; signal?: AbortSignal }) => {
+      const handoff = replay.handoff(cursor => ({ ...current(), cursor }), options?.cursor, options?.signal);
+      return { snapshot: handoff.snapshot, events: handoff.subscription };
+    },
+    dispose: async () => {},
+  };
+  const store = new VisualStore("/workspace", directory);
+  const files = { available: false, reads: 0 };
+  store.setReader(async () => {
+    files.reads++;
+    if (!files.available) throw new VisualReadError(true);
+    return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  });
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: agentId, name: agentId }, service: provider as unknown as WorkspaceChatService }] });
+  const subscription = await service.subscribe(`${agentId}:c`);
+  return {
+    replay, projection, current, provider, store, files, service, subscription,
+    iterator: subscription.events[Symbol.asyncIterator](),
+    cleanup: async () => { subscription.events.cancel(); await service.dispose(); await fs.rm(directory, { recursive: true, force: true }); },
+  };
+}
+
+test.each(["footer", "result"] as const)("Claude text stop stays pending through tool file creation until %s", async completion => {
+  const h = await visualSubscriptionHarness("claude");
+  const memory = createClaudeEventMemory();
+  let uuid = 0;
+  const emit = (frame: Record<string, unknown>) => {
+    const normalized = normalizeClaudeMessage({ uuid: `frame-${++uuid}`, timestamp: uuid, ...frame }, memory, "live");
+    for (const update of normalized.updates) h.projection.apply(update);
+  };
+  const stream = (event: Record<string, unknown>) => emit({ type: "stream_event", event });
+  const markdown = "![Generated](later.png)";
+  try {
+    stream({ type: "message_start", message: { id: "native-claude" } });
+    stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: markdown } });
+    await deliveredBatch(h.replay, h.iterator);
+    stream({ type: "content_block_stop", index: 0 });
+    emit({ type: "assistant", uuid: "stopped-text", message: { id: "native-claude", content: [{ type: "text", text: markdown }] } });
+    const stopped = await deliveredBatch(h.replay, h.iterator);
+    const text = stopped.findLast(event => event.type === "item.upsert" && event.item.type === "assistant_message");
+    if (text?.type !== "item.upsert" || text.item.type !== "assistant_message") throw new Error("expected normalized stopped text");
+    expect(text.item.completedAt).toBeDefined();
+    expect(text.item.visuals?.[0]?.status).toBe("pending");
+    expect(h.files.reads).toBe(1);
+    emit({ type: "assistant", message: { id: "native-tool", content: [{ type: "tool_use", id: "write-image", name: "Write", input: { file_path: "later.png" } }] } });
+    h.files.available = true;
+    emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "write-image", content: "Created later.png" }] } });
+    await deliveredBatch(h.replay, h.iterator);
+    const duringTool = (await h.service.history("claude:c")).items.find(item => item.id === "message:stopped-text") as AssistantMessageItem;
+    expect(duringTool.visuals?.[0]?.status).toBe("pending");
+    expect(h.files.reads).toBe(1);
+    if (completion === "footer") h.projection.upsert({ id: "turn:done", type: "turn_status", createdAt: 20, status: "completed" });
+    else emit({ type: "result", subtype: "success", is_error: false });
+    const terminal = await deliveredBatch(h.replay, h.iterator);
+    expect(terminal[0]!.type).toBe(completion === "footer" ? "item.upsert" : "conversation.status");
+    expect(terminal.at(-1)).toMatchObject({ type: "resync", sequence: terminal[0]!.sequence });
+    const finished = (await h.service.history("claude:c")).items.find(item => item.id === "message:stopped-text") as AssistantMessageItem;
+    expect(finished.visuals?.[0]?.status).toBe("ready");
+    expect(h.files.reads).toBe(2);
+  } finally { await h.cleanup(); }
+});
+
+test.each(["status-error", "updated"] as const)("visual terminal refresh preserves the original %s before its additional resync", async kind => {
+  const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Missing](later.png)" }]);
+  try {
+    const original = kind === "status-error"
+      ? h.projection.statusUpdate("failed", "Provider rejected the model; /reload required")
+      : h.projection.conversationUpdate({ ...summary("c"), status: "completed", title: "Renamed by provider", updatedAt: 99 });
+    const delivered = await deliveredBatch(h.replay, h.iterator);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toEqual({ ...original, conversationId: "test:c", ...(original.type === "conversation.updated" ? { conversation: { ...original.conversation, id: "test:c", agent: { id: "test", name: "test" } } } : {}) });
+    expect(delivered[1]).toEqual({ generation: original.generation, sequence: original.sequence, conversationId: "test:c", type: "resync", reason: "conversation-rewritten" });
+    const first = applyChatEvent(projectionFromSnapshot(h.subscription.snapshot), delivered[0]!);
+    expect(first.outcome).toBe("applied");
+    expect(first.projection.status).toBe(kind === "status-error" ? "failed" : "completed");
+    if (kind === "updated") expect(first.projection.conversation?.title).toBe("Renamed by provider");
+    expect(applyChatEvent(first.projection, delivered[1]!).outcome).toBe("resync");
+  } finally { await h.cleanup(); }
+});
+
+test.each([false, true])("provider resync reseeds rewritten assistant text before deltas (covered delta=%s)", async covered => {
+  const h = await visualSubscriptionHarness("test", [
+    { id: "answer", type: "assistant_message", createdAt: 1, markdown: "stale answer ![Old](old.png)" },
+    { id: "removed", type: "assistant_message", createdAt: 2, markdown: "removed text" },
+    { id: "tool", type: "tool", createdAt: 3, name: "Read", status: "running", output: "large tool output" },
+  ]);
+  try {
+    h.projection.seed([{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "rewritten answer " }]);
+    h.replay.publish({ type: "resync", reason: "conversation-rewritten" });
+    if (covered) h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: "already covered " });
+    const reset = await deliveredBatch(h.replay, h.iterator);
+    expect(reset[0]).toMatchObject({ type: "resync", reason: "conversation-rewritten" });
+    const delta = "![New](new.png)";
+    const original = h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: delta });
+    const delivered = await deliveredBatch(h.replay, h.iterator);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ generation: original!.generation, sequence: original!.sequence, conversationId: "test:c", type: "item.upsert" });
+    const enriched = delivered.at(-1)!;
+    if (enriched.type !== "item.upsert" || enriched.item.type !== "assistant_message") throw new Error("expected enriched rewritten reply");
+    expect(enriched.item.markdown).toBe(`rewritten answer ${covered ? "already covered " : ""}${delta}`);
+    for (const itemId of ["removed", "tool"]) h.replay.publish({ type: "item.text_delta", itemId, delta });
+    const stale = await deliveredBatch(h.replay, h.iterator);
+    expect(stale.map(event => event.type)).toEqual(["item.text_delta", "item.text_delta"]);
+  } finally { await h.cleanup(); }
+});
+
+test("a visual-bearing replay boundary retains its original updated event before the additional resync", async () => {
+  const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Missing](later.png)" }]);
+  const cursor = h.replay.latestCursor();
+  const original = h.projection.conversationUpdate({ ...summary("c"), status: "running", title: "Replay this title" });
+  const reconnect = await h.service.subscribe("test:c", { cursor });
+  try {
+    const delivered = await deliveredBatch(h.replay, reconnect.events[Symbol.asyncIterator]());
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toMatchObject({ type: "conversation.updated", sequence: original.sequence, conversation: { id: "test:c", title: "Replay this title" } });
+    expect(delivered[1]).toMatchObject({ type: "resync", sequence: original.sequence, reason: "conversation-rewritten" });
+  } finally { reconnect.events.cancel(); await h.cleanup(); }
+});
+
+test("cancelling between a status and its additional resync stops both the wrapper and source", async () => {
+  const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Missing](later.png)" }]);
+  try {
+    const original = h.projection.statusUpdate("completed");
+    expect((await h.iterator.next()).value).toEqual({ ...original, conversationId: "test:c" });
+    h.subscription.events.cancel();
+    expect(await h.iterator.next()).toEqual({ value: undefined, done: true });
+  } finally { await h.cleanup(); }
+});
+
+test("only the newest history request treats trailing rows as live, regardless of an older page's footer", async () => {
+  const h = await visualSubscriptionHarness("test");
+  h.provider.history = async (_id, options) => ({ ...h.current(), items: [
+    { id: "prior-footer", type: "turn_status", createdAt: 1, status: "completed" },
+    { id: options?.cursor ? "old-page" : "newest-page", type: "assistant_message", createdAt: 2, markdown: "![Missing](later.png)\n\n```svg\n<svg>" },
+  ], olderCursor: "there-is-still-an-older-page" });
+  try {
+    const old = await h.service.history("test:c", { cursor: "actual-older-history-request" });
+    expect((old.items[1] as AssistantMessageItem).visuals?.map(visual => visual.status)).toEqual(["unavailable", "unavailable"]);
+    const newest = await h.service.history("test:c", { limit: 2 });
+    expect((newest.items[1] as AssistantMessageItem).visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
+  } finally { await h.cleanup(); }
+});
+
+test.each([
+  { fence: "```", chunks: ["```"] },
+  { fence: "```", chunks: ["`", "`", "`"] },
+  { fence: "~~~", chunks: ["~~~"] },
+  { fence: "~~~", chunks: ["~", "~", "~"] },
+])("a $fence SVG close flushes immediately inside the cadence, including split delimiters ($chunks)", async ({ fence, chunks }) => {
+  const h = await visualSubscriptionHarness("test");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const outcomes: string[] = [];
+  const project = (event: ChatEvent) => {
+    const result = applyChatEvent(client, event);
+    outcomes.push(result.outcome);
+    expect(result.outcome).toBe("applied");
+    client = result.projection;
+  };
+  try {
+    const open: AssistantMessageItem = { id: "answer", type: "assistant_message", createdAt: 1, markdown: `${fence}svg\n<svg><rect width="10"/></svg>\n`, contextKey: "original-context", model: { providerId: "test", modelId: "original-model" } };
+    const original = h.projection.upsert(open)!;
+    const opening = await deliveredBatch(h.replay, h.iterator, project);
+    expect(opening).toHaveLength(1);
+    expect(opening[0]).toMatchObject({ type: "item.upsert", sequence: original.sequence, item: open });
+    expect((client.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+    let last: ChatEvent[] = [];
+    for (const text of chunks) {
+      h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text });
+      last = await deliveredBatch(h.replay, h.iterator, project);
+      expect(last).toHaveLength(1);
+    }
+    expect(last[0]).toMatchObject({ type: "item.upsert", item: { markdown: open.markdown + fence, contextKey: open.contextKey, model: open.model } });
+    const displayed = client.items[0] as AssistantMessageItem;
+    expect(displayed.markdown).toBe(open.markdown + fence);
+    expect(displayed.visuals?.[0]?.status).toBe("ready");
+    expect(outcomes).not.toContain("duplicate");
+    expect(h.projection.status).toBe("running"); // No tool, footer, status or elapsed cadence needed.
+    expect(new TextDecoder().decode((await h.service.resolveVisual(displayed.visuals![0]!.id!))?.sourceBytes)).toBe('<svg><rect width="10"/></svg>\n');
+  } finally { clock.mockRestore(); await h.cleanup(); }
+});
+
+test("ordinary streamed code tokens have bounded enrichment/store work and an explicit final flush without losing deltas", async () => {
+  const prefix = "![First](first.png)\n\n```ts\n";
+  const h = await visualSubscriptionHarness("test", [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: prefix }]);
+  let now = 1_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const captures = spyOn(h.store, "captureMany");
+  const enrichments = spyOn(h.service as unknown as { enrichItem(id: string, item: ConversationItem, streaming: boolean): Promise<ConversationItem> }, "enrichItem");
+  const originals: ChatEvent[] = [];
+  const received: ChatEvent[] = [];
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const result = applyChatEvent(client, event);
+    expect(result.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+    client = result.projection;
+  };
+  try {
+    for (let index = 0; index < 1_000; index++) {
+      now++;
+      const original = h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: `${index}();\n` });
+      if (!original) throw new Error("expected native delta");
+      originals.push(original);
+      received.push(...await deliveredBatch(h.replay, h.iterator, project));
+    }
+    const tail = "```\n![Final](final.png)";
+    h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: tail });
+    received.push(...await deliveredBatch(h.replay, h.iterator, project));
+    expect((client.items[0] as AssistantMessageItem).visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
+    h.files.available = true;
+    const terminal = h.projection.statusUpdate("completed");
+    const final = await deliveredBatch(h.replay, h.iterator, project);
+    expect(final[0]).toEqual({ ...terminal, conversationId: "test:c" });
+    expect(final.at(-1)).toMatchObject({ type: "resync", sequence: terminal.sequence });
+    expect(received.filter(event => event.type === "item.text_delta").slice(0, 1_000)).toEqual(originals.map(event => ({ ...event, conversationId: "test:c" })));
+    expect(enrichments.mock.calls.length).toBeLessThanOrEqual(12);
+    expect(captures.mock.calls.length).toBeLessThanOrEqual(12);
+    expect(h.files.reads).toBe(4); // Each missing image once, then both files at completion.
+    const completed = (await h.service.history("test:c")).items[0] as AssistantMessageItem;
+    expect(completed.markdown).toBe(`${prefix}${Array.from({ length: 1_000 }, (_, index) => `${index}();\n`).join("")}${tail}`);
+    expect(completed.visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
+  } finally { enrichments.mockRestore(); captures.mockRestore(); clock.mockRestore(); await h.cleanup(); }
 });
 
 test("raw HTML image aliases pass the visual-capture precheck", async () => {
@@ -326,8 +572,8 @@ test.each([
         ...stream("delta", messageId, 1, ninthText),
       ];
       const iterator = subscription.events[Symbol.asyncIterator]();
-      const delivered: ChatEvent[] = [];
-      for (const _event of emitted) delivered.push((await iterator.next()).value as ChatEvent);
+      const delivered = await deliveredBatch(replay, iterator);
+      expect(delivered.filter(event => emitted.some(original => original.sequence === event.sequence) && event.type !== "resync").length).toBeGreaterThanOrEqual(emitted.length);
       const ninth = delivered.findLast(event => event.type === "item.upsert" && event.item.id === `part:${partId(messageId, 1)}`);
       if (ninth?.type !== "item.upsert" || ninth.item.type !== "assistant_message") throw new Error("expected refused ninth occurrence on the live stream");
       expect(ninth.item.visuals).toEqual([]);
@@ -418,7 +664,8 @@ test("Claude visual captures survive native stream completion and transcript his
     const iterator = subscription.events[Symbol.asyncIterator]();
     const markdown = Object.keys(originals).map(name => `![${name}](${name})`).join("\n");
     stream({ type: "content_block_delta", index: 4, delta: { type: "text_delta", text: markdown } });
-    const first = (await iterator.next()).value as ChatEvent;
+    const firstEvents = await deliveredBatch(replay, iterator);
+    const first = firstEvents.at(-1)!;
     if (first.type !== "item.upsert" || first.item.type !== "assistant_message") throw new Error("expected captured stream item");
     expect(first.item.id).toBe("message:stream:msg_api:4");
     const captures = first.item.visuals!;
@@ -432,10 +679,10 @@ test("Claude visual captures survive native stream completion and transcript his
     for (const name of Object.keys(originals)) await fs.writeFile(path.join(workspace, name), '<svg><circle r="99"/></svg>');
     await fs.unlink(path.join(workspace, "image.png"));
     const completionEvents = complete("visual", [{ type: "text", text: markdown }]);
-    const delivered: ChatEvent[] = [];
-    for (const _event of completionEvents) delivered.push((await iterator.next()).value as ChatEvent);
+    const delivered = await deliveredBatch(replay, iterator);
+    expect(delivered.length).toBeGreaterThanOrEqual(completionEvents.length);
     expect(delivered[0]).toMatchObject({ type: "item.remove", itemId: "message:stream:msg_api:4" });
-    const final = delivered.find(event => event.type === "item.upsert" && event.item.id === "message:visual");
+    const final = delivered.findLast(event => event.type === "item.upsert" && event.item.id === "message:visual");
     if (final?.type !== "item.upsert" || final.item.type !== "assistant_message") throw new Error("expected durable message");
     expect(final.item.visuals).toEqual(captures);
     expect(reads).toBe(3);
@@ -459,6 +706,20 @@ test("Claude visual captures survive native stream completion and transcript his
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+// A real provider-sequenced marker drains every additional visual event from
+// the preceding batch without sleeps or assuming a unary event mapper.
+async function deliveredBatch(replay: ConversationReplay, iterator: AsyncIterator<ChatEvent>, project?: (event: ChatEvent) => void): Promise<ChatEvent[]> {
+  const marker = replay.publish({ type: "conversation.configuration", configuration: {} });
+  const delivered: ChatEvent[] = [];
+  while (true) {
+    const next = await iterator.next();
+    if (next.done) throw new Error("subscription ended before batch marker");
+    project?.(next.value);
+    if (next.value.sequence === marker.sequence && next.value.type === marker.type) return delivered;
+    delivered.push(next.value);
+  }
+}
 
 function summary(id: string, updatedAt = 1): ConversationSummary {
   return { id, title: `Conversation ${id}`, createdAt: updatedAt, updatedAt, status: "idle" };

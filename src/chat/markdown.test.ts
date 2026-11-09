@@ -30,6 +30,43 @@ describe("chat Markdown security", () => {
     expect(html).not.toContain("<tag>");
   });
 
+  test("uncaptured SVG fences remain visible highlighted code with exact inert source", () => {
+    const svg = '<svg onload="bad()"><text>&amp; &quot; &#38; &lt;tag&gt;</text><script>bad()</script></svg>\r\n';
+    for (const streaming of [false, true]) {
+      for (const complete of [false, true]) {
+        const { document } = parseHTML(renderChatMarkdown(`\`\`\`svg\n${svg}${complete ? "```" : ""}`, { streaming }));
+        const code = document.querySelector("pre > code.hljs.language-svg");
+        expect(code?.textContent).toBe(svg);
+        expect(code?.closest("[hidden]")).toBeNull();
+        expect(document.querySelector(".chat-visual, [data-visual-tab], img, svg, script, [onload]")).toBeNull();
+      }
+    }
+  });
+
+  test("uncaptured image references never create widgets or load original URLs", () => {
+    const source = '![Local](./diagram.svg)\n\n![Remote](https://example.com/track.svg)\n\n<img src="//example.com/raw.png" alt="Raw">';
+    for (const streaming of [false, true]) {
+      const { document } = parseHTML(renderChatMarkdown(source, { streaming }));
+      expect(document.querySelector(".chat-visual-reference")?.textContent).toBe("./diagram.svg");
+      for (const href of ["https://example.com/track.svg", "//example.com/raw.png"]) {
+        const link = document.querySelector(`a[href="${href}"]`);
+        expect(link?.getAttribute("target")).toBe("_blank");
+        expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+      }
+      expect(document.querySelector(".chat-visual, img, [src], [data-visual-tab]")).toBeNull();
+    }
+  });
+
+  test("an explicitly empty snapshot array still enables captured presentation", () => {
+    for (const streaming of [false, true]) {
+      const { document } = parseHTML(renderChatMarkdown("```svg\n<svg/>\n```", { streaming, visuals: [] }));
+      expect(document.querySelector(".chat-visual.is-svg")).not.toBeNull();
+      expect(document.querySelector('[data-visual-tab="source"]')).not.toBeNull();
+      expect(document.querySelector(".chat-visual-source code")?.textContent).toBe("<svg/>\n");
+      expect(document.querySelector("pre")).toBeNull();
+    }
+  });
+
   test("only issued snapshots become images; remote embeds remain explicit links", () => {
     const html = renderChatMarkdown('![Local](./shot.png)\n\n![Remote](https://example.com/track.svg)', {
       streaming: true,
@@ -86,7 +123,7 @@ describe("chat Markdown security", () => {
   });
 
   test("incomplete SVG has a generating placeholder and copyable inert source", () => {
-    const html = renderChatMarkdown('```svg\n<svg onload="bad()"><text>&amp;</text>', { streaming: true });
+    const html = renderChatMarkdown('```svg\n<svg onload="bad()"><text>&amp;</text>', { streaming: true, visuals: [] });
     const { document } = parseHTML(html);
     expect(document.querySelector("svg")).toBeNull();
     expect(document.querySelector("img")).toBeNull();

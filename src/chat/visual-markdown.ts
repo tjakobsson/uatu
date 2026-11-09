@@ -12,7 +12,7 @@ import type { ChatVisualInput } from "./visual-types";
 
 type HtmlNode = ReturnType<typeof fromHtml>["children"][number];
 type MarkdownEvent = ReturnType<typeof postprocess>[number];
-type Origin = { offset: number; svg?: { source: string; complete: boolean } };
+type Origin = { offset: number; complete?: boolean; svg?: { source: string; complete: boolean } };
 declare module "micromark-util-types" {
   interface TokenTypeMap { chatVisualOrigin: "chatVisualOrigin" }
 }
@@ -31,12 +31,20 @@ export function prepareChatVisualMarkdown(source: string, streaming: boolean): P
 }
 
 function prepareVisualMarkdown(source: string, streaming: boolean, presentation: boolean): Prepared {
-  const key = `${presentation ? "p" : "v"}${streaming ? "1" : "0"}${source}`;
+  const key = `${presentation ? "p" : "v"}${source}`;
   const previous = cache.get(key);
-  if (previous) { cache.delete(key); cache.set(key, previous); return previous; }
-  const finish = measureChatWork("markdown");
-  try { return prepareUncached(source, key, presentation); }
-  finally { finish(); }
+  let result: Prepared;
+  if (previous) {
+    cache.delete(key); cache.set(key, previous); result = previous;
+  } else {
+    const finish = measureChatWork("markdown");
+    try { result = prepareUncached(source, key, presentation); }
+    finally { finish(); }
+  }
+  // Parsing and presentation do not change when the turn ends. Only an
+  // unterminated reference-definition line becomes eligible for capture.
+  if (streaming || !result.visuals.some(input => input.kind === "file" && !input.complete)) return result;
+  return { html: result.html, visuals: result.visuals.map(input => input.kind === "file" && !input.complete ? { ...input, complete: true } : input) };
 }
 
 function prepareUncached(source: string, key: string, presentation: boolean): Prepared {
@@ -73,7 +81,7 @@ function prepareUncached(source: string, key: string, presentation: boolean): Pr
       const origin = node.data?.chatVisualOrigin;
       if (node.tagName === "img") {
         const offset = origin?.offset;
-        input = { kind: "file", source: node.data?.chatVisualSource ?? String(node.properties.src ?? ""), alt: String(node.properties.alt ?? "Image"), complete: true, ...(offset === undefined ? {} : { key: `offset:${offset}` }) };
+        input = { kind: "file", source: node.data?.chatVisualSource ?? String(node.properties.src ?? ""), alt: String(node.properties.alt ?? "Image"), complete: origin?.complete !== false, ...(offset === undefined ? {} : { key: `offset:${offset}` }) };
       } else if (node.tagName === "pre") {
         const code = node.children.find(child => child.type === "element" && child.tagName === "code");
         if (code?.type === "element" && Array.isArray(code.properties.className)
@@ -159,9 +167,18 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
   const wrapped: MarkdownEvent[] = [];
   const wrappers = new Map<MarkdownEvent[1], MarkdownEvent[1]>();
   const fenceOrigins = new Map<MarkdownEvent[1], Origin>();
+  const inlineImages = new Set<MarkdownEvent[1]>();
+  const media: MarkdownEvent[1][] = [];
+  let unfinishedDefinition = false;
   let imageDepth = 0;
   let block: { svg: boolean; fences: number; parts: string[]; firstEnding: boolean; offset: number } | undefined;
   for (const [event, token, context] of events) {
+    if (token.type === "image" || token.type === "link") {
+      if (event === "enter") media.push(token);
+      else media.pop();
+    }
+    if (event === "enter" && token.type === "resource" && media.at(-1)?.type === "image") inlineImages.add(media.at(-1)!);
+    if (event === "exit" && token.type === "definition" && token.end.offset === source.length) unfinishedDefinition = true;
     if (event === "enter" && imageDepth === 0 && ["image", "htmlFlow", "htmlText", "codeFenced", "codeIndented"].includes(token.type)) {
       const wrapper = { ...token, type: "chatVisualOrigin" as const };
       wrappers.set(token, wrapper);
@@ -238,7 +255,13 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
         } else {
           const tag = original.type === "image" ? "img" : "pre";
           const position = html.indexOf(`<${tag}`);
-          if (position !== -1) html = annotate(html, position + tag.length + 1, fenceOrigins.get(token) ?? { offset: original.start.offset! });
+          // A final definition line may still grow its destination. Keep new
+          // reference images provisional until that line ends (or the reply
+          // completes), without delaying inline images or changing stored captures.
+          if (position !== -1) html = annotate(html, position + tag.length + 1, fenceOrigins.get(token) ?? {
+            offset: original.start.offset!,
+            ...(original.type === "image" ? { complete: !unfinishedDefinition || inlineImages.has(original) } : {}),
+          });
         }
         const lastWasTag = this.getData("lastWasTag");
         this.raw(html);

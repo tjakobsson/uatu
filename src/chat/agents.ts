@@ -2,8 +2,8 @@ import { createAttachmentStore, type AttachmentStore, type StoredAttachment } fr
 import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-store";
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
-import { claudeVisualIdentity } from "./claude/normalization-types";
-import { visualAdmissionIdentity } from "./visual-identity";
+import { CLAUDE_TEXT_BLOCKS, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
+import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
 import { isLiveConversationStatus } from "./types";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
@@ -341,7 +341,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   async history(id: string, options?: { cursor?: string; limit?: number }): Promise<AgentConversationSnapshot> {
     const { agent, conversationId } = this.resolve(id);
-    return this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId, options)));
+    return this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId, options)), !options?.cursor);
   }
 
   async workerEvidence(id: string): Promise<import("./worker-dismissal-evidence").WorkerEvidenceSnapshot> {
@@ -366,64 +366,134 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       throw error;
     }
     if (options?.signal?.aborted) events.cancel();
-    const boundary = decodeReplayCursor(snapshot.cursor);
+    let boundary = decodeReplayCursor(snapshot.cursor);
     const requestedCursor = options?.cursor ? decodeReplayCursor(options.cursor) : null;
     let replayNeedsVisualResync = Boolean(boundary && requestedCursor
       && boundary.generation === requestedCursor.generation && requestedCursor.sequence < boundary.sequence
       && qualified.items.some(item => item.type === "assistant_message" && item.visuals?.length));
-    const items = new Map(qualified.items.map(item => [item.id, item]));
+    type Assistant = Extract<ConversationItem, { type: "assistant_message" }>;
+    type Tracked = { item: Assistant; live: boolean; enrichedAt: number };
+    // No tool output or other timeline rows belong in the visual accumulator.
+    const items = new Map<string, Tracked>();
     let streaming = isLiveConversationStatus(snapshot.conversation.status);
+    const seed = (current: AgentConversationSnapshot) => {
+      items.clear();
+      streaming = isLiveConversationStatus(current.conversation.status);
+      const lastTurn = current.items.findLastIndex(item => item.type === "turn_status");
+      for (const [index, item] of current.items.entries()) {
+        if (item.type === "assistant_message") items.set(item.id, { item, live: streaming && index > lastTurn, enrichedAt: -Infinity });
+      }
+    };
+    seed(qualified);
+    // Bound the actual Markdown parse and store work, not just highlighting.
+    // Deltas remain lossless and ordered; turn/message completion always flushes.
+    const enrichmentCadenceMs = 100;
+    const completesVisualSyntax = (previous: Assistant, delta: string) => {
+      // Inspect only a bounded suffix plus the new content. A delimiter must
+      // actually finish in the new content, not merely remain in the suffix.
+      // In particular, ordinary code newlines and parentheses do not flush.
+      const suffix = previous.markdown.slice(-512);
+      const added = suffix + delta;
+      const completes = (pattern: RegExp) => {
+        for (const match of added.matchAll(pattern)) {
+          if (match.index! + match[0].length > suffix.length) return true;
+        }
+        return false;
+      };
+      return completes(/(?:`{3,}|~{3,})[ \t]*svg\b/gi)
+        || (Boolean(previous.visuals?.some(visual => visual.status === "pending")) && completes(/`{3}|~{3}/g))
+        || completes(/!\[[^\]\n]*\](?:\([^\)\n]*\)|\[[^\]\n]*\])/g)
+        || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[^\n]*\r?\n/g)
+        || completes(/<(?:img|image)\b[^>]*>/gi);
+    };
+    const enrich = async (tracked: Tracked, force = false) => {
+      if (!force && Date.now() - tracked.enrichedAt < enrichmentCadenceMs) return false;
+      const previous = tracked.item;
+      tracked.item = await this.enrichItem(id, previous, tracked.live) as Assistant;
+      tracked.enrichedAt = tracked.item.markdown.length ? Date.now() : -Infinity;
+      return JSON.stringify(previous.visuals) !== JSON.stringify(tracked.item.visuals);
+    };
+    const finish = async () => {
+      let changed = false;
+      for (const tracked of items.values()) {
+        if (!tracked.live) continue;
+        tracked.live = false;
+        changed = await enrich(tracked, true) || changed;
+      }
+      return changed;
+    };
     return {
       snapshot: qualified,
       events: new QualifyingEventSubscription(events, async raw => {
         const event = this.qualifyEvent(agent.descriptor, raw);
+        if (event.type === "resync") {
+          // Rewrites can replace text without an upsert. Never append a future
+          // delta to the pre-rewrite accumulator. A covered history read may
+          // include already-queued events, so advance its replay fence too.
+          items.clear();
+          replayNeedsVisualResync = false;
+          try {
+            const current = await this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, await agent.service.history(conversationId)));
+            seed(current);
+            boundary = decodeReplayCursor(current.cursor);
+          } catch {
+            // The client must still receive its recovery signal if the read
+            // fails. Remain empty until authoritative upserts reseed rows.
+          }
+          return [event];
+        }
         // The handoff snapshot is current, while a reconnect may replay older
         // events. Never apply history again to snapshot-seeded state. The HTTP
         // reconnect handshake sends only a cursor, so finish visual-bearing
         // replay with a resync at its existing boundary event: the client must
         // fetch the enriched snapshot even when no later live event arrives.
         if (boundary && event.generation === boundary.generation && event.sequence <= boundary.sequence) {
-          if (event.type === "resync") { replayNeedsVisualResync = false; return event; }
           if (replayNeedsVisualResync && event.sequence === boundary.sequence) {
             replayNeedsVisualResync = false;
-            return { generation: event.generation, sequence: event.sequence, conversationId: event.conversationId, type: "resync", reason: "conversation-rewritten" };
+            return [event, { generation: event.generation, sequence: event.sequence, conversationId: event.conversationId, type: "resync", reason: "conversation-rewritten" }];
           }
-          return event;
+          return [event];
         }
         const base = { generation: event.generation, sequence: event.sequence, conversationId: event.conversationId };
+        const resync: ChatEvent = { ...base, type: "resync", reason: "conversation-rewritten" };
         if (event.type === "item.remove") items.delete(event.itemId);
         if (event.type === "conversation.status" || event.type === "conversation.updated") {
           streaming = isLiveConversationStatus(event.type === "conversation.status" ? event.status : event.conversation.status);
-          if (!streaming) {
-            let refresh = false;
-            for (const item of items.values()) {
-              if (item.type !== "assistant_message") continue;
-              const enriched = await this.enrichItem(id, item, false);
-              if (JSON.stringify(enriched) !== JSON.stringify(item)) refresh = true;
-              items.set(item.id, enriched);
-            }
-            // Preserve the provider's sequence/cursor. A resync re-reads the
-            // terminal status and newly resolved visuals without inventing SSE IDs.
-            if (refresh) return { ...base, type: "resync", reason: "conversation-rewritten" };
-          }
+          // Status errors, /reload refreshes and label changes are authoritative
+          // events, not replaceable invalidations. Visual resync is additional.
+          if (!streaming && await finish()) return [event, resync];
         }
         if (event.type === "item.upsert") {
-          const item = await this.enrichItem(id, event.item, streaming);
-          items.set(item.id, item);
-          return { ...event, item };
+          if (event.item.type === "turn_status") {
+            if (await finish()) return [event, resync];
+          } else if (event.item.type === "assistant_message") {
+            const previous = items.get(event.item.id);
+            const tracked: Tracked = {
+              item: { ...event.item, ...(previous?.item.visuals ? { visuals: previous.item.visuals } : {}) },
+              live: previous?.live === false ? false : streaming,
+              enrichedAt: previous?.enrichedAt ?? -Infinity,
+            };
+            items.set(event.item.id, tracked);
+            const appended = previous && event.item.markdown.startsWith(previous.item.markdown)
+              ? event.item.markdown.slice(previous.item.markdown.length) : undefined;
+            const syntaxCompleted = previous && (appended === undefined || completesVisualSyntax(previous.item, appended));
+            await enrich(tracked, !this.visualItemLive(event.item, tracked.live) || Boolean(syntaxCompleted));
+            // Normal events are sequence-deduplicated by the client. Enrich
+            // this one native upsert, retaining all its text and other fields.
+            return [{ ...event, item: tracked.item }];
+          } else items.delete(event.item.id);
         }
         if (event.type === "item.text_delta") {
-          const previous = items.get(event.itemId);
-          if (previous?.type === "assistant_message") {
-            const item = await this.enrichItem(id, { ...previous, markdown: previous.markdown + event.delta }, streaming);
-            items.set(item.id, item);
-            // Native deltas already update Markdown without retransmitting the
-            // growing reply. A full item is needed only to deliver changed
-            // snapshot references (new, completed, shifted or refused visuals).
-            if (item.type === "assistant_message" && JSON.stringify(item.visuals) !== JSON.stringify(previous.visuals)) return { ...base, type: "item.upsert", item };
+          const tracked = items.get(event.itemId);
+          if (tracked) {
+            const syntaxCompleted = completesVisualSyntax(tracked.item, event.delta);
+            tracked.item = { ...tracked.item, markdown: tracked.item.markdown + event.delta };
+            // A replacement upsert carries exactly the accumulated delta text
+            // at the native sequence; a second same-sequence item is ignored.
+            if (await enrich(tracked, syntaxCompleted)) return [{ ...base, type: "item.upsert", item: tracked.item }];
           }
         }
-        return event;
+        return [event];
       }),
     };
   }
@@ -471,7 +541,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean): Promise<ConversationItem> {
     if (item.type !== "assistant_message") return item;
-    const live = streaming && item.completedAt === undefined;
+    const live = this.visualItemLive(item, streaming);
     // Deliberately overinclusive: any image opener or Markdown fence may
     // produce a visual, including reference syntax, raw HTML, nested/indented
     // fences and whitespace before the SVG info string. Plain prose needs no
@@ -492,14 +562,23 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     return { ...item, visuals };
   }
 
-  private async enrichSnapshot(snapshot: AgentConversationSnapshot): Promise<AgentConversationSnapshot> {
-    // Match the renderer's assistantMessageComplete lifecycle: a steer may
-    // follow an answer that is still growing. Within a live conversation, a
-    // turn footer closes prior rows; enrichItem also honors completedAt.
+  private visualItemLive(item: Extract<ConversationItem, { type: "assistant_message" }>, streaming: boolean): boolean {
+    // Claude's completedAt closes a text block/API response, not the agent
+    // turn: a subsequent tool can still create the referenced file. OpenCode's
+    // native parent-message completedAt, in contrast, really seals its parts.
+    const identity = item as typeof item & ClaudeTextIdentity;
+    const claudeBlock = Boolean(identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:"));
+    return streaming && (claudeBlock || item.completedAt === undefined);
+  }
+
+  private async enrichSnapshot(snapshot: AgentConversationSnapshot, newestPage = true): Promise<AgentConversationSnapshot> {
+    // Only the newest requested page can contain a growing turn. A footer on
+    // an older page says nothing about whether its trailing rows are live.
+    // A steer is not a completion boundary on either page.
     const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
     const items: ConversationItem[] = [];
     for (const [index, item] of snapshot.items.entries()) {
-      items.push(await this.enrichItem(snapshot.conversation.id, item, index > lastTurn && isLiveConversationStatus(snapshot.conversation.status)));
+      items.push(await this.enrichItem(snapshot.conversation.id, item, newestPage && index > lastTurn && isLiveConversationStatus(snapshot.conversation.status)));
     }
     return { ...snapshot, items };
   }
@@ -648,12 +727,14 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 }
 
 class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
+  private cancelled = false;
   constructor(
     private readonly source: ChatEventSubscription,
-    private readonly map: (event: ChatEvent) => ChatEvent | Promise<ChatEvent>,
+    private readonly map: (event: ChatEvent) => ChatEvent[] | Promise<ChatEvent[]>,
   ) {}
 
   cancel(): void {
+    this.cancelled = true;
     this.source.cancel();
   }
 
@@ -661,7 +742,13 @@ class QualifyingEventSubscription implements AsyncIterable<ChatEvent> {
     // Consumer return()/throw() unwinds this generator's for-await, which
     // returns the source iterator — cancellation propagates without a
     // separate teardown path.
-    for await (const event of this.source) yield await this.map(event);
+    for await (const event of this.source) {
+      if (this.cancelled) return;
+      for (const mapped of await this.map(event)) {
+        if (this.cancelled) return;
+        yield mapped;
+      }
+    }
   }
 }
 

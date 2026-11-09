@@ -5,6 +5,28 @@ import { renderChatMarkdown } from "./markdown";
 import { getChatVisuals, prepareChatVisualMarkdown } from "./visual-markdown";
 
 describe("agent visual Markdown", () => {
+  test("completed and streaming calls share one cached parse for identical source", () => {
+    const source = '![Cached](same-cache.png)\n\n```svg\n<svg/>\n```';
+    expect(prepareChatVisualMarkdown(source, false)).toBe(prepareChatVisualMarkdown(source, true));
+    const reference = "![Cached][ref]\n\n[ref]: same-cache.png";
+    const live = prepareChatVisualMarkdown(reference, true);
+    const done = prepareChatVisualMarkdown(reference, false);
+    expect(live.visuals[0]?.complete).toBe(false);
+    expect(done.visuals[0]?.complete).toBe(true);
+    expect(done.html).toBe(live.html);
+    expect(prepareChatVisualMarkdown(reference, true)).toBe(live);
+  });
+  test.each(["![shot][ref]", "![ref][]", "![ref]"])("streamed reference destinations stay provisional until their line ends: %s", image => {
+    const prefix = `${image}\n\n[ref]: a.p`;
+    expect(getChatVisuals(prefix, true)[0]).toMatchObject({ source: "a.p", complete: false, key: "offset:0" });
+    expect(getChatVisuals(prefix + "ng", true)[0]).toMatchObject({ source: "a.png", complete: false, key: "offset:0" });
+    expect(getChatVisuals(prefix + "ng\n", true)[0]).toMatchObject({ source: "a.png", complete: true, key: "offset:0" });
+    expect(getChatVisuals(prefix + "ng", false)[0]).toMatchObject({ source: "a.png", complete: true, key: "offset:0" });
+  });
+  test("unfinished definitions do not delay inline or raw HTML images", () => {
+    const source = '![inline](inline.png)\n\n<img src="raw.png">\n\n![shot][ref]\n\n[ref]: a.p';
+    expect(getChatVisuals(source, true).map(input => [input.source, input.complete])).toEqual([["inline.png", true], ["raw.png", true], ["a.p", false]]);
+  });
   test("capture-only extraction never invokes presentation highlighting", () => {
     const source = '```js\nconst answer = 42;\n```\n\n![Shot](result.png)\n\n```svg\n<svg/>\n```';
     const markdownUrl = new URL("../render/markdown.ts", import.meta.url).href;

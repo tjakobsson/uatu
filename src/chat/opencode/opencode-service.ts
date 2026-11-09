@@ -169,6 +169,19 @@ export class OpenCodeService {
       return this.setUnavailable("not-installed", "OpenCode is not installed or is not available on PATH.");
     }
 
+    // Presentation hints are optional. Preserve the original inline settings
+    // verbatim when they cannot safely be extended; OpenCode owns validation.
+    let guidanceForStart: string | undefined;
+    try {
+      withPresentationInstructions(this.env.OPENCODE_CONFIG_CONTENT, "validation-only");
+      this.guidanceFile ??= await this.guidanceFiles.prepare(this.env);
+      guidanceForStart = this.guidanceFile;
+    } catch (error) {
+      const reason = error instanceof Error && error.message.startsWith("Uatu cannot add chat guidance:")
+        ? error.message : "Uatu cannot prepare the optional chat guidance state file.";
+      console.warn(`${reason} Starting OpenCode without Uatu presentation hints.`);
+    }
+
     let lastDiagnostic = "";
     let lastEndpoint: string | null = null;
     let lastStdout = "";
@@ -187,9 +200,6 @@ export class OpenCodeService {
       const stdoutCapture = new BoundedTextCapture(this.stderrLimitBytes, password);
       let spawned: SpawnedOpenCode;
       try {
-        // Validate before creating state; never discard an inherited config.
-        withPresentationInstructions(this.env.OPENCODE_CONFIG_CONTENT, "validation-only");
-        this.guidanceFile ??= await this.guidanceFiles.prepare(this.env);
         if (this.closed) return this.stoppedAvailability();
         spawned = this.spawn([
           executable,
@@ -200,7 +210,7 @@ export class OpenCodeService {
           String(port),
         ], {
           cwd: this.workspacePath,
-          env: buildOpenCodeEnvironment(this.env, password, this.guidanceFile),
+          env: buildOpenCodeEnvironment(this.env, password, guidanceForStart),
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",

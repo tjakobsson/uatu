@@ -27,6 +27,11 @@ converted into visuals. User attachment formats and policy SHALL remain unchange
 - **WHEN** an image exists only as a native tool-result block or an ordinary link
 - **THEN** no assistant visual is created automatically
 
+#### Scenario: A surface has no captured visual references
+- **WHEN** a plan preview, subagent report, or aside answer renders without visual snapshots
+- **THEN** fenced SVG remains visible, copyable code rather than an unavailable preview
+- **AND** image references remain inert text or explicit links without automatic source requests
+
 ### Requirement: Visuals become available while a reply streams
 Chat SHALL recognize visuals as their syntax becomes available during
 streaming. An unfinished SVG fence SHALL show a generating state rather than
@@ -205,11 +210,14 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **AND** the client can recover newly available references through the existing resync protocol
 
 ### Requirement: Managed agents receive scoped presentation guidance
-Managed Claude Code and OpenCode sessions SHALL receive native presentation
+Managed Claude Code and OpenCode sessions SHALL attempt to add native presentation
 guidance describing supported embeds, limits, immutable capture, and resource
 restrictions. Injection SHALL preserve existing prompts, instructions, and
 permissions; it SHALL NOT edit repository or global configuration. Guidance
 SHALL apply to resumed sessions as well as new ones.
+Presentation hints are optional: an injection failure SHALL NOT prevent native
+OpenCode startup or replace inherited configuration. Uatu SHALL log a sanitized
+reason and let OpenCode apply its own configuration validation.
 
 #### Scenario: Claude starts or resumes a session
 - **WHEN** Uatu starts a new or resumed Claude Code session
@@ -226,4 +234,13 @@ SHALL apply to resumed sessions as well as new ones.
 
 #### Scenario: Existing inline configuration is malformed
 - **WHEN** Uatu cannot safely merge the inherited inline configuration
-- **THEN** it reports an actionable startup error rather than replacing or exposing the invalid configuration
+- **THEN** it logs a sanitized warning, preserves the inherited value verbatim, and starts OpenCode without optional Uatu hints
+
+#### Scenario: Guidance state cannot be written
+- **WHEN** the private guidance file cannot be prepared
+- **THEN** OpenCode starts without optional Uatu hints and existing prompts, instructions, and permissions remain unchanged
+
+#### Scenario: A crashed service left guidance files
+- **WHEN** startup finds a guidance directory with a valid app ownership record and an owner PID proven absent
+- **THEN** bounded housekeeping removes only that stale directory's app-owned instruction files
+- **AND** live owners, unknown ownership, PID reuse, symlinks, and unrelated files are preserved

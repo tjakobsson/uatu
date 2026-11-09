@@ -6,7 +6,7 @@ import { DEFAULT_RESPECT_GITIGNORE, shouldDenyPath, type WatchEntry } from "../s
 import { resolveStaticFileRequest } from "../server/static-files";
 import { resolveAttachmentStateRoot, sniffImageMime } from "./attachment-store";
 import type { ChatVisualInput, ChatVisualSnapshot } from "./visual-types";
-import { VISUAL_MAX_COUNT } from "./visual-types";
+import { CHAT_VISUAL_ID_PATTERN, VISUAL_MAX_COUNT } from "./visual-types";
 export { VISUAL_MAX_COUNT } from "./visual-types";
 
 export const VISUAL_MAX_BYTES = 10 * 1024 * 1024;
@@ -193,6 +193,7 @@ function safeCss(value: string): boolean {
 }
 
 type RecordState = { sourceHash: string; snapshot: ChatVisualSnapshot; bytes?: string; sourceBytes?: string };
+type VisualMetadata = Pick<RecordState, "sourceHash" | "snapshot"> & { hasBytes: boolean; hasSourceBytes: boolean };
 export type StoredVisual = { bytes?: Uint8Array; mimeType: string; sourceBytes?: Uint8Array };
 export type VisualCaptureRequest = { messageId: string; input: ChatVisualInput };
 export class VisualStore {
@@ -202,7 +203,8 @@ export class VisualStore {
   private activeOperations = 0;
   private readonly waitingOperations: Array<() => void> = [];
   // Repeated text deltas need only immutable metadata, not multi-MiB bytes.
-  private readonly terminalMetadata = new Map<string, Pick<RecordState, "sourceHash" | "snapshot">>();
+  private readonly terminalMetadata = new Map<string, VisualMetadata>();
+  private readonly metadataReads = new Map<string, Promise<VisualMetadata | null>>();
   // Only complete ledgers are immutable; partial groups must observe new slots.
   private readonly fullAdmissions = new Map<string, ReadonlySet<string>>();
   constructor(private readonly workspacePath: string, root = path.join(path.dirname(resolveAttachmentStateRoot()), "visuals")) {
@@ -235,7 +237,9 @@ export class VisualStore {
       if (!selected.has(id) && await this.admitted(() => this.reserve(conversationId, admissionMessageId, id))) selected.set(id, request);
       if (selected.size === VISUAL_MAX_COUNT) break;
     }
-    const snapshots = await Promise.all([...selected.values()].map(({ messageId, input }) => this.capture(conversationId, messageId, input, streaming, admissionMessageId)
+    // These exact IDs already own permanent slots. Keep the reserved path
+    // private, rather than rereading a partial ledger for every capture.
+    const snapshots = await Promise.all([...selected].map(([id, { input }]) => this.captureOperation(id, input, () => this.captureOnce(id, input, streaming))
       .catch(() => ({ index: input.index, status: "unavailable" as const, message: "Image snapshot could not be stored" }))));
     return snapshots.sort((a, b) => a.index - b.index);
   }
@@ -271,14 +275,17 @@ export class VisualStore {
     return false;
   }
   async capture(conversationId: string, messageId: string, input: ChatVisualInput, streaming: boolean, admissionMessageId = messageId): Promise<ChatVisualSnapshot> {
-    if (!Number.isSafeInteger(input.index) || input.index < 0) return { index: input.index, status: "unavailable", message: "Invalid image index" };
     const id = this.captureId(conversationId, messageId, input);
+    return this.captureOperation(id, input, async () => await this.reserve(conversationId, admissionMessageId, id)
+      ? this.captureOnce(id, input, streaming)
+      : { index: input.index, status: "unavailable" as const, message: "Image limit exceeded" });
+  }
+  private async captureOperation(id: string, input: ChatVisualInput, operation: () => Promise<ChatVisualSnapshot>): Promise<ChatVisualSnapshot> {
+    if (!Number.isSafeInteger(input.index) || input.index < 0) return { index: input.index, status: "unavailable", message: "Invalid image index" };
     // Wait outside admission: duplicate callers must not occupy all permits
     // while waiting for the capture whose permit they need to complete.
     while (this.inflight.has(id)) await this.inflight.get(id);
-    const task = this.admitted(async () => await this.reserve(conversationId, admissionMessageId, id)
-      ? this.captureOnce(id, input, streaming)
-      : { index: input.index, status: "unavailable" as const, message: "Image limit exceeded" });
+    const task = this.admitted(operation);
     this.inflight.set(id, task);
     try { return { ...await task, index: input.index }; }
     finally { this.inflight.delete(id); }
@@ -334,28 +341,74 @@ export class VisualStore {
     // Publish a complete record atomically with link's no-overwrite semantics.
     // Other processes/readers and restarts see exactly the first winner.
     const suffix = record.snapshot.status === "pending" ? ".pending" : "";
-    await this.publishIfAbsent(path.join(this.directory, `${id}${suffix}.json`), JSON.stringify(record));
-    const winner = (await this.readMetadata(id)) ?? (await this.readRecord(id, ".pending"))!;
+    const published = await this.publishIfAbsent(path.join(this.directory, `${id}${suffix}.json`), JSON.stringify(record));
+    // Only the canonical winner may supply derived bytes. A winning writer
+    // already has that record in memory and need not parse its base64 JSON.
+    if (published && !suffix) {
+      await this.materializeMetadata(id, record);
+      return record.snapshot;
+    }
+    // A terminal loser knows the canonical record exists; do not join a
+    // metadata lookup that may have started before that publication.
+    const winner = (await (suffix ? this.readMetadata(id) : this.loadMetadata(id))) ?? (await this.readRecord(id, ".pending"))!;
     return winner.sourceHash === record.sourceHash ? winner.snapshot : { index, status: "unavailable", message: "Image source changed" };
   }
-  private async publishIfAbsent(filename: string, content: string): Promise<void> {
+  private async publishIfAbsent(filename: string, content: string | Uint8Array): Promise<boolean> {
     const temporary = `${filename}.${randomUUID()}.tmp`;
     try {
       await fs.writeFile(temporary, content, { flag: "wx", mode: 0o600 });
-      await fs.link(temporary, filename).catch(error => { if (error.code !== "EEXIST") throw error; });
+      try { await fs.link(temporary, filename); return true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; return false; }
     } finally { await fs.unlink(temporary).catch(() => undefined); }
   }
   private async readRecord(id: string, suffix = ""): Promise<RecordState | null> {
-    if (!/^[a-f\d]{64}$/.test(id)) return null;
+    if (!CHAT_VISUAL_ID_PATTERN.test(id)) return null;
     try { return JSON.parse(await fs.readFile(path.join(this.directory, `${id}${suffix}.json`), "utf8")); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
   }
-  private async readMetadata(id: string): Promise<Pick<RecordState, "sourceHash" | "snapshot"> | null> {
+  private async materializeMetadata(id: string, record: RecordState): Promise<VisualMetadata> {
+    const metadata: VisualMetadata = {
+      sourceHash: record.sourceHash, snapshot: record.snapshot,
+      hasBytes: record.snapshot.status === "ready" && record.bytes !== undefined,
+      hasSourceBytes: record.snapshot.mimeType === "image/svg+xml" && record.sourceBytes !== undefined,
+    };
+    // Fixed filenames derive only from the validated occurrence ID, never
+    // from fields in persisted JSON. All writers derive from the same winner.
+    // Publish raw files before metadata: interrupted materialization can be
+    // resumed without exposing partial or competing-writer content.
+    try {
+      if (metadata.hasBytes) await this.publishIfAbsent(path.join(this.directory, `${id}.preview.bin`), Buffer.from(record.bytes!, "base64"));
+      if (metadata.hasSourceBytes) await this.publishIfAbsent(path.join(this.directory, `${id}.source.bin`), Buffer.from(record.sourceBytes!, "base64"));
+      await this.publishIfAbsent(path.join(this.directory, `${id}.metadata.json`), JSON.stringify(metadata));
+    } catch {
+      // Derived caches are optional: read-only legacy state or an interrupted
+      // sidecar write must not change the canonical winner's availability.
+      // Until materialization succeeds, byte reads fall back to legacy JSON.
+    }
+    return metadata;
+  }
+  private async readMetadata(id: string): Promise<VisualMetadata | null> {
+    if (!CHAT_VISUAL_ID_PATTERN.test(id)) return null;
     const cached = this.terminalMetadata.get(id);
     if (cached) return cached;
-    const record = await this.readRecord(id);
-    if (!record) return null;
-    const metadata = { sourceHash: record.sourceHash, snapshot: record.snapshot };
+    const inflight = this.metadataReads.get(id);
+    if (inflight) return inflight;
+    const task = this.loadMetadata(id);
+    this.metadataReads.set(id, task);
+    try { return await task; }
+    finally { this.metadataReads.delete(id); }
+  }
+  private async loadMetadata(id: string): Promise<VisualMetadata | null> {
+    let metadata: VisualMetadata;
+    try { metadata = JSON.parse(await fs.readFile(path.join(this.directory, `${id}.metadata.json`), "utf8")); }
+    catch {
+      // Legacy canonical files remain authoritative and untouched. Their
+      // first read needs one large JSON parse to create small/raw sidecars;
+      // subsequent history loads and GETs need only the derived files.
+      const record = await this.readRecord(id);
+      if (!record) return null;
+      metadata = await this.materializeMetadata(id, record);
+    }
     if (this.terminalMetadata.size >= 512) this.terminalMetadata.delete(this.terminalMetadata.keys().next().value!);
     this.terminalMetadata.set(id, metadata);
     return metadata;
@@ -364,12 +417,24 @@ export class VisualStore {
     return this.admitted(() => this.resolveOnce(id));
   }
   private async resolveOnce(id: string): Promise<StoredVisual | null> {
-    const record = await this.readRecord(id);
-    if (!record?.snapshot.mimeType) return null;
-    const sourceBytes = record.snapshot.mimeType === "image/svg+xml" && record.sourceBytes !== undefined
-      ? Buffer.from(record.sourceBytes, "base64") : undefined;
-    const bytes = record.snapshot.status === "ready" && record.bytes !== undefined ? Buffer.from(record.bytes, "base64") : undefined;
-    return bytes || sourceBytes ? { mimeType: record.snapshot.mimeType, ...(bytes ? { bytes } : {}), ...(sourceBytes ? { sourceBytes } : {}) } : null;
+    const metadata = await this.readMetadata(id);
+    if (!metadata?.snapshot.mimeType) return null;
+    try {
+      const sourceBytes = metadata.snapshot.mimeType === "image/svg+xml" && metadata.hasSourceBytes === true
+        ? await fs.readFile(path.join(this.directory, `${id}.source.bin`)) : undefined;
+      const bytes = metadata.snapshot.status === "ready" && metadata.hasBytes === true
+        ? await fs.readFile(path.join(this.directory, `${id}.preview.bin`)) : undefined;
+      return bytes || sourceBytes ? { mimeType: metadata.snapshot.mimeType, ...(bytes ? { bytes } : {}), ...(sourceBytes ? { sourceBytes } : {}) } : null;
+    } catch {
+      // Missing/unreadable derived bytes never make preserved legacy bytes
+      // inaccessible. Repair from the authoritative record when possible.
+      const record = await this.readRecord(id);
+      if (!record?.snapshot.mimeType) return null;
+      await this.materializeMetadata(id, record);
+      const sourceBytes = record.snapshot.mimeType === "image/svg+xml" && record.sourceBytes !== undefined ? Buffer.from(record.sourceBytes, "base64") : undefined;
+      const bytes = record.snapshot.status === "ready" && record.bytes !== undefined ? Buffer.from(record.bytes, "base64") : undefined;
+      return bytes || sourceBytes ? { mimeType: record.snapshot.mimeType, ...(bytes ? { bytes } : {}), ...(sourceBytes ? { sourceBytes } : {}) } : null;
+    }
   }
 }
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }

@@ -1,8 +1,14 @@
+import { attachCopyButtons } from "../preview/code-block";
 import { appUrl } from "../shared/app-url";
 import { copyChatText } from "./copy-actions";
 
 /** Bind only new visual nodes. Retained previews keep source state while text streams. */
 export function decorateChatVisuals(root: HTMLElement): void {
+  // These surfaces have no snapshot capture. Their SVG stays ordinary code,
+  // with the same copy decoration as other readable source blocks.
+  const uncaptured = "#chat-aside-answer, .chat-request-plan, .chat-subagent-result";
+  if (root.matches(uncaptured)) attachCopyButtons(root);
+  for (const content of root.querySelectorAll<HTMLElement>(uncaptured)) attachCopyButtons(content);
   for (const visual of root.querySelectorAll<HTMLElement>(".chat-visual")) {
     if (visual.dataset.visualBound) continue;
     visual.dataset.visualBound = "true";

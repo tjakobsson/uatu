@@ -212,13 +212,17 @@ test("side reader uses safe chat markdown with locally scrolling tables", async 
   await expect(notice).toBeFocused();
   await expect(page.locator("#chat-input")).toHaveValue("Keep my selection");
 });
-for (const touch of [false, true]) test(`side-reader SVG source remains accessible and copyable (${touch ? "mobile" : "desktop"})`, async ({ launchBrowser, baseURL, request }) => {
+for (const touch of [false, true]) test(`side-reader SVG stays visible ordinary code with copy and inert image references (${touch ? "mobile" : "desktop"})`, async ({ launchBrowser, baseURL, request }) => {
   const browser = await launchBrowser(engine);
   const page = await browser.newPage({ baseURL, viewport: touch ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: touch, isMobile: touch });
   try {
     await boot(page, request);
+    const imageRequests: string[] = [];
+    page.on("request", req => {
+      if (/external-image\.invalid|\/api\/chat\/visuals\/|\/side-reader\.svg/.test(req.url())) imageRequests.push(req.url());
+    });
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 80"><text x="10" y="40">Side answer</text></svg>\n';
-    await page.route("**/aside", route => route.fulfill({ json: { text: `\`\`\`svg\n${svg}\`\`\`` } }));
+    await page.route("**/aside", route => route.fulfill({ json: { text: `\`\`\`svg\n${svg}\`\`\`\n\n![Local](./side-reader.svg)\n\n![Remote](https://external-image.invalid/aside.svg)\n\n<img src="https://external-image.invalid/raw.png" alt="Raw">` } }));
     await page.locator("#chat-input").fill("/btw Show the diagram source");
     await page.locator("#chat-send").click();
     const notice = page.locator("#chat-aside-ready");
@@ -226,12 +230,16 @@ for (const touch of [false, true]) test(`side-reader SVG source remains accessib
     await notice.click();
     const reader = page.locator("#chat-aside-dialog");
     await expect(reader).toHaveAttribute("aria-modal", String(touch));
-    const visual = reader.locator(".chat-visual");
-    await visual.getByRole("button", { name: "Source", exact: true }).click();
-    await expect(visual.locator(".chat-visual-source")).toBeVisible();
-    await expect(visual.locator(".chat-visual-source code")).toHaveText(svg);
-    await visual.getByRole("button", { name: "Copy source", exact: true }).click();
-    await expect(visual.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    const answer = reader.locator("#chat-aside-answer");
+    await expect(answer.locator("pre > code.hljs.language-svg")).toBeVisible();
+    expect(await answer.locator("pre > code").textContent()).toBe(svg);
+    await expect(answer.locator(".chat-visual, img, svg, [data-visual-tab]")).toHaveCount(0);
+    await expect(answer.locator(".chat-visual-reference")).toHaveText("./side-reader.svg");
+    await expect(answer.locator('a[href="https://external-image.invalid/aside.svg"]')).toBeVisible();
+    await expect(answer.locator('a[href="https://external-image.invalid/raw.png"]')).toBeVisible();
+    await answer.getByRole("button", { name: "Copy code to clipboard", exact: true }).click();
+    await expect(answer.locator("pre > .code-copy")).toHaveText("Copied!");
+    expect(imageRequests).toEqual([]);
     await page.locator("#chat-aside-close").click();
     await expect(reader).toBeHidden();
     await expect(notice).toBeFocused();

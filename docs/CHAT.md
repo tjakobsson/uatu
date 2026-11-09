@@ -945,8 +945,9 @@ SVG files embedded with Markdown have the same controls. Previews use the
 browser's image renderer, not active SVG markup in the chat page. Scripts,
 embedded HTML, and external resources are not supported.
 SVGs can use a `viewBox` without explicit `width` or `height` attributes.
-Source controls also work in side answers and when opening a collapsed Agent
-report containing an SVG fence. Streaming updates preserve keyboard focus on
+Side answers, plan previews, and Agent reports without captured snapshots keep
+SVG fences as visible, copyable code and images as inert references rather than
+showing unavailable preview widgets. Streaming updates preserve keyboard focus on
 retained visual controls. Valid XML comments remain inert in previews; malformed
 comments cannot repair otherwise invalid SVG markup.
 
@@ -965,6 +966,11 @@ The first eight observed occurrences keep their slots, including unavailable
 ones. Removing an occurrence, resolving an earlier reference, or changing
 rendered order does not make room for a ninth capture. Text parts belonging to
 the same native assistant message share that budget for both agents.
+Small metadata and raw-byte sidecars avoid parsing large base64 records on
+subsequent history and image reads. Existing canonical records stay untouched;
+their first access may still read the legacy record to derive those sidecars.
+If sidecars cannot be stored, reads fall back to the canonical record. This
+optimization uses additional app-state disk space, not additional captures.
 
 Admission choices from intermediate unreleased test builds are not migrated.
 Their stored files, IDs, and bytes remain untouched and resolvable, but an old
@@ -977,6 +983,8 @@ links rather than becoming previews. Unsupported image URL schemes remain
 escaped, non-clickable reference text. Invalid or unavailable visuals show an
 explanation and preserve the reference or SVG source. A local file missing
 during streaming is retried once when the reply finishes.
+Reference-style image destinations on an unfinished definition line remain
+provisional until the line ends or the reply completes.
 Steering does not finish the current reply or consume its completion retry;
 reloading or opening another client while it continues preserves pending visuals.
 Native OpenCode completion timestamps also keep older finished answers terminal
@@ -993,6 +1001,10 @@ Uatu supplies brief presentation guidance to its managed agent sessions
 through native instruction mechanisms. This does not rewrite your prompts,
 edit repository instructions or global configuration, or change tool
 permissions. Agents still choose when a visual is useful.
+OpenCode hints are best-effort: an unmergeable inline configuration or unwritable
+guidance state logs a sanitized warning and leaves native startup/configuration
+validation to OpenCode. Startup also performs bounded cleanup of guidance owned
+by processes proven absent; live and unknown owners are retained.
 
 ## Access And Authority
 

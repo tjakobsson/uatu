@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -44,5 +44,32 @@ describe("Uatu presentation guidance", () => {
       expect(await Bun.file(first).exists()).toBe(false);
       await removePresentationGuidanceFile(second);
     } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  test("startup sweeps proven-dead owned sessions while preserving live and unknown directories", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch/uatu-544-review-resume-20261030");
+    await fs.mkdir(scratch, { recursive: true });
+    const root = await fs.mkdtemp(path.join(scratch, "guidance-sweep-"));
+    const directory = path.join(root, "uatu", "chat-presentation");
+    const kill = spyOn(process, "kill").mockImplementation(pid => {
+      if (pid === 1234567) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      return true;
+    });
+    try {
+      for (const name of ["session-dead", "session-live", "session-legacy", "session-with-extra"]) {
+        const owned = path.join(directory, name);
+        await fs.mkdir(owned, { recursive: true });
+        await fs.writeFile(path.join(owned, "instructions.md"), name);
+        if (name !== "session-legacy") await fs.writeFile(path.join(owned, "owner.json"), JSON.stringify({ kind: "uatu-chat-presentation", version: 1, pid: name === "session-live" ? process.pid : 1234567 }));
+      }
+      await fs.writeFile(path.join(directory, "session-with-extra", "keep.txt"), "not an owned instruction file");
+      const file = await preparePresentationGuidanceFile({ XDG_STATE_HOME: root });
+      expect(await Bun.file(path.join(directory, "session-dead", "instructions.md")).exists()).toBe(false);
+      for (const name of ["session-live", "session-legacy", "session-with-extra"]) {
+        expect(await fs.readFile(path.join(directory, name, "instructions.md"), "utf8")).toBe(name);
+      }
+      expect(await fs.readFile(file, "utf8")).toBe(CHAT_PRESENTATION_GUIDANCE);
+      await removePresentationGuidanceFile(file);
+    } finally { kill.mockRestore(); await fs.rm(root, { recursive: true, force: true }); }
   });
 });

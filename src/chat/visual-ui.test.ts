@@ -66,20 +66,40 @@ describe("chat visual controls", () => {
     expect(root.querySelector(".chat-visual-source code")).not.toBeNull();
   });
 
-  test("native source controls reveal the exact inert SVG and bind once", () => {
-    const svg = '<svg><text>&amp; &quot; &#38;</text></svg>\n';
-    const { document, window } = parseHTML(`<div id="root">${renderChatMarkdown(`\`\`\`svg\n${svg}\`\`\``)}</div>`);
-    const root = document.querySelector("#root") as unknown as HTMLElement;
+  for (const attributes of ['id="chat-aside-answer"', 'class="chat-request-plan"', 'class="chat-subagent-result"']) {
+    test(`uncaptured ${attributes} keeps visible source and idempotent ordinary code-copy controls`, () => {
+      const previousDocument = Reflect.get(globalThis, "document");
+      const svg = '<svg><text>&amp; &quot; &#38;</text></svg>\n';
+      const markdown = `\`\`\`svg\n${svg}\`\`\`\n\n\`\`\`js\nconst value = 1;\n\`\`\`\n\n![Local](./diagram.svg)\n\n![Remote](https://example.invalid/track.png)`;
+      const { document } = parseHTML(`<div id="root"><div ${attributes}>${renderChatMarkdown(markdown)}</div></div>`);
+      Reflect.set(globalThis, "document", document);
+      try {
+        const root = document.querySelector("#root") as unknown as HTMLElement;
+        const content = root.firstElementChild as HTMLElement;
+        decorateChatVisuals(root);
+        const copy = content.querySelector("pre > .code-copy");
+        decorateChatVisuals(content);
+        expect(content.querySelector("pre > code.hljs.language-svg")?.textContent).toBe(svg);
+        expect(content.querySelector("pre > code")?.closest("[hidden]")).toBeNull();
+        expect(content.querySelectorAll("pre > .code-copy")).toHaveLength(2);
+        expect(content.querySelector("pre > .code-copy")).toBe(copy);
+        expect(copy?.getAttribute("aria-label")).toBe("Copy code to clipboard");
+        expect(content.querySelector(".chat-visual, [data-visual-tab], img, svg")).toBeNull();
+        expect(content.querySelector(".chat-visual-reference")?.textContent).toBe("./diagram.svg");
+        expect(content.querySelector('a[href="https://example.invalid/track.png"]')).not.toBeNull();
+      } finally {
+        if (previousDocument === undefined) Reflect.deleteProperty(globalThis, "document");
+        else Reflect.set(globalThis, "document", previousDocument);
+      }
+    });
+  }
+
+  test("ordinary assistant code copying remains owned by the timeline renderer", () => {
+    const { document } = parseHTML(`<div class="chat-assistant-content">${renderChatMarkdown("```svg\n<svg/>\n```")}</div>`);
+    const root = document.querySelector("div") as unknown as HTMLElement;
     decorateChatVisuals(root);
-    decorateChatVisuals(root);
-    const source = root.querySelector<HTMLElement>('[data-visual-tab="source"]')!;
-    source.dispatchEvent(new window.Event("click", { bubbles: true }));
-    expect(root.querySelector<HTMLElement>(".chat-visual-preview")!.hidden).toBe(true);
-    expect(root.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
-    expect(root.querySelector(".chat-visual-source code")?.textContent).toBe(svg);
-    expect(source.getAttribute("aria-pressed")).toBe("true");
-    root.querySelector('[data-visual-tab="preview"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
-    expect(root.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(true);
+    expect(root.querySelector("pre > code")?.textContent).toBe("<svg/>\n");
+    expect(root.querySelector("button")).toBeNull();
   });
 
   test("file SVG source loads once from the issued source route, not its original path", async () => {

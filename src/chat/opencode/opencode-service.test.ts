@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import {
   OpenCodeService,
@@ -142,15 +142,38 @@ describe("OpenCodeService startup", () => {
     expect(removed).toEqual(["/uatu-state/owned/instructions.md"]);
   });
 
-  test("does not spawn or prepare guidance when inherited config is malformed", async () => {
+  test.each(["not-json-secret", "null", "[]", '{"instructions":"secret"}', '{"instructions":[1]}'])("starts without optional guidance and preserves unmergeable inline config: %s", async content => {
     let prepared = false;
-    const { service, calls } = fixture({ env: { OPENCODE_CONFIG_CONTENT: "not-json" }, presentationGuidanceFile: {
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const { service, calls } = fixture({ env: { OPENCODE_CONFIG_CONTENT: content }, presentationGuidanceFile: {
       prepare: async () => { prepared = true; return "/unused"; }, remove: async () => {},
     }, probeVersion: async () => null });
-    expect(await service.status()).toMatchObject({ state: "unavailable", reason: "startup-failed", message: expect.stringContaining("OPENCODE_CONFIG_CONTENT") });
-    expect(calls).toHaveLength(0);
-    expect(prepared).toBe(false);
-    await service.dispose();
+    try {
+      expect(await service.status()).toMatchObject({ state: "ready" });
+      expect(calls).toHaveLength(1);
+      expect((calls[0]!.options.env as Record<string, string>).OPENCODE_CONFIG_CONTENT).toBe(content);
+      expect(prepared).toBe(false);
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(String(warning.mock.calls[0])).toContain("without Uatu presentation hints");
+      expect(String(warning.mock.calls[0])).not.toContain("secret");
+    } finally { await service.dispose(); warning.mockRestore(); }
+  });
+
+  test("a read-only guidance state directory does not block native startup", async () => {
+    const content = '{"instructions":["team.md"],"permissions":[{"effect":"deny","action":"edit","resource":"*"}]}';
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const { service, calls } = fixture({ env: { OPENCODE_CONFIG_CONTENT: content }, presentationGuidanceFile: {
+      prepare: async () => { throw Object.assign(new Error("private-path-secret"), { code: "EROFS" }); }, remove: async () => {},
+    } });
+    try {
+      expect(await service.status()).toMatchObject({ state: "ready" });
+      const env = calls[0]!.options.env as Record<string, string>;
+      expect(env.OPENCODE_CONFIG_CONTENT).toBe(content);
+      expect(env.OPENCODE_PASSWORD).toBe("secret-password");
+      expect(env.OPENCODE_SERVER_PASSWORD).toBe("secret-password");
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(String(warning.mock.calls[0])).not.toContain("private-path-secret");
+    } finally { await service.dispose(); warning.mockRestore(); }
   });
 
   test("reports missing OpenCode without spawning", async () => {

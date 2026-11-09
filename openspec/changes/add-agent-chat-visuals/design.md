@@ -136,9 +136,11 @@ context, preserving the native prompt on new and resumed queries. OpenCode
 receives an instruction-file entry through the spawned child's inline config.
 Its private per-service file is under the application's state directory and
 is removed on disposal. Existing JSON/JSONC settings and instruction entries
-are preserved; malformed inherited configuration is reported rather than
-silently replaced. Global/repository instruction files and tool permissions
-are not changed.
+are preserved. If inline configuration cannot be extended safely, or guidance
+state cannot be written, a sanitized warning explains why native startup
+continues without optional hints. Proven-dead app-owned guidance directories
+are swept in bounded startup housekeeping; live and unknown owners are kept.
+Global/repository instruction files and tool permissions are not changed.
 
 ## Risks / Trade-offs
 

@@ -412,27 +412,34 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(visual.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
     } finally { release(); await browser.close(); }
   });
-  browserTest(`${engine}: deferred Agent report SVG source controls work after opening`, async ({ launchBrowser, request, baseURL }) => {
+  browserTest(`${engine}: deferred Agent reports retain visible SVG code, copy, and inert image references`, async ({ launchBrowser, request, baseURL }) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL });
     try {
       const conversationId = await boot(page, request);
+      const imageRequests: string[] = [];
+      page.on("request", req => {
+        if (/external-image\.invalid|\/api\/chat\/visuals\/|\/agent-report\.svg/.test(req.url())) imageRequests.push(req.url());
+      });
       await control(request, { action: "item", conversationId, item: {
         id: "deferred-visual-report", type: "tool", name: "Agent", status: "completed", createdAt: Date.now(),
         input: JSON.stringify({ description: "Draw a diagram", subagent_type: "Explore", prompt: "Show the result." }),
-        output: `\`\`\`svg\n${SVG}\`\`\``,
+        output: `\`\`\`svg\n${SVG}\`\`\`\n\n![Local](./agent-report.svg)\n\n![Remote](https://external-image.invalid/report.svg)\n\n<img src="https://external-image.invalid/report-raw.png" alt="Raw">`,
       } });
       const row = page.locator('[data-chat-item-id="deferred-visual-report"]');
       await expect(row).toHaveAttribute("data-chat-lazy", "");
       await expect(row.locator(".chat-visual")).toHaveCount(0);
       await row.locator("summary").first().click();
-      const visual = row.locator(".chat-visual");
-      await expect(visual).toBeVisible();
-      await visual.getByRole("button", { name: "Source", exact: true }).click();
-      await expect(visual.locator(".chat-visual-source")).toBeVisible();
-      await expect(visual.locator(".chat-visual-source code")).toHaveText(SVG);
-      await visual.getByRole("button", { name: "Copy source", exact: true }).click();
-      await expect(visual.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+      const report = row.locator(".chat-subagent-result");
+      await expect(report.locator("pre > code.hljs.language-svg")).toBeVisible();
+      expect(await report.locator("pre > code").textContent()).toBe(SVG);
+      await expect(row.locator(".chat-visual, img, svg, [data-visual-tab]")).toHaveCount(0);
+      await expect(report.locator(".chat-visual-reference")).toHaveText("./agent-report.svg");
+      await expect(report.locator('a[href="https://external-image.invalid/report.svg"]')).toBeVisible();
+      await expect(report.locator('a[href="https://external-image.invalid/report-raw.png"]')).toBeVisible();
+      await report.getByRole("button", { name: "Copy code to clipboard", exact: true }).click();
+      await expect(report.locator("pre > .code-copy")).toHaveText("Copied!");
+      expect(imageRequests).toEqual([]);
     } finally { await browser.close(); }
   });
   for (const focused of [true, false]) browserTest(`${engine}: touch Latest ${focused ? "keeps the focused composer" : "works without composer focus"} and resumes following`, async ({ launchBrowser, request, baseURL }) => {

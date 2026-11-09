@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -102,6 +103,26 @@ test("history remains readable if permanent admission cannot be persisted, and r
 });
 
 describe("immutable visual snapshots", () => {
+  test.each(["newline", "completion"] as const)("split reference destinations capture only after %s", async boundary => {
+    const store = new VisualStore("/workspace", directory);
+    const reads: string[] = [];
+    store.setReader(async source => { reads.push(source); return png; });
+    const capture = (markdown: string, streaming: boolean) => store.captureMany("a:c", "native-ref", getChatVisuals(markdown, streaming).map(input => ({ messageId: "part:ref", input })), streaming);
+    const prefix = "![shot][ref]\n\n[ref]: a.p";
+    expect((await capture(prefix, true)).map(visual => visual.status)).toEqual(["pending"]);
+    expect((await capture(prefix + "ng", true)).map(visual => visual.status)).toEqual(["pending"]);
+    expect(reads).toEqual([]);
+    const markdown = prefix + "ng" + (boundary === "newline" ? "\n" : "");
+    const captured = await capture(markdown, boundary === "newline");
+    expect(captured).toEqual([expect.objectContaining({ status: "ready", mimeType: "image/png" })]);
+    expect(reads).toEqual(["a.png"]);
+    // A later unfinished, unrelated definition cannot turn a stored capture
+    // back into pending or change its bytes.
+    const later = markdown + "\n\n[other]: half.p";
+    expect(await capture(later, true)).toEqual(captured);
+    expect(reads).toEqual(["a.png"]);
+    expect((await store.resolve(captured[0]!.id!))?.bytes).toEqual(png);
+  });
   test("a full admission ledger is read once for rejected later parts and repeated deltas", async () => {
     const store = new VisualStore("/workspace", directory);
     let sourceReads = 0;
@@ -132,7 +153,7 @@ describe("immutable visual snapshots", () => {
       expect(sourceReads).toBe(8);
     } finally { readFile.mockRestore(); }
   });
-  test("filling a blank ledger caches its complete membership before captures reserve again", async () => {
+  test("filling a blank ledger reserves each occurrence once and caches complete membership", async () => {
     const store = new VisualStore("/workspace", directory);
     let sourceReads = 0, slotReads = 0;
     store.setReader(async () => { sourceReads++; return png; });
@@ -155,6 +176,37 @@ describe("immutable visual snapshots", () => {
       expect(await store.capture("a:c", "later-part", file("ninth.png"), false, "native-message")).toMatchObject({ status: "unavailable", message: "Image limit exceeded" });
       expect(slotReads).toBe(44);
       expect(sourceReads).toBe(8);
+    } finally { readFile.mockRestore(); }
+  });
+  test.each([1, 3, 7])("captureMany reserves only once per occurrence with a partial %i-slot ledger", async count => {
+    const store = new VisualStore("/workspace", directory);
+    let slotReads = 0, sourceReads = 0;
+    store.setReader(async () => { sourceReads++; return png; });
+    const requests = Array.from({ length: count }, (_, index) => ({ messageId: `native-part-${index}`, input: file(`image-${index}.png`, index) }));
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]).includes(".slot-")) slotReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      const first = await store.captureMany("a:c", "native-message", requests, true);
+      expect(first).toHaveLength(count);
+      expect(first.every(snapshot => snapshot.status === "ready")).toBe(true);
+      // Each reservation scans through its owner once; a new slot also has
+      // one initial ENOENT. Capturing must not scan that partial ledger again.
+      const occupiedReads = count * (count + 1) / 2;
+      expect(slotReads).toBe(occupiedReads + count);
+      expect(sourceReads).toBe(count);
+      slotReads = 0;
+      expect(await store.captureMany("a:c", "native-message", requests, true)).toEqual(first);
+      expect(slotReads).toBe(occupiedReads);
+      slotReads = 0;
+      const restarted = new VisualStore("/workspace", directory);
+      expect(await restarted.captureMany("a:c", "native-message", requests, false)).toEqual(first);
+      expect(slotReads).toBe(occupiedReads);
+      expect(sourceReads).toBe(count);
     } finally { readFile.mockRestore(); }
   });
   test("partial admissions observe another store filling slots and full caches stay group-local", async () => {
@@ -185,7 +237,7 @@ describe("immutable visual snapshots", () => {
     // Pre-ledger state used these same complete occurrence records, without
     // any recoverable message grouping. Keep the records themselves untouched.
     for (const filename of await fs.readdir(original.directory)) {
-      if (/\.slot-\d+\.json$/.test(filename)) await fs.unlink(path.join(original.directory, filename));
+      if (/\.slot-\d+\.json$|\.(?:metadata\.json|preview\.bin|source\.bin)$/.test(filename)) await fs.unlink(path.join(original.directory, filename));
     }
     const markdown = prefix + '<img src="new.png"></table>';
     const restarted = new VisualStore("/workspace", directory);
@@ -360,6 +412,98 @@ describe("immutable visual snapshots", () => {
     expect((await store.capture("a:c", "m", file("different.png"), false)).status).toBe("unavailable");
     expect(await store.resolve("../secret")).toBeNull();
   });
+  test("new captures, cold history and repeated preview/source reads never parse canonical base64 JSON", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const largePng = new Uint8Array(VISUAL_MAX_BYTES);
+    largePng.set(png);
+    let sourceReads = 0, canonicalReads = 0, previewReads = 0, svgSourceReads = 0;
+    store.setReader(async () => { sourceReads++; return largePng; });
+    const inputs = [file(), { ...inline("<svg><text>original</text></svg>"), index: 1 }, { ...inline('<svg onload="alert(1)"/>'), index: 2 }];
+    const requests = inputs.map(input => ({ messageId: "m", input }));
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        const filename = path.basename(String(args[0]));
+        if (/^[a-f\d]{64}\.json$/.test(filename)) canonicalReads++;
+        if (filename.endsWith(".preview.bin")) previewReads++;
+        if (filename.endsWith(".source.bin")) svgSourceReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      const captured = await store.captureMany("a:c", "m", requests, false);
+      expect(captured.map(snapshot => snapshot.status)).toEqual(["ready", "ready", "unavailable"]);
+      expect(canonicalReads).toBe(0);
+      expect(sourceReads).toBe(1);
+      for (const snapshot of captured) {
+        const metadata = await fs.readFile(path.join(store.directory, `${snapshot.id}.metadata.json`), "utf8");
+        expect(metadata.length).toBeLessThan(1024);
+        expect(JSON.parse(metadata)).not.toHaveProperty("bytes");
+        expect(JSON.parse(metadata)).not.toHaveProperty("sourceBytes");
+      }
+      for (let iteration = 0; iteration < 3; iteration++) {
+        const restarted = new VisualStore("/workspace", directory);
+        restarted.setReader(async () => { throw new Error("must use immutable metadata, not workspace files"); });
+        expect(await restarted.captureMany("a:c", "m", requests, false)).toEqual(captured);
+        const restored = await Promise.all(captured.map(snapshot => restarted.resolve(snapshot.id!)));
+        expect(restored[0]?.bytes).toEqual(largePng);
+        expect(new TextDecoder().decode(restored[1]?.bytes)).toBe('<svg xmlns="http://www.w3.org/2000/svg"><text>original</text></svg>');
+        expect(new TextDecoder().decode(restored[1]?.sourceBytes)).toBe(inputs[1]!.source);
+        expect(restored[2]?.bytes).toBeUndefined();
+        expect(new TextDecoder().decode(restored[2]?.sourceBytes)).toBe(inputs[2]!.source);
+      }
+      expect(canonicalReads).toBe(0);
+      expect(previewReads).toBe(6);
+      expect(svgSourceReads).toBe(6);
+      expect(sourceReads).toBe(1);
+    } finally { readFile.mockRestore(); }
+  });
+  test.each(["ready", "unavailable"] as const)("legacy %s SVG materializes from its immutable canonical record only once", async status => {
+    const store = new VisualStore("/workspace", directory);
+    const source = status === "ready" ? "<svg><text>legacy</text></svg>" : '<svg onload="alert(1)"/>';
+    const preview = '<svg xmlns="http://www.w3.org/2000/svg"><text>legacy</text></svg>';
+    const input = inline(source);
+    const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+    const id = digest(JSON.stringify(["a:c", "legacy", "0"]));
+    const snapshot = { index: 0, status, id, mimeType: "image/svg+xml" };
+    const record = "\n" + JSON.stringify({
+      sourceHash: digest(JSON.stringify([input.kind, input.source])), snapshot,
+      ...(status === "ready" ? { bytes: Buffer.from(preview).toString("base64") } : {}),
+      sourceBytes: Buffer.from(source).toString("base64"),
+      // Unknown persisted filename fields must never become filesystem paths.
+      filename: "../outside", sourceFilename: "../outside",
+    }, null, 2) + "\n";
+    await fs.mkdir(store.directory, { recursive: true });
+    const canonical = path.join(store.directory, `${id}.json`);
+    await fs.writeFile(canonical, record);
+    const before = await fs.stat(canonical);
+    let canonicalReads = 0;
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]) === canonical) canonicalReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      // A source/preview GET may be the first read, without history enrichment.
+      const [first, duplicate] = await Promise.all([store.resolve(id), store.resolve(id)]);
+      expect(duplicate).toEqual(first);
+      expect(new TextDecoder().decode(first?.sourceBytes)).toBe(source);
+      expect(first?.bytes).toEqual(status === "ready" ? Buffer.from(preview) : undefined);
+      expect(canonicalReads).toBe(1);
+      for (let iteration = 0; iteration < 3; iteration++) {
+        const restarted = new VisualStore("/workspace", directory);
+        restarted.setReader(async () => { throw new Error("must not recapture a legacy occurrence"); });
+        expect(await restarted.capture("a:c", "legacy", input, false)).toEqual(snapshot);
+        expect(await restarted.resolve(id)).toEqual(first);
+      }
+      expect(canonicalReads).toBe(1);
+    } finally { readFile.mockRestore(); }
+    expect(await fs.readFile(canonical, "utf8")).toBe(record);
+    const after = await fs.stat(canonical);
+    expect({ ino: after.ino, size: after.size, mtimeMs: after.mtimeMs }).toEqual({ ino: before.ino, size: before.size, mtimeMs: before.mtimeMs });
+  });
   test("independent stores racing publish a single complete winner", async () => {
     const a = new VisualStore("/workspace", directory), b = new VisualStore("/workspace", directory);
     a.setReader(async () => png);
@@ -368,6 +512,129 @@ describe("immutable visual snapshots", () => {
     expect(results[0]).toEqual(results[1]);
     expect((await a.resolve(results[0]!.id!))?.mimeType).toBe(results[0]!.mimeType!);
   });
+  test("interrupted sidecar publication resumes from the canonical winner without recapture or orphan files", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const input = inline("<svg><text>winner</text></svg>");
+    const originalLink = fs.link.bind(fs);
+    const link = spyOn(fs, "link").mockImplementation(async (existingPath, newPath) => {
+      if (String(newPath).endsWith(".source.bin")) throw Object.assign(new Error("sidecar publication interrupted"), { code: "EIO" });
+      return originalLink(existingPath, newPath);
+    });
+    try {
+      const first = await store.capture("a:c", "interrupted", input, false);
+      expect(first.status).toBe("ready");
+      // Derived cache failure cannot turn an immutable ready capture into a
+      // refusal or hide its original bytes, even before a repair can succeed.
+      expect(new TextDecoder().decode((await store.resolve(first.id!))?.sourceBytes)).toBe(input.source);
+    }
+    finally { link.mockRestore(); }
+    const filenames = await fs.readdir(store.directory);
+    const canonicalName = filenames.find(filename => /^[a-f\d]{64}\.json$/.test(filename))!;
+    const id = canonicalName.slice(0, -".json".length);
+    const canonical = await fs.readFile(path.join(store.directory, canonicalName), "utf8");
+    const preview = await fs.readFile(path.join(store.directory, `${id}.preview.bin`));
+    expect(filenames.some(filename => filename.endsWith(".metadata.json") || filename.endsWith(".tmp"))).toBe(false);
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async () => { throw new Error("canonical winner must not be recaptured"); });
+    const snapshot = await restarted.capture("a:c", "interrupted", input, false);
+    expect(snapshot).toMatchObject({ status: "ready", id });
+    const restored = await restarted.resolve(id);
+    expect(restored?.bytes).toEqual(preview);
+    expect(new TextDecoder().decode(restored?.sourceBytes)).toBe(input.source);
+    expect(await fs.readFile(path.join(store.directory, canonicalName), "utf8")).toBe(canonical);
+    expect((await fs.readdir(store.directory)).sort()).toEqual([
+      ...filenames.filter(filename => filename.includes(".slot-")), canonicalName,
+      `${id}.metadata.json`, `${id}.preview.bin`, `${id}.source.bin`,
+    ].sort());
+  });
+  test("legacy bytes remain readable without sidecar write access and missing sidecars repair when writes recover", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const snapshot = await store.capture("a:c", "read-only", inline(), false);
+    const expected = await store.resolve(snapshot.id!);
+    const canonical = path.join(store.directory, `${snapshot.id}.json`);
+    const original = await fs.readFile(canonical, "utf8");
+    for (const suffix of ["metadata.json", "preview.bin", "source.bin"]) await fs.unlink(path.join(store.directory, `${snapshot.id}.${suffix}`));
+    const restarted = new VisualStore("/workspace", directory);
+    const writeFile = spyOn(fs, "writeFile").mockImplementation(async () => {
+      throw Object.assign(new Error("read-only state"), { code: "EROFS" });
+    });
+    try { expect(await restarted.resolve(snapshot.id!)).toEqual(expected); }
+    finally { writeFile.mockRestore(); }
+    // Cached metadata must not hide the need to repair missing raw files.
+    expect(await restarted.resolve(snapshot.id!)).toEqual(expected);
+    const reads: string[] = [];
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        reads.push(String(args[0]));
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      expect(await new VisualStore("/workspace", directory).resolve(snapshot.id!)).toEqual(expected);
+      expect(reads).not.toContain(canonical);
+      expect(reads).toContain(path.join(store.directory, `${snapshot.id}.source.bin`));
+      expect(reads).toContain(path.join(store.directory, `${snapshot.id}.preview.bin`));
+    } finally { readFile.mockRestore(); }
+    expect(await fs.readFile(canonical, "utf8")).toBe(original);
+  });
+  test("separate processes derive source and preview sidecars only from their shared canonical winner", async () => {
+    const sources = ["<svg><text>safe winner</text></svg>", '<svg onload="alert(1)"/>'];
+    const children = sources.map(source => {
+      const program = `
+        import { VisualStore } from ${JSON.stringify(new URL("./visual-store.ts", import.meta.url).href)};
+        const store = new VisualStore("/workspace", ${JSON.stringify(directory)});
+        store.setReader(async () => {
+          console.log("reader-ready");
+          await Bun.stdin.text();
+          return new TextEncoder().encode(${JSON.stringify(source)});
+        });
+        console.log(JSON.stringify(await store.capture("a:c", "same-process-race", {
+          index: 0, kind: "file", source: "image.svg", alt: "Image", complete: true,
+        }, false)));
+      `;
+      return Bun.spawn([process.execPath, "--eval", program], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    });
+    try {
+      // Both contenders must have read the absent canonical record before
+      // either can publish, rather than depending on process timing.
+      const readers = await Promise.all(children.map(async child => {
+        const reader = child.stdout.getReader();
+        const ready = await reader.read();
+        expect(new TextDecoder().decode(ready.value)).toBe("reader-ready\n");
+        return reader;
+      }));
+      for (const child of children) { child.stdin.write("publish"); child.stdin.end(); }
+      const results = await Promise.all(children.map(async (child, index) => {
+        const stdout = (async () => {
+          let output = "";
+          const decoder = new TextDecoder();
+          while (true) {
+            const next = await readers[index]!.read();
+            if (next.done) return output;
+            output += decoder.decode(next.value, { stream: true });
+          }
+        })();
+        const [exit, output, stderr] = await Promise.all([child.exited, stdout, new Response(child.stderr).text()]);
+        expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+        return JSON.parse(output) as { id: string; status: "ready" | "unavailable" };
+      }));
+      expect(results[0]).toEqual(results[1]);
+      const id = results[0]!.id;
+      const restarted = new VisualStore("/workspace", directory);
+      const canonical = JSON.parse(await fs.readFile(path.join(restarted.directory, `${id}.json`), "utf8"));
+      const restored = (await restarted.resolve(id))!;
+      const source = Buffer.from(canonical.sourceBytes, "base64");
+      expect(restored.sourceBytes).toEqual(source);
+      expect(source.toString()).toBe(results[0]!.status === "ready" ? sources[0]! : sources[1]!);
+      expect(restored.bytes).toEqual(canonical.bytes === undefined ? undefined : Buffer.from(canonical.bytes, "base64"));
+      expect((await fs.readdir(restarted.directory)).sort()).toEqual([
+        ...(await fs.readdir(restarted.directory)).filter(filename => filename.includes(".slot-")),
+        `${id}.json`, `${id}.metadata.json`, `${id}.source.bin`,
+        ...(results[0]!.status === "ready" ? [`${id}.preview.bin`] : []),
+      ].sort());
+    } finally { for (const child of children) { if (child.exitCode === null) child.kill(); } }
+  }, 15_000);
   test("missing is tried once during streaming, once at completion, and not again after restart", async () => {
     let reads = 0;
     const store = new VisualStore("/workspace", directory);

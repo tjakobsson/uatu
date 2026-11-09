@@ -1,5 +1,6 @@
-import { escapeHtml } from "../render/markdown";
+import { highlightCodeBlocks } from "../render/markdown";
 import { appUrl } from "../shared/app-url";
+import { escapeHtml } from "../shared/html";
 import { prepareChatVisualMarkdown } from "./visual-markdown";
 import type { ChatVisualInput, ChatVisualSnapshot } from "./visual-types";
 import { CHAT_VISUAL_ID_PATTERN, VISUAL_MAX_COUNT } from "./visual-types";
@@ -15,10 +16,26 @@ export function renderChatMarkdown(source: string, options: ChatMarkdownOptions 
 }
 
 function renderVisual(input: ChatVisualInput, options: ChatMarkdownOptions): string {
-  const snapshot = options.visuals?.slice(0, VISUAL_MAX_COUNT).find(visual => visual.index === input.index);
+  const external = /^(?:https?:)?\/\//i.test(input.source);
+  // Original URLs never become image sources. External references need an
+  // explicit link follow; local and refused destinations remain inert text.
+  const reference = input.kind === "file"
+    ? external
+      ? `<a href="${escapeHtml(input.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(input.alt || input.source)}</a>`
+      : `<code class="chat-visual-reference">${escapeHtml(input.source)}</code>`
+    : "";
+  // Side answers, plans, and agent reports cannot capture snapshots. Keep
+  // their fences ordinary, visible code and their image destinations inert.
+  // An explicitly supplied empty array still opts into captured presentation.
+  if (options.visuals === undefined) {
+    return input.kind === "svg"
+      // Keep CRLF source exact when the browser parses the highlighted HTML.
+      ? highlightCodeBlocks(`<pre><code class="language-svg">${escapeHtml(input.source)}</code></pre>`).replaceAll("\r", "&#13;")
+      : reference;
+  }
+  const snapshot = options.visuals.slice(0, VISUAL_MAX_COUNT).find(visual => visual.index === input.index);
   const hasId = snapshot?.id !== undefined && CHAT_VISUAL_ID_PATTERN.test(snapshot.id);
   const ready = snapshot?.status === "ready" && hasId;
-  const external = /^(?:https?:)?\/\//i.test(input.source);
   const svg = input.kind === "svg" || (!external && (snapshot?.mimeType === "image/svg+xml" || /\.svg(?:[?#]|$)/i.test(input.source)));
   const pending = snapshot?.status === "pending" || (!snapshot && (options.streaming ?? false));
   const refusedCount = !snapshot && (options.visuals !== undefined || input.index >= VISUAL_MAX_COUNT);
@@ -27,13 +44,6 @@ function renderVisual(input: ChatVisualInput, options: ChatMarkdownOptions): str
   let message = snapshot?.message ?? (pending ? "Preparing image…" : "Image unavailable.");
   if (input.kind === "svg" && !input.complete) message = options.streaming ? "Generating image…" : "SVG block is unfinished.";
   if (refusedCount) message = `At most ${VISUAL_MAX_COUNT} images can be displayed per message.`;
-  // A refused external URL is inert text, not an image. Only an explicit
-  // follow of its link can contact the host; no browser or server prefetch.
-  const reference = input.kind === "file"
-    ? external
-      ? `<a href="${escapeHtml(input.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(input.alt || input.source)}</a>`
-      : `<code class="chat-visual-reference">${escapeHtml(input.source)}</code>`
-    : "";
   const image = ready && !refusedCount
     ? `<button type="button" class="chat-visual-enlarge" data-attachment-view="${escapeHtml(src)}" data-attachment-view-name="${escapeHtml(input.alt)}" aria-label="Enlarge ${escapeHtml(input.alt)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(input.alt)}" loading="lazy" decoding="async"></button><span class="chat-visual-fallback" role="status" hidden>Could not display ${escapeHtml(input.alt || "image")}.${reference ? ` ${reference}` : ""}</span>`
     : `<span class="chat-visual-fallback"${pending ? ' role="status"' : ""}>${escapeHtml(message)}${reference ? ` ${reference}` : ""}</span>`;

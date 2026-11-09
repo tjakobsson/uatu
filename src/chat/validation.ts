@@ -1,4 +1,5 @@
 import { TOKEN_USAGE_COMPONENTS } from "./usage";
+import { CHAT_VISUAL_ID_PATTERN, VISUAL_MAX_COUNT } from "./visual-types";
 import type { AutomaticBackgroundFeedback, AutomaticBackgroundOutcome } from "./types";
 import type {
   AgentChatStatus,
@@ -431,7 +432,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
           if (!Number.isSafeInteger(visual.index) || (visual.index as number) < 0 || indices.has(visual.index as number)) throw new Error("invalid assistant visual index");
           indices.add(visual.index as number);
           expectOneOf(visual.status, ["ready", "pending", "unavailable"], "assistant visual status");
-          if (visual.id !== undefined && (typeof visual.id !== "string" || !/^[a-f\d]{64}$/.test(visual.id))) throw new Error("invalid assistant visual id");
+          if (visual.id !== undefined && (typeof visual.id !== "string" || !CHAT_VISUAL_ID_PATTERN.test(visual.id))) throw new Error("invalid assistant visual id");
           if (visual.mimeType !== undefined) expectOneOf(visual.mimeType, ["image/png", "image/jpeg", "image/svg+xml"], "assistant visual mime type");
           if (visual.message !== undefined) expectString(visual.message, "assistant visual message");
           if (visual.status === "ready" && (visual.id === undefined || visual.mimeType === undefined)) throw new Error("ready assistant visual requires id and MIME type");
@@ -980,4 +981,3 @@ function expectOneOf<T extends string>(value: unknown, values: readonly T[], fie
   if (typeof value !== "string" || !values.includes(value as T)) throw new Error(`invalid ${field}`);
   return value as T;
 }
-import { VISUAL_MAX_COUNT } from "./visual-types";

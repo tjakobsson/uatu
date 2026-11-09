@@ -60,6 +60,24 @@ and safety stash are preserved; no feature commit or publication is implied.
 - [ ] 5.18 Renew GitHub CI and Codex acceptance after the visibility-policy rebase. Prior `6107dc5b` had all executable GitHub checks green and a Codex receipt with no findings or unresolved findings. New-head checks must cover revision 37, canonical/lexical static-file identity, explicitly excluded paths, and newly allowed build/dependency/secret-like image paths without changing workspace, traversal or symlink boundaries.
 - [ ] 5.19 Preserve native OpenCode assistant completion in stored history normalization. Carry the classic message's own time into the shared normalizer and attach validated parent-message completion to text items in both store generations; do not infer message completion from a text part's time. Six new regressions cover missing and previously pending historical visuals during a later running turn, restart durability, and classic `time.end`/`time.completed` plus v2 `time.completed`. Await GitHub CI and Codex; no local test or review run.
 
+## 6. Maintainer review follow-up
+
+These items track review `5830221772` separately from Codex. Regressions are
+authored for GitHub CI; no additional local tests, builds or review runs are
+part of the revised workflow. Future upstream integration uses merge commits
+and ordinary pushes, not rebases or force pushes.
+
+- [ ] 6.1 Preserve status/updated payloads and composer side effects before separate visual resyncs; ensure enriched content is not dropped as a duplicate sequence by the actual client projection.
+- [ ] 6.2 Reseed assistant-only subscription state after provider resync and treat older history pages as terminal.
+- [ ] 6.3 Keep Claude text-block completion distinct from turn completion while honoring true native OpenCode parent-message completion.
+- [ ] 6.4 Keep SVG code visible/copyable and image references inert on aside, plan, and subagent surfaces without captured snapshots.
+- [ ] 6.5 Bound streamed enrichment cadence, flush syntax/turn completion, and preserve ordered text, control events and cancellation.
+- [ ] 6.6 Make OpenCode presentation hints best-effort without replacing inherited configuration, and sweep only provably stale app-owned guidance state.
+- [ ] 6.7 Avoid duplicate reservations and repeated large-record parsing through small metadata/raw-byte sidecars, retaining canonical legacy files and winner identity.
+- [ ] 6.8 Share parsing/presentation caches across streaming completion and defer unfinished reference-definition destinations without changing completed captures.
+- [ ] 6.9 Use shared HTML escaping and visual-ID validation helpers with imports grouped at the top.
+- [ ] 6.10 Verify this complete follow-up batch through GitHub CI and Codex; publish a maintainer-response summary only after text approval.
+
 ## Historical checkpoint evidence (current status is tracked above)
 
 - Final full-unit run on `dcd5674d`: 10,127 passed, 16 skipped, three failed. The detached-shell, SSH-supervisor and aggregate-worker cases all pass isolated reruns (three passed); no unrelated product or test changes were made. Remote CI units passed on the same head. CodeQL, contract integration and performance E2E also passed; final Codex review found only the mixed-root case now covered by task 5.11.
