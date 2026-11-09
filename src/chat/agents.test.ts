@@ -72,7 +72,7 @@ test.each([
     expect(answer(second.snapshot).visuals).toEqual(answer(first).visuals);
     expect(reads).toBe(1);
     const iterator = second.events[Symbol.asyncIterator]();
-    const delta = '/></svg>\n```';
+    const delta = '/></svg>\n```\n';
     projection.apply({ kind: "text", itemId: assistant.id, identity: "answer", mode: "incremental", text: delta });
     const fenceEvents = await deliveredBatch(replay, iterator);
     expect(fenceEvents).toHaveLength(1);
@@ -356,7 +356,7 @@ test.each(["completed", "failed", "interrupted"] as const)("delayed Claude drain
   const memory = createClaudeEventMemory();
   const clock = spyOn(Date, "now").mockReturnValue(1_000);
   const prefix = '![Generated](later.png)\n\n```svg\n<svg><rect width="10"';
-  const close = '/></svg>\n```';
+  const close = '/></svg>\n```\n';
   const markdown = prefix + close;
   const svg = '<svg><rect width="10"/></svg>\n';
   const published: ChatEvent[] = [];
@@ -455,7 +455,7 @@ test.each([
   const memory = createClaudeEventMemory();
   const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
   const prefix = '```svg\n<svg><rect width="10"';
-  const close = '/></svg>\n```';
+  const close = '/></svg>\n```\n';
   const svg = '<svg><rect width="10"/></svg>\n';
   let frame = 0;
   const emit = (value: Record<string, unknown>) => {
@@ -1079,12 +1079,93 @@ test.each([
   } finally { clock.mockRestore(); await restarted?.dispose(); await h.cleanup(); }
 });
 
+test.each([false, true])("classic OpenCode text-part end captures a final reference definition before a tool overwrite without sealing the turn (missing=%s)", async missing => {
+  const h = await visualSubscriptionHarness("opencode");
+  const memory = createProviderEventMemory();
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const markdown = "![shot][ref]\n\n[ref]: result.svg"; // No terminating definition newline.
+  const original = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10"/></svg>';
+  const replacement = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="20"/></svg>';
+  let sourceText = original;
+  let available = !missing;
+  const reads: string[] = [];
+  h.store.setReader(async source => { expect(source).toBe("result.svg"); reads.push(source); if (!available) throw new VisualReadError(true); return new TextEncoder().encode(sourceText); });
+  let frame = 0;
+  const emit = (type: string, properties: Record<string, unknown>) => {
+    const normalized = normalizeOpenCodeV1({ id: `classic-${++frame}`, type, properties: { sessionID: "c", timestamp: 1, ...properties } }, memory);
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+  };
+  const part = { id: "classic-text", messageID: "classic-message", sessionID: "c", type: "text", text: markdown };
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const applied = applyChatEvent(client, event);
+    expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+    client = applied.projection;
+  };
+  const answer = () => client.items.find(item => item.id === "part:classic-text") as AssistantMessageItem;
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    emit("message.part.updated", { part: { ...part, time: { start: 1 } } });
+    await deliveredBatch(h.replay, h.iterator, project);
+    expect(answer().visuals?.[0]?.status).toBe("pending");
+    expect(reads).toEqual([]);
+    const endedPart = { ...part, time: { start: 1, end: 3 } };
+    const native = emit("message.part.updated", { part: endedPart });
+    expect(native).toHaveLength(1); // Identical text must still publish the native part end.
+    const ended = await deliveredBatch(h.replay, h.iterator, project);
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toMatchObject({ type: "item.upsert", generation: native[0]!.generation, sequence: native[0]!.sequence, item: { id: "part:classic-text", markdown, visuals: [{ status: missing ? "pending" : "ready" }] } });
+    expect(answer()).not.toHaveProperty("completedAt");
+    expect((answer() as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(h.projection.status).toBe("running");
+    expect(reads).toEqual(["result.svg"]);
+    const beforeTool = answer().visuals;
+    if (!missing) expect(new TextDecoder().decode((await h.service.resolveVisual(beforeTool![0]!.id!))?.sourceBytes)).toBe(original);
+
+    emit("message.part.updated", { part: { id: "write-result", messageID: "tool-message", sessionID: "c", type: "tool", tool: "write", state: { status: "running", input: { filePath: "result.svg" }, time: { start: 4 } } } });
+    sourceText = replacement;
+    available = true;
+    emit("message.part.updated", { part: { id: "write-result", messageID: "tool-message", sessionID: "c", type: "tool", tool: "write", state: { status: "completed", input: { filePath: "result.svg" }, output: "Updated result.svg", time: { start: 4, end: 5 } } } });
+    await deliveredBatch(h.replay, h.iterator, project);
+    const duringTool = (await h.service.history("opencode:c")).items.find(item => item.id === "part:classic-text") as AssistantMessageItem;
+    expect(duringTool.visuals).toEqual(beforeTool);
+    expect(reads).toEqual(["result.svg"]); // Missing remains retryable, not retried at text end/history.
+    const terminal = emit("session.idle", {})[0]!;
+    const final = await deliveredBatch(h.replay, h.iterator, project);
+    expect(final[0]).toEqual({ ...terminal, conversationId: "opencode:c" });
+    expect(final).toHaveLength(missing ? 2 : 1);
+    if (missing) expect(final[1]).toMatchObject({ type: "resync", sequence: terminal.sequence });
+    const completed = (await h.service.history("opencode:c")).items.find(item => item.id === "part:classic-text") as AssistantMessageItem;
+    expect(completed.visuals?.[0]?.status).toBe("ready");
+    const captured = await h.service.resolveVisual(completed.visuals![0]!.id!);
+    const expected = new TextEncoder().encode(missing ? replacement : original);
+    expect(captured?.bytes).toEqual(expected);
+    expect(captured?.sourceBytes).toEqual(expected);
+    expect(reads).toHaveLength(missing ? 2 : 1);
+
+    // A fresh classic stored-message normalization must address the same slot;
+    // only the parent's genuine completion adds public completedAt metadata.
+    const stored = normalizeProviderMessage({ info: { id: "classic-message", role: "assistant", time: { created: 1, completed: 6 } }, parts: [endedPart] });
+    h.provider.history = async () => ({ ...h.current(), items: stored });
+    const store = new VisualStore("/workspace", h.directory);
+    store.setReader(async source => { reads.push(source); return new TextEncoder().encode("changed again"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reloaded = (await restarted.history("opencode:c")).items[0] as AssistantMessageItem;
+    expect(reloaded.completedAt).toBe(6);
+    expect(reloaded.markdown).toBe(markdown);
+    expect(reloaded.visuals).toEqual(completed.visuals);
+    expect(await restarted.resolveVisual(reloaded.visuals![0]!.id!)).toEqual(captured);
+    expect(reads).toHaveLength(missing ? 2 : 1);
+  } finally { clock.mockRestore(); await restarted?.dispose(); await h.cleanup(); }
+});
+
 test.each([
   { fence: "```", chunks: ["```"] },
   { fence: "```", chunks: ["`", "`", "`"] },
   { fence: "~~~", chunks: ["~~~"] },
   { fence: "~~~", chunks: ["~", "~", "~"] },
-])("a $fence SVG close flushes immediately inside the cadence, including split delimiters ($chunks)", async ({ fence, chunks }) => {
+])("a $fence SVG closing line flushes on its newline inside the cadence, including split delimiters ($chunks)", async ({ fence, chunks }) => {
   const h = await visualSubscriptionHarness("test");
   const clock = spyOn(Date, "now").mockReturnValue(1_000);
   let client = projectionFromSnapshot(h.subscription.snapshot);
@@ -1112,10 +1193,15 @@ test.each([
       h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text });
       last = await deliveredBatch(h.replay, h.iterator, project);
       expect(last).toHaveLength(1);
+      expect((client.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
     }
-    expect(last[0]).toMatchObject({ type: "item.upsert", item: { markdown: open.markdown + body + fence, contextKey: open.contextKey, model: open.model } });
+    expect((client.items[0] as AssistantMessageItem).markdown).toBe(open.markdown + body + fence);
+    const lineEnd = h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: "\n" })!;
+    last = await deliveredBatch(h.replay, h.iterator, project);
+    expect(last).toHaveLength(1);
+    expect(last[0]).toMatchObject({ type: "item.upsert", generation: lineEnd.generation, sequence: lineEnd.sequence, item: { markdown: open.markdown + body + fence + "\n", contextKey: open.contextKey, model: open.model } });
     const displayed = client.items[0] as AssistantMessageItem;
-    expect(displayed.markdown).toBe(open.markdown + body + fence);
+    expect(displayed.markdown).toBe(open.markdown + body + fence + "\n");
     expect(displayed.visuals?.[0]?.status).toBe("ready");
     expect(outcomes).not.toContain("duplicate");
     expect(h.projection.status).toBe("running"); // No tool, footer, status or elapsed cadence needed.

@@ -103,6 +103,35 @@ test("history remains readable if permanent admission cannot be persisted, and r
 });
 
 describe("immutable visual snapshots", () => {
+  test.each(["```", "~~~"].flatMap(marker => ["newline", "completion"].map(boundary => ({ marker, boundary }))))("SVG text containing $marker labels never persists an EOF-prefix refusal before $boundary", async ({ marker, boundary }) => {
+    const store = new VisualStore("/workspace", directory);
+    const capture = (markdown: string, streaming: boolean, target = store) => target.captureMany("a:c", "svg-label", getChatVisuals(markdown, streaming).map(input => ({ messageId: "part:svg-label", input })), streaming);
+    const prefix = `${marker}svg\n<svg xmlns="http://www.w3.org/2000/svg"><text>\n${marker}`;
+    const continued = prefix + "label\n</text></svg>\n";
+    const eofClose = continued + marker + " \t";
+    const key = getChatVisuals(prefix, true)[0]!.key;
+    for (const markdown of [prefix, continued, eofClose]) {
+      expect(getChatVisuals(markdown, true)[0]).toMatchObject({ key, complete: false });
+      expect((await capture(markdown, true))[0]).toMatchObject({ status: "pending" });
+      // Slots are permanent, but a provisional parser interpretation must
+      // bind neither a canonical record nor retained/truncated SVG source.
+      expect((await fs.readdir(store.directory)).filter(name => /^[a-f\d]{64}(?:\.pending)?\.json$|\.(?:metadata\.json|preview\.bin|source\.bin)$/.test(name))).toEqual([]);
+    }
+    expect((await fs.readdir(store.directory)).filter(name => name.includes(".slot-"))).toHaveLength(1);
+    const markdown = eofClose + (boundary === "newline" ? "\n" : "");
+    const ready = await capture(markdown, boundary === "newline");
+    expect(ready[0]).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+    const expected = `<svg xmlns="http://www.w3.org/2000/svg"><text>\n${marker}label\n</text></svg>\n`;
+    const stored = await store.resolve(ready[0]!.id!);
+    expect(new TextDecoder().decode(stored?.sourceBytes)).toBe(expected);
+    expect(new TextDecoder().decode(stored?.bytes)).toBe(expected);
+    const canonical = path.join(store.directory, `${ready[0]!.id}.json`);
+    const original = await fs.readFile(canonical, "utf8");
+    const restarted = new VisualStore("/workspace", directory);
+    expect(await capture(markdown, false, restarted)).toEqual(ready);
+    expect(await restarted.resolve(ready[0]!.id!)).toEqual(stored);
+    expect(await fs.readFile(canonical, "utf8")).toBe(original);
+  });
   test.each([false, true])("a provisional shortcut binds neither old bytes nor a missing-file hash before becoming inline (old missing=%s)", async missing => {
     const store = new VisualStore("/workspace", directory);
     const reads: string[] = [];
@@ -1431,7 +1460,7 @@ test("split image syntax and whitespace-separated SVG fences deliver metadata on
   await delta("~~~");
   await delta(" svg\n");
   await delta("<svg><rect width=\"1\"/></svg>\n");
-  const fence = await delta("~~~");
+  const fence = await delta("~~~\n");
   expect(fence.type).toBe("item.upsert");
   if (fence.type !== "item.upsert" || fence.item.type !== "assistant_message") throw new Error("expected completed SVG");
   expect(fence.item.visuals?.[0]?.status).toBe("ready");

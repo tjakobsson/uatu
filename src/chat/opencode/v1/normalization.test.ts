@@ -36,6 +36,43 @@ test("native and classic text events plus both history shapes retain the parent 
 });
 
 describe("OpenCode provider completion timestamps", () => {
+  test("validated classic text-part ends flush unchanged text without sealing the parent", () => {
+    for (const end of [0, 30]) {
+      const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+      const memory = createProviderEventMemory();
+      const part = { id: "p", messageID: "m", sessionID: "s", type: "text", text: "![shot][ref]\n\n[ref]: result.png" };
+      const emit = (time: Record<string, unknown>) => normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 10, part: { ...part, time } } }, memory).updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+      emit({ start: 10 });
+      const ended = emit({ end });
+      expect(ended).toHaveLength(1);
+      expect(ended[0]).toMatchObject({ type: "item.upsert", item: { id: "part:p", createdAt: 10, markdown: part.text } });
+      const item = projection.items()[0]!;
+      expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+      expect(item).not.toHaveProperty("completedAt");
+      expect(visualAdmissionIdentity(item)).toBe("opencode:message:m");
+      const json = JSON.parse(JSON.stringify(item));
+      expect(Object.keys(json).sort()).toEqual(["createdAt", "id", "markdown", "type"]);
+      expect(parseConversationItem(json)).toEqual(json);
+      for (const completed of [undefined, 40]) {
+        const [stored] = normalizeProviderMessage({ info: { id: "m", role: "assistant", time: { created: 10, ...(completed === undefined ? {} : { completed }) } }, parts: [{ ...part, time: { end } }] });
+        expect(stored?.type).toBe("assistant_message");
+        expect((stored as typeof stored & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+        if (completed === undefined) expect(stored).not.toHaveProperty("completedAt");
+        else expect(stored).toHaveProperty("completedAt", completed);
+      }
+    }
+  });
+  test("invalid classic text-part end values are not authoritative syntax boundaries", () => {
+    for (const end of [undefined, null, -1, NaN, Infinity, -Infinity, "30", {}]) {
+      const normalized = normalizeProviderEvent({ type: "message.part.updated", properties: { sessionID: "s", timestamp: 10, part: { id: "p", messageID: "m", type: "text", text: "reference", time: { end } } } });
+      expect(normalized.updates).toHaveLength(1);
+      const update = normalized.updates[0]!;
+      expect(update).toMatchObject({ kind: "text", mode: "cumulative", text: "reference" });
+      if (update.kind !== "text" || !update.item) throw new Error("expected provisional cumulative text");
+      expect((update.item as typeof update.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBeUndefined();
+      expect(update.item).not.toHaveProperty("completedAt");
+    }
+  });
   test("an unchanged native text end publishes one syntax-boundary upsert without parent completion or a moved start time", () => {
     const memory = createProviderEventMemory();
     const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));

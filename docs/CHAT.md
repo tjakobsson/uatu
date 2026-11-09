@@ -952,7 +952,9 @@ retained visual controls. Valid XML comments remain inert in previews; malformed
 comments cannot repair otherwise invalid SVG markup.
 
 Visuals appear during streaming. An unfinished SVG fence shows
-“Generating image…” until its closing fence arrives. Images fit the message
+"Generating image…" until its closing-fence line ends or native text completion
+confirms it. An apparent closing fence at the current streamed text end can
+still become ordinary SVG text in the next update. Images fit the message
 width without cropping; tall diagrams scroll with the conversation. Select
 an image to open the full-size viewer.
 

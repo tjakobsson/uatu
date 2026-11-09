@@ -483,7 +483,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         return false;
       };
       return completes(/(?:`{3,}|~{3,})[ \t]*svg\b/gi)
-        || (Boolean(previous.visuals?.some(visual => visual.status === "pending")) && completes(/`{3}|~{3}/g))
+        || (Boolean(previous.visuals?.some(visual => visual.status === "pending"))
+          && (completes(/`{3}|~{3}/g) || completes(/(?:`{3,}|~{3,})[ \t]*(?:\r\n|\r|\n)/g)))
         || closesImageCandidate()
         || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[^\n]*\r?\n/g)
         || completes(/<(?:img|image)\b[^>]*>/gi);

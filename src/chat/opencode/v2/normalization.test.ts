@@ -79,6 +79,17 @@ test("text phases, content restatement and stored messages supply the same non-w
   }
 });
 
+test("classic part-end handling leaves v2 historical parent-completion semantics unchanged", () => {
+  for (const completed of [undefined, 40]) {
+    const [item] = normalizeStoredMessage({ id: "m", type: "assistant", time: { created: 10, ...(completed === undefined ? {} : { completed }) }, content: [{ type: "text", text: "![shot][ref]\n\n[ref]: result.png", time: { start: 11, end: 20 } }] });
+    expect(item?.type).toBe("assistant_message");
+    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBeUndefined();
+    if (completed === undefined) expect(item).not.toHaveProperty("completedAt");
+    else expect(item).toHaveProperty("completedAt", completed);
+    expect(parseConversationItem(JSON.parse(JSON.stringify(item)))).toMatchObject({ id: "part:m:text:0", type: "assistant_message" });
+  }
+});
+
 function run(events: Array<Record<string, unknown>>, memory: OpenCodeV2Memory = createOpenCodeV2Memory()) {
   const normalize = createOpenCodeV2Normalizer(WORKSPACE);
   const normalized = events.map(event => normalize(event, memory));

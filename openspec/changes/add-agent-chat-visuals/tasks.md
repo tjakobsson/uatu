@@ -91,6 +91,8 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.22 Fix browser leg 1's four side-reader SVG code-copy failures: the dialog header intercepts normal pointer clicks on the copy button. Preserve visible source, exact clipboard content, inert image references and real desktop/mobile Chromium/WebKit pointer coverage.
 - [ ] 6.23 Address Codex on `93acd2e3`: freeze snapshot text and visual-liveness decisions at one boundary before asynchronous capture; native Claude completion during an earlier capture must not terminalize a later row's old unfinished prefix. Preserve authoritative historical completion and ordered live-frame behavior.
 - [ ] 6.24 Address Codex on `197c9bc3`: native Claude text-block completion must disambiguate Markdown syntax immediately, independently of turn completion, so an existing reference image is captured before later tools can change it. A genuinely missing file still retains its turn-completion retry.
+- [ ] 6.25 Address Codex on `d552238f`: classic OpenCode `message.part.updated` text-part end must provide the same syntax-only boundary as the newer native text-ended event, without implying parent-message completion or consuming a missing-file turn retry.
+- [ ] 6.26 Keep a possible SVG closing fence at the current text end provisional until its line terminates or authoritative text completion confirms it. A later label continuation inside valid SVG must not turn an earlier prefix into an immutable refusal; preserve shared parsing caches and exact final bytes.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

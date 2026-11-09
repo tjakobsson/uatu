@@ -6,7 +6,7 @@ import { getChatVisuals, prepareChatVisualMarkdown } from "./visual-markdown";
 
 describe("agent visual Markdown", () => {
   test("completed and streaming calls share one cached parse for identical source", () => {
-    const source = '![Cached](same-cache.png)\n\n```svg\n<svg/>\n```';
+    const source = '![Cached](same-cache.png)\n\n```svg\n<svg/>\n```\n';
     expect(prepareChatVisualMarkdown(source, false)).toBe(prepareChatVisualMarkdown(source, true));
     const reference = "![Cached][ref]\n\n[ref]: same-cache.png";
     const live = prepareChatVisualMarkdown(reference, true);
@@ -15,6 +15,33 @@ describe("agent visual Markdown", () => {
     expect(done.visuals[0]?.complete).toBe(true);
     expect(done.html).toBe(live.html);
     expect(prepareChatVisualMarkdown(reference, true)).toBe(live);
+  });
+  test.each(["```", "~~~"].flatMap(marker => ["", " \t"].map(whitespace => ({ marker, whitespace }))))("EOF $marker$whitespace closes only on text completion using one cached parse", ({ marker, whitespace }) => {
+    const source = `${marker}svg\n<svg><text>cached EOF readiness</text></svg>\n${marker}${whitespace}`;
+    const previous = globalThis.__uatuChatPerformance;
+    const measurements = { counts: {}, durations: {} } as NonNullable<typeof previous>;
+    globalThis.__uatuChatPerformance = measurements;
+    try {
+      const live = prepareChatVisualMarkdown(source, true);
+      expect(live.visuals[0]).toMatchObject({ kind: "svg", complete: false, key: "offset:0" });
+      const done = prepareChatVisualMarkdown(source, false);
+      expect(done.visuals[0]).toEqual({ ...live.visuals[0]!, complete: true });
+      expect(done.html).toBe(live.html);
+      expect(prepareChatVisualMarkdown(source, true)).toBe(live);
+      expect(measurements.counts.markdown).toBe(1);
+    } finally { globalThis.__uatuChatPerformance = previous; }
+    for (const ending of ["\n", "\r\n", "\r"]) expect(getChatVisuals(source + ending, true)[0]?.complete).toBe(true);
+    expect(getChatVisuals(`${marker}svg\n<svg/>`, false)[0]?.complete).toBe(false);
+  });
+  test.each(["```", "~~~"])("an EOF %s inside SVG text stays provisional when the line grows a label", marker => {
+    const prefix = `${marker}svg\n<svg xmlns="http://www.w3.org/2000/svg"><text>\n${marker}`;
+    const continued = prefix + "label\n</text></svg>\n";
+    const candidate = getChatVisuals(prefix, true)[0]!;
+    expect(candidate).toMatchObject({ complete: false, key: "offset:0" });
+    expect(getChatVisuals(continued, true)[0]).toMatchObject({ complete: false, key: candidate.key });
+    const closed = getChatVisuals(continued + marker + "\n", true)[0]!;
+    expect(closed).toMatchObject({ complete: true, key: candidate.key });
+    expect(closed.source).toBe(`<svg xmlns="http://www.w3.org/2000/svg"><text>\n${marker}label\n</text></svg>\n`);
   });
   test.each(["![shot][ref]", "![ref][]", "![ref]"])("streamed reference destinations stay provisional until their line ends: %s", image => {
     const prefix = `${image}\n\n[ref]: a.p`;
@@ -68,12 +95,15 @@ describe("agent visual Markdown", () => {
       import { mock } from "bun:test";
       const original = await import(${JSON.stringify(markdownUrl)});
       mock.module(${JSON.stringify(markdownUrl)}, () => ({ ...original, highlightCodeBlocks() { throw new Error("presentation-only"); } }));
-      const { getChatVisuals, prepareChatVisualMarkdown } = await import(${JSON.stringify(visualUrl)});
-      const source = await Bun.stdin.text();
-      for (const streaming of [true, false]) {
-        const visuals = getChatVisuals(source, streaming);
-        if (visuals.length !== 2 || visuals[0].source !== "result.png" || visuals[1].source !== "<svg/>\\n") process.exit(1);
-      }
+       const { getChatVisuals, prepareChatVisualMarkdown } = await import(${JSON.stringify(visualUrl)});
+       const source = await Bun.stdin.text();
+       globalThis.__uatuChatPerformance = { counts: {}, durations: {} };
+       for (const streaming of [true, false]) {
+         const visuals = getChatVisuals(source, streaming);
+         if (visuals.length !== 2 || visuals[0].source !== "result.png" || visuals[1].source !== "<svg/>\\n") process.exit(1);
+         if (visuals[1].complete !== !streaming) process.exit(1);
+       }
+       if (globalThis.__uatuChatPerformance.counts.markdown !== 1) process.exit(1);
       try { prepareChatVisualMarkdown(source, false); process.exit(1); }
       catch (error) { if (error.message !== "presentation-only") throw error; }
       console.log("capture-only");
@@ -112,7 +142,9 @@ describe("agent visual Markdown", () => {
       expect(getChatVisuals(source, true)[0]?.complete).toBe(false);
     }
     for (const source of ["```svg\n<svg/>\n```", "~~~svg\n<svg/>\n~~~", "> ```svg\n> <svg/>\n> ```", "- ```svg\n  <svg/>\n  ```"]) {
-      expect(getChatVisuals(source, true)[0]?.complete).toBe(true);
+      expect(getChatVisuals(source, true)[0]?.complete).toBe(false);
+      expect(getChatVisuals(source, false)[0]?.complete).toBe(true);
+      expect(getChatVisuals(source + "\n", true)[0]?.complete).toBe(true);
     }
   });
 

@@ -50,7 +50,9 @@ test.describe("agent inline visuals", () => {
       const visual = page.locator("#chat-items .chat-visual");
       await expect(visual).toContainText("Generating image…");
       await expect(visual.locator("img")).toHaveCount(0);
-      const markdown = `Here is the architecture.\n\n\`\`\`svg\n${SVG}\`\`\``;
+       // A possible closing fence at EOF can still become a label line.
+       // Terminate it before expecting a streaming capture.
+       const markdown = `Here is the architecture.\n\n\`\`\`svg\n${SVG}\`\`\`\n`;
       await publish(request, conversationId, id, markdown);
       const image = visual.locator("img");
       await expect(image).toHaveCount(1);
@@ -171,7 +173,7 @@ test.describe("agent inline visuals", () => {
         await publish(request, conversationId, imageId, `${markdown}\n\n\`\`\`svg\n${SVG}`);
         await expect(page.locator(`[data-chat-item-id="${imageId}"]`)).toContainText("Generating image…");
         await stableAnchor();
-        await publish(request, conversationId, imageId, `${markdown}\n\n\`\`\`svg\n${SVG}\`\`\``);
+        await publish(request, conversationId, imageId, `${markdown}\n\n\`\`\`svg\n${SVG}\`\`\`\n`);
         const streamed = page.locator(`[data-chat-item-id="${imageId}"] img`).nth(1);
         // An offscreen lazy image need not load. Request its actual decode
         // explicitly so this phase tests intrinsic layout rather than timing.
@@ -374,7 +376,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     try {
       const conversationId = await boot(page, request);
       await control(request, { action: "status", conversationId, status: "running" });
-      const markdown = `\`\`\`svg\n${SVG}\`\`\``;
+      const markdown = `\`\`\`svg\n${SVG}\`\`\`\n`;
       await publish(request, conversationId, "focused-visual", markdown);
       const row = page.locator('[data-chat-item-id="focused-visual"]');
       const visual = row.locator(".chat-visual");

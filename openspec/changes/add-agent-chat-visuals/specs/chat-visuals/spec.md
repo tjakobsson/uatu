@@ -234,6 +234,11 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **THEN** its terminated reference definition can be captured without waiting for turn completion
 - **AND** a shortcut interpretation at the current text end remains provisional while a later delta can still supply an inline destination
 
+#### Scenario: A streamed SVG contains a fence-like label line
+- **WHEN** a delta ends at an apparent SVG closing fence and a later delta adds label text on that same line
+- **THEN** the prefix remains provisional rather than creating an immutable refusal
+- **AND** a terminated closing-fence line or authoritative native text completion permits capture of the final exact SVG source
+
 ### Requirement: Managed agents receive scoped presentation guidance
 Managed Claude Code and OpenCode sessions SHALL attempt to add native presentation
 guidance describing supported embeds, limits, immutable capture, and resource

@@ -12,7 +12,7 @@ import type { ChatVisualInput } from "./visual-types";
 
 type HtmlNode = ReturnType<typeof fromHtml>["children"][number];
 type MarkdownEvent = ReturnType<typeof postprocess>[number];
-type Origin = { offset: number; complete?: boolean; svg?: { source: string; complete: boolean } };
+type Origin = { offset: number; complete?: boolean; svg?: { source: string; complete: boolean; provisional?: boolean } };
 declare module "micromark-util-types" {
   interface TokenTypeMap { chatVisualOrigin: "chatVisualOrigin" }
 }
@@ -21,7 +21,8 @@ declare module "hast" {
 }
 
 type Prepared = { html: string; visuals: ChatVisualInput[] };
-const cache = new Map<string, Prepared>();
+type CachedPrepared = { prepared: Prepared; provisionalSvgClosures: ReadonlySet<number> };
+const cache = new Map<string, CachedPrepared>();
 const BYTE_LIMIT = 4 * 1024 * 1024;
 let retainedBytes = 0;
 
@@ -33,7 +34,7 @@ export function prepareChatVisualMarkdown(source: string, streaming: boolean): P
 function prepareVisualMarkdown(source: string, streaming: boolean, presentation: boolean): Prepared {
   const key = `${presentation ? "p" : "v"}${source}`;
   const previous = cache.get(key);
-  let result: Prepared;
+  let result: CachedPrepared;
   if (previous) {
     cache.delete(key); cache.set(key, previous); result = previous;
   } else {
@@ -42,12 +43,15 @@ function prepareVisualMarkdown(source: string, streaming: boolean, presentation:
     finally { finish(); }
   }
   // Parsing/presentation are shared across modes. Text completion only makes
-  // provisional reference interpretations/definition lines capture-eligible.
-  if (streaming || !result.visuals.some(input => input.kind === "file" && !input.complete)) return result;
-  return { html: result.html, visuals: result.visuals.map(input => input.kind === "file" && !input.complete ? { ...input, complete: true } : input) };
+  // provisional references and EOF closing-fence candidates capture-eligible.
+  // An SVG with no closing candidate remains incomplete in either view.
+  const { prepared, provisionalSvgClosures } = result;
+  const promote = (input: ChatVisualInput) => !input.complete && (input.kind === "file" || provisionalSvgClosures.has(input.index));
+  if (streaming || !prepared.visuals.some(promote)) return prepared;
+  return { html: prepared.html, visuals: prepared.visuals.map(input => promote(input) ? { ...input, complete: true } : input) };
 }
 
-function prepareUncached(source: string, key: string, presentation: boolean): Prepared {
+function prepareUncached(source: string, key: string, presentation: boolean): CachedPrepared {
   // Extract SVG before syntax highlighting: source text is not HTML, and
   // must never be reconstructed by decoding highlighted markup.
   const { html, attribute, origins } = visualSyntax(source);
@@ -74,6 +78,7 @@ function prepareUncached(source: string, key: string, presentation: boolean): Pr
   const tree = sanitize(unsafe, markdownSanitizeSchema);
   if (presentation) markExternalAnchors(tree);
   const visuals: ChatVisualInput[] = [];
+  const provisionalSvgClosures = new Set<number>();
   const visit = (parent: { children: HtmlNode[] }) => {
     parent.children = parent.children.map(node => {
       if (node.type !== "element") return node;
@@ -112,6 +117,7 @@ function prepareUncached(source: string, key: string, presentation: boolean): Pr
       }
       const index = visuals.length;
       visuals.push({ ...input, index });
+      if (origin?.svg?.provisional) provisionalSvgClosures.add(index);
       // Replace every img before HTML reaches a DOM. Even a failed or not-yet
       // captured reference must never trigger a request to the original URL.
       return { type: "element", tagName: "span", properties: { "data-uatu-visual": String(index) }, children: [] };
@@ -125,12 +131,12 @@ function prepareUncached(source: string, key: string, presentation: boolean): Pr
     while (cache.size >= 128 || retainedBytes + bytes > BYTE_LIMIT) {
       const [oldKey, old] = cache.entries().next().value!;
       cache.delete(oldKey);
-      retainedBytes -= 2 * (oldKey.length + old.html.length + old.visuals.reduce((n, visual) => n + visual.source.length + visual.alt.length, 0));
+      retainedBytes -= 2 * (oldKey.length + old.prepared.html.length + old.prepared.visuals.reduce((n, visual) => n + visual.source.length + visual.alt.length, 0));
     }
-    cache.set(key, result);
+    cache.set(key, { prepared: result, provisionalSvgClosures });
     retainedBytes += bytes;
   }
-  return result;
+  return { prepared: result, provisionalSvgClosures };
 }
 
 export function getChatVisuals(source: string, streaming: boolean): ChatVisualInput[] {
@@ -171,7 +177,7 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
   const media: MarkdownEvent[1][] = [];
   let unfinishedDefinition = false;
   let imageDepth = 0;
-  let block: { svg: boolean; fences: number; parts: string[]; firstEnding: boolean; offset: number } | undefined;
+  let block: { svg: boolean; fences: number; parts: string[]; firstEnding: boolean; offset: number; closingEnd?: number } | undefined;
   for (const [event, token, context] of events) {
     if (token.type === "image" || token.type === "link") {
       if (event === "enter") media.push(token);
@@ -193,6 +199,7 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
     if (event === "enter" && token.type === "codeFenced") block = { svg: false, fences: 0, parts: [], firstEnding: true, offset: token.start.offset! };
     if (!block) continue;
     if (event === "enter" && token.type === "codeFencedFence") block.fences += 1;
+    if (event === "exit" && token.type === "codeFencedFenceSequence" && block.fences === 2) block.closingEnd = token.end.offset;
     if (event === "exit" && token.type === "codeFencedFenceInfo") {
       block.svg = source.slice(token.start.offset, token.end.offset).toLowerCase() === "svg";
     }
@@ -204,7 +211,13 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
       }
     }
     if (event === "exit" && token.type === "codeFenced") {
-      fenceOrigins.set(wrappers.get(token)!, { offset: block.offset, ...(block.svg ? { svg: { source: block.parts.join(""), complete: block.fences === 2 } } : {}) });
+      // At EOF a fence marker plus optional whitespace can still grow into
+      // ordinary source (e.g. ```label inside SVG text). Its line ending or
+      // authoritative text completion, not this transient parse, seals it.
+      const provisional = block.closingEnd !== undefined && /^[\t ]*$/.test(source.slice(block.closingEnd));
+      fenceOrigins.set(wrappers.get(token)!, { offset: block.offset, ...(block.svg ? { svg: {
+        source: block.parts.join(""), complete: block.fences === 2 && !provisional, ...(provisional ? { provisional: true } : {}),
+      } } : {}) });
       block = undefined;
     }
   }

@@ -704,7 +704,12 @@ export const IGNORED_PARTS: ReadonlySet<string> = new Set(["step-start", "step-f
 export function normalizePart(part: RecordValue, createdAt: number, skipped?: string[], messageId?: string): NormalizedProviderUpdate[] {
   const id = string(part.id, "part id");
   if (part.type === "text") {
-    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId ?? optionalString(part.messageID)) };
+    const ended = completionTime(record(part.time).end).completedAt !== undefined;
+    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId ?? optionalString(part.messageID)), ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
+    // Classic part completion is a genuine syntax boundary, even when its
+    // cumulative text is unchanged. It is not parent-message completion:
+    // keep missing-file captures live until the ordered turn/message end.
+    if (ended) return [{ kind: "upsert", item }];
     return [{ kind: "text", itemId: item.id, identity: id, mode: "cumulative", text: text(part.text), item }];
   }
   if (part.type === "reasoning") {
