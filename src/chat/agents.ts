@@ -420,12 +420,51 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         }
         return false;
       };
+      const closesImageCandidate = () => {
+        if (!added.includes("![")) return false;
+        // This is a bounded candidate trigger, not another Markdown parser.
+        // Balance delimiters and skip escapes/quoted or angle destinations so
+        // an inner ']' or ')' cannot hide the eventual outer close. Validity,
+        // code contexts and reference resolution still belong to the parser.
+        let state: "label" | "after-label" | "reference" | "destination" | undefined;
+        let depth = 0;
+        let angle = false;
+        let quote = "";
+        for (let index = 0; index < added.length; index++) {
+          const char = added[index]!;
+          if (char === "\\") { index++; continue; }
+          if (state === undefined) {
+            if (char === "!" && added[index + 1] === "[") { state = "label"; depth = 1; index++; }
+          } else if (state === "label" || state === "reference") {
+            if (char === "[") depth++;
+            if (char === "]" && --depth === 0) {
+              if (index >= suffix.length) return true; // Includes shorthand.
+              state = state === "label" ? "after-label" : undefined;
+            }
+          } else if (state === "after-label") {
+            if (char === "(" || char === "[") {
+              state = char === "(" ? "destination" : "reference";
+              depth = 1;
+              angle = false;
+              quote = "";
+            } else { state = undefined; index--; }
+          } else {
+            if (angle) { if (char === ">") angle = false; continue; }
+            if (quote) { if (char === quote) quote = ""; continue; }
+            if (char === "<") { angle = true; continue; }
+            if ((char === '"' || char === "'") && /\s/.test(added[index - 1] ?? "")) { quote = char; continue; }
+            if (char === "(") depth++;
+            if (char === ")" && --depth === 0) {
+              if (index >= suffix.length) return true;
+              state = undefined;
+            }
+          }
+        }
+        return false;
+      };
       return completes(/(?:`{3,}|~{3,})[ \t]*svg\b/gi)
         || (Boolean(previous.visuals?.some(visual => visual.status === "pending")) && completes(/`{3}|~{3}/g))
-        // A closed label also completes shorthand images when a preceding
-        // reference definition exists. Parsing decides whether it resolves;
-        // this bounded trigger deliberately admits false positives.
-        || completes(/!\[[^\]\n]*\](?:\([^\)\n]*\)|\[[^\]\n]*\])?/g)
+        || closesImageCandidate()
         || completes(/(?:^|\n)[ \t]{0,3}\[[^\]\n]+\]:[^\n]*\r?\n/g)
         || completes(/<(?:img|image)\b[^>]*>/gi);
     };

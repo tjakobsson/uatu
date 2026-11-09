@@ -81,6 +81,7 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.12 Correct GitHub-evidenced test fixtures without relaxing behavior: consume preserved status events before visual resyncs; distinguish missing-record probes from large canonical reads; supply pending admission metadata for generating SVG; leave a moving window slot beside pinned files and give the watcher integration an outer deadline longer than its bounded waits. Renew all checks on the resulting head.
 - [ ] 6.13 Address Codex findings on `b685e77f`: bind resolved visual reads to the canonical symlink-checked candidate and enroll pending visuals paged in after subscription for the actual turn's completion flush. Correct the remaining exact Claude streaming expectation for its internal turn token, retaining block identity and text assertions.
 - [ ] 6.14 Correct GitHub-evidenced failures on `02cd1a87`: drain queued subscription events on natural source completion while retaining immediate cancellation/cleanup, and await observed watcher writes and eviction patches rather than fixed sleeps or an unrelated upsert. Keep all original qualification, pinning and eviction assertions.
+- [ ] 6.15 Address the late Codex finding from `02cd1a87`: nested image labels must trigger completion enrichment within the cadence, without waiting for later text or turn completion and without unbounded per-token parsing.
 
 ## Historical checkpoint evidence (current status is tracked above)
 

@@ -567,6 +567,60 @@ test("a shorthand image completed inside the cadence enriches the same native ev
 });
 
 test.each([
+  { markdown: "![chart [detail]](result.png)", source: "result.png" },
+  { markdown: "![chart \\[detail\\]](result.png)", source: "result.png" },
+  { markdown: "![chart [detail]](result(v1).png)", source: "result(v1).png" },
+  { markdown: "![chart \\] [detail]](result\\).png)", source: "result).png" },
+  { markdown: "![chart [detail]](<result(v1.png>)", source: "result(v1.png" },
+  { markdown: '![chart [detail]](result.png "caption ) [detail]")', source: "result.png" },
+])("native OpenCode captures $markdown on its split outer close before an unchanged text end and paused tool", async ({ markdown, source }) => {
+  const h = await visualSubscriptionHarness("opencode");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const memory = createOpenCodeV2Memory();
+  const normalize = createOpenCodeV2Normalizer("/workspace");
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  h.store.setReader(async requested => { expect(requested).toBe(source); h.files.reads++; return png; });
+  let nativeSequence = 0;
+  const emit = (type: string, content: Record<string, unknown>) => {
+    const normalized = normalize({ id: `native-${++nativeSequence}`, type, created: 1, location: { directory: "/workspace" }, data: { sessionID: "c", assistantMessageID: "native-answer", ordinal: 0, ...content } }, memory);
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+  };
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const applied = applyChatEvent(client, event);
+    expect(applied.outcome).toBe("applied");
+    client = applied.projection;
+  };
+  const answer = () => client.items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+  try {
+    emit("session.text.started", { text: "" });
+    await deliveredBatch(h.replay, h.iterator, project);
+    emit("session.text.delta", { delta: markdown.slice(0, -2) });
+    await deliveredBatch(h.replay, h.iterator, project);
+    expect(h.files.reads).toBe(0);
+    const native = emit("session.text.delta", { delta: markdown.slice(-2) });
+    expect(native).toHaveLength(1);
+    const completed = await deliveredBatch(h.replay, h.iterator, project);
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ generation: native[0]!.generation, sequence: native[0]!.sequence, type: "item.upsert", item: { markdown, visuals: [{ status: "ready" }] } });
+    expect(answer().markdown).toBe(markdown);
+    expect(answer().visuals?.[0]?.status).toBe("ready");
+    expect(h.files.reads).toBe(1); // Capture happened before any text-end/tool event.
+    expect((await h.service.resolveVisual(answer().visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(emit("session.text.ended", { text: markdown })).toEqual([]);
+    h.projection.upsert({ id: "long-tool", type: "tool", createdAt: 2, name: "Bash", status: "running", input: "long-running work" });
+    const paused = await deliveredBatch(h.replay, h.iterator, project);
+    expect(paused).toHaveLength(1);
+    expect(paused[0]).toMatchObject({ type: "item.upsert", item: { id: "long-tool", type: "tool", status: "running" } });
+    expect(answer().markdown).toBe(markdown);
+    expect(answer().visuals?.[0]?.status).toBe("ready");
+    expect(h.projection.status).toBe("running");
+    expect(h.files.reads).toBe(1); // No elapsed cadence or terminal flush was needed.
+  } finally { clock.mockRestore(); await h.cleanup(); }
+});
+
+test.each([
   { fence: "```", chunks: ["```"] },
   { fence: "```", chunks: ["`", "`", "`"] },
   { fence: "~~~", chunks: ["~~~"] },
@@ -625,10 +679,13 @@ test("ordinary streamed code tokens have bounded enrichment/store work and an ex
     expect(result.outcome).toBe(event.type === "resync" ? "resync" : "applied");
     client = result.projection;
   };
+  // Nested delimiters, quotes and escapes after an already-closed image must
+  // remain ordinary code, not keep an image-completion candidate alive.
+  const codeLine = (index: number) => `${index}(["[detail]", "escaped\\]", "(nested)"]);\n`;
   try {
     for (let index = 0; index < 1_000; index++) {
       now++;
-      const original = h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: `${index}();\n` });
+      const original = h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: codeLine(index) });
       if (!original || original.type !== "item.text_delta") throw new Error("expected native delta");
       originals.push(original);
       received.push(...await deliveredBatch(h.replay, h.iterator, project));
@@ -647,7 +704,7 @@ test("ordinary streamed code tokens have bounded enrichment/store work and an ex
     expect(captures.mock.calls.length).toBeLessThanOrEqual(12);
     expect(h.files.reads).toBe(4); // Each missing image once, then both files at completion.
     const completed = (await h.service.history("test:c")).items[0] as AssistantMessageItem;
-    expect(completed.markdown).toBe(`${prefix}${Array.from({ length: 1_000 }, (_, index) => `${index}();\n`).join("")}${tail}`);
+    expect(completed.markdown).toBe(`${prefix}${Array.from({ length: 1_000 }, (_, index) => codeLine(index)).join("")}${tail}`);
     expect(completed.visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
   } finally { enrichments.mockRestore(); captures.mockRestore(); clock.mockRestore(); await h.cleanup(); }
 });
