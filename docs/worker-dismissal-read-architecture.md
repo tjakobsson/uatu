@@ -21,6 +21,12 @@ margin. The former ten-second Hub deadline incorrectly rejected otherwise valid
 reads before the child's budget expired. This alignment does not bypass evidence
 validation or retry conditional mutations.
 
+Covered reads do not require a quiet child: later assistant output leaves an
+unchanged historical idle outcome usable. Changes to consumed idle records,
+execution boundaries, removals and reverts still fence publication. A fresh
+scoped child record that reveals a changed revert boundary revokes the earlier
+outcome source even before the corresponding native event arrives.
+
 ## Browser consistency and recovery
 
 Requests and responses use `no-store`; the browser keeps only an in-memory

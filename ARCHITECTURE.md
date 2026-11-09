@@ -1189,10 +1189,14 @@ outcome evidence; clearing it restores eligibility, while committing removes it.
 Complete stored idle boundaries still supply conservative admission/control
 vetoes, and unavailable ownership or visibility withholds inference. Retained
 source leases carry that dependency through final publication:
-processed native child transcript changes, removals and reverts revoke dependent
-results even after the inventory transport retires. Unrelated conversations do
-not revoke those sources; consumed execution-event replays do not represent new
-transcript mutations. Boundary-only folds release their outcome dependency so
+processed changes to consumed idle records, new execution boundaries, removals
+and reverts revoke dependent results even after the inventory transport retires.
+Fresh scoped session records also revoke an outcome view when they reveal a
+different child revert boundary, without waiting for SSE. Append-only assistant
+output does not change the historical outcome or its interval and requires no
+quiet window for parent recovery. Unrelated conversations do not revoke those
+sources; consumed execution-event replays do not represent new transcript
+mutations. Boundary-only folds release their outcome dependency so
 compatible live activity and accounting can advance; other folds' positive
 outcome dependencies remain retained. Dependencies retire with their owning leases. Existing
 ownership, stream-generation and Stop fences remain required.

@@ -60,7 +60,7 @@ type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; o
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[] };
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, string | null>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[] };
 
 export function createOpenCodeV2Provider(options: {
   endpoint: string;
@@ -535,6 +535,15 @@ export class OpenCodeV2Provider implements ChatProvider {
             dependencies.set(child, (dependencies.get(child) ?? 0) + 1);
           }
           const complete = await this.allMessages(child, signal);
+          for (const source of historySources) {
+            const outcomes = (source.historyOutcomeMessages ??= new Map()).get(child) ?? new Set<string>();
+            for (const message of complete) if (message.type === "idle") outcomes.add(messageIdentity(message));
+            source.historyOutcomeMessages.set(child, outcomes);
+            // A content snapshot may have arrived while the paginated history
+            // was in flight. Only changes to consumed interval/outcome records
+            // revoke this source; later assistant output needs no quiet window.
+            if ([...(source.historyMessageChanges?.get(child) ?? [])].some(id => outcomes.has(id))) source.revision++;
+          }
           let outcomeHistory: StoredMessage[] = [];
           // A fresh visibility read authorizes positive outcomes, not negative
           // execution boundaries. Avoid introducing another ownership await for
@@ -544,6 +553,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             const lookup = await this.lookupChild(child, signal);
             if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Child history ownership unavailable");
             const { boundaryId, boundaryIndex, visible } = storedHistoryVisibility(complete, lookup.info);
+            for (const source of historySources) (source.historyBoundaries ??= new Map()).set(child, boundaryId ?? null);
             if (boundaryId && boundaryIndex < 0) throw new Error("Child history visibility unavailable");
             outcomeHistory = visible;
           } else {
@@ -1661,14 +1671,21 @@ export class OpenCodeV2Provider implements ChatProvider {
           }
           if (streamReadSignal.aborted) break;
           normalized = this.normalize.prepared(prepared, memory);
-          if (normalized.conversationId && (normalized.revertLifecycle || normalized.removedMessageId
-            || !evidence.execution?.historical && (normalized.updates.length > 0 || evidence.execution)
-            || normalized.eventType === "session.message.content.updated")) {
+          if (normalized.conversationId) {
             // Ownership alone cannot keep a consumed transcript current. A
             // changed child revokes only sources that actually read its history;
             // consumed execution replays do not change that history. Leases
             // remove these dependencies when their bounded owners retire.
-            for (const source of this.historyWorkerSources) if (source.historyChildren?.has(normalized.conversationId)) source.revision++;
+            for (const source of this.historyWorkerSources) if (source.historyChildren?.has(normalized.conversationId)) {
+              const messageId = normalized.eventType === "session.message.content.updated" ? stringValue(asRecord(asRecord(event).data).messageID) : undefined;
+              if (messageId) {
+                const changes = (source.historyMessageChanges ??= new Map()).get(normalized.conversationId) ?? new Set<string>();
+                changes.add(messageId);
+                source.historyMessageChanges.set(normalized.conversationId, changes);
+              }
+              if (normalized.revertLifecycle || normalized.removedMessageId || evidence.execution && !evidence.execution.historical
+                || messageId && source.historyOutcomeMessages?.get(normalized.conversationId)?.has(messageId)) source.revision++;
+            }
           }
           if (normalized.conversationId && (normalized.revertLifecycle || normalized.removedMessageId)) {
             // Leases survive optional transport retirement. Invalidate pending
@@ -2505,7 +2522,14 @@ export class OpenCodeV2Provider implements ChatProvider {
       // is checked by classifiedSessionLookup before reaching this boundary.
       if (foreignWorkspace || requestedId !== undefined && id !== undefined && id !== requestedId || this.owns(info) && id === subject && actualParent) {
         const lookup = { info: this.owns(info) ? info : null, foreignWorkspace };
-        for (const source of this.historyWorkerSources) if (source.states.has(subject)) this.observeHistoryWorkerSource(source, subject, this.agentOwnership(subject, source.parent, lookup));
+        for (const source of this.historyWorkerSources) if (source.states.has(subject)) {
+          const ownership = this.agentOwnership(subject, source.parent, lookup);
+          this.observeHistoryWorkerSource(source, subject, ownership);
+          // A native record can reveal a staged/cleared boundary before SSE.
+          // Ownership staying confirmed does not preserve an older outcome view.
+          if (ownership === "confirmed" && source.historyChildren?.has(subject) && source.historyBoundaries?.has(subject)
+            && source.historyBoundaries.get(subject) !== (stringValue(asRecord(info.revert).messageID) ?? null)) source.revision++;
+        }
       }
     }
     return { info: this.owns(info) ? info : null, foreignWorkspace };
