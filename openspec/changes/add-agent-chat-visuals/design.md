@@ -123,6 +123,9 @@ OpenCode text-end metadata separately disambiguates trailing image syntax and
 forces enrichment even when the final text is unchanged. It is internal,
 does not mark the parent message complete, and does not consume a missing
 file's turn-completion retry.
+Claude text-block completion provides the same syntax-only boundary: it emits
+an updated row even when the final block text is unchanged, without marking
+the entire turn complete or mutating already-queued prefix frames.
 
 ### Keep visual interaction within the existing chat surface
 

@@ -531,6 +531,16 @@ function normalizeMessage(
         item: { id: itemId, type: "assistant_message", createdAt: stream.createdAt, markdown: "", ...streamTextIdentity(memory.currentStream!, stream, index), ...visualTurnIdentity(memory) },
       }] };
     }
+    if (event.type === "content_block_stop" && stream.textBlocks.includes(index)) {
+      // The projection keeps the streamed Markdown/start time for an empty
+      // upsert. Publish the genuine block boundary even if no text changed;
+      // the later assistant frame still replaces this row under the same
+      // native text-block capture identity. This does not seal the turn token.
+      return { ...base, outcome: "handled", updates: [...resumed, { kind: "upsert", item: {
+        id: itemId, type: "assistant_message", createdAt: stream.createdAt, markdown: "", completedAt: envelope.createdAt,
+        ...streamTextIdentity(memory.currentStream!, stream, index), ...visualTurnIdentity(memory),
+      } }] };
+    }
     return { ...base, outcome: resumed.length ? "handled" : "ignored", updates: resumed };
   }
 

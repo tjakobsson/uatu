@@ -90,6 +90,7 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.21 Address Codex on `48b68794`: keep trailing shortcut image interpretations provisional while a later delta can turn them into inline syntax. Use following syntax or authoritative text-end evidence to disambiguate without consuming the missing-file turn-completion retry or changing stored bytes.
 - [ ] 6.22 Fix browser leg 1's four side-reader SVG code-copy failures: the dialog header intercepts normal pointer clicks on the copy button. Preserve visible source, exact clipboard content, inert image references and real desktop/mobile Chromium/WebKit pointer coverage.
 - [ ] 6.23 Address Codex on `93acd2e3`: freeze snapshot text and visual-liveness decisions at one boundary before asynchronous capture; native Claude completion during an earlier capture must not terminalize a later row's old unfinished prefix. Preserve authoritative historical completion and ordered live-frame behavior.
+- [ ] 6.24 Address Codex on `197c9bc3`: native Claude text-block completion must disambiguate Markdown syntax immediately, independently of turn completion, so an existing reference image is captured before later tools can change it. A genuinely missing file still retains its turn-completion retry.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

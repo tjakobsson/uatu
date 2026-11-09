@@ -6,7 +6,7 @@ import path from "node:path";
 import { MultiAgentChatService, parseQualifiedConversationId, qualifyConversationId, UnknownAgentError, type RegisteredChatAgent } from "./agents";
 import { ConversationProjection } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
-import { CLAUDE_TURN, type ClaudeTextIdentity } from "./claude/normalization-types";
+import { CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
@@ -263,6 +263,91 @@ test.each(["footer", "result"] as const)("Claude text stop stays pending through
     expect(finished.visuals?.[0]?.status).toBe("ready");
     expect(h.files.reads).toBe(2);
   } finally { await h.cleanup(); }
+});
+
+test.each([
+  { arrival: "stream", missing: false }, { arrival: "stream", missing: true },
+  { arrival: "assistant", missing: false }, { arrival: "assistant", missing: true },
+] as const)("Claude $arrival block completion captures a final definition before following tools without ending the turn (missing=$missing)", async ({ arrival, missing }) => {
+  const h = await visualSubscriptionHarness("claude");
+  const memory = createClaudeEventMemory();
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const markdown = "![shot][ref]\n\n[ref]: result.png"; // Deliberately no final newline.
+  const original = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const replacement = Uint8Array.from([...original.slice(0, -1), 2]);
+  let available = !missing;
+  let bytes = original;
+  let reads = 0;
+  h.store.setReader(async source => { expect(source).toBe("result.png"); reads++; if (!available) throw new VisualReadError(true); return bytes; });
+  let frame = 0;
+  const emit = (value: Record<string, unknown>) => normalizeClaudeMessage({ uuid: `frame-${++frame}`, timestamp: frame, ...value }, memory, "live").updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+  const stream = (event: Record<string, unknown>) => emit({ type: "stream_event", event });
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const applied = applyChatEvent(client, event);
+    expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+    client = applied.projection;
+  };
+  const answer = () => client.items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    let stopped: ChatEvent[];
+    if (arrival === "stream") {
+      stream({ type: "message_start", message: { id: "native-definition" } });
+      stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: markdown } });
+      await deliveredBatch(h.replay, h.iterator, project);
+      expect(answer().visuals?.[0]?.status).toBe("pending");
+      expect(reads).toBe(0);
+      stopped = stream({ type: "content_block_stop", index: 0 });
+      expect(stopped).toHaveLength(1); // Unchanged Markdown still publishes its genuine block boundary.
+    } else {
+      stopped = emit({ type: "assistant", uuid: "definition-durable", message: { id: "native-definition", content: [{ type: "text", text: markdown }] } });
+    }
+    const delivered = await deliveredBatch(h.replay, h.iterator, project);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ type: "item.upsert", generation: stopped[0]!.generation, sequence: stopped[0]!.sequence, item: { markdown, visuals: [{ status: missing ? "pending" : "ready" }] } });
+    expect(answer().completedAt).toBeDefined();
+    expect((answer() as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect(claudeVisualIdentity(answer(), "offset:0")).toEqual({ messageId: "claude:text:native-definition:0", key: "offset:0" });
+    expect(h.projection.status).toBe("running");
+    expect(reads).toBe(1);
+    const firstVisuals = answer().visuals;
+    if (!missing) expect((await h.service.resolveVisual(firstVisuals![0]!.id!))?.bytes).toEqual(original);
+
+    if (arrival === "stream") {
+      emit({ type: "assistant", uuid: "definition-durable", message: { id: "native-definition", content: [{ type: "text", text: markdown }] } });
+      await deliveredBatch(h.replay, h.iterator, project);
+      expect(answer().visuals).toEqual(firstVisuals);
+      expect(claudeVisualIdentity(answer(), "offset:0")).toEqual({ messageId: "claude:text:native-definition:0", key: "offset:0" });
+      expect(reads).toBe(1); // Durable replacement shares the original block slot.
+    }
+    // Only after block completion does the next tool create/overwrite the file.
+    emit({ type: "assistant", message: { id: "native-write", content: [{ type: "tool_use", id: "write-result", name: "Write", input: { file_path: "result.png" } }] } });
+    available = true;
+    bytes = replacement;
+    emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "write-result", content: "Updated result.png" }] } });
+    await deliveredBatch(h.replay, h.iterator, project);
+    const duringTool = (await h.service.history("claude:c")).items.find(item => item.id === "message:definition-durable") as AssistantMessageItem;
+    expect(duringTool.visuals).toEqual(firstVisuals);
+    expect(reads).toBe(1); // A missing file is still reserved for the genuine turn retry.
+    const terminal = emit({ type: "result", subtype: "success" })[0]!;
+    const final = await deliveredBatch(h.replay, h.iterator, project);
+    expect(final[0]).toEqual({ ...terminal, conversationId: "claude:c" });
+    expect(final).toHaveLength(missing ? 2 : 1);
+    if (missing) expect(final[1]).toMatchObject({ type: "resync", sequence: terminal.sequence });
+    const completed = (await h.service.history("claude:c")).items.find(item => item.id === "message:definition-durable") as AssistantMessageItem;
+    expect(completed.visuals?.[0]?.status).toBe("ready");
+    expect((await h.service.resolveVisual(completed.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
+    expect(reads).toBe(missing ? 2 : 1);
+    const store = new VisualStore("/workspace", h.directory);
+    store.setReader(async () => { reads++; throw new Error("immutable completed block capture must not reread the overwritten file"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reloaded = (await restarted.history("claude:c")).items.find(item => item.id === "message:definition-durable") as AssistantMessageItem;
+    expect(reloaded.visuals).toEqual(completed.visuals);
+    expect((await restarted.resolveVisual(reloaded.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
+    expect(reads).toBe(missing ? 2 : 1);
+  } finally { clock.mockRestore(); await restarted?.dispose(); await h.cleanup(); }
 });
 
 test.each(["completed", "failed", "interrupted"] as const)("delayed Claude draining keeps queued prefixes live until the ordered native %s result", async status => {

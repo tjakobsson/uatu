@@ -11,6 +11,31 @@ import path from "node:path";
 import { readSessionTranscript } from "./transcript";
 
 describe("Claude native text-block capture identity", () => {
+  test("native text-block stop publishes an immutable syntax boundary without sealing the shared turn", () => {
+    const memory = createClaudeEventMemory();
+    let frame = 0;
+    const stream = (event: Record<string, unknown>) => normalizeClaudeMessage({ type: "stream_event", uuid: `frame-${++frame}`, timestamp: frame, event }, memory, "live");
+    stream({ type: "message_start", message: { id: "native-block" } });
+    const opened = stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }).updates[0]!;
+    if (opened.kind !== "upsert") throw new Error("expected opened text block");
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "![shot][ref]\n\n[ref]: result.png" } });
+    const stopped = stream({ type: "content_block_stop", index: 0 });
+    expect(stopped.updates).toHaveLength(1);
+    const update = stopped.updates[0]!;
+    if (update.kind !== "upsert") throw new Error("expected stopped text block");
+    expect(update.item).toMatchObject({ id: opened.item.id, type: "assistant_message", markdown: "", completedAt: 4 });
+    expect(claudeVisualIdentity(update.item, "offset:0")).toEqual({ messageId: "claude:text:native-block:0", key: "offset:0" });
+    const turn = (update.item as typeof update.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    expect(turn).toBe((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]);
+    expect(turn.completed).toBe(false);
+    expect(opened.item).not.toHaveProperty("completedAt"); // No later mutation of queued prefixes.
+    stream({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "write", name: "Write" } });
+    expect(stream({ type: "content_block_stop", index: 1 }).updates).toEqual([]);
+    normalizeClaudeMessage({ type: "result", uuid: "done", timestamp: 9, subtype: "success" }, memory, "live");
+    expect(turn.completed).toBe(true);
+    expect(update.item).toHaveProperty("completedAt", 4);
+    expect(opened.item).not.toHaveProperty("completedAt");
+  });
   test("joined completion blocks retain per-block offsets, replay idempotently and reconstruct from stored frames", () => {
     const memory = createClaudeEventMemory();
     const frame = (uuid: string, content: unknown[]) => ({ type: "assistant", uuid, timestamp: 1, message: { id: "msg_api", content } });

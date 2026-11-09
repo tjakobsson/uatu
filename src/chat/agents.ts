@@ -578,7 +578,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
             const appended = previous && event.item.markdown.startsWith(previous.item.markdown)
               ? event.item.markdown.slice(previous.item.markdown.length) : undefined;
             const syntaxCompleted = previous && (appended === undefined || completesVisualSyntax(previous.item, appended));
-            const textEnded = (event.item as typeof event.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END];
+            const textEnded = this.visualTextEnded(event.item);
             await enrich(tracked, Boolean(textEnded) || !this.visualItemLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
             // Normal events are sequence-deduplicated by the client. Enrich
             // this one native upsert, retaining all its text and other fields.
@@ -681,7 +681,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // produce a visual, including reference syntax, raw HTML, nested/indented
     // fences and whitespace before the SVG info string. Plain prose needs no
     // Markdown parse/highlight on every streamed token.
-    const textEnded = (item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END];
+    const textEnded = this.visualTextEnded(item);
     const inputs = /!\[|<(?:img|image|pre)\b|`{3}|~{3}/i.test(item.markdown) ? getChatVisuals(item.markdown, live && !textEnded) : [];
     if (!inputs.length) {
       const { visuals: _visuals, ...rest } = item;
@@ -696,6 +696,15 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const visuals = await this.visualStore.captureMany(conversationId, visualAdmissionIdentity(item), requests(), live)
       .catch(() => inputs.slice(0, VISUAL_MAX_COUNT).map(input => ({ index: input.index, status: "unavailable" as const, message: "Image snapshot could not be stored" })));
     return { ...item, visuals };
+  }
+
+  private visualTextEnded(item: Extract<ConversationItem, { type: "assistant_message" }>): boolean {
+    const identity = item as typeof item & ClaudeTextIdentity & OpenCodeTextIdentity;
+    // Claude's native per-block completedAt seals syntax, not the turn. It is
+    // immutable on this frame, unlike the shared turn token. Other agents'
+    // arbitrary completedAt values do not stand in for Claude block identity.
+    return Boolean(identity[OPENCODE_TEXT_END] || item.completedAt !== undefined
+      && (identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:")));
   }
 
   private visualItemLive(item: Extract<ConversationItem, { type: "assistant_message" }>, streaming: boolean, orderedTurnState = false): boolean {

@@ -999,6 +999,8 @@ the interpretation unambiguous. A trailing `![label]` remains provisional while
 the next streamed text could still add an inline destination. Native OpenCode
 text end can flush that preview before a tool finishes without consuming the
 missing-file retry reserved for turn completion.
+Claude's native text-block completion likewise finalizes image syntax without
+finishing the turn or consuming a genuinely missing file's completion retry.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain
