@@ -87,6 +87,8 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.18 Address Codex on `36a0dd81`: a terminal visual refresh must recover when the client receives terminal status, misses its additional same-sequence resync, and reconnects at exactly that cursor. Cover the real cursor-only HTTP open frame without inventing native sequence numbers or refetching ordinary text-only history.
 - [ ] 6.19 Diagnose the `d6e932c5` WebKit desktop-parent following failure: initial bottom distance is 16 px on all three CI attempts. Preserve the strict bottom assertion; collect pre-activation trace, geometry, fonts and following state through CI before proposing a production change.
 - [ ] 6.20 Correct the two `bd1d5189` equal-cursor regression fixtures that start unavailable rather than pending, and diagnose the Hub hung-observation coalescing assertion (expected one write, observed two) without weakening the original requirements. Obtain latest-head clean CI and reconcile Codex's no-major-issues receipt with its still-unresolved summary.
+- [ ] 6.21 Address Codex on `48b68794`: keep trailing shortcut image interpretations provisional while a later delta can turn them into inline syntax. Use following syntax or authoritative text-end evidence to disambiguate without consuming the missing-file turn-completion retry or changing stored bytes.
+- [ ] 6.22 Fix browser leg 1's four side-reader SVG code-copy failures: the dialog header intercepts normal pointer clicks on the copy button. Preserve visible source, exact clipboard content, inert image references and real desktop/mobile Chromium/WebKit pointer coverage.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

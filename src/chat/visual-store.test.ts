@@ -103,6 +103,31 @@ test("history remains readable if permanent admission cannot be persisted, and r
 });
 
 describe("immutable visual snapshots", () => {
+  test.each([false, true])("a provisional shortcut binds neither old bytes nor a missing-file hash before becoming inline (old missing=%s)", async missing => {
+    const store = new VisualStore("/workspace", directory);
+    const reads: string[] = [];
+    const newBytes = Uint8Array.from([...png.slice(0, -1), 2]);
+    store.setReader(async source => {
+      reads.push(source);
+      if (source === "old.png" && missing) throw new VisualReadError(true);
+      return source === "new.png" ? newBytes : png;
+    });
+    const prefix = "[shot]: old.png\n\n![shot]";
+    const capture = (markdown: string, streaming: boolean, target = store) => target.captureMany("a:c", "shortcut", getChatVisuals(markdown, streaming).map(input => ({ messageId: "part:shortcut", input })), streaming);
+    expect((await capture(prefix, true))[0]?.status).toBe("pending");
+    expect((await capture(prefix + "(new.p", true))[0]?.status).toBe("pending");
+    expect(reads).toEqual([]);
+    const markdown = prefix + "(new.png)";
+    const ready = await capture(markdown, true);
+    expect(ready[0]?.status).toBe("ready");
+    expect(reads).toEqual(["new.png"]);
+    expect((await store.resolve(ready[0]!.id!))?.bytes).toEqual(newBytes);
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async source => { reads.push(source); return png; });
+    expect(await capture(markdown, false, restarted)).toEqual(ready);
+    expect((await restarted.resolve(ready[0]!.id!))?.bytes).toEqual(newBytes);
+    expect(reads).toEqual(["new.png"]);
+  });
   test.each(["newline", "completion"] as const)("split reference destinations capture only after %s", async boundary => {
     const store = new VisualStore("/workspace", directory);
     const reads: string[] = [];

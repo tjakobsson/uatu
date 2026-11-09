@@ -27,6 +27,29 @@ describe("agent visual Markdown", () => {
     const source = '![inline](inline.png)\n\n<img src="raw.png">\n\n![shot][ref]\n\n[ref]: a.p';
     expect(getChatVisuals(source, true).map(input => [input.source, input.complete])).toEqual([["inline.png", true], ["raw.png", true], ["a.p", false]]);
   });
+  test("a trailing shortcut and incomplete resource/reference continuations stay provisional at the same occurrence", () => {
+    const prefix = "[shot]: old.png\n[next]: new.png\n\n";
+    const image = prefix + "![shot]";
+    const key = `offset:${prefix.length}`;
+    for (const suffix of ["", "(", "(new.p", "[", "[nex"]) {
+      expect(getChatVisuals(image + suffix, true)[0]).toMatchObject({ source: "old.png", complete: false, key });
+    }
+    expect(getChatVisuals(image + "(new.png)", true)[0]).toMatchObject({ source: "new.png", complete: true, key });
+    expect(getChatVisuals(image + "[next] ", true)[0]).toMatchObject({ source: "new.png", complete: true, key });
+    for (const suffix of [" ", "\n", " followed by text", "\\("]) {
+      expect(getChatVisuals(image + suffix, true)[0]).toMatchObject({ source: "old.png", complete: true, key });
+    }
+  });
+  test.each(["![shot]", "![shot][]", "![caption][shot]"])("text completion disambiguates trailing %s using the shared cached parse", image => {
+    const source = "[shot]: shortcut-cache.png\n\n" + image;
+    const live = prepareChatVisualMarkdown(source, true);
+    expect(live.visuals[0]).toMatchObject({ source: "shortcut-cache.png", complete: false });
+    const done = prepareChatVisualMarkdown(source, false);
+    expect(done.visuals[0]).toMatchObject({ source: "shortcut-cache.png", complete: true, key: live.visuals[0]!.key });
+    expect(done.html).toBe(live.html);
+    expect(prepareChatVisualMarkdown(source, true)).toBe(live);
+    expect(getChatVisuals(source + " ", true)[0]?.complete).toBe(true);
+  });
   test("capture-only extraction never invokes presentation highlighting", () => {
     const source = '```js\nconst answer = 42;\n```\n\n![Shot](result.png)\n\n```svg\n<svg/>\n```';
     const markdownUrl = new URL("../render/markdown.ts", import.meta.url).href;

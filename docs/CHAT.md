@@ -994,7 +994,11 @@ turns stay terminal, while a live turn retains its pending visuals across histor
 pages. Pending visuals loaded after the live subscription starts also receive
 the turn-completion retry; they do not require a manual history reload.
 Streaming shorthand references can preview once their already-terminated
-reference definition resolves, without waiting for later text or a tool to finish.
+reference definition resolves and following syntax or a native text end makes
+the interpretation unambiguous. A trailing `![label]` remains provisional while
+the next streamed text could still add an inline destination. Native OpenCode
+text end can flush that preview before a tool finishes without consuming the
+missing-file retry reserved for turn completion.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain

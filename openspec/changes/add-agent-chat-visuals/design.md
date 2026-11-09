@@ -119,6 +119,10 @@ and sealed only by native `result` or transcript `turn_duration` records. It
 survives item spreads and history pagination, but is not serialized onto the
 public wire. This distinguishes completed historical turns from a live turn
 spanning pages without treating a later user row as a completion boundary.
+OpenCode text-end metadata separately disambiguates trailing image syntax and
+forces enrichment even when the final text is unchanged. It is internal,
+does not mark the parent message complete, and does not consume a missing
+file's turn-completion retry.
 
 ### Keep visual interaction within the existing chat surface
 

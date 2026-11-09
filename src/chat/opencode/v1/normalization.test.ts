@@ -6,6 +6,7 @@ import { ProviderTextReconciler } from "../../text-reconciler";
 import { ConversationProjection } from "../../adapter";
 import { parseConversationItem } from "../../validation";
 import { visualAdmissionIdentity } from "../../visual-identity";
+import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "../normalization-types";
 
 test("native and classic text events plus both history shapes retain the parent admission identity outside JSON", () => {
   const messageId = "native:api:id";
@@ -17,7 +18,7 @@ test("native and classic text events plus both history shapes retain the parent 
     normalizeProviderEvent({ type: "message.part.delta", properties: { timestamp: 10, sessionID: "s", messageID: messageId, partID: partId, field: "text", delta: "text" } }),
     normalizeProviderEvent({ type: "message.part.updated", properties: { timestamp: 10, sessionID: "s", part: { id: partId, messageID: messageId, type: "text", text: "text" } } }),
   ];
-  const live = [...native, ...classic].flatMap(event => event.updates.flatMap(update => update.kind === "text" && update.item ? [update.item] : []));
+  const live = [...native, ...classic].flatMap(event => event.updates.flatMap(update => update.kind === "upsert" ? [update.item] : update.kind === "text" && update.item ? [update.item] : []));
   expect(live).toHaveLength(5);
   const part = { id: partId, type: "text", text: "text" };
   const history = [
@@ -35,6 +36,21 @@ test("native and classic text events plus both history shapes retain the parent 
 });
 
 describe("OpenCode provider completion timestamps", () => {
+  test("an unchanged native text end publishes one syntax-boundary upsert without parent completion or a moved start time", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const emit = (phase: string, timestamp: number, content: Record<string, unknown>) => normalizeProviderEvent({ type: `session.next.text.${phase}`, properties: { sessionID: "s", textID: "p", assistantMessageID: "m", timestamp, ...content } }, memory).updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+    emit("started", 1, { text: "" });
+    emit("delta", 2, { delta: "[shot]: old.png\n\n![shot]" });
+    const ended = emit("ended", 3, { text: "[shot]: old.png\n\n![shot]" });
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toMatchObject({ type: "item.upsert", item: { id: "part:p", createdAt: 1, markdown: "[shot]: old.png\n\n![shot]" } });
+    const item = projection.items()[0]!;
+    expect(item).not.toHaveProperty("completedAt");
+    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(JSON.stringify(item)).not.toContain("opencode-text-end");
+    expect(emit("delta", 4, { delta: "![shot]" })).toEqual([]); // Covered trailing delta remains deduplicated.
+  });
   test("classic live parts and history preserve each tool's terminal time, not the message completion", () => {
     for (const tool of ["bash", "read"]) for (const status of ["completed", "error"]) {
       const part = { id: "p", type: "tool", tool, state: { status, input: { command: "pwd" }, time: { start: 20, end: 40 } } };

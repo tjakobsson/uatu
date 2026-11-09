@@ -41,8 +41,8 @@ function prepareVisualMarkdown(source: string, streaming: boolean, presentation:
     try { result = prepareUncached(source, key, presentation); }
     finally { finish(); }
   }
-  // Parsing and presentation do not change when the turn ends. Only an
-  // unterminated reference-definition line becomes eligible for capture.
+  // Parsing/presentation are shared across modes. Text completion only makes
+  // provisional reference interpretations/definition lines capture-eligible.
   if (streaming || !result.visuals.some(input => input.kind === "file" && !input.complete)) return result;
   return { html: result.html, visuals: result.visuals.map(input => input.kind === "file" && !input.complete ? { ...input, complete: true } : input) };
 }
@@ -255,12 +255,17 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
         } else {
           const tag = original.type === "image" ? "img" : "pre";
           const position = html.indexOf(`<${tag}`);
-          // A final definition line may still grow its destination. Keep new
-          // reference images provisional until that line ends (or the reply
-          // completes), without delaying inline images or changing stored captures.
+          // A streaming shortcut at EOF can still become an inline/full
+          // reference image. The parser can also fall back to the shortcut
+          // while its following resource/reference syntax is incomplete.
+          // Do not bind bytes (or a missing-file hash) to that interpretation.
+          // Completed resource syntax is unambiguous; native text completion
+          // promotes the same cached file inputs without another parse.
+          const following = source.slice(original.end.offset, original.end.offset! + 1);
+          const provisionalReference = unfinishedDefinition || following === "" || following === "(" || following === "[";
           if (position !== -1) html = annotate(html, position + tag.length + 1, fenceOrigins.get(token) ?? {
             offset: original.start.offset!,
-            ...(original.type === "image" ? { complete: !unfinishedDefinition || inlineImages.has(original) } : {}),
+            ...(original.type === "image" ? { complete: inlineImages.has(original) || !provisionalReference } : {}),
           });
         }
         const lastWasTag = this.getData("lastWasTag");

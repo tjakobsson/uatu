@@ -11186,6 +11186,11 @@ html[data-ui-mode="touch"] .chat-surface:has(#chat-work-dock > details[open]:not
 .chat-aside-header button { flex: 0 0 auto; }
 #chat-aside-answer { min-width: 0; overflow-wrap: anywhere; margin-block: 16px; user-select: text; }
 #chat-aside-answer :is(table, pre) { display: block; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+/* Shared code-copy controls are absolute children of their source block,
+   not of the reader dialog beneath its sticky header. */
+#chat-aside-answer pre { position: relative; }
+#chat-aside-answer pre:hover > .code-copy,
+#chat-aside-answer pre:focus-within > .code-copy { opacity: 1; }
 #chat-aside-answer :is(p, a) { overflow-wrap: anywhere; }
 #chat-aside-answer :is(td, th) { white-space: nowrap; }
 .chat-aside-ready { position: absolute; bottom: 0; left: 8px; z-index: 2; max-width: calc(50% - 12px); padding: 10px 8px; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; isolation: isolate; }

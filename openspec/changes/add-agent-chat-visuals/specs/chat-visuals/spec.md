@@ -230,8 +230,9 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **AND** unrelated completed turns and cancelled subscriptions are not enrolled for that retry
 
 #### Scenario: A shorthand image reference completes before a long-running tool
-- **WHEN** a supported shorthand reference closes during the streaming enrichment cadence
-- **THEN** its terminated reference definition can be captured without waiting for later assistant text or turn completion
+- **WHEN** following syntax or an authoritative text end disambiguates a supported shorthand reference during the streaming enrichment cadence
+- **THEN** its terminated reference definition can be captured without waiting for turn completion
+- **AND** a shortcut interpretation at the current text end remains provisional while a later delta can still supply an inline destination
 
 ### Requirement: Managed agents receive scoped presentation guidance
 Managed Claude Code and OpenCode sessions SHALL attempt to add native presentation

@@ -10,6 +10,7 @@ import { CLAUDE_TURN, type ClaudeTextIdentity } from "./claude/normalization-typ
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
+import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ConversationReplay, decodeReplayCursor, ReplaySubscription } from "./replay";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
@@ -665,7 +666,7 @@ test("native Claude completed turns stay sealed while a running turn spans older
   } finally { await h.cleanup(); await fs.rm(path.dirname(file), { recursive: true, force: true }); }
 });
 
-test("a shorthand image completed inside the cadence enriches the same native event immediately", async () => {
+test("a shorthand label inside the cadence stays provisional, then following whitespace flushes its resolved source immediately", async () => {
   const h = await visualSubscriptionHarness("test");
   const clock = spyOn(Date, "now").mockReturnValue(1_000);
   let client = projectionFromSnapshot(h.subscription.snapshot);
@@ -691,7 +692,11 @@ test("a shorthand image completed inside the cadence enriches the same native ev
     expect((client.items[0] as AssistantMessageItem).markdown).toBe(prefix + "![shot]");
     expect((client.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
     expect(h.projection.status).toBe("running");
-    expect(h.files.reads).toBe(1);
+    expect(h.files.reads).toBe(0); // The closed label may still gain an inline destination.
+    h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: " " });
+    expect(await deliveredBatch(h.replay, h.iterator, project)).toHaveLength(1);
+    expect((client.items[0] as AssistantMessageItem).markdown).toBe(prefix + "![shot] ");
+    expect(h.files.reads).toBe(1); // Whitespace disambiguates even within the same cadence.
   } finally { clock.mockRestore(); await h.cleanup(); }
 });
 
@@ -737,7 +742,12 @@ test.each([
     expect(answer().visuals?.[0]?.status).toBe("ready");
     expect(h.files.reads).toBe(1); // Capture happened before any text-end/tool event.
     expect((await h.service.resolveVisual(answer().visuals![0]!.id!))?.bytes).toEqual(png);
-    expect(emit("session.text.ended", { text: markdown })).toEqual([]);
+    const ended = emit("session.text.ended", { text: markdown });
+    expect(ended).toHaveLength(1);
+    const endedEvents = await deliveredBatch(h.replay, h.iterator, project);
+    expect(endedEvents).toHaveLength(1);
+    expect(endedEvents[0]).toMatchObject({ type: "item.upsert", sequence: ended[0]!.sequence, item: { markdown, visuals: [{ status: "ready" }] } });
+    expect(answer()).not.toHaveProperty("completedAt");
     h.projection.upsert({ id: "long-tool", type: "tool", createdAt: 2, name: "Bash", status: "running", input: "long-running work" });
     const paused = await deliveredBatch(h.replay, h.iterator, project);
     expect(paused).toHaveLength(1);
@@ -747,6 +757,137 @@ test.each([
     expect(h.projection.status).toBe("running");
     expect(h.files.reads).toBe(1); // No elapsed cadence or terminal flush was needed.
   } finally { clock.mockRestore(); await h.cleanup(); }
+});
+
+test.each([false, true])("streamed OpenCode shortcut-to-inline revision captures only the final destination, including reload (old missing=%s)", async oldMissing => {
+  const h = await visualSubscriptionHarness("opencode");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const memory = createOpenCodeV2Memory();
+  const normalize = createOpenCodeV2Normalizer("/workspace");
+  const oldBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const newBytes = Uint8Array.from([...oldBytes.slice(0, -1), 2]);
+  const reads: string[] = [];
+  h.store.setReader(async source => {
+    reads.push(source);
+    if (source === "old.png" && oldMissing) throw new VisualReadError(true);
+    return source === "new.png" ? newBytes : oldBytes;
+  });
+  let frame = 0;
+  const emit = (phase: string, content: string) => normalize({ id: `frame-${++frame}`, created: frame, type: `session.text.${phase}`, location: { directory: "/workspace" }, data: { sessionID: "c", assistantMessageID: "native-revised", ordinal: 0, ...(phase === "delta" ? { delta: content } : { text: content }) } }, memory).updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const applied = applyChatEvent(client, event);
+    expect(applied.outcome).toBe("applied");
+    client = applied.projection;
+  };
+  const answer = () => client.items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+  const prefix = "[shot]: old.png\n\n![shot]";
+  const markdown = prefix + "(new.png)";
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    emit("started", "");
+    await deliveredBatch(h.replay, h.iterator, project);
+    emit("delta", prefix);
+    await deliveredBatch(h.replay, h.iterator, project);
+    expect(answer().visuals?.[0]?.status).toBe("pending");
+    expect(reads).toEqual([]);
+    emit("delta", "(new.p");
+    await deliveredBatch(h.replay, h.iterator, project);
+    expect(answer().markdown).toBe(prefix + "(new.p");
+    expect(answer().visuals?.[0]?.status).toBe("pending");
+    expect(reads).toEqual([]);
+    const native = emit("delta", "ng)");
+    const final = await deliveredBatch(h.replay, h.iterator, project);
+    expect(final).toHaveLength(1);
+    expect(final[0]).toMatchObject({ generation: native[0]!.generation, sequence: native[0]!.sequence, type: "item.upsert", item: { markdown, visuals: [{ status: "ready" }] } });
+    expect(answer().markdown).toBe(markdown);
+    expect(reads).toEqual(["new.png"]);
+    const visual = answer().visuals![0]!;
+    expect((await h.service.resolveVisual(visual.id!))?.bytes).toEqual(newBytes);
+    emit("ended", markdown);
+    await deliveredBatch(h.replay, h.iterator, project);
+    const terminal = h.projection.statusUpdate("completed");
+    expect(await deliveredBatch(h.replay, h.iterator, project)).toEqual([{ ...terminal, conversationId: "opencode:c" }]);
+    const store = new VisualStore("/workspace", h.directory);
+    store.setReader(async source => { reads.push(source); return oldBytes; });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reloaded = (await restarted.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+    expect(reloaded.markdown).toBe(markdown);
+    expect(reloaded.visuals).toEqual(answer().visuals);
+    expect((await restarted.resolveVisual(visual.id!))?.bytes).toEqual(newBytes);
+    expect(reads).toEqual(["new.png"]);
+  } finally { clock.mockRestore(); await restarted?.dispose(); await h.cleanup(); }
+});
+
+test.each([
+  { generation: "v1", missing: false }, { generation: "v1", missing: true },
+  { generation: "v2", missing: false }, { generation: "v2", missing: true },
+] as const)("native $generation unchanged text end finalizes a shortcut before paused work without spending its turn retry (missing=$missing)", async ({ generation, missing }) => {
+  const h = await visualSubscriptionHarness("opencode");
+  const clock = spyOn(Date, "now").mockReturnValue(1_000);
+  const memoryV1 = createProviderEventMemory();
+  const memoryV2 = createOpenCodeV2Memory();
+  const normalizeV2 = createOpenCodeV2Normalizer("/workspace");
+  const markdown = "[shot]: old.png\n\n![shot]";
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  let available = !missing;
+  let reads = 0;
+  h.store.setReader(async source => { expect(source).toBe("old.png"); reads++; if (!available) throw new VisualReadError(true); return png; });
+  let frame = 0;
+  const emit = (phase: string, value: string) => {
+    const data = { sessionID: "c", assistantMessageID: "native-shortcut", ...(phase === "delta" ? { delta: value } : { text: value }) };
+    const normalized = generation === "v1"
+      ? normalizeOpenCodeV1({ id: `frame-${++frame}`, type: `session.next.text.${phase}`, properties: { ...data, timestamp: frame, textID: "native-shortcut:text:0" } }, memoryV1)
+      : normalizeV2({ id: `frame-${++frame}`, created: frame, type: `session.text.${phase}`, location: { directory: "/workspace" }, data: { ...data, ordinal: 0 } }, memoryV2);
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+  };
+  let client = projectionFromSnapshot(h.subscription.snapshot);
+  const project = (event: ChatEvent) => {
+    const applied = applyChatEvent(client, event);
+    expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied");
+    client = applied.projection;
+  };
+  const answer = () => client.items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    emit("started", "");
+    await deliveredBatch(h.replay, h.iterator, project);
+    emit("delta", markdown);
+    await deliveredBatch(h.replay, h.iterator, project);
+    expect(answer().visuals?.[0]?.status).toBe("pending");
+    expect(reads).toBe(0);
+    const ended = emit("ended", markdown);
+    expect(ended).toHaveLength(1);
+    const delivered = await deliveredBatch(h.replay, h.iterator, project);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ type: "item.upsert", sequence: ended[0]!.sequence, item: { markdown, createdAt: 1, visuals: [{ status: missing ? "pending" : "ready" }] } });
+    expect((answer() as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(answer()).not.toHaveProperty("completedAt");
+    expect(reads).toBe(1);
+    h.projection.upsert({ id: "paused-tool", type: "tool", createdAt: 4, name: "Bash", status: "running" });
+    await deliveredBatch(h.replay, h.iterator, project);
+    available = true;
+    const duringTool = (await h.service.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+    expect(duringTool.visuals?.[0]?.status).toBe(missing ? "pending" : "ready");
+    expect(h.projection.status).toBe("running");
+    expect(reads).toBe(1); // Text end did not seal the missing-file retry slot.
+    const terminal = h.projection.statusUpdate("completed");
+    const final = await deliveredBatch(h.replay, h.iterator, project);
+    expect(final[0]).toEqual({ ...terminal, conversationId: "opencode:c" });
+    expect(final).toHaveLength(missing ? 2 : 1);
+    if (missing) expect(final[1]).toMatchObject({ type: "resync", sequence: terminal.sequence });
+    const completed = (await h.service.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+    expect(completed.visuals?.[0]?.status).toBe("ready");
+    expect(reads).toBe(missing ? 2 : 1);
+    const store = new VisualStore("/workspace", h.directory);
+    store.setReader(async () => { reads++; throw new Error("completed source must remain immutable across reload"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reloaded = (await restarted.history("opencode:c")).items.find(item => item.type === "assistant_message") as AssistantMessageItem;
+    expect(reloaded.visuals).toEqual(completed.visuals);
+    expect((await restarted.resolveVisual(reloaded.visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(reads).toBe(missing ? 2 : 1);
+  } finally { clock.mockRestore(); await restarted?.dispose(); await h.cleanup(); }
 });
 
 test.each([

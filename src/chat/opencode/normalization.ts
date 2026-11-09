@@ -3,6 +3,7 @@ import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-sto
 import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, LOGIN_FAILED_NOTICE_CODE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
 import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
 import { nativeVisualMessageIdentity } from "../visual-identity";
+import { OPENCODE_TEXT_END } from "./normalization-types";
 
 /**
  * The normalization core both OpenCode generations share.
@@ -36,6 +37,8 @@ export type ProviderEventMemory = {
   // The newest user message seen per session: the prompt an assistant message
   // answers when the event does not name it (the v2 record has no `parentID`).
   prompts: Map<string, string>;
+  // Preserve the text row's start time when its authoritative end is upserted.
+  textStarts?: Map<string, number>;
 };
 
 export function createProviderEventMemory(): ProviderEventMemory {
@@ -302,7 +305,7 @@ export function normalizeEventEnvelopeWith<Memory extends ProviderEventMemory>(e
       const canonical = mapper.toCanonical(eventType, data, event);
       if (canonical) {
         canonicalType = canonical.type;
-        matched = normalizeCanonicalEvent(canonical.type, canonical.data, eventContext(event, canonical.data));
+        matched = normalizeCanonicalEvent(canonical.type, canonical.data, eventContext(event, canonical.data), memory);
       }
     }
     if (matched) return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle || matched.revertLifecycle ? "handled" : "ignored", eventType };
@@ -332,7 +335,7 @@ function conversationIdOf(value: unknown): string | undefined {
 // The shared cases, by canonical (2.x) name over the canonical payload shape.
 // 1.x reaches them by renaming `session.next.X`; 2.x by reshaping its typed
 // payloads onto the same fields.
-export function normalizeCanonicalEvent(type: string, data: RecordValue, context: EventContext): KnownEvent | undefined {
+export function normalizeCanonicalEvent(type: string, data: RecordValue, context: EventContext, memory?: ProviderEventMemory): KnownEvent | undefined {
   const { conversationId, eventId, createdAt } = context;
   switch (type) {
     case "session.created": {
@@ -379,11 +382,11 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
         message: text(data.text) || "Context updated",
       } }] };
     case "session.text.started":
-      return textUpdate(data, eventId, createdAt, "cumulative", "");
+      return textUpdate(data, eventId, createdAt, "cumulative", "", memory);
     case "session.text.delta":
-      return textUpdate(data, eventId, createdAt, "incremental", text(data.delta ?? data.text));
+      return textUpdate(data, eventId, createdAt, "incremental", text(data.delta ?? data.text), memory);
     case "session.text.ended":
-      return textUpdate(data, eventId, createdAt, "cumulative", text(data.text));
+      return textUpdate(data, eventId, createdAt, "cumulative", text(data.text), memory, true);
     case "session.reasoning.started":
     case "session.reasoning.delta":
     case "session.reasoning.ended": {
@@ -820,18 +823,29 @@ function normalizeDiffs(data: RecordValue, createdAt: number): NormalizedProvide
   });
 }
 
-export function textUpdate(data: RecordValue, fallbackId: string, createdAt: number, mode: "cumulative" | "incremental", value: string): KnownEvent {
+export function textUpdate(data: RecordValue, fallbackId: string, createdAt: number, mode: "cumulative" | "incremental", value: string, memory?: ProviderEventMemory, ended = false): KnownEvent {
   const partId = optionalString(data.textID) ?? optionalString(data.partID) ?? optionalString(data.id) ?? fallbackId;
   const itemId = `part:${partId}`;
+  if (memory) {
+    const starts = memory.textStarts ??= new Map<string, number>();
+    const key = JSON.stringify([optionalString(data.sessionID), partId]);
+    const start = starts.get(key);
+    if (start === undefined) remember(starts, key, createdAt);
+    else createdAt = start;
+  }
+  const item = { id: itemId, type: "assistant_message" as const, createdAt, markdown: ended ? value : "", ...nativeVisualMessageIdentity("opencode", optionalString(data.messageID) ?? optionalString(data.assistantMessageID)), ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
   return {
     conversationId: optionalString(data.sessionID),
-    updates: [{
+    // A real ended frame must reach projection even when its cumulative text
+    // is unchanged. One ordinary upsert carries the private syntax boundary;
+    // completedAt remains reserved for authoritative parent completion.
+    updates: ended ? [{ kind: "upsert", item }] : [{
       kind: "text" as const,
       itemId,
       identity: partId,
       mode,
       text: value,
-      item: { id: itemId, type: "assistant_message" as const, createdAt, markdown: "", ...nativeVisualMessageIdentity("opencode", optionalString(data.messageID) ?? optionalString(data.assistantMessageID)) },
+      item,
     }],
   };
 }

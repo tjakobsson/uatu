@@ -10,6 +10,7 @@ import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../pr
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
 import { visualAdmissionIdentity } from "../../visual-identity";
+import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "../normalization-types";
 
 test("native shell exit evidence uses the typed identity and terminal process status", () => {
   const normalize = createOpenCodeV2Normalizer("/ws");
@@ -65,7 +66,7 @@ test("text phases, content restatement and stored messages supply the same non-w
   const messageId = "native:api:id";
   const events = ["started", "delta", "ended"].map(phase => normalize({ id: `e-${phase}`, created: 10, type: `session.text.${phase}`, location: { directory: WORKSPACE }, data: { sessionID: "s", assistantMessageID: messageId, ordinal: 1, text: "text", delta: "text" } }));
   events.push(normalize({ id: "restated", created: 10, type: "session.message.content.updated", location: { directory: WORKSPACE }, data: { sessionID: "s", messageID: messageId, content: [{ type: "text", text: "first" }, { type: "text", text: "text" }] } }));
-  const live = events.flatMap(event => event.updates.flatMap(update => update.kind === "text" && update.item ? [update.item] : []));
+  const live = events.flatMap(event => event.updates.flatMap(update => update.kind === "upsert" ? [update.item] : update.kind === "text" && update.item ? [update.item] : []));
   expect(live).toHaveLength(5);
   const history = normalizeStoredMessage({ id: messageId, type: "assistant", time: { created: 10 }, content: [{ type: "text", text: "first" }, { type: "text", text: "text" }] });
   expect(history).toHaveLength(2);
@@ -542,7 +543,11 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     const reasoning = new Set(identities("session.reasoning.delta"));
     expect(identities("session.text.delta").some(identity => reasoning.has(identity))).toBe(false);
     const [textEnded] = byType("session.text.ended");
-    expect(textEnded!.updates[0]).toMatchObject({ kind: "text", mode: "cumulative", text: "`##`" });
+    expect(textEnded!.updates[0]).toMatchObject({ kind: "upsert", item: { type: "assistant_message", markdown: "`##`" } });
+    const endedUpdate = textEnded!.updates[0]!;
+    if (endedUpdate.kind !== "upsert") throw new Error("expected authoritative text-end upsert");
+    expect((endedUpdate.item as typeof endedUpdate.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(endedUpdate.item).not.toHaveProperty("completedAt");
   });
 
   test("a tool call is named from its input announcement and settles with its output", () => {

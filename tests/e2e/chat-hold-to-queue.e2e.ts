@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, test as base } from "./fixtures";
 import { withEngineBrowsers } from "./page-diagnostics";
-import { openChatPanel, openChatPending } from "./chat-helpers";
+import { installClipboardMock, openChatPanel, openChatPending, readClipboardMock } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 
 const test = withEngineBrowsers(base);
@@ -217,6 +217,7 @@ for (const touch of [false, true]) test(`side-reader SVG stays visible ordinary 
   const page = await browser.newPage({ baseURL, viewport: touch ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: touch, isMobile: touch });
   try {
     await boot(page, request);
+    await installClipboardMock(page);
     const imageRequests: string[] = [];
     page.on("request", req => {
       if (/external-image\.invalid|\/api\/chat\/visuals\/|\/side-reader\.svg/.test(req.url())) imageRequests.push(req.url());
@@ -237,8 +238,22 @@ for (const touch of [false, true]) test(`side-reader SVG stays visible ordinary 
     await expect(answer.locator(".chat-visual-reference")).toHaveText("./side-reader.svg");
     await expect(answer.locator('a[href="https://external-image.invalid/aside.svg"]')).toBeVisible();
     await expect(answer.locator('a[href="https://external-image.invalid/raw.png"]')).toBeVisible();
-    await answer.getByRole("button", { name: "Copy code to clipboard", exact: true }).click();
+    const copy = answer.getByRole("button", { name: "Copy code to clipboard", exact: true });
+    if (!touch) await answer.locator("pre").hover();
+    await expect(copy).toHaveCSS("opacity", "1");
+    await expect.poll(() => copy.evaluate(button => {
+      const block = button.closest("pre")!.getBoundingClientRect();
+      const dialog = button.closest("dialog")!;
+      const header = dialog.querySelector(".chat-aside-header")!.getBoundingClientRect();
+      const reader = dialog.getBoundingClientRect();
+      const box = button.getBoundingClientRect();
+      return box.width > 0 && box.height > 0 && box.left >= block.left && box.right <= block.right
+        && box.top >= Math.max(block.top, header.bottom) && box.bottom <= Math.min(block.bottom, reader.bottom, window.innerHeight)
+        && button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+    }), { message: "the code-copy target stays in its source block below the sticky header and receives native input" }).toBe(true);
+    await copy.click();
     await expect(answer.locator("pre > .code-copy")).toHaveText("Copied!");
+    expect(await readClipboardMock(page)).toBe(svg);
     expect(imageRequests).toEqual([]);
     await page.locator("#chat-aside-close").click();
     await expect(reader).toBeHidden();

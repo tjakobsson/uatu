@@ -3,6 +3,7 @@ import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
 import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
+import { OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
 import { isLiveConversationStatus } from "./types";
@@ -442,14 +443,17 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         let quote = "";
         for (let index = 0; index < added.length; index++) {
           const char = added[index]!;
-          if (char === "\\") { index++; continue; }
+          if (char === "\\") {
+            if (state === "after-label" && index >= suffix.length) return true;
+            index++; continue;
+          }
           if (state === undefined) {
             if (char === "!" && added[index + 1] === "[") { state = "label"; depth = 1; index++; }
           } else if (state === "label" || state === "reference") {
             if (char === "[") depth++;
             if (char === "]" && --depth === 0) {
               if (index >= suffix.length) return true; // Includes shorthand.
-              state = state === "label" ? "after-label" : undefined;
+              state = "after-label";
             }
           } else if (state === "after-label") {
             if (char === "(" || char === "[") {
@@ -457,7 +461,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
               depth = 1;
               angle = false;
               quote = "";
-            } else { state = undefined; index--; }
+            } else {
+              if (index >= suffix.length) return true;
+              state = undefined; index--;
+            }
           } else {
             if (angle) { if (char === ">") angle = false; continue; }
             if (quote) { if (char === quote) quote = ""; continue; }
@@ -567,7 +574,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
             const appended = previous && event.item.markdown.startsWith(previous.item.markdown)
               ? event.item.markdown.slice(previous.item.markdown.length) : undefined;
             const syntaxCompleted = previous && (appended === undefined || completesVisualSyntax(previous.item, appended));
-            await enrich(tracked, !this.visualItemLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
+            const textEnded = (event.item as typeof event.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END];
+            await enrich(tracked, Boolean(textEnded) || !this.visualItemLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
             // Normal events are sequence-deduplicated by the client. Enrich
             // this one native upsert, retaining all its text and other fields.
             return [{ ...event, item: tracked.item }];
@@ -669,7 +677,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // produce a visual, including reference syntax, raw HTML, nested/indented
     // fences and whitespace before the SVG info string. Plain prose needs no
     // Markdown parse/highlight on every streamed token.
-    const inputs = /!\[|<(?:img|image|pre)\b|`{3}|~{3}/i.test(item.markdown) ? getChatVisuals(item.markdown, live) : [];
+    const textEnded = (item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END];
+    const inputs = /!\[|<(?:img|image|pre)\b|`{3}|~{3}/i.test(item.markdown) ? getChatVisuals(item.markdown, live && !textEnded) : [];
     if (!inputs.length) {
       const { visuals: _visuals, ...rest } = item;
       return rest;
