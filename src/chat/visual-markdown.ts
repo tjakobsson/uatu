@@ -27,15 +27,19 @@ let retainedBytes = 0;
 
 /** One parser for snapshot capture and presentation, so occurrence ids agree. */
 export function prepareChatVisualMarkdown(source: string, streaming: boolean): Prepared {
-  const key = `${streaming ? "1" : "0"}${source}`;
+  return prepareVisualMarkdown(source, streaming, true);
+}
+
+function prepareVisualMarkdown(source: string, streaming: boolean, presentation: boolean): Prepared {
+  const key = `${presentation ? "p" : "v"}${streaming ? "1" : "0"}${source}`;
   const previous = cache.get(key);
   if (previous) { cache.delete(key); cache.set(key, previous); return previous; }
   const finish = measureChatWork("markdown");
-  try { return prepareUncached(source, streaming, key); }
+  try { return prepareUncached(source, key, presentation); }
   finally { finish(); }
 }
 
-function prepareUncached(source: string, streaming: boolean, key: string): Prepared {
+function prepareUncached(source: string, key: string, presentation: boolean): Prepared {
   // Extract SVG before syntax highlighting: source text is not HTML, and
   // must never be reconstructed by decoding highlighted markup.
   const { html, attribute, origins } = visualSyntax(source);
@@ -60,7 +64,7 @@ function prepareUncached(source: string, streaming: boolean, key: string): Prepa
   };
   attributeOrigins(unsafe);
   const tree = sanitize(unsafe, markdownSanitizeSchema);
-  markExternalAnchors(tree);
+  if (presentation) markExternalAnchors(tree);
   const visuals: ChatVisualInput[] = [];
   const visit = (parent: { children: HtmlNode[] }) => {
     parent.children = parent.children.map(node => {
@@ -81,6 +85,7 @@ function prepareUncached(source: string, streaming: boolean, key: string): Prepa
       }
       if (!input) {
         if (node.tagName === "pre") {
+          if (!presentation) return node;
           // HTML pre is formatted text, not an inert container. Quote its
           // nested markup so a raw <img> can never escape the capture path.
           const code = node.children.length === 1 && node.children[0]?.type === "element" && node.children[0].tagName === "code"
@@ -91,7 +96,7 @@ function prepareUncached(source: string, streaming: boolean, key: string): Prepa
         visit(node);
         // Linked images open in the in-chat viewer, never navigate away from
         // the conversation through a wrapping Markdown link.
-        if (node.tagName === "a" && node.children.some(containsVisual)) {
+        if (presentation && node.tagName === "a" && node.children.some(containsVisual)) {
           node.tagName = "span";
           node.properties = {};
         }
@@ -105,7 +110,8 @@ function prepareUncached(source: string, streaming: boolean, key: string): Prepa
     });
   };
   if (tree.type === "root") visit(tree);
-  const result = { html: highlightCodeBlocks(toHtml(tree)), visuals };
+  // Capture-only enrichment shares occurrence parsing, not presentation work.
+  const result = { html: presentation ? highlightCodeBlocks(toHtml(tree)) : "", visuals };
   const bytes = 2 * (key.length + result.html.length + visuals.reduce((n, visual) => n + visual.source.length + visual.alt.length, 0));
   if (bytes <= BYTE_LIMIT) {
     while (cache.size >= 128 || retainedBytes + bytes > BYTE_LIMIT) {
@@ -120,7 +126,7 @@ function prepareUncached(source: string, streaming: boolean, key: string): Prepa
 }
 
 export function getChatVisuals(source: string, streaming: boolean): ChatVisualInput[] {
-  return prepareChatVisualMarkdown(source, streaming).visuals;
+  return prepareVisualMarkdown(source, streaming, false).visuals;
 }
 
 function containsVisual(node: HtmlNode): boolean {

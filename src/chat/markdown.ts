@@ -38,7 +38,7 @@ function renderVisual(input: ChatVisualInput, options: ChatMarkdownOptions): str
     ? `<button type="button" class="chat-visual-enlarge" data-attachment-view="${escapeHtml(src)}" data-attachment-view-name="${escapeHtml(input.alt)}" aria-label="Enlarge ${escapeHtml(input.alt)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(input.alt)}" loading="lazy" decoding="async"></button><span class="chat-visual-fallback" role="status" hidden>Could not display ${escapeHtml(input.alt || "image")}.${reference ? ` ${reference}` : ""}</span>`
     : `<span class="chat-visual-fallback"${pending ? ' role="status"' : ""}>${escapeHtml(message)}${reference ? ` ${reference}` : ""}</span>`;
   const controls = svg
-    ? '<span class="chat-visual-controls" role="group" aria-label="SVG view"><button type="button" data-visual-tab="preview" aria-pressed="true">Preview</button><button type="button" data-visual-tab="source" aria-pressed="false">Source</button><button type="button" data-visual-copy>Copy source</button></span>'
+    ? `<span class="chat-visual-controls" role="group" aria-label="SVG view"><button type="button" data-visual-tab="preview" aria-pressed="true">Preview</button><button type="button" data-visual-tab="source" aria-pressed="false">Source</button><button type="button" data-visual-copy${input.kind === "svg" && !hasId ? "" : ' disabled title="Open Source to load SVG before copying"'}>Copy source</button></span>`
     : "";
   const original = input.kind === "svg" && !hasId ? escapeHtml(input.source) : "";
   const source = svg ? `<span class="chat-visual-source" hidden><code>${original}</code></span>` : "";

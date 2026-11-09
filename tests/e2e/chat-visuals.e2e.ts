@@ -372,6 +372,9 @@ for (const engine of ["chromium", "webkit"] as const) {
       const row = page.locator('[data-chat-item-id="focused-visual"]');
       const visual = row.locator(".chat-visual");
       await expect(visual.locator("img")).toHaveCount(1);
+      await visual.getByRole("button", { name: "Source", exact: true }).click();
+      await expect(visual.locator("[data-visual-copy]")).toBeEnabled();
+      await visual.getByRole("button", { name: "Preview", exact: true }).click();
       for (const [index, selector] of ["[data-visual-tab=source]", "[data-visual-copy]", ".chat-visual-enlarge"].entries()) {
         const button = visual.locator(selector);
         await button.focus();
@@ -383,6 +386,31 @@ for (const engine of ["chromium", "webkit"] as const) {
       await visual.getByRole("button", { name: "Source", exact: true }).click();
       await expect(visual.locator(".chat-visual-source code")).toHaveText(SVG);
     } finally { await browser.close(); }
+  });
+  browserTest(`${engine}: first copy works after SVG source outlasts activation`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL });
+    let release!: () => void;
+    const responseReady = new Promise<void>(resolve => { release = resolve; });
+    try {
+      const conversationId = await boot(page, request);
+      await page.route(/\/api\/chat\/visuals\/[0-9a-f]{64}\/source$/, async route => {
+        await responseReady;
+        await route.continue();
+      });
+      await publish(request, conversationId, "slow-svg-source", `\`\`\`svg\n${SVG}\`\`\``);
+      const visual = page.locator('[data-chat-item-id="slow-svg-source"] .chat-visual');
+      const copy = visual.getByRole("button", { name: "Copy source", exact: true });
+      await expect(copy).toBeDisabled();
+      await visual.getByRole("button", { name: "Source", exact: true }).click();
+      // Deliberately outlast transient activation from opening Source.
+      await page.waitForTimeout(6_000);
+      await expect(copy).toBeDisabled();
+      release();
+      await expect(copy).toBeEnabled();
+      await copy.click();
+      await expect(visual.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    } finally { release(); await browser.close(); }
   });
   browserTest(`${engine}: deferred Agent report SVG source controls work after opening`, async ({ launchBrowser, request, baseURL }) => {
     const browser = await launchBrowser(engine);

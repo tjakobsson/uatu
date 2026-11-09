@@ -7,6 +7,7 @@ export function decorateChatVisuals(root: HTMLElement): void {
     if (visual.dataset.visualBound) continue;
     visual.dataset.visualBound = "true";
     const status = visual.querySelector<HTMLElement>(".chat-visual-status");
+    const copyButton = visual.querySelector<HTMLButtonElement>("[data-visual-copy]");
     let loading: Promise<string> | undefined;
     const source = (): Promise<string> => {
       const code = visual.querySelector<HTMLElement>(".chat-visual-source code");
@@ -21,6 +22,10 @@ export function decorateChatVisuals(root: HTMLElement): void {
         const text = await response.text();
         code.textContent = text;
         visual.dataset.visualSourceLoaded = "true";
+        if (copyButton) {
+          copyButton.disabled = false;
+          copyButton.removeAttribute("title");
+        }
         return text;
       })().catch(error => { loading = undefined; throw error; });
       return loading;
@@ -41,8 +46,13 @@ export function decorateChatVisuals(root: HTMLElement): void {
         return;
       }
       const copy = target.closest<HTMLButtonElement>("[data-visual-copy]");
-      if (copy) void source().then(text => copyChatText(copy, text, message => { if (status) status.textContent = message; }))
-        .catch(error => { if (status) status.textContent = messageOf(error); });
+      // Source is loaded before copying is enabled. Start clipboard work in
+      // this click's activation, never after awaiting a network response.
+      if (copy && !copy.disabled && visual.dataset.visualSourceLoaded) {
+        const text = visual.querySelector(".chat-visual-source code")?.textContent ?? "";
+        void copyChatText(copy, text, message => { if (status) status.textContent = message; })
+          .catch(error => { if (status) status.textContent = messageOf(error); });
+      }
     });
     const image = visual.querySelector<HTMLImageElement>(".chat-visual-enlarge img");
     if (image) {

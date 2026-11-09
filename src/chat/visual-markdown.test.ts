@@ -5,6 +5,27 @@ import { renderChatMarkdown } from "./markdown";
 import { getChatVisuals, prepareChatVisualMarkdown } from "./visual-markdown";
 
 describe("agent visual Markdown", () => {
+  test("capture-only extraction never invokes presentation highlighting", () => {
+    const source = '```js\nconst answer = 42;\n```\n\n![Shot](result.png)\n\n```svg\n<svg/>\n```';
+    const markdownUrl = new URL("../render/markdown.ts", import.meta.url).href;
+    const visualUrl = new URL("./visual-markdown.ts", import.meta.url).href;
+    const child = Bun.spawnSync([process.execPath, "--eval", `
+      import { mock } from "bun:test";
+      const original = await import(${JSON.stringify(markdownUrl)});
+      mock.module(${JSON.stringify(markdownUrl)}, () => ({ ...original, highlightCodeBlocks() { throw new Error("presentation-only"); } }));
+      const { getChatVisuals, prepareChatVisualMarkdown } = await import(${JSON.stringify(visualUrl)});
+      const source = await Bun.stdin.text();
+      for (const streaming of [true, false]) {
+        const visuals = getChatVisuals(source, streaming);
+        if (visuals.length !== 2 || visuals[0].source !== "result.png" || visuals[1].source !== "<svg/>\\n") process.exit(1);
+      }
+      try { prepareChatVisualMarkdown(source, false); process.exit(1); }
+      catch (error) { if (error.message !== "presentation-only") throw error; }
+      console.log("capture-only");
+    `], { stdin: Buffer.from(source), stdout: "pipe", stderr: "pipe", timeout: 3_000, killSignal: "SIGKILL" });
+    expect({ exitCode: child.exitCode, stderr: child.stderr.toString(), stdout: child.stdout.toString() })
+      .toEqual({ exitCode: 0, stderr: "", stdout: "capture-only\n" });
+  });
   test("origin-name collisions cannot stall visual preparation", () => {
     const source = "```svg\n<svg><text>uatu-origin" + "-".repeat(1_048_576) + "</text></svg>\n```\n\n![Shot](result.png)";
     const moduleUrl = new URL("./visual-markdown.ts", import.meta.url).href;

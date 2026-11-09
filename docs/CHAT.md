@@ -937,6 +937,8 @@ returned only inside a tool result is not automatically displayed.
 
 A fenced code block labelled `svg` also becomes an inline preview. **Source**
 shows the original SVG, and **Copy source** copies it without changing it.
+For stored captures, open **Source** first; copying becomes available once the
+source has loaded, so the copy click retains browser clipboard permission.
 SVG files embedded with Markdown have the same controls. Previews use the
 browser's image renderer, not active SVG markup in the chat page. Scripts,
 embedded HTML, and external resources are not supported.

@@ -5,6 +5,27 @@ import { decorateChatVisuals } from "./visual-ui";
 const VISUAL_ID = "a".repeat(64);
 
 describe("chat visual controls", () => {
+  test("copy waits for source loading, not for network work inside the copy click", async () => {
+    const oldFetch = globalThis.fetch;
+    let finish!: (response: Response) => void;
+    globalThis.fetch = (() => new Promise<Response>(resolve => { finish = resolve; })) as typeof fetch;
+    try {
+      const { document, window } = parseHTML(`<div id="root">${renderChatMarkdown("![Diagram](./slow.svg)", {
+        visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }],
+      })}</div>`);
+      const root = document.querySelector("#root") as unknown as HTMLElement;
+      const copy = root.querySelector<HTMLButtonElement>("[data-visual-copy]")!;
+      expect(copy.hasAttribute("disabled")).toBe(true);
+      decorateChatVisuals(root);
+      root.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(copy.hasAttribute("disabled")).toBe(true);
+      finish(new Response("<svg/>", { headers: { "Content-Type": "text/plain" } }));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(copy.disabled).toBe(false);
+      expect(root.querySelector(".chat-visual-source code")?.textContent).toBe("<svg/>");
+      expect(root.querySelector<HTMLElement>(".chat-visual")?.dataset.visualSourceLoaded).toBe("true");
+    } finally { globalThis.fetch = oldFetch; }
+  });
   test("a completed decode failure shows the original reference even before binding", () => {
     const { document } = parseHTML(`<div id="root">${renderChatMarkdown('![Broken <shot>](./broken.png)', {
       visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/png" }],
