@@ -390,7 +390,7 @@ test("ordinary streamed code tokens have bounded enrichment/store work and an ex
   const clock = spyOn(Date, "now").mockImplementation(() => now);
   const captures = spyOn(h.store, "captureMany");
   const enrichments = spyOn(h.service as unknown as { enrichItem(id: string, item: ConversationItem, streaming: boolean): Promise<ConversationItem> }, "enrichItem");
-  const originals: ChatEvent[] = [];
+  const originals: Array<Extract<ChatEvent, { type: "item.text_delta" }>> = [];
   const received: ChatEvent[] = [];
   let client = projectionFromSnapshot(h.subscription.snapshot);
   const project = (event: ChatEvent) => {
@@ -402,7 +402,7 @@ test("ordinary streamed code tokens have bounded enrichment/store work and an ex
     for (let index = 0; index < 1_000; index++) {
       now++;
       const original = h.projection.apply({ kind: "text", itemId: "answer", identity: "answer", mode: "incremental", text: `${index}();\n` });
-      if (!original) throw new Error("expected native delta");
+      if (!original || original.type !== "item.text_delta") throw new Error("expected native delta");
       originals.push(original);
       received.push(...await deliveredBatch(h.replay, h.iterator, project));
     }
