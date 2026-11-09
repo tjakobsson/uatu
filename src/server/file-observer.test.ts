@@ -888,3 +888,37 @@ test("deleting a folder above a live-written file inside an unlisted folder remo
   control.notify("rename", path.join(build, "nested"));
   await until(() => events.includes("unlink build/nested/a.md"), "removal noticed through the deleted folder");
 });
+
+for (const event of ["rename", "change"] as const) {
+  test(`replacing an unlisted folder rechecks the files tracked below its subfolders (${event} names only the folder)`, async () => {
+    const root = await fixture();
+    const build = path.join(root, "build");
+    await mkdir(path.join(build, "nested"), { recursive: true });
+    const tracked = path.join(build, "nested", "a.md");
+    await writeFile(tracked, "# before");
+    await writeFile(path.join(build, "sibling.md"), "# never listed");
+    const control = controlledNativeWatch();
+    const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+    const entry = { kind: "dir" as const, absolutePath: root };
+    const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+      unlisted: directory => directory === build || directory.startsWith(build + path.sep) });
+    observers.push(observer);
+    const events: string[] = [];
+    await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+    observer.on("all", (kind, file) => events.push(`${kind} ${path.relative(root, file)}`));
+    observer.track?.(tracked);
+    await until(() => events.includes("add build/nested/a.md"), "tracked file known");
+    await until(() => events.includes("addDir build/nested"), "its folders registered");
+    // A build swaps in a fresh output folder carrying an updated file.
+    const fresh = path.join(root, "build.next");
+    await mkdir(path.join(fresh, "nested"), { recursive: true });
+    await writeFile(path.join(fresh, "nested", "a.md"), "# after, a longer body");
+    await writeFile(path.join(fresh, "other.md"), "# also never listed");
+    await rm(build, { recursive: true });
+    await rename(fresh, build);
+    control.notify(event, build);
+    await until(() => events.includes("change build/nested/a.md"), "tracked file below the replaced folder rechecked");
+    // Still only what was tracked: the rest of the unlisted folder stays unread.
+    expect(events.some(line => line.includes("other.md") || line.includes("sibling.md"))).toBe(false);
+  });
+}

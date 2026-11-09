@@ -528,9 +528,12 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       }
       if (!previous) this.emit("all", "addDir", file, stats);
       if (unlisted) {
-        // An ambiguous rename inside it can name only a temporary source:
-        // recheck the files tracked there, without reading the rest.
-        if (discover) for (const child of this.children.get(file) ?? []) if (!this.known.get(child)?.isDirectory()) this.enqueue(child, false);
+        // An ambiguous rename inside it can name only a temporary source,
+        // and a replaced folder (new inode) can carry new copies of what is
+        // tracked below it: recheck the tracked chain, subfolders included,
+        // without reading the rest.
+        const replaced = previous?.isDirectory() === true && previous.ino !== stats.ino;
+        if (discover || replaced) for (const child of this.children.get(file) ?? []) this.enqueue(child, this.known.get(child)?.isDirectory() === true);
         return;
       }
       if (!discover && previous?.isDirectory() && previous.mtimeMs === stats.mtimeMs && previous.ino === stats.ino) return;
