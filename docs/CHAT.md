@@ -925,7 +925,9 @@ a Markdown `svg` fence for a preview.
 Paths are relative to the agent's workspace, not the document currently open
 in Preview. The image must be in a location permitted by Uatu's existing
 file-serving policy; exposure-excluded, denied, and outside-workspace files are
-not imported. A Git ignore rule alone does not exclude a file from exposure;
+not imported. Built-in exclusions follow VS Code's file-exclusion defaults;
+build output and secret-like filenames are not excluded by name alone.
+A Git ignore rule alone does not exclude a file from exposure;
 use Uatu's `ignore.exclude` policy for that. Symlinked workspace roots work,
 but symlinks below a watched root cannot bypass these checks. Additional watched
 roots do not expand the agent workspace's capture boundary. A named-file watch

@@ -24,7 +24,7 @@ that proposal-first development occurred or that verification is complete.
 - Supply scoped native presentation guidance to managed Claude Code and
   OpenCode sessions without changing prompts, permissions, or user configuration.
 - **BREAKING (workspace payload):** add optional snapshot references to the
-  closed assistant-message schema, with workspace revision 36 and migration
+  closed assistant-message schema, with workspace revision 37 and migration
   guidance. The Hub API revision remains 14; bundled-web revision 4 refreshes
   older assets before they consume the new payload.
 
@@ -50,7 +50,7 @@ no new dependency, sharing tool, mandatory skill, or extraction of native
 tool-result images is proposed. Repository/global instructions are unchanged.
 
 The initial review baseline is upstream `71e4700`, integrated by merge
-`331661b`. The current integration base is upstream `8894d92`
+`331661b`. The current integration base is upstream `ab6f4c2`
 (latest rebase on 2026-11-09).
 At the planning-approval checkpoint, generated-input safety tests,
 independent fix review, and pinned-SDK validation remained outstanding.

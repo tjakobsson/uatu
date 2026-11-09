@@ -6,7 +6,7 @@ See [proposal.md](proposal.md) for motivation and
 [the capability delta](specs/chat-visuals/spec.md) for acceptance behavior.
 The initial implementation was uncommitted on top of merge `331661b`, which
 integrated upstream `71e4700`. The current integration base is upstream
-`8894d92` (latest rebase on 2026-11-09). Retrospective planning was approved on
+`ab6f4c2` (latest rebase on 2026-11-09). Retrospective planning was approved on
 2026-10-30; implementation presence still does not establish final acceptance.
 
 The shared chat model owns presentation while native agent transcripts own
@@ -161,8 +161,8 @@ are not changed.
 1. Review and approve these retrospective artifacts before resuming code work.
 2. Resolve remaining review findings and verify the integrated fixes against
    pinned upstream, including all new implementation files.
-3. Keep workspace revision 36, web revision 4, API schema/examples, and migration
-   notes aligned. Strict revision-35 validators must be regenerated for the
+3. Keep workspace revision 37, web revision 4, API schema/examples, and migration
+   notes aligned. Strict revision-36 validators must be regenerated for the
    optional assistant `visuals` field; the Hub revision remains 14.
 4. Run relevant unit, generated-input, contract, build, and browser checks;
    report full-suite or live-agent limitations separately.

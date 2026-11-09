@@ -504,10 +504,29 @@ describe("immutable visual snapshots", () => {
 });
 
 describe("watched-root bounded reader", () => {
+  test("capture follows upstream visibility policy for build output and explicit exclusions", async () => {
+    const root = path.join(directory, "workspace");
+    await fs.mkdir(path.join(root, "build"), { recursive: true });
+    await fs.mkdir(path.join(root, "node_modules"));
+    for (const name of [".env", "build/image.png", "node_modules/image.png", "ignored.png", "excluded.png", ".DS_Store"]) {
+      await fs.writeFile(path.join(root, name), png);
+    }
+    await fs.writeFile(path.join(root, ".gitignore"), "ignored.png\n");
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.png"] } }));
+    const entries = await resolveWatchRoots([root], directory);
+    const reader = createWatchedVisualReader(entries);
+    const store = new VisualStore(root, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    for (const [index, name] of [".env", "build/image.png", "node_modules/image.png", "ignored.png"].entries()) {
+      expect(await reader(name, root)).toEqual(png);
+      expect(await store.capture("a:c", "upstream-policy", file(name, index), false)).toMatchObject({ status: "ready", mimeType: "image/png" });
+    }
+    for (const name of ["excluded.png", ".DS_Store"]) await expect(reader(name, root)).rejects.toMatchObject({ missing: false });
+  });
   test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("nested watch roots can authorize a parent-excluded visual ($name)", async ({ aliased }) => {
     const root = path.join(directory, "workspace");
     await fs.mkdir(path.join(root, "images"), { recursive: true });
-    for (const name of ["diagram.svg", "blocked.svg", ".env"]) await fs.writeFile(path.join(root, "images", name), svg);
+    for (const name of ["diagram.svg", "blocked.svg", ".DS_Store"]) await fs.writeFile(path.join(root, "images", name), svg);
     await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["images/"] } }));
     await fs.writeFile(path.join(root, "images", ".uatu.json"), JSON.stringify({ ignore: { exclude: ["blocked.svg"] } }));
     await fs.writeFile(path.join(directory, "outside.svg"), svg);
@@ -516,12 +535,12 @@ describe("watched-root bounded reader", () => {
     if (aliased) await fs.symlink(root, watched);
     const entries = await resolveWatchRoots([watched, path.join(watched, "images")], directory);
     const workspace = await fs.realpath(root);
-    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "images", "diagram.svg") });
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "images", "diagram.svg"), documentPath: path.join(watched, "images", "diagram.svg") });
     const reader = createWatchedVisualReader(entries);
     expect(new TextDecoder().decode(await reader("images/diagram.svg", workspace))).toBe(svg);
     expect(new TextDecoder().decode(await createWatchedVisualReader([...entries].reverse())("images/diagram.svg", workspace))).toBe(svg);
     await expect(createWatchedVisualReader([entries[0]!])("images/diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
-    for (const source of ["images/blocked.svg", "images/.env", "images/escape.svg", path.join(directory, "outside.svg")]) {
+    for (const source of ["images/blocked.svg", "images/.DS_Store", "images/escape.svg", path.join(directory, "outside.svg")]) {
       await expect(reader(source, workspace)).rejects.toMatchObject({ missing: false });
     }
     await expect(reader("images/missing.svg", workspace)).rejects.toMatchObject({ missing: true });
@@ -539,7 +558,7 @@ describe("watched-root bounded reader", () => {
     if (aliased) await fs.symlink(root, watched);
     const entries = [{ kind: "file" as const, absolutePath: path.join(watched, "diagram.svg"), parentDir: watched }];
     const workspace = await selectCanonicalChatRoot(entries);
-    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "diagram.svg") });
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "diagram.svg"), documentPath: path.join(watched, "diagram.svg") });
     const reader = createWatchedVisualReader(entries);
     expect(new TextDecoder().decode(await reader("diagram.svg", workspace))).toBe(svg);
     await expect(createWatchedVisualReader([{ kind: "dir", absolutePath: watched }])("diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
@@ -557,7 +576,7 @@ describe("watched-root bounded reader", () => {
     await fs.writeFile(path.join(workspace, "a.md"), "Watched document");
     await fs.writeFile(path.join(images, "diagram.svg"), svg);
     await fs.writeFile(path.join(images, "blocked.svg"), svg);
-    await fs.writeFile(path.join(images, ".env"), svg);
+    await fs.writeFile(path.join(images, ".DS_Store"), svg);
     await fs.writeFile(path.join(images, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["blocked.svg"] } }));
     await fs.writeFile(path.join(directory, "outside.svg"), svg);
     await fs.symlink(path.join(directory, "outside.svg"), path.join(images, "escape.svg"));
@@ -567,11 +586,11 @@ describe("watched-root bounded reader", () => {
     const canonical = await selectCanonicalChatRoot(entries);
     expect(canonical).toBe(await fs.realpath(workspace));
     expect(entries[0]!.kind).toBe("file");
-    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(canonical, "images", "diagram.svg") });
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(canonical, "images", "diagram.svg"), documentPath: path.join(watched, "images", "diagram.svg") });
     const reader = createWatchedVisualReader(entries);
     expect(new TextDecoder().decode(await reader("images/diagram.svg", canonical))).toBe(svg);
     expect(new TextDecoder().decode(await createWatchedVisualReader([...entries].reverse())("images/diagram.svg", canonical))).toBe(svg);
-    for (const source of ["images/blocked.svg", "images/.env", "images/escape.svg", path.join(directory, "outside.svg")]) {
+    for (const source of ["images/blocked.svg", "images/.DS_Store", "images/escape.svg", path.join(directory, "outside.svg")]) {
       await expect(reader(source, canonical)).rejects.toMatchObject({ missing: false });
     }
     await expect(reader("images/missing.svg", canonical)).rejects.toMatchObject({ missing: true });
@@ -596,7 +615,7 @@ describe("watched-root bounded reader", () => {
       await fs.writeFile(path.join(root, name, "image.png"), png);
       await fs.symlink(path.join(root, name), path.join(root, `${name}-alias`));
     }
-    await fs.writeFile(path.join(root, ".env"), png);
+    await fs.writeFile(path.join(root, ".DS_Store"), png);
     await fs.writeFile(path.join(directory, "outside.png"), png);
     await fs.symlink(path.join(directory, "outside.png"), path.join(root, "escape.png"));
     await fs.symlink(directory, path.join(root, "escape-parent"));
@@ -605,12 +624,12 @@ describe("watched-root bounded reader", () => {
     const entries = await resolveWatchRoots([lexicalRoot], directory);
     const workspace = await selectCanonicalChatRoot(entries);
     expect(workspace).toBe(await fs.realpath(root));
-    expect(await resolveStaticFileRequest("image.png", entries)).toEqual({ status: "found", filePath: path.join(workspace, "image.png") });
+    expect(await resolveStaticFileRequest("image.png", entries)).toEqual({ status: "found", filePath: path.join(workspace, "image.png"), documentPath: path.join(lexicalRoot, "image.png") });
     const reader = createWatchedVisualReader(entries);
     expect(await reader("image.png", workspace)).toEqual(png);
     expect(await reader(path.join(workspace, "image.png"), workspace)).toEqual(png);
     expect(await reader("image.png", lexicalRoot)).toEqual(png);
-    for (const denied of [".env", "excluded.png", "excluded-alias/image.png", ".git-alias/image.png", "escape.png", "escape-parent/outside.png"]) {
+    for (const denied of [".DS_Store", "excluded.png", "excluded-alias/image.png", ".git-alias/image.png", "escape.png", "escape-parent/outside.png"]) {
       await expect(reader(denied, workspace)).rejects.toMatchObject({ missing: false });
     }
     await expect(reader("missing.png", workspace)).rejects.toMatchObject({ missing: true });
@@ -657,7 +676,7 @@ describe("watched-root bounded reader", () => {
     await fs.writeFile(path.join(root, "ignored.png"), png);
     await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.png"] } }));
     await fs.writeFile(path.join(root, "excluded.png"), png);
-    await fs.writeFile(path.join(root, ".env"), png);
+    await fs.writeFile(path.join(root, ".DS_Store"), png);
     await fs.writeFile(path.join(directory, "outside.png"), png);
     await fs.symlink(path.join(directory, "outside.png"), path.join(root, "escape.png"));
     await fs.symlink(directory, path.join(root, "escape-parent"));
@@ -665,7 +684,7 @@ describe("watched-root bounded reader", () => {
     expect(await reader("image.png", root)).toEqual(png);
     expect(await reader(path.join(root, "image.jpg"), root)).toEqual(Uint8Array.from([0xff, 0xd8, 0xff]));
     expect(new TextDecoder().decode(await reader("image.svg", root))).toBe(svg);
-    for (const denied of ["../outside.png", "%2e%2e/outside.png", "https://example.com/a.png", "//example.com/a.png", "file:///etc/passwd", ".env", "excluded.png", "escape.png", "escape-parent/outside.png", "image.png?x", "bad%00.png", "%ZZ"]) {
+    for (const denied of ["../outside.png", "%2e%2e/outside.png", "https://example.com/a.png", "//example.com/a.png", "file:///etc/passwd", ".DS_Store", "excluded.png", "escape.png", "escape-parent/outside.png", "image.png?x", "bad%00.png", "%ZZ"]) {
       await expect(reader(denied, root)).rejects.toBeInstanceOf(VisualReadError);
     }
     await expect(reader("missing.png", root)).rejects.toMatchObject({ missing: true });
