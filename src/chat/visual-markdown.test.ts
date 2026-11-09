@@ -27,14 +27,24 @@ describe("agent visual Markdown", () => {
     const source = '![inline](inline.png)\n\n<img src="raw.png">\n\n![shot][ref]\n\n[ref]: a.p';
     expect(getChatVisuals(source, true).map(input => [input.source, input.complete])).toEqual([["inline.png", true], ["raw.png", true], ["a.p", false]]);
   });
-  test("a trailing shortcut and incomplete resource/reference continuations stay provisional at the same occurrence", () => {
+  test("a trailing shortcut stays provisional through an incomplete resource, while incomplete explicit references produce no visual", () => {
     const prefix = "[shot]: old.png\n[next]: new.png\n\n";
     const image = prefix + "![shot]";
     const key = `offset:${prefix.length}`;
-    for (const suffix of ["", "(", "(new.p", "[", "[nex"]) {
-      expect(getChatVisuals(image + suffix, true)[0]).toMatchObject({ source: "old.png", complete: false, key });
+    for (const suffix of ["", "(", "(new.p"]) {
+      expect(getChatVisuals(image + suffix, true)).toEqual([
+        { index: 0, kind: "file", source: "old.png", alt: "shot", complete: false, key },
+      ]);
+    }
+    // Micromark permits shortcut fallback after a failed resource attempt,
+    // but an explicit reference attempt must resolve full/collapsed syntax.
+    // Its incomplete forms are text, not permission to import old.png.
+    for (const suffix of ["[", "[nex"]) {
+      expect(getChatVisuals(image + suffix, true)).toEqual([]);
     }
     expect(getChatVisuals(image + "(new.png)", true)[0]).toMatchObject({ source: "new.png", complete: true, key });
+    expect(getChatVisuals(image + "[next]", true)[0]).toMatchObject({ source: "new.png", complete: false, key });
+    expect(getChatVisuals(image + "[next]", false)[0]).toMatchObject({ source: "new.png", complete: true, key });
     expect(getChatVisuals(image + "[next] ", true)[0]).toMatchObject({ source: "new.png", complete: true, key });
     for (const suffix of [" ", "\n", " followed by text", "\\("]) {
       expect(getChatVisuals(image + suffix, true)[0]).toMatchObject({ source: "old.png", complete: true, key });
