@@ -116,6 +116,69 @@ test.each(["completedAt", "turn_status"] as const)("historical visuals stay term
   } finally { await service.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
+test.each([
+  { generation: "v1", field: "completed", pending: false },
+  { generation: "v1", field: "completed", pending: true },
+  { generation: "v1", field: "end", pending: false },
+  { generation: "v1", field: "end", pending: true },
+  { generation: "v2", field: "completed", pending: false },
+  { generation: "v2", field: "completed", pending: true },
+] as const)("native $generation time.$field seals historical visuals before a newer turn (pending=$pending)", async ({ generation, field, pending }) => {
+  const root = path.join(os.homedir(), ".cache/opencode/scratch/uatu-544-review-resume-20261030/admission");
+  await fs.mkdir(root, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(root, "historical-native-"));
+  const content = [
+    { id: "old-image", type: "text", text: "![Old](old.png)", time: { start: 1, end: 2, created: 1, completed: 2 } },
+    { id: "old-svg", type: "text", text: "```svg\n<svg>", time: { start: 1, end: 2, created: 1, completed: 2 } },
+  ];
+  const normalize = (completed: boolean): ConversationItem[] => {
+    const time = { created: 1, ...(completed ? { [field]: 2 } : {}) };
+    return generation === "v1"
+      ? normalizeProviderMessage({ info: { id: "old", role: "assistant", time }, parts: content })
+      : normalizeOpenCodeV2History({ id: "old", type: "assistant", time, content });
+  };
+  let items = normalize(false);
+  let status: ConversationSummary["status"] = "running";
+  const provider = { history: async () => ({ ...snapshot("c"), conversation: { ...summary("c"), status }, items }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const services: MultiAgentChatService[] = [];
+  let available = false;
+  let reads = 0;
+  const makeService = () => {
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async source => {
+      expect(source).toBe("old.png");
+      reads++;
+      if (!available) throw new VisualReadError(true);
+      return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    });
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: provider }] });
+    services.push(service);
+    return service;
+  };
+  const visuals = (value: ConversationSnapshot) => value.items.filter((item): item is AssistantMessageItem => item.type === "assistant_message").flatMap(item => item.visuals ?? []);
+  try {
+    if (pending) {
+      expect(items.every(item => item.type !== "assistant_message" || item.completedAt === undefined)).toBe(true);
+      expect(visuals(await makeService().history("opencode:c")).map(visual => visual.status)).toEqual(["pending", "pending"]);
+    }
+    const old = normalize(true);
+    expect(old.every(item => item.type !== "assistant_message" || item.completedAt === 2)).toBe(true);
+    items = [...old, { id: "new-prompt", type: "user_message", createdAt: 3, text: "Next turn" }];
+    const service = makeService();
+    const terminal = visuals(await service.history("opencode:c"));
+    expect(terminal.map(visual => visual.status)).toEqual(["unavailable", "unavailable"]);
+    expect(reads).toBe(pending ? 2 : 1);
+    available = true;
+    status = "completed";
+    expect(visuals(await service.history("opencode:c"))).toEqual(terminal);
+    expect(visuals(await makeService().history("opencode:c"))).toEqual(terminal);
+    expect(reads).toBe(pending ? 2 : 1);
+  } finally {
+    for (const service of services) await service.dispose();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("raw HTML image aliases pass the visual-capture precheck", async () => {
   const scratch = path.join(os.tmpdir(), "opencode");
   await fs.mkdir(scratch, { recursive: true });

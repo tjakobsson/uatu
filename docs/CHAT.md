@@ -979,6 +979,8 @@ explanation and preserve the reference or SVG source. A local file missing
 during streaming is retried once when the reply finishes.
 Steering does not finish the current reply or consume its completion retry;
 reloading or opening another client while it continues preserves pending visuals.
+Native OpenCode completion timestamps also keep older finished answers terminal
+when their history is opened during a newer running turn.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain

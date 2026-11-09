@@ -656,16 +656,18 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, cost: info.cost, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model, agent: info.agent ?? info.mode }, id, createdAt, mintUsageCarrier);
+    return normalizeAssistant({ content: parts, time: info.time, error: info.error, snapshot: info.snapshot, tokens: info.tokens, cost: info.cost, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model, agent: info.agent ?? info.mode }, id, createdAt, mintUsageCarrier);
   }
   return [];
 }
 
 export function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number, mintUsageCarrier: boolean): ConversationItem[] {
+  // A text part may finish before its message. Only native message completion
+  // seals historical visuals while a later conversation turn is still live.
+  const completed = completionTime(finishedTime(message.time));
   const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt, undefined, messageId)).flatMap(update => {
-    if (update.kind === "upsert") return [update.item];
-    if (update.kind === "text" && update.item) return [update.item];
-    return [];
+    const item = update.kind === "upsert" || update.kind === "text" ? update.item : undefined;
+    return item ? [item.type === "assistant_message" ? { ...item, ...completed } : item] : [];
   });
   // What the turn spent, on the message's own carrier — the same item id the
   // live path uses, so a conversation reads back exactly as it streamed. This

@@ -11,8 +11,10 @@ import {
   type RecordValue,
   array,
   createProviderEventMemory,
+  completionTime,
   errorMessage,
   isLoginError,
+  finishedTime,
   normalizeCanonicalEvent,
   normalizeEventWith,
   normalizeEventEnvelopeWith,
@@ -734,10 +736,10 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
     }
     case "assistant": {
       const tools = prepared.tools;
+      const completed = completionTime(finishedTime(message.time));
       const items = assistantContentUpdates(id, array(message.content), createdAt, undefined, tools).flatMap(update => {
-        if (update.kind === "upsert") return [update.item];
-        if (update.kind === "text" && update.item) return [update.item];
-        return [];
+        const item = update.kind === "upsert" || update.kind === "text" ? update.item : undefined;
+        return item ? [item.type === "assistant_message" ? { ...item, ...completed } : item] : [];
       });
       if (background) for (const tool of tools.values()) items.push(...background.workers.launchPrepared(background.parent, tool, createdAt).flatMap(update => update.kind === "upsert" ? [update.item] : []));
       const usage = tokensToUsage(message.tokens, message.cost);
