@@ -114,7 +114,7 @@ test.each(["completed", "failed", "interrupted"] as const)("ordered Claude %s se
   expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(true);
   const first = projection.get(originals[0]!.id)!;
   if (first.type !== "assistant_message") throw new Error("expected assistant");
-  projection.upsert({ ...first, model: "live-only-model" });
+  projection.upsert({ ...first, model: { providerId: "claude", modelId: "live-only-model" } });
   projection.replace(history());
   expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(true);
   expect((projection.get(originals[0]!.id) as AssistantMessageItem).model).toBeUndefined();

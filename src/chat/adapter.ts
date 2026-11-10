@@ -7492,8 +7492,11 @@ function latestModel(byMessage: Map<string, MessageModel> | undefined): string |
 function preserveClaudeTurn(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (current?.type !== "assistant_message" || incoming.type !== "assistant_message") return incoming;
   const turn = (current as typeof current & ClaudeTextIdentity)[CLAUDE_TURN];
-  return turn?.completed && !(incoming as typeof incoming & ClaudeTextIdentity)[CLAUDE_TURN]?.completed
-    ? { ...incoming, [CLAUDE_TURN]: turn } : incoming;
+  if (turn?.completed && !(incoming as typeof incoming & ClaudeTextIdentity)[CLAUDE_TURN]?.completed) {
+    const preserved: typeof incoming & ClaudeTextIdentity = { ...incoming, [CLAUDE_TURN]: turn };
+    return preserved;
+  }
+  return incoming;
 }
 
 function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
