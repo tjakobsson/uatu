@@ -165,11 +165,12 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
   while (usedSuffixes.has(suffix)) suffix++;
   const attribute = prefix + String(suffix).padStart(width, "0");
   const origins = new Map<string, Origin>();
-  const annotate = (html: string, position: number, origin: Origin) => {
+  const annotation = (origin: Origin) => {
     const id = String(origins.size);
     origins.set(id, origin);
-    return html.slice(0, position) + ` ${attribute}="${id}"` + html.slice(position);
+    return ` ${attribute}="${id}"`;
   };
+  const annotate = (html: string, position: number, origin: Origin) => html.slice(0, position) + annotation(origin) + html.slice(position);
   const wrapped: MarkdownEvent[] = [];
   const wrappers = new Map<MarkdownEvent[1], MarkdownEvent[1]>();
   const fenceOrigins = new Map<MarkdownEvent[1], Origin>();
@@ -242,6 +243,9 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
           // DOM order. Source slices retain list/quote prefixes and offsets.
           const positions = (raw: string) => {
             const result: { tag: string; offset: number; insertion: number }[] = [];
+            // Match only the parsed node's lexical tag name, without copying
+            // the entire remaining block for each image/pre occurrence.
+            const name = /<[^\t\n\f\r />]+/y;
             const visit = (parent: { children: HtmlNode[] }) => {
               for (const node of parent.children) {
                 if (node.type !== "element") continue;
@@ -249,8 +253,9 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
                   const offset = node.position.start.offset;
                   // HTML normalizes aliases such as <image> to img. Insert
                   // after the lexical name, not inside its longer source tag.
-                  const name = /^<[^\t\n\f\r />]+/.exec(raw.slice(offset));
-                  if (name) result.push({ tag: node.tagName, offset, insertion: offset + name[0].length });
+                  name.lastIndex = offset;
+                  const matched = name.exec(raw);
+                  if (matched) result.push({ tag: node.tagName, offset, insertion: offset + matched[0].length });
                 }
                 visit(node);
               }
@@ -260,10 +265,25 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
           };
           const sourcePositions = positions(source.slice(original.start.offset, original.end.offset));
           const renderedPositions = positions(html);
+          const insertions: { position: number; attribute: string }[] = [];
           for (let i = renderedPositions.length - 1; i >= 0; i--) {
             const rendered = renderedPositions[i]!;
             const sourcePosition = sourcePositions[i];
-            if (sourcePosition?.tag === rendered.tag) html = annotate(html, rendered.insertion, { offset: original.start.offset! + sourcePosition.offset });
+            if (sourcePosition?.tag === rendered.tag) insertions.push({ position: rendered.insertion,
+              attribute: annotation({ offset: original.start.offset! + sourcePosition.offset }) });
+          }
+          if (insertions.length) {
+            // Positions all refer to the original block. Copy each character
+            // once, rather than rebuilding the growing block for every tag.
+            const segments: string[] = [];
+            let previous = 0;
+            for (let i = insertions.length - 1; i >= 0; i--) {
+              const insertion = insertions[i]!;
+              segments.push(html.slice(previous, insertion.position), insertion.attribute);
+              previous = insertion.position;
+            }
+            segments.push(html.slice(previous));
+            html = segments.join("");
           }
         } else {
           const tag = original.type === "image" ? "img" : "pre";

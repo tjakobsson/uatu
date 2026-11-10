@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { renderMarkdownToHtml } from "../render/markdown";
 import { renderChatMarkdown } from "./markdown";
@@ -198,6 +198,87 @@ describe("agent visual Markdown", () => {
       expect(document.querySelector("img")?.getAttribute("src")).toBe(`/api/chat/visuals/${"a".repeat(64)}`);
       expect(prepared.html).not.toContain("uatu-origin");
     }
+  });
+
+  test("one raw block annotates all 16,000 images with a linear source-copy budget", () => {
+    const prefix = '<div data-annotation-work="linear-16000">\n';
+    const sourceParts = [prefix];
+    const expected = [];
+    let offset = prefix.length;
+    for (let index = 0; index < 16_000; index++) {
+      const tag = `<${index % 2 ? "IMG" : "image"} src="p${index}.png" alt="a&amp;b" class="keep">\n`;
+      sourceParts.push(tag);
+      expected.push({ index, key: `offset:${offset}`, kind: "file", source: `p${index}.png`, alt: "a&b", complete: true });
+      offset += tag.length;
+    }
+    sourceParts.push("</div>\n");
+    const source = sourceParts.join("");
+    const assemblies: Array<{ annotations: number; segments: number; copied: number; original: string }> = [];
+    const join = Array.prototype.join;
+    // Inspect the actual raw annotation assembly, not elapsed time or a
+    // production counter that merely assumes the implementation is linear.
+    const assembling = spyOn(Array.prototype, "join").mockImplementation(function (this: unknown[], separator?: string) {
+      if (separator === "" && typeof this[0] === "string" && this[0].startsWith(prefix)) {
+        const marker = /^ uatu-origin-[0-9]+="[0-9]+"$/;
+        const annotations = this.filter(value => typeof value === "string" && marker.test(value));
+        if (annotations.length) {
+          const original = this.filter(value => typeof value !== "string" || !marker.test(value));
+          assemblies.push({ annotations: annotations.length, segments: this.length,
+            copied: original.reduce<number>((sum, value) => sum + String(value).length, 0), original: join.call(original, "") });
+        }
+      }
+      return join.call(this, separator);
+    });
+    const previous = globalThis.__uatuChatPerformance;
+    const measurements = { counts: {}, durations: {} } as NonNullable<typeof previous>;
+    globalThis.__uatuChatPerformance = measurements;
+    try {
+      const live = prepareChatVisualMarkdown(source, true);
+      expect(live.visuals).toEqual(expected);
+      expect(prepareChatVisualMarkdown(source, false)).toBe(live);
+      expect(prepareChatVisualMarkdown(source, true)).toBe(live);
+      expect(measurements.counts.markdown).toBe(1);
+      expect((live.html.match(/data-uatu-visual="[0-9]+"/g) ?? []).length).toBe(16_000);
+      expect(live.html).not.toMatch(/<img\b/i);
+      expect(live.html).not.toContain("uatu-origin-");
+      expect(getChatVisuals(source, true)).toEqual(expected);
+      expect(getChatVisuals(source, false)).toEqual(expected);
+      expect(measurements.counts.markdown).toBe(2); // One parse per presentation/capture view, not per mode.
+      expect(assemblies).toHaveLength(2);
+      for (const assembly of assemblies) {
+        expect(assembly.annotations).toBe(16_000); // Exactly one origin per actual tag; no eight-input truncation.
+        expect(assembly.segments).toBe(2 * 16_000 + 1);
+        expect(assembly.copied).toBeLessThanOrEqual(source.length);
+        // Micromark can emit the block's final line ending outside its wrapper.
+        // Otherwise every original attribute, entity and character is unchanged.
+        expect(assembly.original.replace(/\n$/, "")).toBe(source.replace(/\n$/, ""));
+      }
+    } finally { assembling.mockRestore(); globalThis.__uatuChatPerformance = previous; }
+  });
+
+  test("raw block annotation preserves quoted markup, comments, inert text and surrounding attributes", () => {
+    const source = '<div title="a &quot;quote&quot; &amp; literal &lt;img src=quoted.png&gt;">\n'
+      + '<!-- <IMG src="comment.png"> -->\n'
+      + '<script>const hidden = \'<img src="script.png">\';</script>\n'
+      + '<textarea><img src="inert.png"></textarea>\n'
+      + '<span title="literal <img src=attribute.png>">before &amp; after</span><br>\n'
+      + '<ImG src="a&amp;b.png" alt="A &quot;quoted&quot; &amp; B" title="unchanged">\n'
+      + '<iMaGe src="second.png" alt="second">\n</div>\n\n'
+      + 'ordinary **markup**  \nnext line\n';
+    const prepared = prepareChatVisualMarkdown(source, false);
+    expect(prepared.visuals).toEqual([
+      { index: 0, key: `offset:${source.indexOf('<ImG src="a&amp;b.png"')}`, kind: "file", source: "a&b.png", alt: 'A "quoted" & B', complete: true },
+      { index: 1, key: `offset:${source.indexOf('<iMaGe src="second.png"')}`, kind: "file", source: "second.png", alt: "second", complete: true },
+    ]);
+    expect(getChatVisuals(source, true)).toEqual(prepared.visuals);
+    const { document } = parseHTML(prepared.html);
+    expect(document.querySelector("div")?.getAttribute("title")).toBe('a "quote" & literal <img src=quoted.png>');
+    expect(document.querySelector("span[title]")?.getAttribute("title")).toBe("literal <img src=attribute.png>");
+    expect(document.querySelectorAll("[data-uatu-visual]").length).toBe(2);
+    expect(document.querySelectorAll("img").length).toBe(0);
+    expect(document.querySelector("strong")?.textContent).toBe("markup");
+    expect(document.querySelector("p br")).not.toBeNull();
+    expect(prepared.html).not.toContain("uatu-origin-");
   });
 
   test("SVG source preserves literal entities, quotes, and original line endings", () => {
