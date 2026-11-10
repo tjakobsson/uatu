@@ -6,6 +6,147 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { workerCanStop, workerExecutionClockRuns } from "../../worker-state";
 import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
 
+for (const change of ["distinct-start", "first-late-start", "exact-start-replay", "replay-storm", "text-noise", "other-child", "foreign-workspace"] as const)
+test(`returned cold activity remains covered through scheduler admission (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, armed = false, parentHeldOnce = false, interrupts = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, parentEntered!: () => void, releaseParent!: () => void,
+    folded!: (tasks: import("../../types").BackgroundTaskItem[]) => void, interactionsEntered!: () => void, releaseInteractions!: () => void;
+  const parentPending = new Promise<void>(resolve => { parentEntered = resolve; }), parentHeld = new Promise<void>(resolve => { releaseParent = resolve; });
+  const returned = new Promise<import("../../types").BackgroundTaskItem[]>(resolve => { folded = resolve; });
+  const interactions = new Promise<void>(resolve => { interactionsEntered = resolve; }), interactionsHeld = new Promise<void>(resolve => { releaseInteractions = resolve; });
+  const barriers = new Map<string, () => void>();
+  const frame = (type: string, data: unknown, created: number, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory: location } })}\n\n`));
+  const barrier = (name: string) => new Promise<void>(resolve => { barriers.set(name, resolve); frame(name, {}, 40); });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/interrupt")) interrupts++;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/permission/request" || route === "/api/form") { interactionsEntered(); await interactionsHeld; }
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
+      first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      if (armed && !parentHeldOnce) { parentHeldOnce = true; parentEntered(); await parentHeld; }
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-prompt", type: "user", text: "Execution prompt", time: { created: 10 } }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeEvents = provider.events.bind(provider), nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) {
+    barriers.get(event.eventType)?.(); barriers.delete(event.eventType); yield event;
+  } };
+  const firstAbort = new AbortController(), abort = new AbortController(), guards: import("../../provider").WorkerSourceGuard[] = [];
+  let capturedInitial = false;
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const observedGuards: import("../../provider").WorkerSourceGuard[] = [];
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => { options?.onSource?.(source); if (id === parent) observedGuards.push(source.workerSource.retain(abort.signal)); } });
+    if (id === parent && !capturedInitial && tasks.some(task => task.activity?.generation === 2)) {
+      capturedInitial = true; guards.push(...observedGuards); folded(tasks);
+    }
+    return tasks;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined, publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of nativeEvents(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Returned activity start counterproof")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const unrelated = (await provider.createSession("Other execution owner")).id, unrelatedChild = fake.launchRequestWorker(unrelated).childId;
+    const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+    publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
+      throw new Error("Scheduler ended before worker admission"); })(); void publication.catch(() => undefined);
+    armed = true; pump = adapter.startEventPump(); await provider.waitForEventStream!(abort.signal); await parentPending;
+    frame("session.created", { sessionID: child, parentID: parent, location: { directory } }, 11);
+    if (change !== "first-late-start") frame("session.execution.started", { sessionID: child }, 11);
+    if (change === "other-child") frame("session.created", { sessionID: unrelatedChild, parentID: unrelated, location: { directory } }, 11);
+    await barrier("diagnostic.initial-cold-start"); releaseParent();
+    const initial = await returned; await interactions;
+    expect(initial.find(task => task.taskId === worker.taskId)).toMatchObject({ status: "running", activity: { kind: "working", generation: 2 }, control: { available: false } });
+    expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (change === "replay-storm") for (let replay = 0; replay < 300; replay++) frame("session.execution.started", { sessionID: child }, 11);
+    else if (change === "text-noise") frame("session.message.content.updated", { sessionID: child, messageID: "later-output", content: [{ type: "text", text: "More output" }] }, 35);
+    else frame("session.execution.started", { sessionID: change === "other-child" ? unrelatedChild : child }, change === "exact-start-replay" ? 11 : 35,
+      change === "foreign-workspace" ? `${directory}/foreign` : directory);
+    await barrier("diagnostic.returned-cold-start");
+    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal }), denied = change === "distinct-start";
+    expect(current.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe(denied ? "unavailable" : "working");
+    if (!denied) expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    releaseInteractions(); const published = await publication;
+    expect(published.activity?.kind).toBe(denied ? "unavailable" : "working");
+    expect(workerExecutionClockRuns(published)).toBe(!denied);
+    expect(workerDismissalEvidence(published)?.dismissible).toBe(denied);
+    expect(published.status).toBe("running"); expect(published.activity?.endedAt).toBeUndefined();
+    expect(published.resultId).toBeUndefined(); expect(published.terminalReportedAt).toBeUndefined();
+    expect(workerCanStop(published)).toBe(false);
+    if (denied) expect(guards.some(guard => !guard.isCurrent())).toBe(true);
+    await expect(provider.stopTask!(parent, worker.taskId)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" }); expect(interrupts).toBe(0);
+  } finally { releaseParent(); releaseInteractions(); firstAbort.abort(); abort.abort(); await adapter.dispose(); await firstPump; await pump; await publication?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
+for (const change of ["distinct-start", "first-late-start", "exact-start-replay"] as const)
+test(`pending cold activity rechecks execution starts before return (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, captured = false, heldOnce = false;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, entered!: () => void, release!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const barriers = new Map<string, () => void>();
+  const frame = (type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory } })}\n\n`));
+  const barrier = (name: string) => new Promise<void>(resolve => { barriers.set(name, resolve); frame(name, {}, 40); });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
+      first.content[0].time = { created: 10, ran: 11, completed: 12 }; return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [], cursor: {} });
+    if (route === `/api/session/${parent}` && captured && !heldOnce) { heldOnce = true; entered(); await held; }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const firstAbort = new AbortController(), abort = new AbortController(), guards: import("../../provider").WorkerSourceGuard[] = [];
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined, recovery: ReturnType<NonNullable<typeof provider.reconcileBackgroundTasks>> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Pending cold activity admission")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = (async () => { for await (const event of provider.events(abort.signal)) { barriers.get(event.eventType)?.(); barriers.delete(event.eventType); } })();
+    await provider.waitForEventStream!(abort.signal);
+    frame("session.created", { sessionID: child, parentID: parent, location: { directory } }, 11);
+    if (change !== "first-late-start") frame("session.execution.started", { sessionID: child }, 11);
+    await barrier("diagnostic.pending-initial-start");
+    recovery = provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal, onSource: source => {
+      guards.push(source.workerSource.retain(abort.signal)); captured = true;
+    } }); void recovery.catch(() => undefined); await pending;
+    frame("session.execution.started", { sessionID: child }, change === "exact-start-replay" ? 11 : 35);
+    await barrier("diagnostic.pending-next-start");
+    expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    release(); const [row] = await recovery, denied = change === "distinct-start";
+    expect(row?.activity?.kind).toBe(denied ? "unavailable" : "working");
+    expect(workerExecutionClockRuns(row!)).toBe(!denied);
+    expect(workerDismissalEvidence(row)?.dismissible).toBe(denied);
+    expect(row?.activity?.endedAt).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();
+    expect(workerCanStop(row!)).toBe(false);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true); // Pending control reads are not blanket-invalidated.
+    const [reused] = await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal });
+    expect(reused?.activity?.kind).toBe(denied ? "unavailable" : "working");
+  } finally { release(); firstAbort.abort(); abort.abort(); await recovery?.catch(() => undefined); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
 for (const boundary of ["succeed-revert-start", "history-only-child", "history-only-terminal", "terminal-only", "no-boundary", "initial-start", "initial-late-start", "initial-start-replay", "newer-start-only", "earlier-boundary", "other-child", "foreign-workspace"] as const)
 test(`cold generation-2 activity respects processed execution boundaries (${boundary})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

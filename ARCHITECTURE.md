@@ -1300,6 +1300,15 @@ child-history or parent-launch counterproof revokes the returned guard, includin
 automatic recovery awaits interactions. Before return, deny-only activity
 withdrawal still permits fresh outcome folding; retained live occurrences keep
 their independent current-lifecycle projection and Stop rules.
+That activity dependency also covers a distinct execution start with no observed
+end. Its existing child slot retains the exact immutable cold occurrence, so
+processed starts are checked against the same admission predicate as a fresh
+recovery, not every launcher ever seen for that child. Before return, a
+contradicting start withdraws Working without blanket control-read invalidation;
+after return it revokes the activity lease through scheduler admission. First
+late starts, exact replays, text noise and unrelated/foreign events do not create
+this veto. The slot keeps its existing read lease/deadline and child scope; no
+event log, global cache or new positive/Stop authority is introduced.
 If a compatible retained alias cohort grows while an older row is awaiting
 publication, the older row stays inspectable with activity unavailable. Neither
 activity nor Stop projection borrows the newer cohort's valid basis.

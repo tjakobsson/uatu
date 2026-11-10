@@ -121,6 +121,15 @@ Returned history-only activity remains covered through that handoff too: later
 terminal events, ordered child-history reads and relevant parent-launch
 counterproof (native read or SSE) revoke its source rather
 than merely changing an activity value already projected before return.
+A distinct child execution start can provide the same counterproof without an
+end event. Each existing read-owned activity-child slot keeps its exact cold
+occurrence and reuses fresh recovery's admission predicate. A contradicting start
+downgrades pending activity to unavailable, or revokes an already returned
+Working lease before scheduler publication. First late starts, exact replays,
+ordinary text and unrelated/foreign events leave that lease intact. The old
+execution clock stays stopped and qualified unavailable evidence remains
+dismissible, without an invented result/end time or new Stop proof. The slot's
+existing child scope and deadline bound retention; it stores no event history.
 Outcome-free child observations remain watched through prepublication awaits
 too. Native idle counterproof is retained for the eventual activity handoff,
 without invalidating unrelated output or prepublication Stop reads merely
