@@ -1195,12 +1195,19 @@ earlier inventory; a conflicting overlapping response withdraws its own
 inference instead. Transport reuse keeps the original native read order, and
 ordinary output or launches for other children do not revoke independent
 outcome authority.
+Idle counterproof is observed at that shared native-history boundary too, so
+direct child history, accounting and inspection reads can revoke an older parent
+outcome. They use the same native ordering and overlapping-response abstention
+as parent inventory reads; returning through worker folding is not required.
 The adapter also retracts an already cached history-only completion when the
 covered complete source returns the same qualified execution as unresolved.
 That replacement clears stale terminal fields instead of merging them back.
 Explicit parent reports and terminal updates received during the read retain
 their existing precedence; an unguarded provider or ambiguous identity supplies
 no such replacement authority.
+Automatic scheduler admission uses that same exact-execution, report-free
+replacement predicate under its source and row-change fences, rather than
+allowing sparse upsert merging to retain a revoked inferred completion.
 This fallback invents neither result text nor a parent result ID. Before reading a
 child transcript, recovery registers it on the parent's bounded read-owned
 source. When explicit outcomes are present, a fresh scoped child record supplies
@@ -1230,6 +1237,12 @@ not per-read function identities; their lifetime remains bounded by source
 leases. Other folds' positive
 outcome dependencies remain retained. Dependencies retire with their owning leases. Existing
 ownership, stream-generation and Stop fences remain required.
+When a returned result still relies on history-only activity, its source also
+retains that publication dependency. A later owned terminal event or ordered
+child-history counterproof revokes the returned guard, including while an
+automatic recovery awaits interactions. Before return, deny-only activity
+withdrawal still permits fresh outcome folding; retained live occurrences keep
+their independent current-lifecycle projection and Stop rules.
 Staged-parent visibility rereads own an additional bounded source lease, since
 their visible/full-history folds can first consume an outcome after the inventory
 source is captured. That lease is published to source observers and checked

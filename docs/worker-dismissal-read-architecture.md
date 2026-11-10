@@ -42,14 +42,22 @@ Fresh parent-history reads provide the same scoped counterproof before SSE:
 nonoverlapping reads can revoke an older launch inventory, while conflicting
 overlapping responses cannot supersede later consumed evidence. Native read
 order survives transport reuse.
+The shared native-history boundary also observes idle counterproof from direct
+child history, accounting and inspection reads; it is not limited to a parent
+worker fold.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
 and concurrent terminal updates keep their existing precedence.
+The automatic scheduler uses the same guarded exact-execution replacement rule,
+so its upserts cannot restore a revoked report-free completion either.
 Automatic inventory recovery also holds and validates source leases through
 its pending permission/question reads and final publication. Its bounded cycle
 owner releases them on completion, failure, cancellation or supersession;
 unavailable evidence cannot publish a stale terminal worker.
+Returned history-only activity remains covered through that handoff too: later
+terminal events or ordered child-history counterproof revoke its source rather
+than merely changing an activity value already projected before return.
 The handoff deadline starts at native source capture, not queue/ownership IO.
 Cancellation releases authority without increasing concurrency over an old
 transport still draining. Identical pending-notice replays preserve authority;

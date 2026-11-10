@@ -126,6 +126,17 @@ function indexRecoveredBackgroundTasks(tasks: readonly BackgroundTaskItem[]) {
   };
 }
 
+/** Covered native evidence may withdraw an inference, never an explicit report. */
+function replacesHistoryOnlyOutcome(current: ConversationItem | undefined, source: ConversationItem | undefined): boolean {
+  return current?.type === "background_task" && current.status !== "running" && !current.resultId
+    && current.summary === undefined && current.terminalReportedAt === undefined
+    && source?.type === "background_task" && source.status === "running" && source.stateUncertain === true
+    && source.id === current.id && source.taskId === current.taskId && source.taskType === current.taskType
+    && source.childConversationId !== undefined && source.childConversationId === current.childConversationId
+    && source.activity?.kind === "unavailable" && source.activity.executionId !== undefined
+    && source.activity.executionId === current.activity?.executionId;
+}
+
 type MessageModel = WorkerMessageModel;
 type InventorySessionMetadata = {
   inWorkspace: boolean;
@@ -162,6 +173,7 @@ class WorkerSourceRead {
     if (!this.isCurrent()) throw new HistoryReadChangedError();
   }
   isCurrent(): boolean { return !this.signal.aborted && this.guards.every(({ guard }) => guard.isCurrent()); }
+  hasSources(): boolean { return this.guards.length > 0; }
   hasAccountingPage(key: string): boolean {
     return this.guards.some(({ accountingKey }) => accountingKey === key);
   }
@@ -1804,11 +1816,7 @@ export class ChatAdapter {
       // Retained completion is not a parent report, and sparse upsert merging
       // must not restore it after the provider withholds that exact inference.
       const source = page.workerSource && page.completeItems?.find(candidate => candidate.id === item.id);
-      if (coverage && !coverage.changed(item.id) && current?.type === "background_task" && current.status !== "running"
-        && !current.resultId && current.summary === undefined && current.terminalReportedAt === undefined
-        && source?.type === "background_task" && source.status === "running" && source.stateUncertain
-        && source.childConversationId === current.childConversationId && source.activity?.kind === "unavailable"
-        && source.activity.executionId !== undefined && source.activity.executionId === current.activity?.executionId) {
+      if (coverage && !coverage.changed(item.id) && replacesHistoryOnlyOutcome(current, source)) {
         revokedRows.add(item.id);
         continue;
       }
@@ -5903,6 +5911,10 @@ export class ChatAdapter {
         for (const known of projection.items()) {
           if (fence.changed(known.id)) continue;
           if (known.type === "background_task" && supersedes(known)) {
+            recoveryUpdates.push({ kind: "remove", itemId: known.id });
+            continue;
+          }
+          if (workerSources.hasSources() && replacesHistoryOnlyOutcome(known, byId.get(known.id))) {
             recoveryUpdates.push({ kind: "remove", itemId: known.id });
             continue;
           }

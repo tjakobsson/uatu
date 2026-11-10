@@ -56,11 +56,11 @@ type StopValidation = {
 };
 type OwnershipCheck = { child: string; parent: string; changed: boolean; contradicted?: (actualParent?: string) => void };
 type ControlBasis = { basis: WorkerOccurrenceEvidence; revision: number };
-type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis>; activityEnded: ReadonlySet<string> };
+type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis>; activityEnded: ReadonlySet<string>; activityPublished: Set<string> };
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges?: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, string | null>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string> };
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges?: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, string | null>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string> };
 
 export function createOpenCodeV2Provider(options: {
   endpoint: string;
@@ -95,7 +95,6 @@ export class OpenCodeV2Provider implements ChatProvider {
   private streamReads?: AbortController;
   private readonly backgroundReads = new Map<string, BackgroundRead>();
   private readonly backgroundVisibilityReads = new Set<{ sessionId: string; invalidated: boolean }>();
-  private childHistoryObservationClock = 0;
   private parentHistoryReadClock = 0;
   private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
@@ -541,21 +540,8 @@ export class OpenCodeV2Provider implements ChatProvider {
             (source.historyParentLaunches ??= new Map()).set(child, competitionLaunches.filter(fact => fact.reportedChild === child));
             (source.historyActivityChildren ??= new Set()).add(child);
           }
-          const started = ++this.childHistoryObservationClock;
           const complete = await this.allMessages(child, signal);
-          const observation = { completed: ++this.childHistoryObservationClock,
-            signature: historyVersion(complete.filter(message => message.type === "idle").map(message =>
-              [messageIdentity(message), asRecord(message.time).created, message.outcome]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))) };
-          for (const source of this.historyWorkerSources) {
-            const previous = source.historyObservations?.get(child);
-            if (!source.historyChildren?.has(child) || !previous || previous.signature === observation.signature) continue;
-            if (started > previous.completed) source.revision++;
-            // A response from an overlapping request cannot supersede an
-            // already consumed observation. Its own conflicting fold abstains.
-            else for (const current of historySources) current.revision++;
-          }
           for (const source of historySources) {
-            (source.historyObservations ??= new Map()).set(child, observation);
             const outcomes = (source.historyOutcomeMessages ??= new Map()).get(child) ?? new Set<string>();
             for (const message of complete) if (message.type === "idle") outcomes.add(messageIdentity(message));
             source.historyOutcomeMessages.set(child, outcomes);
@@ -690,8 +676,17 @@ export class OpenCodeV2Provider implements ChatProvider {
     const currentActivity = (item: import("../../types").BackgroundTaskItem) => item.status === "running" && item.childConversationId
       && item.activity && item.activity.kind !== "ended" && snapshot.activityEnded.has(item.childConversationId)
       ? { ...item, activity: { ...item.activity, kind: "unavailable" as const, request: undefined } } : item;
-    if (initialBoundary === null || snapshot.tasks.length === 0) return snapshot.tasks.map(task => copy(this.projectWorkerControl(
-      this.projectWorkerActivity(currentActivity(task), snapshot.occurrences.get(task.taskId)), snapshot.controls.get(task.taskId))));
+    const publish = (tasks: import("../../types").BackgroundTaskItem[]) => {
+      for (const task of tasks) if (task.status === "running" && task.childConversationId
+        && (task.activity?.kind === "working" || task.activity?.kind === "needs-answer" || task.activity?.kind === "session-active")) {
+        const occurrence = snapshot.occurrences.get(task.taskId);
+        const live = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
+        if (!live || live.uncertain || !live.executionStart) snapshot.activityPublished.add(task.childConversationId);
+      }
+      return tasks;
+    };
+    if (initialBoundary === null || snapshot.tasks.length === 0) return publish(snapshot.tasks.map(task => copy(this.projectWorkerControl(
+      this.projectWorkerActivity(currentActivity(task), snapshot.occurrences.get(task.taskId)), snapshot.controls.get(task.taskId)))));
     const controlRead = this.beginControlRead(sessionId);
     // The inventory source is already captured. Visibility may consume newer
     // child outcomes, so its additional folds need their own publication lease.
@@ -773,7 +768,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         tasks.push(copy(this.projectWorkerControl(this.projectWorkerActivity(currentActivity(proof && current?.basis === proof.basis && current.revision === proof.revision ? item : { ...item, stateUncertain: true }), occurrence), proof)));
       }
       completeRead = true;
-      return tasks;
+      return publish(tasks);
     } finally { visibilitySource.release(); this.controls.endRead(controlRead, completeRead); }
     } finally { this.backgroundVisibilityReads.delete(visibilityRead); lifetime.abort(); }
   }
@@ -990,7 +985,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.eventMemory?.workers.enforceBudget();
     publishSource();
     if (!source.guard.isCurrent()) throw new Error("Background ownership changed during recovery");
-    return { tasks: projected, occurrences: folded.occurrences, activityEnded: source.activityEnded, controls: new Map(projected.flatMap(item => {
+    return { tasks: projected, occurrences: folded.occurrences, activityEnded: source.activityEnded, activityPublished: source.activityPublished, controls: new Map(projected.flatMap(item => {
       const proof = this.controls.proof(item.taskId);
       return proof ? [[item.taskId, proof] as const] : [];
     })) };
@@ -1364,7 +1359,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private beginWorkerSourceRead(parent: string, caller?: AbortSignal, isCurrent: () => boolean = () => true, pendingText = false) {
-    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityEnded: new Set(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
+    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityEnded: new Set(), historyPublishedActivity: new Set(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
     const deadline = AbortSignal.any([this.readLifetime.signal, AbortSignal.timeout(25_000)]);
     const initialOwner = new AbortController();
     const initialSignal = AbortSignal.any([deadline, initialOwner.signal, ...(caller ? [caller] : [])]);
@@ -1386,6 +1381,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     const contradictions = () => [...source.states].flatMap(([child, state]) => state === "contradicted" || state === "foreign-parent" ? [child] : []);
     return { guard: lease(initialSignal, 0), contradictions,
       activityEnded: source.historyActivityEnded as ReadonlySet<string>,
+      activityPublished: source.historyPublishedActivity,
       // A snapshot is a view of the owner's current revision. Only a retained
       // consumer allocates a lease; retries do not accumulate owner leases.
       snapshot: () => ({ workerSource: view(initialSignal, source.revision), contradictedChildren: contradictions() }),
@@ -1562,15 +1558,33 @@ export class OpenCodeV2Provider implements ChatProvider {
     // and reconnect starts cold because V2 offers no provider event replay.
     signal.throwIfAborted();
     const owners = [...this.historyWorkerSources].filter(source => source.parent === sessionId && source.phase === "collecting");
+    const childOwners = [...this.historyWorkerSources].filter(source => source.historyChildren?.has(sessionId) && source.phase === "collecting");
     const messages = await this.historyReuse.readShared(sessionId, this.streamConnected ? String(this.streamGeneration) : undefined,
       ownerSignal => {
         const sharedSignal = this.readSignal(ownerSignal);
         return this.coveredRead(sharedSignal, () => this.readAllMessages(sessionId, sharedSignal));
       }, signal);
     signal.throwIfAborted();
+    const order = this.historyReadOrders.get(messages)!;
+    // Every native transcript consumer can discover outcome counterproof,
+    // including direct child history, accounting and inspection reads.
+    const childSources = [...this.historyWorkerSources].filter(source => source.historyChildren?.has(sessionId) || source.historyPublishedActivity.has(sessionId));
+    if (childSources.length || childOwners.length) {
+      const observation = { completed: order.completed, signature: historyVersion(messages.filter(message => message.type === "idle")
+        .map(message => [messageIdentity(message), asRecord(message.time).created, message.outcome])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))) };
+      for (const source of childSources) {
+        const previous = source.historyObservations?.get(sessionId);
+        if (!previous || previous.signature === observation.signature) continue;
+        if (order.started > previous.completed) source.revision++;
+        else for (const owner of childOwners) owner.revision++;
+      }
+      for (const source of childOwners) if (!source.historyObservations?.has(sessionId)
+        || order.completed >= source.historyObservations.get(sessionId)!.completed)
+        (source.historyObservations ??= new Map()).set(sessionId, observation);
+    }
     const sources = [...this.historyWorkerSources].filter(source => source.parent === sessionId);
     if (!owners.length && !sources.some(source => source.historyParentRead)) return messages;
-    const order = this.historyReadOrders.get(messages)!;
     const launches = messages.flatMap(message => [...prepareStoredMessage(message).tools.values()].map(tool => tool.fact));
     const signature = (facts: readonly LauncherEvidence[], child: string) => historyVersion([...new Set(facts
       .filter(fact => fact.workerType === "agent" && (fact.reportedChild === child || fact.requestedChild === child))
@@ -1771,8 +1785,11 @@ export class OpenCodeV2Provider implements ChatProvider {
             // newly processed terminal boundary vetoes that old observation,
             // even when no live launcher was retained across the reconnect.
             if (evidence.execution?.phase === "ended" && !evidence.execution.historical) {
-              for (const source of this.historyWorkerSources) if (source.historyActivityChildren?.has(normalized.conversationId))
+              for (const source of this.historyWorkerSources) if (source.historyActivityChildren?.has(normalized.conversationId)) {
                 source.historyActivityEnded.add(normalized.conversationId);
+                if (source.historyPublishedActivity.has(normalized.conversationId)
+                  && (!evidence.directory || path.resolve(evidence.directory) === this.workspace)) source.revision++;
+              }
             }
             // Ownership alone cannot keep a consumed transcript current. A
             // changed child revokes only sources that actually read its history;
