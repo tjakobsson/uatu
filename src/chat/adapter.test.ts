@@ -38,7 +38,7 @@ import type { LiveEnvelope } from "../shared/live-protocol";
 import { buildRoutes } from "../server/routes";
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
-import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { isVisualTurnLive, OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
 import { MultiAgentChatService } from "./agents";
 import { VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
@@ -491,6 +491,30 @@ test.each(["succeeded", "failed", "interrupted"] as const)("ordered native execu
   expect(live(original)).toBe(true); // Earlier handoff/upsert is frame-immutable.
   emit("session.execution.started");
   expect(live(projection.get(original.id)!)).toBe(false); // No history refresh required.
+});
+
+test.each(["completed", "failed", "interrupted"] as const)("source-witnessed V1 aliases preserve current execution membership until genuine %s without mutating earlier frames", terminal => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const old: AssistantMessageItem & OpenCodeExecutionIdentity = { id: "part:old", type: "assistant_message", createdAt: 1, markdown: "![Old](old.png)", [OPENCODE_EXECUTION_LIVE]: false };
+  const current: AssistantMessageItem & OpenCodeExecutionIdentity = { id: "part:current", type: "assistant_message", createdAt: 2, markdown: "![Current](current.png)", [OPENCODE_EXECUTION_LIVE]: true };
+  projection.seed([old, current]); projection.statusUpdate("running");
+  projection.statusUpdate("failed", "Retryable step", true, { [OPENCODE_STEP_LIVE]: true });
+  const update = normalizeProviderEvent({ id: "old-idle-alias", type: "session.idle", data: { sessionID: "c" }, [OPENCODE_COMPLETION_ALIAS]: true }).updates[0]!;
+  const alias = projection.apply(update)!;
+  expect(JSON.parse(JSON.stringify(alias))).toMatchObject({ type: "conversation.status", status: "completed" });
+  expect((alias as typeof alias & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBe(true);
+  expect(projection.get(current.id)).toBe(current); // The alias must not seal a newer retained row.
+  const snapshot = projection.withVisualStatus({ id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" });
+  expect(isVisualTurnLive(snapshot)).toBe(true);
+  projection.statusUpdate("running");
+  const ended = projection.statusUpdate(terminal);
+  expect((ended as typeof ended & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBeUndefined();
+  expect((projection.get(current.id) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(false);
+  expect(projection.get(old.id)).toBe(old);
+  expect(current[OPENCODE_EXECUTION_LIVE]).toBe(true); // Earlier row/frame references remain immutable.
+  expect((alias as typeof alias & OpenCodeCompletionAlias)[OPENCODE_ALIAS_LIVE]).toBe(true);
+  expect(isVisualTurnLive(snapshot)).toBe(true); // No queued mutation of an older boundary.
+  expect(isVisualTurnLive(projection.withVisualStatus(snapshot))).toBe(false);
 });
 
 test("native step-live hints are immutable on ordered status frames and adapter snapshots, not public status changes", async () => {

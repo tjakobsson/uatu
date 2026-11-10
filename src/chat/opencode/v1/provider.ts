@@ -6,6 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../../../shared/bounded-map";
+import { OPENCODE_COMPLETION_ALIAS } from "../normalization-types";
 import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
 import { McpServerNames, annotateMcpPermission, looksLikeMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { measureChatWork } from "../../performance";
@@ -1001,6 +1002,15 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
   const notify = () => { wake?.(); wake = null; };
   for (const stream of streams) {
     void (async () => {
+      // 1.19.5 SessionStatus.set publishes Status(idle), then Idle, and the
+      // bridge retains the event id on each stream's copy. Observe the source
+      // lifecycle BEFORE dedup: its preceding idle status may be a dropped
+      // mirror. Only a source whose latest status is idle supplies proof. A
+      // newer busy/retry status retires it, not a credit for a later turn.
+      // Unknown/mid-pair sources keep the idle-first fallback; an idle after
+      // a same-source busy has no ownership evidence and is not labelled.
+      // https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/status.ts
+      const idleStatuses = new Map<string, true>();
       // Id-less events dedupe by payload, which would also swallow a
       // legitimate repeat from the same stream (two identical " " deltas).
       // Numbering occurrences per stream keeps cross-stream duplicates
@@ -1009,7 +1019,16 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
       const occurrences = new Map<string, number>();
       try {
         for await (const value of stream) {
-          const event = value as ProviderEvent;
+          let event = value as ProviderEvent;
+          const data = asRecord(event.data ?? event.properties);
+          const sessionId = stringValue(data.sessionID ?? data.sessionId);
+          if (sessionId && event.type === "session.status") {
+            const status = stringValue(asRecord(data.status).type) ?? stringValue(data.status);
+            if (status === "idle") boundedSet(idleStatuses, sessionId, true, 2_048);
+            else idleStatuses.delete(sessionId);
+          } else if (sessionId && event.type === "session.idle" && idleStatuses.has(sessionId)) {
+            event = { ...event, [OPENCODE_COMPLETION_ALIAS]: true };
+          }
           let identity = providerEventIdentity(event);
           if (typeof event.id !== "string") {
             const occurrence = (occurrences.get(identity) ?? 0) + 1;

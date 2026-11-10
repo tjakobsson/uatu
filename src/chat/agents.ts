@@ -3,7 +3,7 @@ import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
 import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
-import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "./opencode/normalization-types";
+import { isVisualTurnLive, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
@@ -628,6 +628,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         const resync: ChatEvent = { ...base, type: "resync", reason: "conversation-rewritten" };
         if (event.type === "item.remove") items.delete(event.itemId);
         if (event.type === "conversation.status" || event.type === "conversation.updated") {
+          // A source-witnessed V1 idle alias repeats an already ordered end.
+          // Preserve its public status, but neither finalize newer captures nor
+          // change their live state while the other source is catching up.
+          if (event.type === "conversation.status" && (event as typeof event & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]) return [event];
           streaming = isVisualTurnLive(event.type === "conversation.status" ? event : event.conversation);
           // Status errors, /reload refreshes and label changes are authoritative
           // events, not replaceable invalidations. Visual resync is additional.

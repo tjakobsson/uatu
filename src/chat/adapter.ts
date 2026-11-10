@@ -16,7 +16,7 @@ import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
 import { isLiveConversationStatus } from "./types";
-import { OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
@@ -7059,7 +7059,7 @@ export class ConversationProjection {
     // provider's own queue semantics and OpenCode holds it until the active
     // turn actually ends; only removability is lost early. Without turn
     // identity on status events the two cases cannot be told apart here.
-    if (update.kind === "status") return this.statusUpdate(update.status, update.message, true, update as typeof update & OpenCodeStepStatus);
+    if (update.kind === "status") return this.statusUpdate(update.status, update.message, true, update as typeof update & OpenCodeStepStatus & OpenCodeCompletionAlias);
     // An inbox delta is the adapter's, applied to its pending-steer map
     // before updates reach a projection; one that arrives here is a no-op.
     if (update.kind === "inbox") return undefined;
@@ -7136,23 +7136,27 @@ export class ConversationProjection {
   }
 
   private stepVisualLive = false;
+  private aliasVisualLive = false;
 
   /** Copy the current primitive hint into this snapshot, never a shared token. */
-  withVisualStatus(summary: ConversationSummary): ConversationSummary & OpenCodeStepStatus {
-    const { [OPENCODE_STEP_LIVE]: _previous, ...current } = summary as typeof summary & OpenCodeStepStatus;
+  withVisualStatus(summary: ConversationSummary): ConversationSummary & OpenCodeStepStatus & OpenCodeCompletionAlias {
+    const { [OPENCODE_STEP_LIVE]: _previous, [OPENCODE_ALIAS_LIVE]: _alias, ...current } = summary as typeof summary & OpenCodeStepStatus & OpenCodeCompletionAlias;
+    if (this.aliasVisualLive && this.status === "completed" && summary.status === "completed") return { ...current, [OPENCODE_ALIAS_LIVE]: true };
     return this.stepVisualLive && this.status === "failed" && summary.status === "failed"
       ? { ...current, [OPENCODE_STEP_LIVE]: true }
       : current;
   }
 
-  statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true, native?: OpenCodeStepStatus): ChatEvent {
+  statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true, native?: OpenCodeStepStatus & OpenCodeCompletionAlias): ChatEvent {
+    const alias = native?.[OPENCODE_COMPLETION_ALIAS] === true;
+    this.aliasVisualLive = alias && (isLiveConversationStatus(this.status) || this.stepVisualLive || this.aliasVisualLive);
     this.status = status;
     this.stepVisualLive = status === "failed" && native?.[OPENCODE_STEP_LIVE] === true;
     // A known step failure is nonterminal. Actual ordered terminal statuses
     // seal retained native history before a later execution can reuse it.
     // Replace rows, not shared tokens: queued earlier frames/snapshots keep
     // their original text and execution boundary, with no extra wire events.
-    if (sourceTransition && (status === "completed" || status === "interrupted" || status === "failed" && !this.stepVisualLive)) {
+    if (sourceTransition && !alias && (status === "completed" || status === "interrupted" || status === "failed" && !this.stepVisualLive)) {
       const closedTurns = new Map<ClaudeTurn, ClaudeTurn>();
       for (const [id, item] of this.timeline) {
         if (item.type !== "assistant_message") continue;
@@ -7170,7 +7174,10 @@ export class ConversationProjection {
       }
     }
     this.onStatus?.(status, sourceTransition);
-    return this.replay.publish({ type: "conversation.status", status, message, ...(this.stepVisualLive ? { [OPENCODE_STEP_LIVE]: true as const } : {}) });
+    return this.replay.publish({ type: "conversation.status", status, message,
+      ...(this.stepVisualLive ? { [OPENCODE_STEP_LIVE]: true as const } : {}),
+      ...(alias ? { [OPENCODE_COMPLETION_ALIAS]: true as const } : {}),
+      ...(this.aliasVisualLive ? { [OPENCODE_ALIAS_LIVE]: true as const } : {}) });
   }
 
   conversationUpdate(conversation: ConversationSummary): ChatEvent {

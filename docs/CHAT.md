@@ -999,6 +999,10 @@ tool-call messages pending and older executions terminal, including across pages
 API-message completion alone does not end that execution. Classic OpenCode 1.x
 cold/restarted history lacks those boundaries: completed tool-call messages are
 conservatively finalized and may refuse an image that a later tool creates.
+Live 1.x streams retain source-local status evidence before deduplication to
+identify witnessed delayed idle aliases. Idle payloads without that evidence,
+including after a same-source busy/retry, remain ambiguous and use the normal
+completion fallback; universal stale-alias rejection is not guaranteed.
 Completed stored V2 text still finalizes image syntax immediately: existing
 files can be captured before another tool changes them, while missing files
 keep their execution-end retry.

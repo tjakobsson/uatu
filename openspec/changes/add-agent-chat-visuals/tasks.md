@@ -119,6 +119,14 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.43 Preserve Source-tab and focused-control state for generating SVGs before a capture ID exists, using logical occurrence identity. Streamed source must keep updating, and pending-to-ready transitions must preserve user choice without reloading retained previews or stealing focus.
 - [ ] 6.44 Seal retained history-owned Claude turn metadata at ordered terminal projection boundaries even without a visual subscriber. Replace retained rows/tokens rather than mutating earlier frames, preventing a later turn's file from being captured into an older answer.
 - [ ] 6.45 Freeze Claude turn liveness with native snapshot text and cursor, before the asynchronous handoff to enrichment. Closing frames queued in that gap must complete an initially pending SVG without poisoning its immutable capture; retain terminal historical rows and cancellation cleanup.
+- [ ] 6.46 Reject stale OpenCode 1.x completion aliases from a preceding turn before they consume a newer image's missing-file retry. Preserve genuine completion, terminal historical rows, immutable captures and ordered public events.
+
+Implementation checkpoint for 6.46: retain source-local status evidence before
+cross-stream deduplication and carry witnessed idle-alias metadata internally.
+Regression coverage is authored but not run locally. Unwitnessed idle payloads
+and aliases after a same-source busy/retry remain ambiguous and use the normal
+completion fallback; universal stale-alias rejection is not established. This
+live-stream limit is separate from cold/restarted V1 history compatibility.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

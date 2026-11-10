@@ -6,7 +6,7 @@ import { ProviderTextReconciler } from "../../text-reconciler";
 import { ConversationProjection } from "../../adapter";
 import { parseConversationItem } from "../../validation";
 import { visualAdmissionIdentity } from "../../visual-identity";
-import { isVisualTurnLive, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
+import { isVisualTurnLive, OPENCODE_COMPLETION_ALIAS, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeCompletionAlias, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "../../projection";
 
 test("native and classic text events plus both history shapes retain the parent admission identity outside JSON", () => {
@@ -37,6 +37,15 @@ test("native and classic text events plus both history shapes retain the parent 
 });
 
 describe("OpenCode provider completion timestamps", () => {
+  test("source-local alias proof survives normalization/spreads but never enters public status JSON", () => {
+    const raw = { id: "alias", type: "session.idle" as const, properties: { sessionID: "s" } };
+    const ordinary = normalizeProviderEvent(raw).updates[0]!;
+    const witnessed = normalizeProviderEvent({ ...raw, [OPENCODE_COMPLETION_ALIAS]: true }).updates[0]!;
+    expect(JSON.stringify(witnessed)).toBe(JSON.stringify(ordinary));
+    expect(({ ...witnessed } as typeof witnessed & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBe(true);
+    expect((ordinary as typeof ordinary & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBeUndefined();
+    expect((raw as typeof raw & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBeUndefined();
+  });
   test("native step failure stays live for capture, but classic session.error and idle remain terminal", () => {
     const status = (type: string) => {
       const normalized = normalizeProviderEvent({ type, properties: { sessionID: "s", timestamp: 1, assistantMessageID: "m", error: { message: "Rate limited" } } });
