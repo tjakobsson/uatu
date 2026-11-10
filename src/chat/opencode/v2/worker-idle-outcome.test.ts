@@ -3,6 +3,51 @@ import { createOpenCodeV2Provider } from "./provider";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 
 for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+for (const scenario of ["pending-overlap", "running-overlap", "pending-after", "pending-foreign", "accepted-foreground-other", "accepted-background-other", "hidden-pending-overlap", "hidden-running-overlap"] as const)
+test(`${read} treats requested-child invocation as veto-only evidence (${scenario})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined;
+  const foreignReads: string[] = [];
+  const accepted = scenario.startsWith("accepted-"), hidden = scenario.startsWith("hidden-");
+  const overlaps = scenario.endsWith("overlap");
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.startsWith("/api/session/foreign-requested")) { foreignReads.push(route); return new Response(null, { status: 403 }); }
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
+      first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const invocation = structuredClone(first); invocation.id = "requested-invocation"; invocation.time = { created: 15 };
+      const tool = invocation.content[0]; tool.id = "requested-call";
+      tool.time = scenario === "pending-after" ? { created: 30, ran: 31 } : { created: 15, ran: 16, ...(accepted ? { completed: 25 } : {}) };
+      tool.state.status = accepted ? "completed" : scenario.includes("running") ? "running" : "pending";
+      tool.state.input.sessionID = scenario === "pending-foreign" ? "foreign-requested" : child;
+      tool.state.input.background = scenario.includes("running") || scenario === "accepted-background-other";
+      tool.state.metadata = accepted ? { sessionID: other, status: scenario === "accepted-background-other" ? "running" : "completed" } : {};
+      return Response.json({ data: [first, invocation], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-outcome", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
+    if (hidden && route === `/api/session/${parent}`) {
+      const body = await response.json(); body.data.revert = { messageID: "requested-invocation" }; return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  try {
+    parent = (await provider.createSession("Requested-child outcome veto")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId; fake.settleWorker(child, "completed", "No parent report");
+    if (accepted) { other = fake.launchRequestWorker(parent).childId; fake.settleWorker(other, "completed", "No other parent report"); }
+    const tasks = read === "listMessages" ? (await provider.listMessages(parent, { limit: 100 })).items.filter(item => item.type === "background_task")
+      : await provider.reconcileBackgroundTasks!(parent, { fresh: true });
+    expect(tasks).toHaveLength(scenario === "accepted-background-other" ? 2 : 1);
+    expect(tasks.find(task => task.taskId === worker.taskId)).toMatchObject({ status: overlaps ? "running" : "completed", stateUncertain: overlaps });
+    expect(tasks.every(task => task.control?.available !== true)).toBe(true);
+    expect(foreignReads).toEqual([]);
+  } finally { await provider.dispose!(); await fake.stop(); }
+});
+
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
 for (const scenario of ["overlapping", "separate-interval", "different-child"] as const)
 test(`${read} counts a ${scenario} foreground invocation only as child-outcome counterevidence`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

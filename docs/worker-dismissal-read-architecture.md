@@ -26,6 +26,8 @@ unchanged historical idle outcome usable. Changes to consumed idle records,
 execution boundaries, removals and reverts still fence publication. A fresh
 scoped child record that reveals a changed revert boundary revokes the earlier
 outcome source even before the corresponding native event arrives.
+This observation includes a scoped record arriving while the first visibility
+lookup is pending; a late overlapping response cannot overwrite that boundary.
 Later nonoverlapping history reads also fence changed or missing idle evidence;
 an unchanged null revert boundary does not preserve a removed outcome. A
 conflicting overlapping response cannot revoke the later consumed source or
@@ -35,7 +37,10 @@ Staging a parent revert hides rows without removing their native occurrence
 evidence from child-outcome attribution. A hidden overlapping launch therefore
 still prevents an ambiguous outcome from authorizing dismissal of a visible row.
 Overlapping foreground invocations of the same owned child also withhold outcome
-attribution without adding worker rows. Processed changes to the consumed parent
+attribution without adding worker rows.
+Pending/running calls requesting an already independently verified child also
+act only as vetoes; they cause no requested-child ownership checks or reads, and
+a reported accepted child overrides requested intent. Changes to the consumed parent
 launch inventory revoke dependent outcome sources; ordinary parent output and
 unchanged launcher replays do not require a quiet window.
 Fresh parent-history reads provide the same scoped counterproof before SSE:
@@ -56,7 +61,8 @@ its pending permission/question reads and final publication. Its bounded cycle
 owner releases them on completion, failure, cancellation or supersession;
 unavailable evidence cannot publish a stale terminal worker.
 Returned history-only activity remains covered through that handoff too: later
-terminal events or ordered child-history counterproof revoke its source rather
+terminal events, ordered child-history reads and relevant parent-launch
+counterproof (native read or SSE) revoke its source rather
 than merely changing an activity value already projected before return.
 The handoff deadline starts at native source capture, not queue/ownership IO.
 Cancellation releases authority without increasing concurrency over an old

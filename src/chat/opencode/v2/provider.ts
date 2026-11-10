@@ -56,11 +56,12 @@ type StopValidation = {
 };
 type OwnershipCheck = { child: string; parent: string; changed: boolean; contradicted?: (actualParent?: string) => void };
 type ControlBasis = { basis: WorkerOccurrenceEvidence; revision: number };
-type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis>; activityEnded: ReadonlySet<string>; activityPublished: Set<string> };
+type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis>; activityEnded: ReadonlySet<string>; activityPublished: Set<string>; parentChanges: ReadonlySet<string> };
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges?: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, string | null>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string> };
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string> };
+type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 
 export function createOpenCodeV2Provider(options: {
   endpoint: string;
@@ -96,6 +97,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly backgroundReads = new Map<string, BackgroundRead>();
   private readonly backgroundVisibilityReads = new Set<{ sessionId: string; invalidated: boolean }>();
   private parentHistoryReadClock = 0;
+  private sessionRecordClock = 0;
   private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
   // Read-side observations are not live-event admission or Stop evidence.
@@ -318,11 +320,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     const sessions: ProviderSession[] = [];
     let cursor: string | undefined;
     do {
+      const observation = this.beginSessionRecordRead();
       const page = await this.client.session.list(cursor
         ? { directory: this.directory, limit: 100, cursor }
         : { directory: this.directory, order: "desc", limit: 100 });
       for (const info of page.data) {
-        const observed = this.observeSessionRecord(info);
+        const observed = this.observeSessionRecord(info, undefined, observation);
         if (observed.info) sessions.push(toSession(observed.info));
       }
       cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
@@ -331,6 +334,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   async createSession(_id: string, configuration: ConversationConfiguration = {}): Promise<ProviderSession> {
+    const observation = this.beginSessionRecordRead();
     const info = await this.client.session.create({
       location: { directory: this.directory },
       ...(configuration.mode ? { agent: configuration.mode } : {}),
@@ -340,7 +344,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         ...(configuration.variant ? { variant: configuration.variant } : {}),
       } } : {}),
     });
-    const observed = this.observeSessionRecord(info);
+    const observed = this.observeSessionRecord(info, undefined, observation);
     if (!observed.info) throw new Error("OpenCode returned a created session without workspace confirmation");
     return toSession(observed.info);
   }
@@ -563,7 +567,6 @@ export class OpenCodeV2Provider implements ChatProvider {
             const lookup = await this.lookupChild(child, signal);
             if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Child history ownership unavailable");
             const { boundaryId, boundaryIndex, visible } = storedHistoryVisibility(complete, lookup.info);
-            for (const source of historySources) (source.historyBoundaries ??= new Map()).set(child, boundaryId ?? null);
             if (boundaryId && boundaryIndex < 0) throw new Error("Child history visibility unavailable");
             outcomeHistory = visible;
           } else {
@@ -628,9 +631,11 @@ export class OpenCodeV2Provider implements ChatProvider {
       for (const message of competitionHistory) normalizeStoredMessage(message, true, { workers: completeWorkers, parent: sessionId });
       competitors = completeWorkers.evidenceSnapshot();
     }
-    const foreground = competitionLaunches.filter(fact => fact.workerType === "agent" && fact.background !== true
-      && fact.reportedChild && verified.has(fact.reportedChild));
-    for (const update of workers.finishHistory(executionOutcomes, competitors, foreground)) if (update.kind === "upsert") {
+    const counterInvocations = competitionLaunches.filter(fact => {
+      const child = fact.reportedChild ?? fact.requestedChild;
+      return fact.workerType === "agent" && fact.background !== true && child !== undefined && verified.has(child);
+    });
+    for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations)) if (update.kind === "upsert") {
       const entry = normalized.get(update.item.id);
       if (entry) normalized.set(update.item.id, { ...entry, item: update.item });
     }
@@ -677,12 +682,15 @@ export class OpenCodeV2Provider implements ChatProvider {
       && item.activity && item.activity.kind !== "ended" && snapshot.activityEnded.has(item.childConversationId)
       ? { ...item, activity: { ...item.activity, kind: "unavailable" as const, request: undefined } } : item;
     const publish = (tasks: import("../../types").BackgroundTaskItem[]) => {
+      const children: string[] = [];
       for (const task of tasks) if (task.status === "running" && task.childConversationId
         && (task.activity?.kind === "working" || task.activity?.kind === "needs-answer" || task.activity?.kind === "session-active")) {
         const occurrence = snapshot.occurrences.get(task.taskId);
         const live = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
-        if (!live || live.uncertain || !live.executionStart) snapshot.activityPublished.add(task.childConversationId);
+        if (!live || live.uncertain || !live.executionStart) children.push(task.childConversationId);
       }
+      if (children.some(child => snapshot.parentChanges.has(child))) throw new Error("Background launch inventory changed during recovery");
+      for (const child of children) snapshot.activityPublished.add(child);
       return tasks;
     };
     if (initialBoundary === null || snapshot.tasks.length === 0) return publish(snapshot.tasks.map(task => copy(this.projectWorkerControl(
@@ -985,7 +993,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.eventMemory?.workers.enforceBudget();
     publishSource();
     if (!source.guard.isCurrent()) throw new Error("Background ownership changed during recovery");
-    return { tasks: projected, occurrences: folded.occurrences, activityEnded: source.activityEnded, activityPublished: source.activityPublished, controls: new Map(projected.flatMap(item => {
+    return { tasks: projected, occurrences: folded.occurrences, activityEnded: source.activityEnded, activityPublished: source.activityPublished, parentChanges: source.parentChanges, controls: new Map(projected.flatMap(item => {
       const proof = this.controls.proof(item.taskId);
       return proof ? [[item.taskId, proof] as const] : [];
     })) };
@@ -1359,7 +1367,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private beginWorkerSourceRead(parent: string, caller?: AbortSignal, isCurrent: () => boolean = () => true, pendingText = false) {
-    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityEnded: new Set(), historyPublishedActivity: new Set(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
+    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityEnded: new Set(), historyPublishedActivity: new Set(), historyParentChanges: new Set(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
     const deadline = AbortSignal.any([this.readLifetime.signal, AbortSignal.timeout(25_000)]);
     const initialOwner = new AbortController();
     const initialSignal = AbortSignal.any([deadline, initialOwner.signal, ...(caller ? [caller] : [])]);
@@ -1382,6 +1390,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     return { guard: lease(initialSignal, 0), contradictions,
       activityEnded: source.historyActivityEnded as ReadonlySet<string>,
       activityPublished: source.historyPublishedActivity,
+      parentChanges: source.historyParentChanges as ReadonlySet<string>,
       // A snapshot is a view of the owner's current revision. Only a retained
       // consumer allocates a lease; retries do not accumulate owner leases.
       snapshot: () => ({ workerSource: view(initialSignal, source.revision), contradictedChildren: contradictions() }),
@@ -1600,8 +1609,8 @@ export class OpenCodeV2Provider implements ChatProvider {
         // Only a nonoverlapping native read can supersede earlier evidence.
         // An overlapping stale response instead withdraws its own inference.
         for (const target of order.started > previous.completed ? [source] : owners) {
-          (target.historyParentChanges ??= new Set()).add(child);
-          if (target.historyPositiveChildren?.has(child) && target.historyChildren?.has(child)) target.revision++;
+          target.historyParentChanges.add(child);
+          if (dependsOnParentLaunches(target, child)) target.revision++;
         }
       }
     }
@@ -1752,7 +1761,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             if (parent) for (const launcher of evidence.launchers) memory.workers.observeLauncher(parent, launcher);
             if (parent) for (const source of this.historyWorkerSources) if (source.parent === parent) {
               for (const [child, launches] of source.historyParentLaunches ?? []) {
-                if (!source.historyChildren?.has(child)) continue;
+                if (!source.historyChildren?.has(child) && !source.historyPublishedActivity.has(child)) continue;
                 if (evidence.launchers.some(fact => {
                   if (fact.historical) return false;
                   const previous = launches.find(launch => launch.call === fact.call);
@@ -1764,8 +1773,8 @@ export class OpenCodeV2Provider implements ChatProvider {
                     || (fact.completed ?? fact.reportedCompletion) !== undefined
                       && (fact.completed ?? fact.reportedCompletion) !== (previous.completed ?? previous.reportedCompletion);
                 })) {
-                  (source.historyParentChanges ??= new Set()).add(child);
-                  if (source.historyPositiveChildren?.has(child)) source.revision++;
+                  source.historyParentChanges.add(child);
+                  if (dependsOnParentLaunches(source, child)) source.revision++;
                 }
               }
             }
@@ -2611,7 +2620,13 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
   }
 
+  private beginSessionRecordRead(): SessionRecordRead {
+    return { started: ++this.sessionRecordClock, owners: [...this.historyWorkerSources]
+      .filter(source => source.phase === "collecting" && source.historyChildren?.size) };
+  }
+
   private async classifiedSessionLookup(sessionId: string, signal: AbortSignal): Promise<SessionLookup> {
+    const observation = this.beginSessionRecordRead();
     let info: SessionRecord;
     try {
       info = await this.client.session.get({ sessionID: sessionId }, { signal }) as unknown as SessionRecord;
@@ -2620,13 +2635,14 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (isLookupMiss(error)) return { info: null, foreignWorkspace: false };
       throw new Error(`OpenCode session lookup failed: ${stringify(error)}`, { cause: error });
     }
-    return this.observeSessionRecord(info, sessionId);
+    return this.observeSessionRecord(info, sessionId, observation);
   }
 
   /** Consume authoritative native records before public filtering. Collection
    * and create responses have no requested id: only their valid returned id
    * can identify an existing association. This never admits new ownership. */
-  private observeSessionRecord(value: unknown, requestedId?: string): SessionLookup {
+  private observeSessionRecord(value: unknown, requestedId: string | undefined, observation: SessionRecordRead): SessionLookup {
+    const completed = ++this.sessionRecordClock;
     const info = asRecord(value);
     const directory = stringValue(asRecord(info.location).directory);
     const foreignWorkspace = directory !== undefined && path.resolve(directory) !== this.workspace;
@@ -2646,8 +2662,17 @@ export class OpenCodeV2Provider implements ChatProvider {
           this.observeHistoryWorkerSource(source, subject, ownership);
           // A native record can reveal a staged/cleared boundary before SSE.
           // Ownership staying confirmed does not preserve an older outcome view.
-          if (ownership === "confirmed" && source.historyChildren?.has(subject) && source.historyBoundaries?.has(subject)
-            && source.historyBoundaries.get(subject) !== (stringValue(asRecord(info.revert).messageID) ?? null)) source.revision++;
+          if (ownership === "confirmed" && source.historyChildren?.has(subject) && source.historyPositiveChildren?.has(subject)) {
+            const boundary = stringValue(asRecord(info.revert).messageID) ?? null;
+            const boundaries = source.historyBoundaries ??= new Map(), previous = boundaries.get(subject);
+            if (previous && previous.boundary !== boundary) {
+              if (observation.started > previous.completed) source.revision++;
+              else for (const owner of observation.owners) if (owner.historyChildren?.has(subject)) owner.revision++;
+            }
+            // The first scoped observation is evidence even while the outcome
+            // lookup is pending. Overlapping responses cannot replace it.
+            if (!previous || observation.started > previous.completed) boundaries.set(subject, { boundary, completed });
+          }
         }
       }
     }
@@ -2877,6 +2902,11 @@ function backgroundIdentityCandidates(parent: string, messages: StoredMessage[])
 function syntheticNoticeIdentities(messages: StoredMessage[]): Set<string> {
   return new Set(messages.flatMap(message => message.type === "synthetic"
     ? normalizeStoredMessage(message).filter(item => item.type === "notice").map(item => item.id) : []));
+}
+
+function dependsOnParentLaunches(source: HistoryWorkerSource, child: string): boolean {
+  return source.historyPublishedActivity.has(child)
+    || source.historyPositiveChildren?.has(child) === true && source.historyChildren?.has(child) === true;
 }
 
 function pendingResultSignature({ fallback, ...relation }: WorkerResultFallback): string {

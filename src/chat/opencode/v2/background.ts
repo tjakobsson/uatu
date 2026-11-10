@@ -1331,7 +1331,7 @@ export class BackgroundWorkers {
 
   /** A typed native outcome may settle one proven interval. A bare idle only
    * fences activity; missing/straddling windows never identify its execution. */
-  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot(), foreground: readonly LauncherEvidence[] = []): NormalizedProviderUpdate[] {
+  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot(), counterInvocations: readonly LauncherEvidence[] = []): NormalizedProviderUpdate[] {
     if (!this.budget.executionHistory) return [];
     const updates: NormalizedProviderUpdate[] = [];
     for (const [child, results] of outcomes ?? []) {
@@ -1344,9 +1344,9 @@ export class BackgroundWorkers {
           const window = this.admissionWindow(launch), start = launch.ran ?? launch.created;
           return !window ? start === undefined || start <= result.at : window.start <= result.at && (previous === undefined || window.end >= previous);
         };
-        // Foreground calls share the child's execution intervals but never
-        // become worker rows, occurrence aliases or positive outcome targets.
-        if (foreground.some(launch => launch.reportedChild === child && overlaps(launch))) continue;
+        // Foreground and requested-child calls can veto an owned interval, but
+        // never establish ownership, worker rows, aliases or outcome targets.
+        if (counterInvocations.some(launch => (launch.reportedChild ?? launch.requestedChild) === child && overlaps(launch))) continue;
         // Every potentially overlapping occurrence competes, including unknown
         // windows and already reported results. Uncertainty is not exclusion.
         const candidates = [...competitors.values()].filter(occurrence => occurrence.worker === child && occurrence.kind === "agent"

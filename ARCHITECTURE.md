@@ -1185,7 +1185,11 @@ a staged parent revert hides their rows. Prefix visibility cannot turn an
 ambiguous child outcome into a terminal result; launches proven to belong to
 separate child intervals or other children do not compete for that outcome.
 Foreground subagent invocations also supply negative interval evidence for the
-same owned child, without becoming worker rows or outcome targets. Read-owned
+same owned child, without becoming worker rows or outcome targets. Pending or
+running calls that only request that independently owned child are veto-only
+evidence too: they establish no ownership, requested-child reads, rows or
+controls, and a reported accepted child takes precedence over requested intent.
+The complete parent history supplies these vetoes even for hidden invocations. Read-owned
 sources retain the consumed parent launch inventory: a processed new or changed
 relevant launcher revokes dependent outcome recovery before publication, while
 ordinary parent text and unchanged launch replays do not.
@@ -1220,7 +1224,10 @@ source leases carry that dependency through final publication:
 processed changes to consumed idle records, new execution boundaries, removals
 and reverts revoke dependent results even after the inventory transport retires.
 Fresh scoped session records also revoke an outcome view when they reveal a
-different child revert boundary, without waiting for SSE. A later nonoverlapping
+different child revert boundary, without waiting for SSE. Observation begins
+while the first outcome-visibility lookup is pending. Native record read order
+keeps a contradictory overlapping response from replacing a newer boundary;
+the older response's own inference abstains. A later nonoverlapping
 child-history read also revokes consumed idle evidence when its records change
 or disappear, even if the child revert boundary stays null. Conflicting
 overlapping responses cannot supersede an already consumed observation; their
@@ -1239,10 +1246,13 @@ outcome dependencies remain retained. Dependencies retire with their owning leas
 ownership, stream-generation and Stop fences remain required.
 When a returned result still relies on history-only activity, its source also
 retains that publication dependency. A later owned terminal event or ordered
-child-history counterproof revokes the returned guard, including while an
+child-history or parent-launch counterproof revokes the returned guard, including while an
 automatic recovery awaits interactions. Before return, deny-only activity
 withdrawal still permits fresh outcome folding; retained live occurrences keep
 their independent current-lifecycle projection and Stop rules.
+Native-read and SSE parent-launch counterproof use the same dependency predicate
+for outcomes and returned activity. A source with already observed launch
+counterproof cannot acquire new history-only activity publication authority.
 Staged-parent visibility rereads own an additional bounded source lease, since
 their visible/full-history folds can first consume an outcome after the inventory
 source is captured. That lease is published to source observers and checked
