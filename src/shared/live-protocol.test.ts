@@ -112,7 +112,7 @@ describe("per-subscription transport recovery", () => {
     expect(parseLiveSubscriptionChange({ add: [{ topic: "conversation", key: "c" }] })).toEqual({ add: [{ topic: "conversation", key: "c" }] });
     expect(parseLiveSubscriptionChange({ add: [{ topic: "conversation", key: "c", reconnect: false }] })).toEqual({ add: [{ topic: "conversation", key: "c", reconnect: false }] });
   });
-  test.each(["true", 1, 0, null, [], {}])("nonboolean reconnect %j is refused on opening and control paths", reconnect => {
+  test.each(["true", 1, 0, null, [], {}].map(reconnect => ({ reconnect })))("nonboolean reconnect %j is refused on opening and control paths", ({ reconnect }) => {
     const subscription = { topic: "conversation", key: "c", cursor: "native", reconnect };
     expect(parseLiveSubscriptionChange({ add: [subscription] })).toHaveProperty("error");
     expect(parseLiveStreamQuery(new URLSearchParams({ subs: JSON.stringify([subscription]) }))).toHaveProperty("error");
