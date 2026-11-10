@@ -447,7 +447,7 @@ describe("agent visual Markdown", () => {
     expect(after[0]?.key).toBe(`offset:${initial.length}`);
   });
 
-  test("nonvisual rendering keeps the document sanitizer and formatting contract", () => {
+  test("nonvisual rendering keeps document formatting while inert bodies follow the sanitizer strip policy", () => {
     const fixtures = [
       '# Title\n\ntext **bold** [link](https://example.com)\n\n> quote\n\n- first\n- second',
       '---\ntitle: Example\n---\n\n| A | B |\n| - | - |\n| x | y |\n\n- [x] Done',
@@ -455,9 +455,18 @@ describe("agent visual Markdown", () => {
       '<div align="center"><p align="right">Text</p><h1 align="left">Heading</h1><h6 align="center">Small</h6><table align="center"><tr align="right"><th align="left">Key</th><td align="center">Value</td></tr></table></div>',
       '<a href="file:///refused" onclick="bad()">File</a><a href="data:text/html,unsafe" style="color:red">Data</a>',
       'text\n\n```js\nconst answer = 42;\n```\n\n    indented\n\n> ```text\n> quote\n> ```',
-      '<table><tr><td>Cell</td></tr>text outside</table><script>bad()</script>',
+      '<table><tr><td>Cell</td></tr>text outside</table>',
     ];
     for (const source of fixtures) expect(prepareChatVisualMarkdown(source, false).html).toBe(renderMarkdownToHtml(source).html);
+    // Chat preserves raw container context until sanitization, unlike the
+    // document renderer's GFM escaped-tag presentation of script bodies.
+    const table = '<table><tr><td>Cell</td></tr>text outside</table>';
+    const source = table + '<script>bad()</script>';
+    const prepared = prepareChatVisualMarkdown(source, false);
+    expect(prepared.html).toBe(renderMarkdownToHtml(table).html);
+    expect(prepared.visuals).toEqual([]);
+    expect(prepared.html).not.toContain("bad()");
+    expect(parseHTML(prepared.html).document.querySelector("script, img")).toBeNull();
   });
 
   test("author attributes cannot forge an occurrence identity or survive as internal markers", () => {
