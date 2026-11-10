@@ -142,6 +142,224 @@ test(`parent counterproof survives the ${boundary === "ownership" ? "first owner
   } finally { release(); firstAbort.abort(); abort.abort(); await firstPump; await pump; await recovery?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
+for (const mode of ["prebaseline", "same-report", "large-same-report", "many-reports", "report-budget-at", "report-budget-over", "late-ownerless", "report-change-without-part-clocks"] as const)
+test(`native parent-result counterproof is scoped and compact (${mode})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reads = 0, repaired = false, foreignLookups = 0;
+  let entered!: () => void, release!: () => void, secondEntered!: () => void, releaseSecond!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const secondPending = new Promise<void>(resolve => { secondEntered = resolve; }), secondHeld = new Promise<void>(resolve => { releaseSecond = resolve; });
+  const hasInitialReport = mode !== "prebaseline" && mode !== "late-ownerless";
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/session/z") foreignLookups++;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "server.connected", data: {}, location: { directory } })}\n\n`));
+      request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0], index = ++reads, delayed = mode === "late-ownerless" && index === 2;
+      first.time = { created: 20 }; first.content[0].time = { created: 20, ran: 20, completed: 30 };
+      if (mode === "report-change-without-part-clocks") first.content[0].time = {};
+      const report = { id: "native-report", type: "synthetic", time: { created: 45 }, text: mode === "large-same-report" ? "Report".repeat(20_000) : "Parent result",
+        metadata: { source: "subagent", childID: child, state: hasInitialReport && !(mode === "report-change-without-part-clocks" && index > 1) ? "completed" : "error" } };
+      const data = [first, ...(hasInitialReport || index > 1 && !delayed ? [report] : [])];
+      if (mode === "many-reports") for (let item = 1; item < 300; item++) data.push({ ...report, id: `result-${item}` });
+      if (!repaired && index > 1 && (mode === "report-budget-at" || mode === "report-budget-over")) data.push({ id: "noise", type: "assistant", time: { created: 50 },
+        content: Array.from({ length: mode === "report-budget-at" ? 254 : 255 }, (_, item) => ({ type: "tool", id: `n${item}`, name: "subagent", state: { metadata: { sessionID: "z" } } })) });
+      if (index === 1) { entered(); await held; }
+      if (delayed) { secondEntered(); await secondHeld; }
+      return Response.json({ data, cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
+  let older: ReturnType<typeof provider.listMessages> | undefined, delayed: ReturnType<NonNullable<typeof provider.getReversibleHistoryState>> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Compact parent-result observation")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const unrelated = (await provider.createSession("Independent reuse invalidation")).id;
+    pump = (async () => { for await (const _event of provider.events(abort.signal)) {} })(); await provider.waitForEventStream!(abort.signal);
+    older = provider.listMessages(parent, { limit: 100, signal: abort.signal }); void older.catch(() => undefined); await pending;
+    await provider.reconcileBackgroundTasks!(unrelated, { fresh: true, signal: abort.signal });
+    if (mode === "late-ownerless") {
+      delayed = provider.getReversibleHistoryState!(parent); void delayed.catch(() => undefined); await secondPending;
+      await provider.reconcileBackgroundTasks!(unrelated, { fresh: true, signal: abort.signal });
+    }
+    await provider.getReversibleHistoryState!(parent); releaseSecond(); await delayed; release();
+    const stale = await older, contradicted = mode === "prebaseline" || mode === "late-ownerless" || mode === "report-budget-over" || mode === "report-change-without-part-clocks";
+    expect(stale.workerSource?.isCurrent()).toBe(!contradicted);
+    expect(foreignLookups).toBe(0);
+    await provider.getReversibleHistoryState!(parent); expect(reads).toBe(mode === "late-ownerless" ? 3 : 2);
+    repaired = true;
+    const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    expect(fresh.find(task => task.taskId === worker.taskId)).toMatchObject({ status: hasInitialReport && mode !== "report-change-without-part-clocks" ? "completed" : "failed", resultId: "native-report" });
+    expect(foreignLookups).toBe(0);
+  } finally { release(); releaseSecond(); abort.abort(); await older?.catch(() => undefined); await delayed?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const arrival of ["after-owned", "while-owned-pending"] as const)
+test(`older ownerless parent results cannot revoke later consumed results (${arrival})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reads = 0;
+  let entered!: () => void, release!: () => void, newerEntered!: () => void, releaseNewer!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const newerPending = new Promise<void>(resolve => { newerEntered = resolve; }), newerHeld = new Promise<void>(resolve => { releaseNewer = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "server.connected", data: {}, location: { directory } })}\n\n`));
+      request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0], index = ++reads;
+      first.time = { created: 20 }; first.content[0].time = { created: 20, ran: 20, completed: 30 };
+      if (index === 1) { entered(); await held; }
+      else if (arrival === "while-owned-pending") { newerEntered(); await newerHeld; }
+      return Response.json({ data: [first, { id: "parent-result", type: "synthetic", time: { created: 45 }, text: "Authoritative result",
+        metadata: { source: "subagent", childID: child, state: index === 1 ? "completed" : "error" } }], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
+  let older: ReturnType<NonNullable<typeof provider.getReversibleHistoryState>> | undefined, read: ReturnType<typeof provider.listMessages> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Native report ordering")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const unrelated = (await provider.createSession("Independent reuse invalidation")).id;
+    pump = (async () => { for await (const _event of provider.events(abort.signal)) {} })(); await provider.waitForEventStream!(abort.signal);
+    older = provider.getReversibleHistoryState!(parent); void older.catch(() => undefined); await pending;
+    await provider.reconcileBackgroundTasks!(unrelated, { fresh: true, signal: abort.signal });
+    read = provider.listMessages(parent, { limit: 100, signal: abort.signal }); void read.catch(() => undefined);
+    if (arrival === "while-owned-pending") { await newerPending; release(); await older; releaseNewer(); }
+    const page = await read; expect(page.workerSource?.isCurrent()).toBe(true);
+    expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "failed", resultId: "parent-result" }));
+    release(); await older;
+    expect(page.workerSource?.isCurrent()).toBe(true);
+    await provider.getReversibleHistoryState!(parent); expect(reads).toBe(2);
+    expect(page.workerSource?.isCurrent()).toBe(true);
+  } finally { release(); releaseNewer(); abort.abort(); await older?.catch(() => undefined); await read?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const change of ["failed-report", "report-before-idle", "same-report", "other-child", "earlier-report", "append-text", "hidden-report"] as const)
+test(`automatic recovery guards native parent results through interaction admission (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, otherChild: string | undefined, changed = false;
+  let folded!: () => void, interactionsEntered!: () => void, release!: () => void;
+  const consumed = new Promise<void>(resolve => { folded = resolve; }), interactions = new Promise<void>(resolve => { interactionsEntered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/permission/request" || route === "/api/form") { interactionsEntered(); await held; }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 20 };
+      first.content[0].time = { created: 20, ran: 20, completed: 30 };
+      const report = { id: "native-parent-result", type: "synthetic", time: { created: change === "earlier-report" ? 5 : change === "report-before-idle" ? 35 : 45 },
+        text: "Native parent result", metadata: { source: "subagent", childID: change === "other-child" ? otherChild : child, state: change === "same-report" ? "completed" : "error" } };
+      return Response.json({ data: [first,
+        ...(change === "hidden-report" ? [{ id: "report-hidden", type: "user", text: "Hidden suffix", time: { created: 43 } }] : []),
+        ...(change === "same-report" || changed && change !== "append-text" ? [report] : []),
+        ...(changed && change === "append-text" ? [{ id: "ordinary-output", type: "assistant", time: { created: 50 }, content: [{ type: "text", text: "Parent output" }] }] : []),
+      ], cursor: {} });
+    }
+    if (route === `/api/session/${parent}` && change === "hidden-report") {
+      const body = await response.json(); body.data.revert = { messageID: "report-hidden" }; return Response.json(body);
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    if (route === `/api/session/${otherChild}/message`) return Response.json({ data: [], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => { options?.onSource?.(source); guards.push(source.workerSource.retain(abort.signal)); } });
+    folded(); return tasks;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let pump: Promise<void> | undefined, events: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  try {
+    parent = (await provider.createSession("Native parent report handoff")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    if (change === "other-child") otherChild = fake.launchRequestWorker(parent).childId;
+    const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+    events = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
+      throw new Error("Scheduler ended before worker publication"); })(); void events.catch(() => undefined);
+    pump = adapter.startEventPump(); await Promise.all([consumed, interactions]);
+    expect(guards.length).toBeGreaterThan(0);
+    changed = true;
+    // This native read, not SSE, discovers the parent report before the older
+    // scheduler recovery can commit its report-free inferred completion.
+    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    const failed = change === "failed-report" || change === "report-before-idle";
+    const expected = failed ? "failed" : change === "hidden-report" ? "running" : "completed";
+    expect(current.find(task => task.taskId === worker.taskId)?.status).toBe(expected);
+    if (!failed && change !== "hidden-report") expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    release(); const published = await events;
+    expect(published.status).toBe(expected);
+    if (failed) expect(guards.some(guard => !guard.isCurrent())).toBe(true);
+    if (failed || change === "same-report") expect(published).toMatchObject({ resultId: "native-parent-result", summary: "Native parent result" });
+    else expect(published.resultId).toBeUndefined();
+  } finally { release(); abort.abort(); await adapter.dispose(); await pump; await events?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
+for (const change of ["stale-cleared", "stale-staged", "unchanged", "newer-change"] as const)
+test(`ownerless session lookup cannot claim a collecting visibility read (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, lookups = 0, staged = change === "stale-staged";
+  let historyEntered!: () => void, releaseHistory!: () => void, lookupEntered!: () => void, releaseLookup!: () => void;
+  const historyPending = new Promise<void>(resolve => { historyEntered = resolve; }), historyHeld = new Promise<void>(resolve => { releaseHistory = resolve; });
+  const lookupPending = new Promise<void>(resolve => { lookupEntered = resolve; }), lookupHeld = new Promise<void>(resolve => { releaseLookup = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(); body.data[0].time = { created: 20 };
+      body.data[0].content[0].time = { created: 20, ran: 20, completed: 30 }; return Response.json(body);
+    }
+    if (route === `/api/session/${child}/message`) {
+      historyEntered(); await historyHeld;
+      return Response.json({ data: [{ id: "child-hidden", type: "user", text: "Visibility suffix", time: { created: 35 } },
+        { id: "child-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    }
+    if (route === `/api/session/${child}`) {
+      const body = await response.json(); if (staged) body.data.revert = { messageID: "child-hidden" };
+      if (++lookups === 2) { lookupEntered(); await lookupHeld; }
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
+  let read: ReturnType<typeof provider.listMessages> | undefined, ownerless: ReturnType<typeof provider.getSession> | undefined;
+  try {
+    parent = (await provider.createSession("Explicit visibility read owner")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    read = provider.listMessages(parent, { limit: 100, signal: abort.signal }); void read.catch(() => undefined); await historyPending;
+    ownerless = provider.getSession(child); void ownerless.catch(() => undefined); await lookupPending;
+    staged = change === "stale-cleared"; releaseHistory();
+    const page = await read;
+    expect(page.workerSource?.isCurrent()).toBe(true);
+    expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: staged ? "running" : "completed" }));
+    releaseLookup(); await ownerless;
+    expect(page.workerSource?.isCurrent()).toBe(true);
+    if (change === "newer-change") {
+      staged = true; await provider.getSession(child);
+      expect(page.workerSource?.isCurrent()).toBe(false);
+    }
+    const current = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
+    expect(current.workerSource?.isCurrent()).toBe(true);
+    expect(current.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: staged ? "running" : "completed" }));
+  } finally { releaseHistory(); releaseLookup(); abort.abort(); await read?.catch(() => undefined); await ownerless?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
 for (const change of ["competing", "unchanged", "append", "other-child", "late-ownerless", "native-count-at-limit", "native-count-over-limit", "native-bytes-below-limit", "native-bytes-over-limit", "native-replacements"] as const)
 test(`ownerless parent inventory covers its first pending response (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

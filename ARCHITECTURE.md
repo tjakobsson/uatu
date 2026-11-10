@@ -1222,6 +1222,17 @@ The provisional snapshot coalesces exact facts and uses the same 256-fact /
 pending consumer's history authority, never becoming a partial inventory that
 can veto another read. Newer native observations replace the slot without
 accumulation; neither provisional evidence nor saturation grants child IO or Stop.
+Native parent observations also fingerprint relevant explicit subagent results,
+so a report-free inferred completion cannot publish after a newer parent read
+finds a conflicting report. Reports must name native launch children; dated
+reports provably preceding their execution start are excluded. Missing launcher
+clocks cannot prove that a report is irrelevant. One digest per launch child retains neither
+result bodies nor a growing report log; provisional digests share the existing
+256-fact / 64-KiB counterproof budget. The same native-order rules cover owned,
+ownerless and prebaseline reads. Counterproof forces a covered reread, not an
+invented result; public revert-prefix rules still decide whether a report is
+visible. Unchanged reports, unrelated children and ordinary text do not fence
+independent outcomes.
 The adapter also retracts an already cached history-only completion when the
 covered complete source returns the same qualified execution as unresolved.
 That replacement clears stale terminal fields instead of merging them back.
@@ -1247,7 +1258,12 @@ processed changes to consumed idle records, new execution boundaries, removals
 and reverts revoke dependent results even after the inventory transport retires.
 Fresh scoped session records also revoke an outcome view when they reveal a
 different child revert boundary, without waiting for SSE. Observation begins
-while the first outcome-visibility lookup is pending. Native record read order
+while the first outcome-visibility lookup is pending. Session-record reads carry
+their explicit consuming owner, not all collecting parent folds.
+An older ordinary getSession response cannot revoke a page that consumed a newer
+boundary. Fresh nonoverlapping record changes still revoke dependent pages, and
+the first owned visibility lookup still observes intervening counterproof.
+Native record read order
 keeps a contradictory overlapping response from replacing a newer boundary;
 the older response's own inference abstains. A later nonoverlapping
 child-history read also revokes consumed idle evidence when its records change

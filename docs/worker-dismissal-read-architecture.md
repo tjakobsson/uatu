@@ -28,6 +28,11 @@ scoped child record that reveals a changed revert boundary revokes the earlier
 outcome source even before the corresponding native event arrives.
 This observation includes a scoped record arriving while the first visibility
 lookup is pending; a late overlapping response cannot overwrite that boundary.
+Session-record reads carry only their explicit consuming fold as an overlapping
+owner. Ordinary getSession/list/create reads cannot claim all collecting folds
+and revoke a page that consumed a newer boundary. Genuine later nonoverlapping
+boundary changes still revoke every dependent source; first-visibility lookup
+counterproof remains covered.
 Later nonoverlapping history reads also fence changed or missing idle evidence;
 an unchanged null revert boundary does not preserve a removed outcome. A
 conflicting overlapping response cannot revoke the later consumed source or
@@ -78,6 +83,14 @@ older arrival from overwriting newer evidence or vetoing a later owned response;
 joining the same native transport is not a contradiction. Snapshot replacement
 does not accumulate facts. Saturation denies only the older pending consumer,
 not fresh inventory, child ownership, or independent Stop authority.
+Relevant native parent results are counterproof too: a newly observed explicit
+report fences a previously inferred completion through scheduler interaction
+reads and final admission. Results provably predating the child's native execution start
+and reports for unrelated children do not fence that outcome. Retention is one
+digest per native launch child, not report text or a result log; provisional
+digests share the existing count/byte budget. Native ordering protects newer
+observations from stale arrivals. Public prefix recovery, not the fingerprint,
+decides which explicit reports remain visible after a parent revert.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
