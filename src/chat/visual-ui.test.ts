@@ -60,7 +60,9 @@ describe("chat visual controls", () => {
   test("a stale source response cannot populate the replacement snapshot at the same occurrence", async () => {
     const oldFetch = globalThis.fetch;
     const replies: Array<(response: Response) => void> = [];
-    globalThis.fetch = (async () => new Promise<Response>(resolve => { replies.push(resolve); })) as typeof fetch;
+    globalThis.fetch = new Proxy(oldFetch, {
+      apply() { return new Promise<Response>(resolve => { replies.push(resolve); }); },
+    });
     try {
       const { document, window } = parseHTML('<div id="root"></div>');
       const root = document.querySelector("#root") as unknown as HTMLElement;
