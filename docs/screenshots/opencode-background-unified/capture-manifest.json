@@ -1,0 +1,55 @@
+{
+  "kind": "static-single-workers-list-concept-captures",
+  "date": "2026-11-09",
+  "source": "prototype.html",
+  "sourceSha256": "76fd6ac9b75269bb43ed1d724e85377de3afaab5404716d957cde09710707e3a",
+  "captureMethod": "Native Playwright Chromium browser; temporary loopback HTTP; animations disabled; bundled font loaded; viewport with internally scrolling panes",
+  "browser": "Chromium 154.0.0.0 on macOS",
+  "deviceScaleFactor": 1,
+  "imageScale": "css",
+  "captureQuery": "capture=1",
+  "provenance": "Browser captures of a static prototype. All conversation/task/schedule data are illustrative; not implemented product, live-provider, or physical-device evidence. No AI image generation was used. Origin is embedded in every PNG.",
+  "viewports": {
+    "desktop": { "width": 1440, "height": 1000 },
+    "mobile": { "width": 430, "height": 932 }
+  },
+  "checks": {
+    "pageErrors": [],
+    "documentHorizontalOverflow": false,
+    "workSummariesPerState": 1,
+    "flatWorkListsPerState": 1,
+    "separateSchedulePanel": false,
+    "conceptLabelVisible": true,
+    "logoLoaded": true,
+    "bundledMonoFontLoaded": true,
+    "desktopDocumentPreviewRetained": true,
+    "cancelVisibleInOpenStates": true,
+    "mobileCancelHeightCssPx": 44,
+    "scheduledOnlyWorkingRows": 0,
+    "unconfirmedCancellationRetainsSchedule": true,
+    "confirmedCancellationOmitsZeroCountCategory": true,
+    "expandedFiredStateLastCheckConsistent": true
+  },
+  "preservedGalleries": [
+    { "directory": "../opencode-background-concepts/", "aggregateSha256": "61dcf29efbb178aa7b081720872f864cc52ff1a392a826311e37922cc515bf04" },
+    { "directory": "../opencode-background-chat-first/", "aggregateSha256": "291baa08ea831059e8ca0e06fd42a44767bbcbcad4e5759dee6bc2fe0494dd52" }
+  ],
+  "captures": [
+    { "file": "01-compact-desktop-light.png", "state": "compact", "device": "desktop", "theme": "light", "sha256": "350d7c5e6501676727b0f99a6dfc592b741fcc3f9d99506bd4fc617ffba5157b" },
+    { "file": "02-compact-mobile-light.png", "state": "compact", "device": "mobile", "theme": "light", "sha256": "88dc1e96b215f1eccec19e54d501cc8eed48a8ee80e21d2f2b4247d4aff66dab" },
+    { "file": "03-mixed-list-desktop-light.png", "state": "list", "device": "desktop", "theme": "light", "sha256": "90e47bad2bb5e79f7f02da4459a0992e3903dbc191a2ea2bd8bc8c08a5e61787" },
+    { "file": "04-mixed-list-mobile-light.png", "state": "list", "device": "mobile", "theme": "light", "sha256": "87e8eb2308039468ea93afddc61de300193008e406038d39f51e400437695d72" },
+    { "file": "05-scheduled-expanded-desktop-light.png", "state": "expanded", "device": "desktop", "theme": "light", "sha256": "0aa21a07047416ba522381f12801056bd96040bd9f73a9dfdab3d1bfb3814280" },
+    { "file": "06-scheduled-expanded-mobile-light.png", "state": "expanded", "device": "mobile", "theme": "light", "sha256": "ae2b3e87b39e78d3a9cd97e42629014d7da149643194a45c10a85f90a924b219" },
+    { "file": "07-cancelling-desktop-dark.png", "state": "cancelling", "device": "desktop", "theme": "dark", "sha256": "5407ed64f7a6ac9116da58318e1bf9d1e21ec04562618decd67a4ae5dfba5e8a" },
+    { "file": "08-cancelling-mobile-dark.png", "state": "cancelling", "device": "mobile", "theme": "dark", "sha256": "55a1b30eaf911bcc5355ccae0028f295b0e2a474816964ac67ff4d28e321726c" },
+    { "file": "09-unconfirmed-desktop-dark.png", "state": "unconfirmed", "device": "desktop", "theme": "dark", "sha256": "1c583d49de3b228c24db425c6d4acec802c4465de1e62b05166de748a769f163" },
+    { "file": "10-unconfirmed-mobile-dark.png", "state": "unconfirmed", "device": "mobile", "theme": "dark", "sha256": "db49c8c757fe87e672c3af4a6d93987c7e86e3e7db53f36eddc246e3244f84a3" },
+    { "file": "11-cancelled-desktop-light.png", "state": "cancelled", "device": "desktop", "theme": "light", "sha256": "c5c85be25481f8021b7b09d235bb4dbc6daac54f2987b6ca3442a2b0db8953c6" },
+    { "file": "12-cancelled-mobile-light.png", "state": "cancelled", "device": "mobile", "theme": "light", "sha256": "14073ead5e47c4a001b2de0417da445370092c4f4a6ba193a990c4a6f2d352cf" },
+    { "file": "13-fired-desktop-light.png", "state": "fired", "device": "desktop", "theme": "light", "sha256": "de4d9fad0f6109c31a4f3877bb048f0ad0b794bfd8b52afcf218847527ec62de" },
+    { "file": "14-fired-mobile-light.png", "state": "fired", "device": "mobile", "theme": "light", "sha256": "7b00ea1a4f3029ed21442c050ca10634357454e4a45548ac6d057fe32f7965e0" },
+    { "file": "15-scheduled-only-desktop-light.png", "state": "scheduled-only", "device": "desktop", "theme": "light", "sha256": "8423ff7a80ec7e8d1f3e2411b94b8b9be862f42edc2debd7340a9f57c4b96d68" },
+    { "file": "16-scheduled-only-mobile-light.png", "state": "scheduled-only", "device": "mobile", "theme": "light", "sha256": "c9d897a26e02db9e9f09e55a0351589364abd2be6db00612c9d29e7f90561bfd" }
+  ]
+}
