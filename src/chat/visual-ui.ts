@@ -81,7 +81,9 @@ export function decorateChatVisuals(root: HTMLElement): void {
         if (!id || url !== appUrl(`/api/chat/visuals/${id}/source`)) throw new Error("SVG source is unavailable.");
         const response = await fetch(url);
         if (!response.ok) throw new Error("Could not load SVG source.");
-        const text = await response.text();
+        // Response.text() consumes a leading UTF-8 BOM. Source and Copy must
+        // retain that character from the immutable captured bytes.
+        const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(await response.arrayBuffer());
         code.textContent = text;
         visual.dataset.visualSourceLoaded = "true";
         if (copyButton) {

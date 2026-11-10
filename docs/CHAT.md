@@ -938,7 +938,8 @@ Finish writing a file before embedding it. Image content
 returned only inside a tool result is not automatically displayed.
 
 A fenced code block labelled `svg` also becomes an inline preview. **Source**
-shows the original SVG, and **Copy source** copies it without changing it.
+shows the original SVG, and **Copy source** copies it without changing it,
+including a leading UTF-8 BOM and CRLF line endings.
 For stored captures, open **Source** first; copying becomes available once the
 source has loaded, so the copy click retains browser clipboard permission.
 SVG files embedded with Markdown have the same controls. Previews use the

@@ -5,6 +5,48 @@ import { decorateChatVisuals, reconcileChatVisuals } from "./visual-ui";
 const VISUAL_ID = "a".repeat(64);
 
 describe("chat visual controls", () => {
+  test.each(["file", "fence"] as const)("captured %s SVG source and copy preserve a leading BOM, CRLF and encoded text", async kind => {
+    const oldFetch = globalThis.fetch;
+    const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const source = '\uFEFF<svg><text>Original &amp; source</text></svg>\r\n';
+    const bytes = new TextEncoder().encode(source);
+    const requests: string[] = [];
+    const copied: string[] = [];
+    globalThis.fetch = new Proxy(oldFetch, {
+      apply(_target, _thisArg, args: Parameters<typeof fetch>) {
+        requests.push(String(args[0]));
+        return Promise.resolve(new Response(bytes, { headers: { "Content-Type": "text/plain; charset=utf-8" } }));
+      },
+    });
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: {
+      clipboard: { async writeText(value: string) { copied.push(value); } },
+    } });
+    try {
+      const markdown = kind === "file" ? "![Diagram](./bom.svg)" : `\`\`\`svg\r\n${source}\`\`\`\r\n`;
+      const { document, window } = parseHTML(`<div id="root">${renderChatMarkdown(markdown, {
+        visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }],
+      })}</div>`);
+      const root = document.querySelector("#root") as unknown as HTMLElement;
+      decorateChatVisuals(root);
+      const tab = root.querySelector('[data-visual-tab="source"]')!;
+      tab.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(root.querySelector(".chat-visual-source code")?.textContent).toBe(source);
+      const copy = root.querySelector<HTMLButtonElement>("[data-visual-copy]")!;
+      expect(copy.disabled).toBe(false);
+      copy.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(copied).toEqual([source]);
+      tab.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(requests).toEqual([`/api/chat/visuals/${VISUAL_ID}/source`]);
+      expect(root.querySelector(".chat-visual-source code")?.textContent).toBe(source);
+    } finally {
+      globalThis.fetch = oldFetch;
+      if (navigatorDescriptor) Object.defineProperty(globalThis, "navigator", navigatorDescriptor);
+      else Reflect.deleteProperty(globalThis, "navigator");
+    }
+  });
+
   test("pending Source and focused Copy survive capture while handlers load only the newly issued immutable source", async () => {
     const oldFetch = globalThis.fetch;
     const requests: string[] = [];

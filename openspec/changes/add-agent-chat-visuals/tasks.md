@@ -120,6 +120,7 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.44 Seal retained history-owned Claude turn metadata at ordered terminal projection boundaries even without a visual subscriber. Replace retained rows/tokens rather than mutating earlier frames, preventing a later turn's file from being captured into an older answer.
 - [ ] 6.45 Freeze Claude turn liveness with native snapshot text and cursor, before the asynchronous handoff to enrichment. Closing frames queued in that gap must complete an initially pending SVG without poisoning its immutable capture; retain terminal historical rows and cancellation cleanup.
 - [ ] 6.46 Reject stale OpenCode 1.x completion aliases from a preceding turn before they consume a newer image's missing-file retry. Preserve genuine completion, terminal historical rows, immutable captures and ordered public events.
+- [ ] 6.47 Preserve a captured SVG's leading UTF-8 BOM when decoding its source response, so Source and Copy retain the original text for both file and fenced captures, including CRLF and entity-encoded text.
 
 Implementation checkpoint for 6.46: retain source-local status evidence before
 cross-stream deduplication and carry witnessed idle-alias metadata internally.
