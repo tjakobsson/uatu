@@ -989,8 +989,11 @@ Reference-style image destinations on an unfinished definition line remain
 provisional until the line ends or the reply completes.
 Steering does not finish the current reply or consume its completion retry;
 reloading or opening another client while it continues preserves pending visuals.
-Native OpenCode completion timestamps also keep older finished answers terminal
-when their history is opened during a newer running turn.
+OpenCode 2.x history uses stored execution boundaries to keep current-execution
+tool-call messages pending and older executions terminal, including across pages.
+API-message completion alone does not end that execution. Classic OpenCode 1.x
+cold/restarted history lacks those boundaries: completed tool-call messages are
+conservatively finalized and may refuse an image that a later tool creates.
 Claude uses native turn-end records rather than text-block completion: completed
 turns stay terminal, while a live turn retains its pending visuals across history
 pages. Pending visuals loaded after the live subscription starts also receive

@@ -1,8 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { normalizePersistedConversationConfiguration, quietCancellation, resolveNewConversationConfiguration, OpenCodeV1Provider, stableProviderId } from "./provider";
 import { ReversibleHistoryTargetError } from "../../provider";
+import { ChatAdapter } from "../../adapter";
+import { MultiAgentChatService } from "../../agents";
+import { VisualReadError, VisualStore } from "../../visual-store";
+import type { WorkspaceChatService } from "../../service";
+import type { AssistantMessageItem } from "../../types";
+import { OPENCODE_EXECUTION_LIVE, type OpenCodeExecutionIdentity } from "../normalization-types";
 
 describe("OpenCode v2 identity policy", () => {
   test("declares durable conversation rename support", () => {
@@ -725,6 +734,54 @@ describe("history across both OpenCode message stores", () => {
 
   const classic = (id: string, created: number) => ({ info: { id, role: "user", time: { created } }, parts: [] });
   const modern = (id: string, created: number) => ({ id, type: "user", time: { created }, text: "hi" });
+
+  test("classic parent users and API finish reasons do not invent persisted execution boundaries", async () => {
+    const reply = (id: string, parentID: string, created: number, finish: string) => ({
+      info: { id, role: "assistant", parentID, time: { created, completed: created + 1 }, finish },
+      parts: [{ id: `${id}-text`, type: "text", text: "![Image](later.png)" }],
+    });
+    const legacy = [classic("prompt", 1), reply("tool-step", "prompt", 2, "tool-calls"),
+      classic("steer", 4), reply("steered-step", "steer", 5, "tool-calls"), reply("stop", "steer", 7, "stop")];
+    const provider = new OpenCodeV1Provider(client([{ data: [] }], legacy), "/workspace");
+    const page = await provider.listMessages("ses_history", { limit: 1 });
+    expect(page.items.find(item => item.id === "part:stop-text")).toMatchObject({ completedAt: 8 });
+    expect(page.completeItems?.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+    const older = await provider.listMessages("ses_history", { limit: 2, cursor: page.nextCursor });
+    expect(older.items.find(item => item.id === "part:steered-step-text")).toMatchObject({ completedAt: 6 });
+    expect(older.items.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+    expect((await provider.listMessages("ses_history", { limit: 100 })).accounting).toEqual([]);
+  });
+
+  test("cold classic completed tool-call history keeps the conservative sealed fallback through history and attach", async () => {
+    const root = path.join(os.tmpdir(), "opencode");
+    await mkdir(root, { recursive: true });
+    const directory = await mkdtemp(path.join(root, "classic-execution-fallback-"));
+    // This is the known 1.x limitation, not a claim that parentID identifies
+    // the active execution: even a current completed API step stays terminal
+    // on a cold read without native execution-end evidence.
+    const legacy = [classic("prompt", 1), {
+      info: { id: "tool-step", role: "assistant", parentID: "prompt", time: { created: 2, completed: 3 }, finish: "tool-calls" },
+      parts: [{ id: "tool-text", type: "text", text: "![Image](later.png)" }],
+    }, classic("steer", 4)];
+    const provider = new OpenCodeV1Provider(client([{ data: [] }], legacy), "/workspace");
+    const adapter = new ChatAdapter({ provider, workspacePath: "/workspace" });
+    adapter.projectionForTests("ses_history").statusUpdate("running");
+    let available = false, reads = 0;
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]); });
+    const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: async () => {} } as unknown as WorkspaceChatService;
+    const router = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    try {
+      const first = await router.history("opencode:ses_history");
+      const answer = first.items.find(item => item.id === "part:tool-text") as AssistantMessageItem;
+      expect(answer.visuals?.[0]?.status).toBe("unavailable");
+      available = true;
+      const attach = await router.subscribe("opencode:ses_history"); attach.events.cancel();
+      expect((attach.snapshot.items.find(item => item.id === answer.id) as AssistantMessageItem).visuals).toEqual(answer.visuals);
+      expect((await router.history("opencode:ses_history")).items.find(item => item.id === answer.id)).toMatchObject({ visuals: answer.visuals });
+      expect(reads).toBe(1); // Never reinterpret parent/steer rows to capture later bytes.
+    } finally { await router.dispose(); await adapter.dispose(); await rm(directory, { recursive: true, force: true }); }
+  });
 
   test("reads the classic store when the v2 store is empty for a session", async () => {
     const provider = new OpenCodeV1Provider(client([{ data: [] }], [classic("msg_b", 2), classic("msg_a", 1)]), "/workspace");

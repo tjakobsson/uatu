@@ -700,8 +700,9 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
 }
 
 export function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number, mintUsageCarrier: boolean): ConversationItem[] {
-  // A text part may finish before its message. Only native message completion
-  // seals historical visuals while a later conversation turn is still live.
+  // Preserve API-message completion independently of execution membership.
+  // Where native execution evidence is unavailable (notably 1.x/classic),
+  // visual history retains this conservative completion fallback.
   const completed = completionTime(finishedTime(message.time));
   const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt, undefined, messageId)).flatMap(update => {
     const item = update.kind === "upsert" || update.kind === "text" ? update.item : undefined;

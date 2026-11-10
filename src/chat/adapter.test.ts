@@ -25,7 +25,7 @@ import { MetricsRegistry } from "../debug/metrics";
 import type { ConversationInventorySubscription } from "./inventory-broadcaster";
 import { OpenCodeNotificationLifecycle } from "./opencode/notification-lifecycle";
 import { createOpenCodeV2Provider } from "./opencode/v2/provider";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer } from "./opencode/v2/normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage, prepareStoredMessage, storedExecutionLiveness } from "./opencode/v2/normalization";
 import type { AgentNotificationEvent } from "./notifications";
 import { notificationPipeline } from "../../tests/notification-pipeline";
 import { startOpenCodeV2Fake } from "../../tests/e2e/opencode-v2-fake";
@@ -36,11 +36,42 @@ import type { LiveEnvelope } from "../shared/live-protocol";
 import { buildRoutes } from "../server/routes";
 import { ConversationProjection } from "./adapter";
 import { ConversationReplay, decodeReplayCursor } from "./replay";
-import { isVisualTurnLive, OPENCODE_STEP_LIVE, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
 import { MultiAgentChatService } from "./agents";
 import { VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import type { AssistantMessageItem } from "./types";
+
+test.each(["succeeded", "failed", "interrupted"] as const)("ordered native execution %s seals retained membership by replacement, with no extra frames", terminal => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const normalize = createOpenCodeV2Normalizer("/workspace");
+  const memory = createOpenCodeV2Memory();
+  let frame = 0;
+  const emit = (type: string, data: Record<string, unknown> = {}) => normalize({ id: `e-${++frame}`, created: frame, type, location: { directory: "/workspace" }, data: { sessionID: "c", ...data } }, memory).updates
+    .flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+  emit("session.execution.started");
+  const native = { id: "api", type: "assistant", time: { created: 1, completed: 2 }, finish: "tool-calls", content: [{ type: "text", text: "![Later](later.png)" }] };
+  const membership = storedExecutionLiveness([native]);
+  projection.seed(normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), membership.get(native.id)));
+  const original = projection.items()[0]!;
+  const live = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+  const failed = emit("session.step.failed", { assistantMessageID: "api", error: { type: "rate-limit", message: "Retry" } });
+  expect(failed.some(event => event.type === "conversation.status" && event.status === "failed")).toBe(true);
+  expect(live(projection.get(original.id)!)).toBe(true);
+  emit("session.retry.scheduled", { message: "Retrying" });
+  expect(live(projection.get(original.id)!)).toBe(true);
+  const before = decodeReplayCursor(projection.replay.latestCursor())!;
+  const ended = emit(`session.execution.${terminal}`, terminal === "failed" ? { error: { type: "unknown", message: "Retry" } } : {});
+  expect(ended).toHaveLength(1); // Failure notice was already delivered at the step.
+  expect(ended[0]!.sequence).toBe(before.sequence + 1);
+  const sealed = projection.get(original.id)!;
+  expect(JSON.stringify(sealed)).toBe(JSON.stringify(original));
+  expect(sealed).not.toBe(original);
+  expect(live(sealed)).toBe(false);
+  expect(live(original)).toBe(true); // Earlier handoff/upsert is frame-immutable.
+  emit("session.execution.started");
+  expect(live(projection.get(original.id)!)).toBe(false); // No history refresh required.
+});
 
 test("native step-live hints are immutable on ordered status frames and adapter snapshots, not public status changes", async () => {
   const provider = new FakeProvider();

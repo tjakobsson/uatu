@@ -15,7 +15,7 @@ import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
 import { isLiveConversationStatus } from "./types";
-import { OPENCODE_STEP_LIVE, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
@@ -1961,7 +1961,13 @@ export class ChatAdapter {
         // Publish recovered values, not just a silent seed of the next snapshot.
         for (const item of items) {
           const current = projection.get(item.id);
-          if (!current || !sameConversationItems([current], [item]) || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
+          // Equal JSON can carry newer native execution evidence. Stage that
+          // replacement in the same validated recovery batch; recover's public
+          // equality suppresses a symbol-only frame while retaining the row.
+          const execution = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+          const executionChanged = execution !== undefined
+            && execution !== (current as (ConversationItem & OpenCodeExecutionIdentity) | undefined)?.[OPENCODE_EXECUTION_LIVE];
+          if (!current || !sameConversationItems([current], [item]) || executionChanged || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
           else if (current.type === "tool" && item.type === "tool" && coverage?.projection === projection && !coverage.changed(item.id)) {
             this.refreshEquivalentDescendantBindings(projection, current, item);
           }
@@ -7134,6 +7140,18 @@ export class ConversationProjection {
   statusUpdate(status: ConversationStatus, message?: string, sourceTransition = true, native?: OpenCodeStepStatus): ChatEvent {
     this.status = status;
     this.stepVisualLive = status === "failed" && native?.[OPENCODE_STEP_LIVE] === true;
+    // A known step failure is nonterminal. Actual ordered terminal statuses
+    // seal retained native history before a later execution can reuse it.
+    // Replace rows, not shared tokens: queued earlier frames/snapshots keep
+    // their original text and execution boundary, with no extra wire events.
+    if (sourceTransition && (status === "completed" || status === "interrupted" || status === "failed" && !this.stepVisualLive)) {
+      for (const [id, item] of this.timeline) {
+        if (item.type !== "assistant_message" || (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] !== true) continue;
+        const sealed = { ...item, [OPENCODE_EXECUTION_LIVE]: false };
+        this.timeline.set(id, sealed);
+        this.historyChanged(id);
+      }
+    }
     this.onStatus?.(status, sourceTransition);
     return this.replay.publish({ type: "conversation.status", status, message, ...(this.stepVisualLive ? { [OPENCODE_STEP_LIVE]: true as const } : {}) });
   }

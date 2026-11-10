@@ -3,7 +3,7 @@ import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
 import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
-import { isVisualTurnLive, OPENCODE_TEXT_END, type OpenCodeTextIdentity } from "./opencode/normalization-types";
+import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
@@ -712,20 +712,21 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   }
 
   private visualItemLive(item: Extract<ConversationItem, { type: "assistant_message" }>, streaming: boolean, orderedTurnState = false): boolean {
-    // Claude's completedAt closes a text block/API response, not the agent
-    // turn: a subsequent tool can still create the referenced file. OpenCode's
-    // native parent-message completedAt, in contrast, really seals its parts.
-    const identity = item as typeof item & ClaudeTextIdentity;
+    // API/text completion is distinct from the execution that may still run
+    // a file-producing tool. Native execution evidence overrides completedAt;
+    // incompatible/unannotated histories retain the historical fallback.
+    const identity = item as typeof item & ClaudeTextIdentity & OpenCodeExecutionIdentity;
     // Queued Claude frames share a token the provider may already have sealed.
     // Live projection must instead wait for its ordered status/turn boundary;
     // history/snapshot reads still use the authoritative native token.
     if (identity[CLAUDE_TURN]) return streaming && (orderedTurnState || !identity[CLAUDE_TURN].completed);
+    if (identity[OPENCODE_EXECUTION_LIVE] !== undefined) return streaming && identity[OPENCODE_EXECUTION_LIVE] === true;
     const claudeBlock = Boolean(identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:"));
     return streaming && (claudeBlock || item.completedAt === undefined);
   }
 
   private async enrichSnapshot(snapshot: AgentConversationSnapshot, newestPage = true): Promise<AgentConversationSnapshot> {
-    // Native Claude turn metadata is computed before pagination: an older
+    // Native execution metadata is computed before pagination: an older
     // page can still belong to the same running turn. Without authoritative
     // metadata, keep older pages terminal rather than inferring from a user
     // row or a page-local footer.
@@ -738,7 +739,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const planned = snapshot.items.map((item, index) => {
       if (item.type !== "assistant_message") return { item, live: false };
       const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
-      const live = this.visualItemLive(item, streaming && (Boolean(turn) || newestPage && index > lastTurn));
+      const execution = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+      const live = this.visualItemLive(item, streaming && (Boolean(turn) || execution !== undefined || newestPage && index > lastTurn));
       liveness.set(item.id, live);
       return { item, live };
     });

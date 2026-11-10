@@ -352,6 +352,10 @@ export class OpenCodeV1Provider implements ChatProvider {
     const end = historyPageEnd(options.cursor, version, visible.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const page = visible.slice(start, end);
+    // Neither 1.x store persists an execution id/end marker. Classic parentID
+    // names a user message, not an execution (a steer can change that parent).
+    // Do not infer capture liveness from the newest user or finish:tool-calls;
+    // these unannotated rows deliberately retain the completion fallback.
     // Each assistant message is paired with the prompt it answers. The classic
     // record names it; the v2 record does not, so the newest user message
     // before it in the transcript stands in — walked from the start, because

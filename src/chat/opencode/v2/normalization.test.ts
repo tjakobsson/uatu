@@ -4,13 +4,13 @@ import path from "node:path";
 import type { ShellExited } from "@opencode/client";
 
 import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, storedAccounting, type OpenCodeV2Memory } from "./normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, prepareStoredMessage, storedAccounting, storedExecutionLiveness, type OpenCodeV2Memory } from "./normalization";
 import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
 import { visualAdmissionIdentity } from "../../visual-identity";
-import { isVisualTurnLive, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
+import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
 
 test("native shell exit evidence uses the typed identity and terminal process status", () => {
   const normalize = createOpenCodeV2Normalizer("/ws");
@@ -60,6 +60,39 @@ const FIXTURES = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../..
   storedMessages: { data: Array<Record<string, unknown>> };
 };
 const WORKSPACE = "/tmp/oc-v2-ws";
+
+test("captured API tool/stop completions do not end execution; the stored idle does, immutably", () => {
+  const stored = FIXTURES.storedMessages.data;
+  const idle = stored.findIndex(message => message.type === "idle");
+  expect(idle).toBeGreaterThan(0);
+  const prefix = stored.slice(0, idle);
+  expect(prefix.some(message => message.type === "assistant" && message.finish === "tool-calls")).toBe(true);
+  expect(prefix.some(message => message.type === "assistant" && message.finish === "stop")).toBe(true);
+  const normalize = (messages: readonly Record<string, unknown>[]) => {
+    const membership = storedExecutionLiveness(messages);
+    return messages.flatMap(message => normalizeStoredMessage(message, true, undefined, prepareStoredMessage(message), membership.get(message.id as string)))
+      .filter(item => item.type === "assistant_message");
+  };
+  const running = normalize(prefix);
+  expect(running.length).toBeGreaterThan(0);
+  expect(running.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true)).toBe(true);
+  const sealed = normalize(stored);
+  expect(sealed.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === false)).toBe(true);
+  expect(JSON.stringify(running)).toBe(JSON.stringify(sealed)); // No new public fields.
+  expect(running.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true)).toBe(true);
+  for (const message of prefix.filter(message => message.type === "assistant")) {
+    const unannotated = normalizeStoredMessage(message);
+    expect(unannotated.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+  }
+});
+
+test.each(["succeeded", "failed", "interrupted"] as const)("stored %s idle separates executions without mistaking a delivered steer for an end", outcome => {
+  const assistant = (id: string, created: number) => ({ id, type: "assistant", time: { created, completed: created + 1 }, finish: "tool-calls", content: [{ type: "text", text: "![Image](later.png)" }] });
+  const old = assistant("old", 1), current = assistant("current", 4);
+  const history = [old, { id: "end", type: "idle", time: { created: 3 }, outcome }, current,
+    { id: "steer", type: "user", time: { created: 6 }, text: "Change the image" }, assistant("next-step", 7)];
+  expect([...storedExecutionLiveness(history)]).toEqual([["next-step", true], ["current", true], ["old", false]]);
+});
 
 test("text phases, content restatement and stored messages supply the same non-wire native admission identity", () => {
   const normalize = createOpenCodeV2Normalizer(WORKSPACE);

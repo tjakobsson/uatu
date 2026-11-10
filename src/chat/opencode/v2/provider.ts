@@ -27,7 +27,7 @@ import type {
 } from "../../provider";
 import { pendingPermissionFields, number as numberField } from "../normalization";
 import { BackgroundControls, BackgroundWorkers, launcherChanged, nativeLauncherTaskId, nativeNotificationTaskId, retainLauncherEvidence, sameLauncherIdentity, shellBirthIdentity, shellCommandFingerprint, workerExecutionIds, type ControlRead, type LauncherEvidence, type WorkerOccurrenceEvidence } from "./background";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, pendingInboxEntry, prepareStoredMessage, storedAccounting, storedPromptId, supportedFormFields, type V2Evidence } from "./normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, pendingInboxEntry, prepareStoredMessage, storedAccounting, storedExecutionLiveness, storedPromptId, supportedFormFields, type V2Evidence } from "./normalization";
 import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 import { TASK_OUTPUT_TAIL_MAX_BYTES } from "../../types";
 
@@ -426,14 +426,15 @@ export class OpenCodeV2Provider implements ChatProvider {
 
   private async readHistoryVisibility(sessionId: string, signal: AbortSignal, controlRead: ControlRead, cursor?: string, optionalEnrichment = false) {
     const complete = await this.allMessages(sessionId, signal);
+    const executionLiveness = storedExecutionLiveness(complete);
     const info = await this.lookupWorkerParent(sessionId, signal);
     const boundaryId = stringValue(asRecord(asRecord(info).revert).messageID);
     const boundaryIndex = boundaryId ? complete.findIndex(message => messageIdentity(message) === boundaryId) : -1;
     const visible = boundaryIndex >= 0 ? complete.slice(0, boundaryIndex) : complete;
     const version = historyVersion([visible, boundaryId]);
     const end = historyPageEnd(cursor, version, visible.length);
-    const normalized = await this.backgroundHistory(sessionId, visible, signal, controlRead, true, optionalEnrichment);
-    const allNormalized = boundaryIndex >= 0 ? await this.backgroundHistory(sessionId, complete, signal, controlRead, true, optionalEnrichment) : normalized;
+    const normalized = await this.backgroundHistory(sessionId, visible, signal, controlRead, true, optionalEnrichment, executionLiveness);
+    const allNormalized = boundaryIndex >= 0 ? await this.backgroundHistory(sessionId, complete, signal, controlRead, true, optionalEnrichment, executionLiveness) : normalized;
     // An optional prefix omission is not native visibility evidence. A full
     // fold may recover that metadata, but only rows first introduced by the
     // actual hidden suffix can become exclusions. Keep canonical alias origins
@@ -474,7 +475,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     return boundary;
   }
 
-  private async backgroundHistory(sessionId: string, visible: StoredMessage[], signal = this.readSignal(), controlRead?: ControlRead, overlay = true, optionalEnrichment = false) {
+  private async backgroundHistory(sessionId: string, visible: StoredMessage[], signal = this.readSignal(), controlRead?: ControlRead, overlay = true, optionalEnrichment = false, executionLiveness = storedExecutionLiveness(visible)) {
     const transcriptSignal = signal;
     // Child enrichment has its own lifetime. Its deadline must leave time to
     // return the required parent transcript, and never turn missing metadata
@@ -540,7 +541,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     const normalized = new Map<string, { item: import("../../types").ConversationItem; index: number }>();
     const origins = new Map<string, number>();
     visible.forEach((message, index) => {
-      for (let item of normalizeStoredMessage(message, true, { workers, parent: sessionId }, prepared[index])) {
+      for (let item of normalizeStoredMessage(message, true, { workers, parent: sessionId }, prepared[index], executionLiveness.get(messageIdentity(message)))) {
         if (!origins.has(item.id)) origins.set(item.id, index);
         if (optionalEnrichment && item.type === "tool" && item.childConversationId && !verified.has(item.childConversationId)) {
           const { childConversationId: _unverified, ...transcript } = item;

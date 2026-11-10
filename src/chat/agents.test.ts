@@ -9,8 +9,8 @@ import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEnt
 import { CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
 import { readSessionTranscript } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent as normalizeOpenCodeV1, normalizeProviderMessage } from "./opencode/v1/normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History } from "./opencode/v2/normalization";
-import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "./opencode/normalization-types";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, normalizeStoredMessage as normalizeOpenCodeV2History, prepareStoredMessage, storedExecutionLiveness } from "./opencode/v2/normalization";
+import { OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "./opencode/normalization-types";
 import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ConversationReplay, decodeReplayCursor, encodeReplayCursor, ReplaySubscription } from "./replay";
 import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
@@ -567,6 +567,68 @@ test.each(["status-error", "updated"] as const)("visual terminal refresh preserv
     if (kind === "updated") expect(first.projection.conversation?.title).toBe("Renamed by provider");
     expect(applyChatEvent(first.projection, delivered[1]!).outcome).toBe("resync");
   } finally { await h.cleanup(); }
+});
+
+test.each(["history", "subscribe"] as const)("%s freezes all OpenCode execution membership before a blocked visual read and queued execution end", async entry => {
+  const h = await visualSubscriptionHarness("opencode");
+  const assistant = (id: string, created: number, markdown: string) => ({ id, type: "assistant", time: { created, completed: created + 1 }, finish: "tool-calls", content: [{ type: "text", text: markdown }] });
+  const native = [assistant("old", 1, "![Old](old.png)"),
+    { id: "old-end", type: "idle", time: { created: 3 }, outcome: "succeeded" },
+    assistant("first", 4, "![First](first.png)"),
+    { id: "steer", type: "user", time: { created: 6 }, text: "Make it smaller" },
+    assistant("last", 7, "![Last](last.png)")];
+  const membership = storedExecutionLiveness(native);
+  h.projection.seed(native.flatMap(message => normalizeOpenCodeV2History(message, true, undefined, prepareStoredMessage(message), membership.get(message.id))));
+  const normalize = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  let started!: () => void, release!: () => void;
+  const reading = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const reads = { "old.png": 0, "first.png": 0, "last.png": 0 };
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  let available = false;
+  h.store.setReader(async source => {
+    if (source !== "old.png" && source !== "first.png" && source !== "last.png") throw new Error("unexpected visual source");
+    reads[source]++;
+    if (source === "old.png") throw new VisualReadError(true);
+    if (source === "first.png" && reads[source] === 1) { started(); await gate; }
+    if (!available) throw new VisualReadError(true);
+    return png;
+  });
+  let attached: { cancel(): void } | undefined;
+  try {
+    const boundary = h.replay.latestCursor();
+    // An older page may contain the currently running execution too.
+    const loading = entry === "history"
+      ? h.service.history("opencode:c", { cursor: "older-current-execution" }).then(snapshot => ({ snapshot, events: h.subscription.events }))
+      : h.service.subscribe("opencode:c");
+    await reading;
+    const initial = h.projection.get("part:last:text:0")!;
+    for (const update of normalize({ id: "actual-end", type: "session.execution.succeeded", created: 10, location: { directory: "/workspace" }, data: { sessionID: "c" } }, memory).updates) h.projection.apply(update);
+    expect((h.projection.get(initial.id) as typeof initial & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(false);
+    expect((initial as typeof initial & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    release();
+    const loaded = await loading; attached = loaded.events;
+    expect(loaded.snapshot.cursor).toBe(boundary);
+    expect(loaded.snapshot.conversation.status).toBe("running");
+    const answer = (snapshot: { items: ConversationItem[] }, id: string) => snapshot.items.find(item => item.id === `part:${id}:text:0`) as AssistantMessageItem;
+    expect(answer(loaded.snapshot, "old").visuals?.[0]?.status).toBe("unavailable");
+    expect(answer(loaded.snapshot, "first").visuals?.[0]?.status).toBe("pending");
+    expect(answer(loaded.snapshot, "last").visuals?.[0]?.status).toBe("pending");
+    expect(reads).toEqual({ "old.png": 1, "first.png": 1, "last.png": 1 });
+    available = true;
+    const delivered = await deliveredBatch(h.replay, entry === "subscribe" ? loaded.events[Symbol.asyncIterator]() : h.iterator);
+    expect(delivered.filter(event => event.type === "conversation.status")).toHaveLength(1);
+    expect(delivered.filter(event => event.type === "resync")).toHaveLength(1);
+    expect(reads).toEqual({ "old.png": 1, "first.png": 2, "last.png": 2 });
+    const completed = await h.service.history("opencode:c");
+    for (const id of ["first", "last"]) {
+      const item = answer(completed, id);
+      expect(item.visuals?.[0]?.status).toBe("ready");
+      expect((await h.service.resolveVisual(item.visuals![0]!.id!))?.bytes).toEqual(png);
+    }
+    expect(answer(loaded.snapshot, "last").visuals?.[0]?.status).toBe("pending");
+    expect(reads).toEqual({ "old.png": 1, "first.png": 2, "last.png": 2 });
+  } finally { release(); attached?.cancel(); await h.cleanup(); }
 });
 
 test("queued native step failure stays capture-live even when the provider has already ended execution before draining", async () => {

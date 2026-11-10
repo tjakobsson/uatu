@@ -123,6 +123,14 @@ OpenCode text-end metadata separately disambiguates trailing image syntax and
 forces enrichment even when the final text is unchanged. It is internal,
 does not mark the parent message complete, and does not consume a missing
 file's turn-completion retry.
+OpenCode 2.x history folds stored execution boundaries before pagination and
+revert filtering. Immutable internal membership distinguishes completed API
+messages in a live execution from older sealed executions; adapter recovery
+retains membership-only changes without adding wire frames. Ordered execution
+ends seal retained rows by replacement, not mutation. Classic 1.x cold/restarted
+history has no persisted execution boundary or execution ID, so its conservative
+completed-message fallback remains a known compatibility limit; user-message
+parent IDs are not treated as execution IDs.
 Claude text-block completion provides the same syntax-only boundary: it emits
 an updated row even when the final block text is unchanged, without marking
 the entire turn complete or mutating already-queued prefix frames.
