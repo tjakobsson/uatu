@@ -764,7 +764,7 @@ export class BackgroundWorkers {
   private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests;
     /** Greatest known distinct-start clock; null means its clock is unknown.
      * Negative evidence only, never a positive execution start/end timestamp. */
-    startCounterproof?: number | null }>();
+    startCounterproof?: number | null; undatedEnd?: true }>();
   private readonly unmatched = new Map<string, { parent: string; worker: string; item: BackgroundTaskItem; correlatable: boolean; published: boolean }>();
   private readonly ended = new Map<string, number[]>();
   private readonly aliases = new Map<string, string>();
@@ -900,7 +900,7 @@ export class BackgroundWorkers {
   coldActivityContradicted(candidate: WorkerOccurrenceEvidence): boolean {
     if (candidate.kind !== "agent") return false;
     const boundary = this.terminalProofs.get(candidate.worker);
-    if (boundary?.proof && boundary.proof.created === undefined) return true;
+    if (boundary?.undatedEnd) return true;
     const ends = this.ended.get(candidate.worker) ?? [];
     if (ends.some(end => candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
@@ -913,6 +913,25 @@ export class BackgroundWorkers {
     return start !== undefined && candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
       return !window || start === null || start > window.end;
+    });
+  }
+
+  /** Scoped observed ends constrain intervals, but never supply outcomes.
+   * Undefined means a retention gap/unknown clock cannot prove an interval. */
+  observedExecutionEnds(child: string): readonly number[] | undefined {
+    if (this.recoveryOnly || this.terminalProofs.get(child)?.undatedEnd) return;
+    return this.ended.get(child) ?? [];
+  }
+
+  historyOutcomeContradicted(candidate: WorkerOccurrenceEvidence, at: number): boolean {
+    if (candidate.kind !== "agent") return false;
+    const ends = this.observedExecutionEnds(candidate.worker);
+    if (!ends) return true;
+    const start = this.terminalProofs.get(candidate.worker)?.startCounterproof;
+    return candidate.launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || ends.some(end => end >= window.start && end < at)
+        || start === null || start !== undefined && start <= at && start > window.end;
     });
   }
 
@@ -1353,7 +1372,9 @@ export class BackgroundWorkers {
     // A history callback without native proof still needs verified ownership.
     if (this.recoveryOnly || !identity(child) || !this.parents.has(child) && !proof) return;
     if (this.terminalReplay(child, proof)) return;
-    if (proof) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child), proof, prelaunch: undefined, occurrences: Object.freeze([...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent").map(task => task.evidence.key)) });
+    if (proof) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child), proof, prelaunch: undefined,
+      ...(proof.created === undefined ? { undatedEnd: true as const } : {}),
+      occurrences: Object.freeze([...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent").map(task => task.evidence.key)) });
     else {
       const boundary = this.terminalProofs.get(child);
       if (boundary?.prelaunch) this.set(this.terminalProofs, child, { ...boundary, prelaunch: undefined });
@@ -1372,7 +1393,7 @@ export class BackgroundWorkers {
 
   /** A typed native outcome may settle one proven interval. A bare idle only
    * fences activity; missing/straddling windows never identify its execution. */
-  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot(), counterInvocations: readonly LauncherEvidence[] = []): NormalizedProviderUpdate[] {
+  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot(), counterInvocations: readonly LauncherEvidence[] = [], contradicted?: (candidate: WorkerOccurrenceEvidence, at: number) => boolean): NormalizedProviderUpdate[] {
     if (!this.budget.executionHistory) return [];
     const updates: NormalizedProviderUpdate[] = [];
     for (const [child, results] of outcomes ?? []) {
@@ -1394,7 +1415,7 @@ export class BackgroundWorkers {
           && occurrence.launches.some(overlaps));
         const occurrence = candidates.length === 1 ? candidates[0] : undefined;
         const task = occurrence && this.tasks.get(occurrence.taskId);
-        if (!occurrence || !task || task.item.status !== "running" || occurrence.uncertain || task.evidence.uncertain || task.item.stateUncertain || !occurrence.launches.every(launch => {
+        if (!occurrence || !task || task.item.status !== "running" || occurrence.uncertain || task.evidence.uncertain || task.item.stateUncertain || contradicted?.(occurrence, result.at) || !occurrence.launches.every(launch => {
           const window = this.admissionWindow(launch);
           return window && window.end < result.at && (previous === undefined || window.start > previous);
         })) continue;

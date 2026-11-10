@@ -596,8 +596,18 @@ export class OpenCodeV2Provider implements ChatProvider {
           const idle = complete.filter(message => message.type === "idle");
           const ends = idle.map(message => numberField(asRecord(message.time).created));
           for (const end of ends) if (end !== undefined && end >= 0) workers.executionEnded(child, end);
-          if (ends.every((end): end is number => end !== undefined && end >= 0)) {
-            executionHistory.set(child, ends);
+          const observedEnds = this.eventMemory ? this.eventMemory.workers.observedExecutionEnds(child) : [];
+          if (observedEnds && ends.every((end): end is number => end !== undefined && end >= 0)) {
+            // Observed boundaries can survive a committed transcript revert.
+            // They only partition/veto intervals, never mint positive outcomes.
+            // Preserve ambiguous duplicate transcript clocks; do not duplicate
+            // a transcript boundary merely because its event was also seen.
+            const intervals = [...ends];
+            for (const end of observedEnds) {
+              if (!intervals.includes(end)) intervals.push(end);
+              workers.executionEnded(child, end);
+            }
+            executionHistory.set(child, intervals);
             executionOutcomes.set(child, outcomeHistory.filter(message => message.type === "idle").flatMap(message => {
               const status = message.outcome === "succeeded" ? "completed" : message.outcome === "failed" ? "failed" : message.outcome === "interrupted" ? "stopped" : undefined;
               return status ? [{ at: numberField(asRecord(message.time).created)!, status }] : [];
@@ -645,7 +655,8 @@ export class OpenCodeV2Provider implements ChatProvider {
       const child = counterproofChild(fact);
       return fact.workerType === "agent" && fact.background !== true && child !== undefined && verified.has(child);
     });
-    for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations)) if (update.kind === "upsert") {
+    for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations,
+      (candidate, at) => this.eventMemory?.workers.historyOutcomeContradicted(candidate, at) ?? false)) if (update.kind === "upsert") {
       const entry = normalized.get(update.item.id);
       if (entry) normalized.set(update.item.id, { ...entry, item: update.item });
     }
@@ -1653,7 +1664,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     return { entries, observation: { started, completed, reports, ...(overflow ? { overflow } : {}) } satisfies PendingOutcomeRead };
   }
 
-  private observePendingOutcomes(parent: string, observation: PendingOutcomeRead, owner?: HistoryWorkerSource): void {
+  private observePendingOutcomes(parent: string, observation: PendingOutcomeRead, owner?: HistoryWorkerSource, delta = false): void {
     const signature = (read: PendingOutcomeRead, child: string, launches: readonly LauncherEvidence[]) => {
       let start: number | undefined = Infinity;
       for (const launch of launches) {
@@ -1669,10 +1680,23 @@ export class OpenCodeV2Provider implements ChatProvider {
     for (const source of this.historyWorkerSources) {
       if (source.parent !== parent || source.pendingFingerprint !== undefined || !source.historyPendingConsumer) continue;
       const previous = source.historyPendingRead;
+      // An enqueue is an addition, not a complete inbox snapshot. Preserve
+      // unrelated baseline reports and exact replay identity in the same slot.
+      let incoming = observation;
+      if (delta && previous) {
+        const reports = [...previous.reports], seen = new Set(reports.map(report => report.digest));
+        let bytes = reports.reduce((sum, report) => sum + JSON.stringify(report).length * 2, 0), overflow = previous.overflow ?? observation.overflow;
+        for (const report of observation.reports) if (!seen.has(report.digest)) {
+          const size = JSON.stringify(report).length * 2;
+          if (reports.length >= parentCounterproofMaxFacts || bytes + size > parentCounterproofMaxBytes) { overflow = true; break; }
+          reports.push(report); seen.add(report.digest); bytes += size;
+        }
+        incoming = { ...observation, reports, ...(overflow ? { overflow } : {}) };
+      }
       if (source.phase === "collecting" && source !== owner && (!previous || previous.provisional)) {
         // One bounded deny-only snapshot for a pending consumer, including an
         // empty inbox. It grants no child read, result admission or Stop proof.
-        if (!previous || observation.started > previous.started) source.historyPendingRead = { ...observation, provisional: true };
+        if (!previous || incoming.started > previous.started) source.historyPendingRead = { ...incoming, provisional: true };
         continue;
       }
       if (!previous || previous.provisional && source === owner && observation.started >= previous.started) continue;
@@ -1680,11 +1704,12 @@ export class OpenCodeV2Provider implements ChatProvider {
       const target = observation.started > previous.completed ? source : owner;
       if (!target) continue;
       for (const [child, launches] of target.historyParentLaunches ?? []) {
-        if (!previous.overflow && !observation.overflow && signature(previous, child, launches) === signature(observation, child, launches)) continue;
+        if (!previous.overflow && !incoming.overflow && signature(previous, child, launches) === signature(incoming, child, launches)) continue;
         if (observation.started <= previous.completed) conflictingOverlap = true;
         target.historyParentChanges.add(child);
         if (dependsOnWorkerHistory(target, child)) target.revision++;
       }
+      if (delta) source.historyPendingRead = incoming;
     }
     if (owner && !conflictingOverlap && (!owner.historyPendingRead || observation.completed >= owner.historyPendingRead.completed)) {
       owner.historyPendingRead = observation;
@@ -1978,6 +2003,16 @@ export class OpenCodeV2Provider implements ChatProvider {
               const replay = stringValue(asRecord(event).type) === "session.inbox.enqueued" && resultId
                 ? this.workerResultFallbacks({ ...asRecord(item.payload), id: resultId, type: item.type, time: { created: asRecord(event).created } })[0] : undefined;
               const replaySignature = replay && pendingResultSignature(replay);
+              if (replay) {
+                const message = { ...asRecord(item.payload), id: resultId, type: item.type, time: { created: asRecord(event).created } };
+                const report = prepareStoredMessage(message).notification;
+                if (report?.source === "subagent" && report.valid && report.status && report.worker) {
+                  const at = numberField(asRecord(event).created), clock = ++this.parentHistoryReadClock;
+                  const fact = { child: report.worker, at, digest: historyVersion([resultId, at, report]) };
+                  const overflow = JSON.stringify(fact).length * 2 > parentCounterproofMaxBytes;
+                  this.observePendingOutcomes(parent, { started: clock, completed: clock, reports: overflow ? [] : [fact], ...(overflow ? { overflow: true as const } : {}) }, undefined, true);
+                }
+              }
               for (const source of this.historyWorkerSources) if (source.parent === parent && source.pendingFingerprint !== undefined
                 && resultId && (source.pendingIds === undefined || source.pendingIds.includes(resultId))
                 && (!replaySignature || source.pendingContent?.get(resultId) !== replaySignature)) source.revision++;

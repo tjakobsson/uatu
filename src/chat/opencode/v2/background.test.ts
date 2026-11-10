@@ -9,6 +9,30 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
 for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`outcome veto clocks remain bounded and unknown ends stay sticky (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  const dated = nativeProof({ id: "end", created: 20 }, { child: "child", phase: "ended" });
+  for (let replay = 0; replay < 300; replay++) workers.executionEnded("child", 20, dated);
+  expect(workers.observedExecutionEnds("child")).toEqual([20]);
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(false);
+  expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  workers.executionEnded("child", 30, nativeProof({ id: "undated" }, { child: "child", phase: "ended" }));
+  workers.executionEnded("child", 20, dated);
+  expect(workers.observedExecutionEnds("child")).toBeUndefined();
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  for (let index = 0; index < 50; index++) workers.executionEnded(`other-${index}`, 40 + index,
+    nativeProof({ id: `end-${index}`, created: 40 + index }, { child: `other-${index}`, phase: "ended" }));
+  expect(workers.controlEvidenceAvailable).toBe(false);
+  expect(workers.observedExecutionEnds("child")).toBeUndefined();
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true); checkBytes(workers);
+});
+
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
 test(`distinct-start counterproof survives replay in constant ledger space (${JSON.stringify(budget)})`, () => {
   const workers = new BackgroundWorkers(budget);
   const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",

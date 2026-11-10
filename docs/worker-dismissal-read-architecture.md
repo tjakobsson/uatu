@@ -101,6 +101,10 @@ first pending consumers. Unchanged/ordinary-text, earlier-execution and
 other-child reports leave independent outcomes current. Aborted observations
 cannot revoke evidence; released leases retire the snapshot. Saturation is
 deny-only and cannot grant ownership, result text or Stop authority.
+Streamed subagent enqueues feed the same bounded slot before ownership awaits,
+without a native inbox reread. They add facts rather than replacing the inbox
+baseline, and exact replays coalesce. Their shared read-order clock fences older
+in-flight empty responses; an identical pending baseline remains current.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
@@ -111,6 +115,12 @@ admission after an observed end or later distinct execution. Reverting the store
 idle does not erase that scoped counterproof. Native end proofs arriving before
 the first ownership lookup remain negative-only facts under the existing ledger
 entry/byte limits; saturation stays fail-closed without creating ownership.
+Outcome inference uses these retained ends as veto-only interval boundaries too:
+a reverted earlier idle cannot make a later execution's outcome belong to the
+old admission. Matching event/transcript clocks are counted once, but duplicate
+transcript idles remain ambiguous. An undated observed end retains one sticky
+unknown-clock flag under the same ledger budget. Only valid visible transcript
+outcomes can infer terminal status; explicit parent reports still take precedence.
 The old row remains outcome-unknown
 and activity-unavailable, with its clock stopped and no new Stop authority or
 fabricated end timestamp. An otherwise qualified unavailable row can supply

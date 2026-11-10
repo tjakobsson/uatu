@@ -1211,6 +1211,13 @@ older responses cannot poison later owned evidence; pending ownerless observatio
 are provisional deny-only facts. Cancellation is checked before observation and
 released leases retire the slot. Overflow withholds dependent history authority,
 never ownership, fabricated results or Stop proof.
+Streamed `session.inbox.enqueued` subagent reports update that same bounded
+read-owned slot before child ownership enrichment can await. An enqueue adds
+counterproof; it is not a complete inbox snapshot and cannot erase unrelated
+baseline reports. Exact report replays coalesce. The shared native-read clock
+orders enqueues against in-flight inbox reads, so an older empty response cannot
+restore inferred outcome authority. This fence requires no extra inbox read and
+does not turn a stream report into ownership or Stop proof.
 
 A bare idle boundary alone never completes a worker. Native child idle records
 with an explicit `succeeded`, `failed` or `interrupted` outcome can recover the
@@ -1219,6 +1226,15 @@ complete scoped child history and exactly one occurrence whose entire admission
 window lies after the previous idle and before this first enclosing idle.
 Missing-clock, tied, straddling and already-terminal competing occurrences still
 block attribution. Unknown outcomes remain boundaries only. This history-only
+fold also uses scoped observed execution ends that survive transcript reverts
+as veto-only interval boundaries. Matching observed/transcript clocks are not
+counted twice, while duplicate transcript clocks remain ambiguous. An earlier
+observed end or a distinct start separating the admission from a later outcome
+vetoes that outcome; a matching unique terminal can still settle its admission.
+An undated observed end leaves a sticky unknown-clock veto in the existing
+budgeted ledger record. None of these retained events supplies a positive
+outcome, report timestamp or Stop proof, and explicit parent reports retain
+precedence. This history-only
 attribution counts the complete native parent's competing occurrences even when
 a staged parent revert hides their rows. Prefix visibility cannot turn an
 ambiguous child outcome into a terminal result; launches proven to belong to
