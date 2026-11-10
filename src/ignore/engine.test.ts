@@ -24,21 +24,28 @@ async function writeUatuConfig(rootPath: string, payload: unknown): Promise<void
 }
 
 describe("loadIgnoreMatcher", () => {
-  test("output admission distinguishes traversal ancestors, subtrees and mandatory/positive denials", async () => {
+  test("only VS Code's files.exclude defaults are built in, at any depth and any case", async () => {
     const rootPath = await makeTempDir();
-    await writeUatuConfig(rootPath, { ignore: { include: ["packages/app/build/renders"], exclude: ["packages/app/build/renders/private/**", "!packages/app/build/renders/private/keep.md", "!.git/**"] } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
-    expect(matcher.shouldIgnore("packages/app/build", true)).toBe(false);
-    expect(matcher.shouldIgnore("packages/app/build", false)).toBe(true);
-    expect(matcher.shouldIgnore("packages/app/build/renders", false)).toBe(true);
-    expect(matcher.shouldIgnore("packages/app/build/renders", true)).toBe(false);
-    expect(matcher.shouldIgnore("packages/app/build/objects", true)).toBe(true);
-    expect(matcher.shouldIgnore("packages/app/build/renders/out.wav")).toBe(false);
-    expect(matcher.shouldIgnore("packages/app/build/renders/private/keep.md")).toBe(true);
-    for (const denied of [".git/config", ".GIT/config", "NODE_MODULES/a.md", "node_modules/a.md", ".env.local", "private.key", "dist/no.md", "DIST/no.md"]) {
-      expect(matcher.shouldIgnore(`packages/app/build/renders/${denied}`)).toBe(true);
+    for (const denied of [".git/config", "a/.GIT/HEAD", ".svn/entries", "x/.hg/store", ".jj/repo", "docs/.DS_Store", "img/Thumbs.db", "a/b/thumbs.db"]) {
+      expect(matcher.shouldIgnore(denied)).toBe(true);
     }
-    expect(matcher.toChokidarIgnored()(path.join(rootPath, "packages/app/build"))).toBe(false);
+    for (const permitted of ["node_modules/x.js", ".venv/lib/site.py", ".env", ".env.local", "id_rsa", "a.swp", "notes~", "coverage/lcov.info", "build/renders/out.wav", "dist/index.html", "__pycache__/m.pyc", ".cache/x", "server.pem", "CVS/Entries"]) {
+      expect(matcher.shouldIgnore(permitted)).toBe(false);
+    }
+    expect(matcher.shouldIgnore("node_modules", true)).toBe(false);
+    expect(matcher.toChokidarIgnored()(path.join(rootPath, "build"))).toBe(false);
+  });
+
+  test("explicit exclusions win and negations cannot reopen built-ins", async () => {
+    const rootPath = await makeTempDir();
+    await writeUatuConfig(rootPath, { ignore: { exclude: ["build/renders/private/**", "node_modules/", "!.git/**"] } });
+    const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
+    expect(matcher.shouldIgnore("build/renders/out.wav")).toBe(false);
+    expect(matcher.shouldIgnore("build/renders/private/take.wav")).toBe(true);
+    expect(matcher.shouldIgnore("node_modules", true)).toBe(true);
+    expect(matcher.shouldIgnore("pkg/node_modules/a.js")).toBe(true);
+    expect(matcher.shouldIgnore(".git/config")).toBe(true);
   });
 
   test("only explicit valid legacy configuration changes the initial visibility default", async () => {
@@ -53,11 +60,11 @@ describe("loadIgnoreMatcher", () => {
     await writeUatuConfig(rootPath, { ignore: { respectGitignore: false } });
     expect((await loadIgnoreMatcher({ rootPath, respectGitignore: true })).initialShowIgnored).toBe(true);
   });
-  test("built-in defaults always hide node_modules", async () => {
+  test("dependency and output folders are not built-in exclusions", async () => {
     const rootPath = await makeTempDir();
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });
-    expect(matcher.shouldIgnore("node_modules/foo.js")).toBe(true);
-    expect(matcher.shouldIgnore("dist/bundle.js")).toBe(true);
+    expect(matcher.shouldIgnore("node_modules/foo.js")).toBe(false);
+    expect(matcher.shouldIgnore("dist/bundle.js")).toBe(false);
     expect(matcher.shouldIgnore("README.md")).toBe(false);
   });
 
@@ -92,7 +99,7 @@ describe("loadIgnoreMatcher", () => {
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
     expect(matcher.shouldIgnore("debug.log")).toBe(false);
     // Built-in defaults still apply.
-    expect(matcher.shouldIgnore("node_modules/foo.js")).toBe(true);
+    expect(matcher.shouldIgnore(".git/config")).toBe(true);
   });
 
   test(".uatu.json ignore.exclude negation un-excludes something .gitignore excluded", async () => {
@@ -117,7 +124,8 @@ describe("loadIgnoreMatcher", () => {
     const rootPath = await makeTempDir();
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
     expect(matcher.shouldIgnore("README.md")).toBe(false);
-    expect(matcher.shouldIgnore("node_modules/anything")).toBe(true);
+    expect(matcher.shouldIgnore(".git/anything")).toBe(true);
+    expect(matcher.shouldIgnore("node_modules/anything")).toBe(false);
   });
 
   test("isSingleFileRoot skips .gitignore AND .uatu.json (defaults still apply)", async () => {
@@ -132,7 +140,7 @@ describe("loadIgnoreMatcher", () => {
     expect(matcher.shouldIgnore("secret.md")).toBe(false);
     expect(matcher.shouldIgnore("debug.log")).toBe(false);
     // Defaults still apply, even on single-file roots.
-    expect(matcher.shouldIgnore("node_modules/foo.js")).toBe(true);
+    expect(matcher.shouldIgnore(".git/config")).toBe(true);
   });
 
   test("toChokidarIgnored converts absolute paths and never ignores the watched root itself", async () => {
@@ -165,6 +173,7 @@ describe("loadIgnoreMatcher", () => {
     await writeFile(path.join(rootPath, ".uatu.json"), "{not json", "utf8");
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });
     expect(matcher.shouldIgnore("README.md")).toBe(false);
-    expect(matcher.shouldIgnore("node_modules/anything")).toBe(true);
+    expect(matcher.shouldIgnore(".git/anything")).toBe(true);
+    expect(matcher.shouldIgnore("node_modules/anything")).toBe(false);
   });
 });

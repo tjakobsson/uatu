@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { DEFAULT_IGNORE_CONFIG, loadIgnoreConfig } from "./config";
+import { loadIgnoreMatcher } from "./engine";
 
 let workspace: string;
 
@@ -20,21 +21,29 @@ async function writeConfig(payload: unknown): Promise<void> {
 }
 
 describe("loadIgnoreConfig", () => {
-  it("validates literal nested output directories and retains future locations", async () => {
-    await fs.mkdir(path.join(workspace, "build/renders"), { recursive: true });
-    await fs.writeFile(path.join(workspace, "build/file"), "not a directory");
-    await writeConfig({ ignore: { include: ["build/renders", "packages/app/dist/previews", "dist/future", "build", "dist", "/build/render", "build/../render", "build/*", "build/file", "build//render", "build/./render", "build/render/", "build\\render", "src/plain", "build/\u0000bad"] } });
+  it.each([
+    [["build/renders", "dist/previews"]],
+    [["build/renders", false]],
+    ["build/renders"],
+    [[]],
+  ])("warns once that ignore.include has no effect, include=%j", async include => {
+    await writeConfig({ ignore: { include, exclude: ["*.lock"] } });
     const result = await loadIgnoreConfig(workspace);
-    expect(result.config.include).toEqual(["build/renders", "packages/app/dist/previews", "dist/future"]);
-    expect(result.warnings).toHaveLength(12);
+    expect(result.warnings).toEqual(["Ignored .uatu.json ignore.include because it no longer has an effect: build and dist output is listed without configuration."]);
+    expect(result.config).not.toHaveProperty("include");
+    expect(result.config.exclude).toEqual(["*.lock"]);
   });
 
-  it("warns once for a malformed include array", async () => {
-    await writeConfig({ ignore: { include: ["build/renders", false] } });
-    const result = await loadIgnoreConfig(workspace);
-    expect(result.config.include).toEqual([]);
-    expect(result.warnings).toHaveLength(1);
+  it("exposure is identical with and without a leftover include key", async () => {
+    const paths = ["build/renders/out.wav", "build/objects/main.o", "dist/index.html", "bun.lock", ".git/config"];
+    await writeConfig({ ignore: { exclude: ["*.lock"] } });
+    const without = await loadIgnoreMatcher({ rootPath: workspace, respectGitignore: true });
+    await writeConfig({ ignore: { exclude: ["*.lock"], include: ["build/renders"] } });
+    const withKey = await loadIgnoreMatcher({ rootPath: workspace, respectGitignore: true });
+    expect(paths.map(candidate => withKey.shouldIgnore(candidate))).toEqual(paths.map(candidate => without.shouldIgnore(candidate)));
+    expect(paths.map(candidate => without.shouldIgnore(candidate))).toEqual([false, false, false, true, true]);
   });
+
   it("returns the default config when no .uatu.json exists", async () => {
     const result = await loadIgnoreConfig(workspace);
     expect(result.config.exclude).toEqual([]);

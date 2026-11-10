@@ -15,6 +15,7 @@ import path from "node:path";
 import { ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { OperationOutcomeUnknownError, BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
+import { createWatchedVisualReader, VISUAL_CSP } from "../chat/visual-store";
 import { encodeReplayCursor } from "../chat/replay";
 import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
 import { WorkerEvidenceError } from "../chat/worker-dismissal-evidence";
@@ -43,13 +44,13 @@ import { CHILD_POLICY_HEADER, CHAT_ACTION_BODY_BYTES, isChildPolicyAction, type 
 import { CHAT_OPERATION_RECEIPT_HEADER, validChatOperationReceipt } from "../shared/chat-operation-receipt";
 import type { ChatActionContext } from "../chat/types";
 import { SideGenerationUnsupportedError } from "../chat/adapter";
-import { CHILD_CONVERSATION_OPEN_EVENT, CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
+import { CHILD_CONVERSATION_OPEN_EVENT, CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
 import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
 import { isDocumentVisible } from "../shared/file-visibility";
-import type { WatchSession } from "./watch-session";
+import { FolderListingError, type WatchSession } from "./watch-session";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
 // terminal WebSockets must never be reaped by an idle timer.
@@ -140,6 +141,10 @@ export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
 // the result is spread at the call sites.
 export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string> {
   const { assets, getSession } = deps;
+  deps.chatService.configureVisualReader?.((source, workspacePath) => {
+    const policy = getSession().getStaticFilePolicy();
+    return createWatchedVisualReader(policy.entries, policy.respectGitignore)(source, workspacePath);
+  });
   const basePath = deps.basePath ?? "/";
   const manifestScope = deps.manifestScope ?? "base-path";
   // Static route keys are data to Bun.serve, so prefixing them is enough to
@@ -374,6 +379,27 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         return Response.json({ ok: true });
       },
     },
+    // Lists one level of a Git-ignored folder into the shared index. Answers
+    // with the document revision that carries the listing, which every client
+    // receives as an ordinary patch.
+    [p("/api/index/folder")]: {
+      POST: async (request: Request) => {
+        if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
+        if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
+        const body = await request.json().catch(() => null) as { rootId?: unknown; path?: unknown } | null;
+        if (!body || typeof body.rootId !== "string" || typeof body.path !== "string") {
+          return Response.json({ error: "rootId and path are required" }, { status: 400 });
+        }
+        try {
+          const listed = await getSession().listFolder(body.rootId, body.path);
+          return Response.json(listed, { status: listed.status === "missing" ? 404 : 200, headers: { "cache-control": "no-store" } });
+        } catch (error) {
+          if (error instanceof FolderListingError) return Response.json({ error: error.message }, { status: error.status });
+          // Unreadable for another reason: the folder stays, unlisted.
+          return Response.json({ error: "folder could not be read" }, { status: 500 });
+        }
+      },
+    },
     [p("/api/repositories/refresh")]: {
       POST: (request: Request) => {
         if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
@@ -538,6 +564,23 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     return hasValidWorkspaceCredentials(request, url, deps.getWorkspaceCredential())
       ? null
       : chatError(401, "authentication required");
+  };
+  const visualResponse = async (request: RouteRequest, source: boolean): Promise<Response> => {
+    const rejected = authenticated(request);
+    if (rejected) return rejected;
+    const id = routeIdentity(request, "visualId");
+    if (id instanceof Response) return id;
+    try {
+      const stored = await deps.chatService.resolveVisual?.(id);
+      const bytes = source && stored?.mimeType === "image/svg+xml" ? stored.sourceBytes : source ? undefined : stored?.bytes;
+      if (!stored || !bytes) return chatError(404, "visual not found");
+      return new Response(new Uint8Array(bytes), { headers: {
+        "content-type": source ? "text/plain; charset=utf-8" : stored.mimeType,
+        "content-security-policy": VISUAL_CSP,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, max-age=31536000, immutable",
+      } });
+    } catch (error) { return normalizedChatError(error); }
   };
   const mutationGate = (request: Request): Response | null => {
     const auth = authenticated(request);
@@ -909,7 +952,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const onAbort = () => abort.abort();
         request.signal.addEventListener("abort", onAbort, { once: true });
         try {
-          const { snapshot, events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal });
+          const { snapshot, events, replayVisualResyncCursor } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal, reconnect: url.searchParams.get("reconnect") === "1" });
           const encoder = new TextEncoder();
           const iterator = events[Symbol.asyncIterator]();
           let pending = iterator.next();
@@ -925,8 +968,10 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
             if (finished) return;
             finished = true;
             streamMetrics.closed("chat-conversation", outcome);
-            await iterator.return?.().catch(() => undefined);
+            // A prefetched next() may still await provider traffic. Cancel the
+            // source first so generator return() cannot deadlock after resync.
             events.cancel();
+            await iterator.return?.().catch(() => undefined);
             request.signal.removeEventListener("abort", onAbort);
           };
           // Pull-driven, one frame per pull: a slow or stalled client stops
@@ -979,6 +1024,9 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
               "cache-control": "no-cache, no-transform",
               "content-type": "text/event-stream; charset=utf-8",
               "x-accel-buffering": "no",
+              // Child transport metadata only: no public JSON/event change.
+              // The hint cannot name another snapshot or conversation cursor.
+              ...(replayVisualResyncCursor === snapshot.cursor ? { [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: replayVisualResyncCursor } : {}),
             },
           });
         } catch (error) {
@@ -1074,6 +1122,13 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         return run(() => deps.chatService.saveAttachment(bytes), 201);
       },
+    },
+    // Visual ids name immutable workspace captures, not arbitrary file paths.
+    [p("/api/chat/visuals/:visualId")]: {
+      GET: (request: RouteRequest) => visualResponse(request, false),
+    },
+    [p("/api/chat/visuals/:visualId/source")]: {
+      GET: (request: RouteRequest) => visualResponse(request, true),
     },
     // Not conversation-scoped: the id is a workspace-issued uuid and the
     // authorization boundary is the workspace, same as every chat route.

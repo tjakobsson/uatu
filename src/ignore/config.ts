@@ -12,7 +12,6 @@ export type IgnoreConfig = {
   exclude: string[];
   respectGitignore: boolean;
   explicitRespectGitignore?: boolean;
-  include: string[];
 };
 
 export type IgnoreConfigResult = {
@@ -22,14 +21,12 @@ export type IgnoreConfigResult = {
 
 export const DEFAULT_IGNORE_CONFIG: Readonly<IgnoreConfig> = Object.freeze({
   exclude: [] as string[],
-  include: [] as string[],
   respectGitignore: true,
 });
 
 export async function loadIgnoreConfig(rootPath: string): Promise<IgnoreConfigResult> {
   const config: IgnoreConfig = {
     exclude: [],
-    include: [],
     respectGitignore: DEFAULT_IGNORE_CONFIG.respectGitignore,
   };
   const warnings: string[] = [];
@@ -82,22 +79,10 @@ export async function loadIgnoreConfig(rootPath: string): Promise<IgnoreConfigRe
     }
   }
 
+  // `ignore.include` opened build/dist subtrees before they were visible by
+  // default. It has no effect now; say so once rather than silently ignore it.
   if (block.include !== undefined) {
-    if (!Array.isArray(block.include) || !block.include.every(value => typeof value === "string")) {
-      warnings.push("Ignored .uatu.json ignore.include because it must be a string array.");
-    } else {
-      for (const value of block.include as string[]) {
-        const segments = value.split("/");
-        const output = segments.findIndex(segment => segment.toLowerCase() === "build" || segment.toLowerCase() === "dist");
-        const valid = value.length > 0 && !/[\\\\*?\[\]{}!\x00-\x1f:]/.test(value)
-          && segments.every(segment => segment.length > 0 && segment !== "." && segment !== "..")
-          && output >= 0 && output < segments.length - 1;
-        const stats = valid ? await fs.lstat(path.join(rootPath, value)).catch(() => null) : null;
-        if (!valid || stats && !stats.isDirectory()) {
-          warnings.push(`Ignored .uatu.json ignore.include entry ${JSON.stringify(value)} because it must name a literal directory beneath build/dist.`);
-        } else config.include.push(value);
-      }
-    }
+    warnings.push("Ignored .uatu.json ignore.include because it no longer has an effect: build and dist output is listed without configuration.");
   }
   return { config, warnings };
 }

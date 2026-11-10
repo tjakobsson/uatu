@@ -1,6 +1,8 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { ClientError } from "@opencode/client";
 import type { FormCancelled, FormCreated, FormReplied, PermissionAsked, PermissionReplied, ShellInfo, SessionCreated, SessionExecutionStarted, SessionExecutionSucceeded, SessionToolInputStarted, SessionToolCalled, SessionToolSuccess, SessionMessageContentUpdated } from "@opencode/client";
@@ -15,6 +17,11 @@ import { workerState, workerExecutionClockRuns, workerCanStop, workerStateLabel 
 import { workerDismissalIdentities } from "../../worker-dismissal-identity";
 import { visibleWorkers } from "../../worker-dismissal-client";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
+import { MultiAgentChatService } from "../../agents";
+import { VisualReadError, VisualStore } from "../../visual-store";
+import type { WorkspaceChatService } from "../../service";
+import type { AssistantMessageItem, ChatEvent, ConversationSnapshot } from "../../types";
+import { OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "../normalization-types";
 
 // The stored records of a real 2.0.13 session: user, assistant (read tool),
 // assistant (text), idle, user — see normalization.test.ts for provenance.
@@ -82,6 +89,310 @@ function session(id: string, overrides: Record<string, unknown> = {}) {
 const scoped = <T>(data: T) => ({ location: { directory: WORKSPACE }, data });
 const skillInfo = (id: string, overrides: { name?: string; description?: string } = {}) => ({ id, name: overrides.name ?? id, ...(overrides.description ? { description: overrides.description } : {}), path: `/ws/.opencode/skills/${id}/SKILL.md`, content: `# ${id}` });
 const notFound = (sessionID: string) => Response.json({ _tag: "SessionNotFoundError", sessionID, message: `Session not found: ${sessionID}` }, { status: 404 });
+
+// Native records use the captured 2.0.13 assistant shape, including the API
+// completion that previously sealed missing images between tool steps.
+function visualExecutionRecords() {
+  const base = STORED.find(message => message.type === "assistant" && message.finish === "tool-calls")!;
+  const assistant = (id: string, created: number, markdown: string, finish = "tool-calls") => ({
+    ...base, id, time: { created, completed: created + 1 }, finish, rawFinish: finish,
+    content: [{ type: "text", text: markdown }],
+  });
+  return { assistant, records: [
+    { id: "old-prompt", type: "user", time: { created: 1 }, text: "Old execution" },
+    assistant("old-tool", 2, "![Old](old.png)"),
+    assistant("old-stop", 4, "Previous execution ended", "stop"),
+    { id: "old-end", type: "idle", time: { created: 6 }, outcome: "succeeded" },
+    { id: "prompt", type: "user", time: { created: 7 }, text: "Create an image" },
+    assistant("current-tool", 8, "![Generated](later.png)"),
+    { id: "steer", type: "user", time: { created: 10 }, text: "Make it smaller" },
+    assistant("later-step", 11, "Working on the image"),
+  ] as Array<Record<string, unknown>> };
+}
+
+test("V2 execution membership spans native and local history pages, but not a stored idle boundary or revert", async () => {
+  const { records } = visualExecutionRecords();
+  let boundary: string | undefined;
+  const server = fakeOpenCode({
+    "GET /api/session/ses_visual": () => session("ses_visual", boundary ? { revert: { messageID: boundary } } : {}),
+    // Split the native read itself as well as the provider's local pages.
+    "GET /api/session/ses_visual/message": ({ query }) => query.get("cursor")
+      ? { data: records.slice(4), cursor: {} } : { data: records.slice(0, 4), cursor: { next: "native-older-boundary" } },
+  });
+  const provider = server.provider();
+  const live = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+  try {
+    const newest = await provider.listMessages("ses_visual", { limit: 1 });
+    expect(newest.items.filter(item => item.type === "assistant_message").every(item => live(item) === true)).toBe(true);
+    const steer = await provider.listMessages("ses_visual", { limit: 1, cursor: newest.nextCursor });
+    const current = await provider.listMessages("ses_visual", { limit: 1, cursor: steer.nextCursor });
+    expect(current.items.find(item => item.id === "part:current-tool:text:0")).toMatchObject({ completedAt: 9 });
+    expect(current.items.filter(item => item.type === "assistant_message").every(item => live(item) === true)).toBe(true);
+    const all = newest.completeItems!;
+    expect(live(all.find(item => item.id === "part:old-tool:text:0")!)).toBe(false);
+    expect(live(all.find(item => item.id === "part:old-stop:text:0")!)).toBe(false);
+    expect(live(all.find(item => item.id === "part:current-tool:text:0")!)).toBe(true);
+    // Hiding a suffix must not erase the actual native end of an old execution.
+    boundary = "old-end";
+    const reverted = await provider.listMessages("ses_visual", { limit: 100 });
+    expect(live(reverted.items.find(item => item.id === "part:old-tool:text:0")!)).toBe(false);
+    expect(live(all.find(item => item.id === "part:current-tool:text:0")!)).toBe(true);
+  } finally { await provider.dispose(); }
+});
+
+async function visualExecutionFixture(markdown?: string) {
+  const state = visualExecutionRecords();
+  if (markdown !== undefined) state.records.find(message => message.id === "current-tool")!.content = [{ type: "text", text: markdown }];
+  let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
+  const server = fakeOpenCode({
+    "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller;
+      controller.enqueue(new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n'));
+      signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session": () => ({ data: [], cursor: {} }),
+    "GET /api/session/ses_visual": () => session("ses_visual"),
+    "GET /api/session/ses_visual/message": () => ({ data: state.records, cursor: {} }),
+    "GET /api/session/:id/inbox": () => ({ data: [] }),
+    "GET /api/session/active": () => ({}),
+    "GET /api/permission/request": () => scoped([]),
+    "GET /api/form": () => scoped([]),
+  });
+  const provider = server.provider(), events = provider.events.bind(provider);
+  provider.events = async function* (signal) {
+    for await (const event of events(signal)) { yield event; if (event.eventType === "diagnostic.visual.applied") applied(); }
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+  await adapter.history("ses_visual"); // Opens the real provider stream and seeds native history.
+  let frame = 0;
+  const emit = async (type: string, data: Record<string, unknown> = {}) => {
+    const ready = new Promise<void>(resolve => { applied = resolve; });
+    for (const event of [
+      { id: `visual-event-${++frame}`, created: 100 + frame, type, data: { sessionID: "ses_visual", ...data } },
+      { type: "diagnostic.visual.applied", data: {} },
+    ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory: WORKSPACE } })}\n\n`));
+    await ready;
+  };
+  await emit("session.execution.started");
+  const service = {
+    history: (id: string, options?: { cursor?: string; limit?: number }) => adapter.history(id, options),
+    subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
+    dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  return { state, adapter, provider, emit, service };
+}
+
+test.each([
+  { outcome: "succeeded", created: true }, { outcome: "failed", created: true },
+  { outcome: "interrupted", created: true }, { outcome: "failed", created: false },
+] as const)("V2 completed tool-call history stays pending through attach/steer/pages until execution $outcome (file created=$created)", async ({ outcome, created }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, "native-execution-"));
+  const h = await visualExecutionFixture();
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const reads = { "old.png": 0, "later.png": 0 };
+  let available = false;
+  const routers: MultiAgentChatService[] = [], subscriptions: Array<{ cancel(): void }> = [];
+  const router = () => {
+    const store = new VisualStore(WORKSPACE, directory);
+    store.setReader(async source => {
+      if (source !== "old.png" && source !== "later.png") throw new Error(`unexpected visual ${source}`);
+      reads[source]++;
+      if (!available) throw new VisualReadError(true);
+      return png;
+    });
+    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.service }] });
+    routers.push(value);
+    return value;
+  };
+  const answer = (snapshot: ConversationSnapshot, id = "current-tool") => snapshot.items.find(item => item.id === `part:${id}:text:0`) as AssistantMessageItem;
+  try {
+    const first = router();
+    const initial = await first.history("opencode:ses_visual");
+    expect(answer(initial).completedAt).toBe(9); // API completion is still preserved.
+    expect(answer(initial).visuals?.[0]?.status).toBe("pending");
+    expect(answer(initial, "old-tool").visuals?.[0]?.status).toBe("unavailable");
+    // A fresh visual store and second subscriber see the same running execution.
+    const second = router();
+    const client = await second.subscribe("opencode:ses_visual"); subscriptions.push(client.events);
+    expect(answer(client.snapshot).visuals?.[0]?.status).toBe("pending");
+    const iterator = client.events[Symbol.asyncIterator]();
+    const drain = async () => {
+      const marker = h.adapter.projectionForTests("ses_visual").replay.publish({ type: "conversation.configuration", configuration: {} });
+      const received: ChatEvent[] = [];
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) throw new Error("visual stream ended before barrier");
+        if (next.value.type === marker.type && next.value.sequence === marker.sequence) return received;
+        received.push(next.value);
+      }
+    };
+    const newest = await second.history("opencode:ses_visual", { limit: 1 });
+    const steer = await second.history("opencode:ses_visual", { limit: 1, cursor: newest.olderCursor });
+    const older = await second.history("opencode:ses_visual", { limit: 1, cursor: steer.olderCursor });
+    expect(answer(older).visuals?.[0]?.status).toBe("pending");
+    expect(reads).toEqual({ "old.png": 1, "later.png": 1 });
+    await h.emit("session.step.failed", { assistantMessageID: "current-tool", error: { type: "rate-limit", message: "Retry" } });
+    await drain();
+    expect(answer(await second.history("opencode:ses_visual")).visuals?.[0]?.status).toBe("pending");
+    await h.emit("session.retry.scheduled", { message: "Retrying" });
+    await drain();
+    available = created;
+    await h.emit("session.tool.input.started", { assistantMessageID: "later-step", id: "write", name: "Write" });
+    await h.emit("session.tool.called", { assistantMessageID: "later-step", id: "write", input: { file_path: "later.png" } });
+    await h.emit("session.tool.success", { assistantMessageID: "later-step", id: "write", content: [{ type: "text", text: "Created image" }], metadata: {}, executed: true });
+    await drain();
+    expect(reads).toEqual({ "old.png": 1, "later.png": 1 });
+    h.state.records.push(h.state.assistant("final-stop", 30, "Done", "stop"), { id: "end", type: "idle", time: { created: 32 }, outcome });
+    await h.emit(`session.execution.${outcome}`, outcome === "failed" ? { error: { type: "unknown", message: "Execution failed" } } : {});
+    const terminal = await drain();
+    expect(terminal.filter(event => event.type === "conversation.status")).toHaveLength(1);
+    expect(terminal.filter(event => event.type === "resync")).toHaveLength(1);
+    expect(reads).toEqual({ "old.png": 1, "later.png": 2 }); // Exactly one genuine terminal retry.
+    available = true; // A terminal miss must never capture these later bytes.
+    const complete = await second.history("opencode:ses_visual");
+    expect(answer(complete).visuals?.[0]?.status).toBe(created ? "ready" : "unavailable");
+    if (created) expect((await second.resolveVisual(answer(complete).visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(answer(complete, "old-tool").visuals?.[0]?.status).toBe("unavailable");
+    expect((answer(initial) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    const reloaded = router();
+    const reload = await reloaded.history("opencode:ses_visual");
+    expect(answer(reload).visuals).toEqual(answer(complete).visuals);
+    if (created) expect((await reloaded.resolveVisual(answer(reload).visuals![0]!.id!))?.bytes).toEqual(png);
+    expect(reads).toEqual({ "old.png": 1, "later.png": 2 });
+  } finally {
+    for (const subscription of subscriptions) subscription.cancel();
+    for (const value of routers) await value.dispose();
+    await h.adapter.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  { entry: "history", missing: false }, { entry: "history", missing: true },
+  { entry: "subscribe", missing: false }, { entry: "subscribe", missing: true },
+] as const)("completed V2 stored tool-call text seals EOF reference syntax on $entry without sealing execution (missing=$missing)", async ({ entry, missing }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, "native-stored-text-end-"));
+  const markdown = "![shot][ref]\n\n[ref]: later.png"; // Deliberately no final newline.
+  const h = await visualExecutionFixture(markdown);
+  const original = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const overwritten = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 2]);
+  let bytes = original, available = !missing, reads = 0;
+  const routers: MultiAgentChatService[] = [], subscriptions: Array<{ cancel(): void }> = [];
+  const router = () => {
+    const store = new VisualStore(WORKSPACE, directory);
+    store.setReader(async source => {
+      if (source === "old.png") throw new VisualReadError(true);
+      expect(source).toBe("later.png"); reads++;
+      if (!available) throw new VisualReadError(true);
+      return bytes;
+    });
+    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.service }] });
+    routers.push(value); return value;
+  };
+  const answer = (snapshot: ConversationSnapshot) => snapshot.items.find(item => item.id === "part:current-tool:text:0") as AssistantMessageItem;
+  try {
+    const first = router();
+    const initial = entry === "history" ? await first.history("opencode:ses_visual") : await (async () => {
+      const attach = await first.subscribe("opencode:ses_visual"); subscriptions.push(attach.events); return attach.snapshot;
+    })();
+    expect(initial.conversation.status).toBe("running");
+    expect(answer(initial)).toMatchObject({ markdown, completedAt: 9 });
+    expect((answer(initial) as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((answer(initial) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    expect(answer(initial).visuals?.[0]?.status).toBe(missing ? "pending" : "ready");
+    expect(reads).toBe(1); // A completed EOF definition must attempt capture now.
+    if (!missing) expect((await first.resolveVisual(answer(initial).visuals![0]!.id!))?.bytes).toEqual(original);
+    const second = router();
+    const attach = await second.subscribe("opencode:ses_visual"); subscriptions.push(attach.events);
+    expect(answer(attach.snapshot).visuals).toEqual(answer(initial).visuals);
+    expect(answer(await second.history("opencode:ses_visual")).visuals).toEqual(answer(initial).visuals);
+    expect(reads).toBe(1);
+    const iterator = attach.events[Symbol.asyncIterator]();
+    const drain = async () => {
+      const marker = h.adapter.projectionForTests("ses_visual").replay.publish({ type: "conversation.configuration", configuration: {} });
+      const received: ChatEvent[] = [];
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) throw new Error("visual stream ended before barrier");
+        if (next.value.type === marker.type && next.value.sequence === marker.sequence) return received;
+        received.push(next.value);
+      }
+    };
+    await h.emit("session.tool.input.started", { assistantMessageID: "later-step", id: "write", name: "Write" });
+    await h.emit("session.tool.called", { assistantMessageID: "later-step", id: "write", input: { file_path: "later.png" } });
+    available = true; bytes = overwritten;
+    await h.emit("session.tool.success", { assistantMessageID: "later-step", id: "write", content: [{ type: "text", text: "Replaced image" }], metadata: {}, executed: true });
+    await drain();
+    expect(answer(await second.history("opencode:ses_visual")).visuals).toEqual(answer(initial).visuals);
+    expect(reads).toBe(1); // Syntax end never spends a missing file's end retry.
+    if (!missing) expect((await second.resolveVisual(answer(initial).visuals![0]!.id!))?.bytes).toEqual(original);
+    h.state.records.push({ id: "actual-end", type: "idle", time: { created: 40 }, outcome: "succeeded" });
+    await h.emit("session.execution.succeeded");
+    const terminal = await drain();
+    expect(terminal.filter(event => event.type === "conversation.status")).toHaveLength(1);
+    expect(terminal.filter(event => event.type === "resync")).toHaveLength(missing ? 1 : 0);
+    expect(reads).toBe(missing ? 2 : 1);
+    const completed = answer(await second.history("opencode:ses_visual"));
+    expect(completed.markdown).toBe(markdown);
+    expect(completed.visuals?.[0]?.status).toBe("ready");
+    const expected = missing ? overwritten : original;
+    expect((await second.resolveVisual(completed.visuals![0]!.id!))?.bytes).toEqual(expected);
+    bytes = Uint8Array.from([...overwritten, 3]);
+    const reloaded = router();
+    const reload = answer(await reloaded.history("opencode:ses_visual"));
+    expect(reload.visuals).toEqual(completed.visuals);
+    expect((await reloaded.resolveVisual(reload.visuals![0]!.id!))?.bytes).toEqual(expected);
+    expect(answer(initial).visuals?.[0]?.status).toBe(missing ? "pending" : "ready");
+    expect(reads).toBe(missing ? 2 : 1);
+  } finally {
+    for (const subscription of subscriptions) subscription.cancel();
+    for (const value of routers) await value.dispose();
+    await h.adapter.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("V2 stored-only execution end refreshes equal-JSON projection rows without a synthetic frame", async () => {
+  const h = await visualExecutionFixture();
+  const membership = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
+  try {
+    const original = (await h.adapter.history("ses_visual")).items.find(item => item.id === "part:current-tool:text:0")!;
+    expect(membership(original)).toBe(true);
+    expect((original as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    // Simulate an end missed by this process, followed by another execution.
+    h.state.records.push({ id: "missed-end", type: "idle", time: { created: 20 }, outcome: "succeeded" },
+      { id: "new-prompt", type: "user", time: { created: 21 }, text: "New execution" });
+    await h.emit("session.execution.started");
+    const projection = h.adapter.projectionForTests("ses_visual");
+    const observer = await h.adapter.subscribe("ses_visual");
+    const before = projection.replay.latestCursor();
+    const recovered = await h.adapter.history("ses_visual");
+    const current = recovered.items.find(item => item.id === original.id)!;
+    expect(JSON.stringify(current)).toBe(JSON.stringify(original));
+    expect(membership(current)).toBe(false);
+    expect(membership(projection.get(original.id)!)).toBe(false);
+    expect((projection.get(original.id) as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(membership(original)).toBe(true);
+    // Only the genuinely new user row gets a public frame.
+    const iterator = observer.events[Symbol.asyncIterator]();
+    const marker = projection.replay.publish({ type: "conversation.configuration", configuration: {} });
+    const received: ChatEvent[] = [];
+    for await (const event of { [Symbol.asyncIterator]: () => iterator }) {
+      if (event.sequence === marker.sequence) break;
+      received.push(event);
+    }
+    observer.events.cancel();
+    expect(received.filter(event => event.type === "item.upsert" && event.item.id === original.id)).toEqual([]);
+    expect(before).not.toBe(projection.replay.latestCursor());
+    const attach = await h.adapter.subscribe("ses_visual"); attach.events.cancel();
+    expect(membership(attach.snapshot.items.find(item => item.id === original.id)!)).toBe(false);
+    expect((attach.snapshot.items.find(item => item.id === original.id) as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+  } finally { await h.adapter.dispose(); }
+});
 
 test("fallback relations describe only actual visible native subagent results, without granting ownership", async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
@@ -625,7 +936,7 @@ for (const outcome of [
   "newer-first-input-foreign-parent", "newer-first-occurrence-foreign-workspace", "newer-first-input-current-accounting", "newer-first-input-unrelated", "newer-second-input-recovery",
   "post-history-input", "post-history-occurrence", "post-history-unchanged", "post-history-healthy", "post-history-cold",
   "post-history-unchanged-unrelated", "post-history-input-unrelated",
-  "post-history-input-recovery", "post-history-input-owner-eviction", "post-history-input-projection-eviction",
+  "post-history-input-recovery", "post-history-input-recovery-held-reconnect", "post-history-input-owner-eviction", "post-history-input-projection-eviction",
   "post-history-input-recovery-zero",
   "post-history-input-pending-eviction", "post-history-input-pending-eviction-unpinned",
   "post-history-input-same-generation",
@@ -675,6 +986,10 @@ test(`concurrent foreground output preserves complete shared-child attribution o
   const hidden = outcome.startsWith("hidden-origin");
   let freshAccounting = outcome === "current-accounting" || outcome.endsWith("-current-accounting");
   const recovering = outcome.includes("-recovery");
+  const heldReconnect = outcome === "post-history-input-recovery-held-reconnect";
+  let holdReconnectRecovery = false, reconnectHeld = false, reconnectEntered!: () => void, releaseReconnect!: () => void;
+  const reconnectReady = new Promise<void>(resolve => { reconnectEntered = resolve; });
+  const reconnectGate = new Promise<void>(resolve => { releaseReconnect = resolve; });
   const zero = outcome.endsWith("-zero");
   const unrelated = outcome.endsWith("-unrelated");
   const unrelatedLaunch = structuredClone(second);
@@ -720,6 +1035,16 @@ test(`concurrent foreground output preserves complete shared-child attribution o
     "GET /api/session/:id/message": () => ({ data: [], cursor: {} }),
   });
   const provider = server.provider(), list = provider.listMessages.bind(provider), events = provider.events.bind(provider);
+  const reconcileBackgroundTasks = provider.reconcileBackgroundTasks.bind(provider);
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    if (heldReconnect && holdReconnectRecovery && id === "ses_child" && !reconnectHeld && !options?.signal?.aborted) {
+      // Reconnect also recovers the already-projected child, independently of
+      // the awaited parent history. Hold its optional second transcript read
+      // after its initial page, without blocking the parent's reconstruction.
+      reconnectHeld = true; reconnectEntered(); await reconnectGate;
+    }
+    return reconcileBackgroundTasks(id, options);
+  };
   let capturedPage: Awaited<ReturnType<OpenCodeV2Provider["listMessages"]>> | undefined;
   provider.listMessages = async (id, options) => {
     const page = await list(id, options);
@@ -760,8 +1085,13 @@ test(`concurrent foreground output preserves complete shared-child attribution o
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0, ...(projectionEviction || pendingProjection ? { maxProjections: 2 } : {}) });
   const history = adapter.history.bind(adapter);
   const recoveryReads = new Map<string, ReturnType<ChatAdapter["history"]>>();
+  const pendingRecoveryReads = new Set<ReturnType<ChatAdapter["history"]>>();
   adapter.history = (...args) => {
     const reading = history(...args);
+    if (!owner.getStore() && args[1]?.limit === undefined) {
+      pendingRecoveryReads.add(reading);
+      void reading.finally(() => pendingRecoveryReads.delete(reading)).catch(() => undefined);
+    }
     if (unpinned && freshAccounting && !owner.getStore() && args[1]?.limit === undefined) recoveryReads.set(args[0], reading);
     return reading;
   };
@@ -971,6 +1301,7 @@ test(`concurrent foreground output preserves complete shared-child attribution o
       // Expire the existing reuse window; do not extend any cache or budget.
       second.content = secondContent; freshAccounting = true; elapsed = 31_000;
       await adapter.stopEventPump();
+      holdReconnectRecovery = true;
       const restored = await adapter.history("ses_parent");
       const following = await adapter.subscribe("ses_parent"); following.events.cancel();
       published = following.snapshot;
@@ -1003,6 +1334,18 @@ test(`concurrent foreground output preserves complete shared-child attribution o
         const reset = await adapter.subscribe("ses_parent"); reset.events.cancel();
         expect(reset.snapshot.items).toEqual([]);
       }
+      if (heldReconnect) {
+        await reconnectReady;
+        expect(pendingRecoveryReads.size).toBeGreaterThan(0);
+        releaseReconnect();
+      }
+      // server.connected starts fire-and-forget history reads for every
+      // projected conversation. Neither the parent history nor subscribe's
+      // handoff waits for the child's reconnect recovery. Settle those prior
+      // owners before measuring I/O caused by the accounting restatement:
+      // its unscoped diagnostic marker invalidates provider history reuse, so
+      // an older recovery continuation could otherwise issue a counted read.
+      while (pendingRecoveryReads.size) await Promise.allSettled([...pendingRecoveryReads]);
       const transcriptReads = server.requests("GET", "/api/session/ses_child/message").length;
       admitRestatement = true;
       restate("restated"); await restatementApplied;
@@ -1024,7 +1367,7 @@ test(`concurrent foreground output preserves complete shared-child attribution o
       });
       expect(server.calls.every(call => call.method === "GET")).toBe(true);
     }
-  } finally { release(); releasePublication(); releasePressure(); observer?.events.cancel(); retained?.events.cancel(); publicationView?.events.cancel(); await nativePublication?.catch(() => undefined); await reading?.catch(() => undefined); await Promise.allSettled([...recoveryReads.values()]); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
+  } finally { release(); releasePublication(); releasePressure(); releaseReconnect(); observer?.events.cancel(); retained?.events.cancel(); publicationView?.events.cancel(); await nativePublication?.catch(() => undefined); await reading?.catch(() => undefined); await Promise.allSettled([...recoveryReads.values()]); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
 for (const depth of ["direct", "root"] as const) for (const remaining of [0.5, 0])
@@ -8221,13 +8564,16 @@ describe("OpenCode 2.x provider: identity and catalogs", () => {
       "GET /api/model": () => scoped([
         { id: "flash", modelID: "flash", providerID: "opencode", name: "Flash", capabilities: { tools: true, input: ["text", "image"], output: ["text"] }, variants: [], limit: { context: 200000, output: 32000 }, status: "active", enabled: true, cost: [], time: { released: 0 } },
         { id: "think", modelID: "think", providerID: "berget", name: "Thinker", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [{ id: "high" }, { id: "low" }], limit: { context: 128000, output: 8000 }, status: "active", enabled: true, cost: [], time: { released: 0 } },
+        { id: "gpt-5.5", modelID: "gpt-5.5", providerID: "openai", name: "GPT-5.5", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [], limit: { context: 400000, input: 272000, output: 128000 }, status: "active", enabled: true, cost: [], time: { released: 0 } },
         { id: "old", modelID: "old", providerID: "berget", name: "Old", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [], limit: { context: 8000, output: 800 }, status: "deprecated", enabled: true, cost: [], time: { released: 0 } },
         { id: "off", modelID: "off", providerID: "berget", name: "Off", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [], limit: { context: 8000, output: 800 }, status: "active", enabled: false, cost: [], time: { released: 0 } },
       ]),
-      "GET /api/provider": () => scoped([{ id: "opencode", name: "OpenCode Zen", activation: "auto", package: "x" }, { id: "berget", name: "Berget", activation: "enabled", package: "y" }]),
+      "GET /api/provider": () => scoped([{ id: "opencode", name: "OpenCode Zen", activation: "auto", package: "x" }, { id: "berget", name: "Berget", activation: "enabled", package: "y" }, { id: "openai", name: "OpenAI", activation: "enabled", package: "z" }]),
     });
     expect(await provider().listModels()).toEqual([
       { selection: { providerId: "berget", modelId: "think" }, provider: "Berget", name: "Thinker", variants: ["high", "low"], contextLimit: 128000, contextWindow: { source: "catalog", freshness: "current" } },
+      // A stated prompt limit is the window; the total capacity rides beside it.
+      { selection: { providerId: "openai", modelId: "gpt-5.5" }, provider: "OpenAI", name: "GPT-5.5", contextLimit: 272000, contextWindow: { source: "catalog", freshness: "current", kind: "effective", capacity: 400000 } },
       { selection: { providerId: "opencode", modelId: "flash" }, provider: "OpenCode Zen", name: "Flash", contextLimit: 200000, contextWindow: { source: "catalog", freshness: "current" }, imageInput: true },
     ]);
   });

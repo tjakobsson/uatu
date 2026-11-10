@@ -57,7 +57,7 @@ The system SHALL read each directory watch root's `.uatu.json ignore.exclude` as
 ## ADDED Requirements
 
 ### Requirement: Built-in exclusions match VS Code's defaults
-The system SHALL hide only the names VS Code's `files.exclude` hides by default, at any depth: the VCS metadata directories `.git`, `.svn`, `.hg`, and `CVS`, and the OS files `.DS_Store` and `Thumbs.db`. These SHALL be the only built-in exclusions. They SHALL be encoded in source, SHALL apply whether or not project configuration exists, and SHALL NOT be bypassed by a visibility preference or by a negation in project configuration. No other directory name, file name, suffix, or secret-like pattern SHALL be excluded by default. Dependency, build, cache, virtual-environment, editor-temporary, and secret-like paths SHALL be governed by Git-ignore visibility and explicit project exclusions like any other path.
+The system SHALL hide only the names VS Code's `files.exclude` hides by default, at any depth: the VCS metadata directories `.git`, `.svn`, `.hg`, and `.jj`, and the OS files `.DS_Store` and `Thumbs.db`. These SHALL be the only built-in exclusions. They SHALL be encoded in source, SHALL apply whether or not project configuration exists, and SHALL NOT be bypassed by a visibility preference or by a negation in project configuration. No other directory name, file name, suffix, or secret-like pattern SHALL be excluded by default. Dependency, build, cache, virtual-environment, editor-temporary, and secret-like paths SHALL be governed by Git-ignore visibility and explicit project exclusions like any other path.
 
 #### Scenario: A nested `.git/` directory is hidden
 - **WHEN** the root contains `tools/repos/example/.git/`

@@ -26,6 +26,7 @@ import {
   usageUpsert,
 } from "../normalization";
 import type { TokenUsage } from "../../types";
+import { OPENCODE_COMPLETION_ALIAS, type OpenCodeCompletionAlias } from "../normalization-types";
 
 // The OpenCode 1.x mapper over the shared normalization core: 1.18's
 // `session.next.*` generation is the canonical vocabulary minus a `next.`
@@ -236,5 +237,8 @@ export const openCodeV1Mapper: GenerationMapper = { own, toCanonical, ignored: I
 // outcome rather than an exception, so one malformed payload costs one event
 // instead of the pump.
 export function normalizeProviderEvent(value: unknown, memory?: ProviderEventMemory): NormalizedProviderEvent {
-  return normalizeEventWith(value, openCodeV1Mapper, memory);
+  const normalized = normalizeEventWith(value, openCodeV1Mapper, memory);
+  if ((value as OpenCodeCompletionAlias | null)?.[OPENCODE_COMPLETION_ALIAS] !== true) return normalized;
+  return { ...normalized, updates: normalized.updates.map(update => update.kind === "status"
+    ? { ...update, [OPENCODE_COMPLETION_ALIAS]: true as const } : update) };
 }

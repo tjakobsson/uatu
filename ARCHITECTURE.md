@@ -552,6 +552,8 @@ sequenceDiagram
 
 - **The stream.** The response writes `: open` at once, then a `hello` event carrying an unguessable stream id, then `live` envelopes `{ ws, topic, key?, cursor, event }`. While idle it sends a `: keepalive` comment every 15 s. The query names the workspace (`ws`), opts into activity (`activity=1`), and lists the initial subscriptions with the cursor each one resumes from (`subs`).
 - **Subscription changes.** Selecting a conversation or opening a subagent never opens a connection. The page posts `add` and `remove` operations to `POST /api/hub/live/<streamId>/subscriptions`, which the hub accepts only from the hub session that owns the stream, so one tab can't steer another's. An `add` for a key that is already subscribed replaces it; that is how a topic re-attaches after a resync.
+- **Recovery intent.** Conversation additions may carry optional `reconnect: true` with a bounded nonempty cursor when they resume retained browser state, including additions deferred by the stream URL budget. Omitted or false means a fresh attachment; post-history resubscription clears recovery intent even at the same cursor. Other topics cannot carry this flag. The updated endpoint forwards validated intent per attachment, not to every later add on a recovering stream; older Hubs do not guarantee this repair.
+- **Caught-up recovery.** Recovery intent does not imply a full snapshot refetch. The broker remembers the last forwarded visual-resync trailer cursor per conversation beyond an upstream replacement. A healthy-head reconnect requests resync only at that remembered cursor; without a matching trailer it receives `ready` without refetch or reprojection. After a Hub restart there is no retained upstream, so child-side recovery applies its visual-metadata gate. The subscription recovery flag is published in Hub API revision 15.
 - **Topics.** `document` is keyed by the watch context and carries a baseline snapshot followed by file patches and independent repository updates. The Hub applies patches to a keyed accumulator and materializes a current snapshot for joining or behind clients. The child epoch and predecessor revision protect application ordering independently of Hub transport cursors. Only full snapshots can replace queued document frames; patches retain their order. `inventory` invalidates the chat conversation list, `conversation` carries one conversation's events, and `activity` carries the validated workspace summary. `worktrees` invalidates accessible worktree inventory. `personal` invalidates the authenticated account's worker-dismissal state for the stream's workspace; it carries no marks, account identity or conversation content.
 - **Cursors.** `document`, `inventory` and `conversation` have independent opaque replay cursors, advanced only by `data`. A reconnect presents their retained cursors, so a stale conversation cursor never forces a document resync. `activity`, `worktrees` and `personal` have no replay cursor: attachment/reconnect supplies fresh activity summaries, or invalidations prompting authoritative worktree/personal-state reads.
 - **Signals.** For upstream-backed subscriptions, `ready` means attached with owed replay written, `resync` requires a fresh snapshot and reattachment, and `unavailable` means upstream failure or child exit with retry while subscribed. For `personal`, `unavailable` instead reports failed or unconfirmed private dismissal persistence—not workspace liveness. There is no personal upstream retry loop; confirmed persistence recovery emits `ready` followed by a fresh data invalidation. Initial personal attachment emits data without requiring `ready`. Topic-scoped signals do not end the stream; private persistence trouble does not block chat or suppress canonical requests.
@@ -646,11 +648,21 @@ Changing visibility replaces only the document topic's context and protects
 selection from old Follow nominations in its baseline. Direct authenticated
 delivery still enforces exposure policy regardless of row visibility.
 
-Root `.uatu.json` `ignore.include` names literal output directories beneath
-build/dist, admitting only their subtrees and necessary traversal ancestors.
-Explicit Uatu exclusions, mandatory denied paths, and containment remain
-authoritative. Discovery, observation, index membership, and delivery share
-that policy; a client visibility toggle does not rebuild watchers.
+Built-in exposure exclusions are only VS Code's `files.exclude` defaults
+(`ignore/exposure.ts`); everything else is excluded only by an explicit
+`.uatu.json` `ignore.exclude`. Discovery, observation, index membership, and
+delivery share that policy; a client visibility toggle does not rebuild
+watchers. Folders Git ignores as a whole come from one `git ls-files
+--others --ignored --directory` call per root (`server/git-ignore.ts`) and
+become `FolderEntry` rows that discovery does not read (`server/ignored-folders.ts`).
+`POST /api/index/folder` lists one level into the shared index, which every
+client receives as an ordinary patch. The native watcher still reports writes
+inside unlisted levels; `FileIndex` keeps the newest 2,000 per root (pinned
+when a client requests them) and publishes everything inside ignored folders
+on its own 1 s / 5 s lane in patches of up to 1,024 entries, classified and
+never followed. The watcher queues those paths behind ordinary ones. A
+`.gitignore` edit rebuilds a root only when the set of whole-ignored folders
+changes.
 
 A representative path: the SPA needs the rendered HTML for `guides/setup.md`.
 

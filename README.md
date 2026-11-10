@@ -41,14 +41,14 @@ cognitive debt.
 - **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved compare base via [`@pierre/diffs`](https://diffs.com/)
 - **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
-- Whole-repo browsing with personal Gitignored-file visibility, explicit `.uatu.json ignore.exclude` exposure rules, and narrow generated-output includes
+- Whole-repo browsing that follows VS Code: Gitignored files and folders show muted, big ignored folders such as `node_modules/` and `build/` are read when expanded, and `.uatu.json ignore.exclude` hides anything else
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
 - [All / Recent / Changed Files views](./docs/FILES.md), with disk-write ordering, filename/path filtering, and a saved per-workspace view
 - [Audio/video previews and quick auditioning](./docs/FILES.md#audio-and-video), with one persistent player, captured Previous/Next order, current-clip Loop, and explicit Reload for new renders
 - Git-aware workspaces: adding a folder outside a repository offers `git init`
 - [Git worktree workspaces](./docs/WORKTREES.md): create and switch branch checkouts from the workspace picker, with independent terminals and conversations, parent credential policy and guarded cleanup
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
-- Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
+- Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and inline images/SVG, tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
 - Subagent rows show the latest execution-reported reasoning effort and cumulative child-session USD cost when available; a labeled dash means not reported, never an estimated price or inherited parent selection.
 - Installable as a PWA so TUI editor shortcuts (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach the embedded terminal
 
@@ -250,22 +250,26 @@ Change Overview rather than aborting the watch session.
 ```json
 {
   "ignore": {
-    "exclude": ["bun.lock", "*.log", "!debug.log"],
-    "include": ["build/renders", "dist/previews"],
+    "exclude": ["bun.lock", "*.log", "!debug.log", ".env*"],
     "respectGitignore": true
   }
 }
 ```
 
-Gitignored files now show by default. **Files options → Show ignored files** is
-a personal browsing preference; direct authenticated access remains available
-for permitted hidden files. Explicit `respectGitignore` is a legacy initial
-visibility default, and a saved personal choice wins. Without a saved choice
-or `--no-gitignore`, any watched root's explicit `true` initially hides ignored
-files, regardless of root order. Use `ignore.exclude` to
-prevent indexing and delivery. `ignore.include` opens only the named build/dist
-output subtrees, subject to those exclusions and mandatory denied paths. See
-[Files](./docs/FILES.md) for migration and examples.
+Uatu hides what VS Code's `files.exclude` hides by default: `.git`, `.svn`,
+`.hg`, `.jj`, `.DS_Store` and `Thumbs.db`. Everything else, including
+`node_modules/`, `build/`, `dist/`, `.venv/` and secret-like files such as
+`.env`, is listed unless `ignore.exclude` names it. `ignore.exclude` plays the
+role of VS Code's `files.exclude`: excluded paths are not indexed, followed or
+served.
+
+Files Git ignores show muted, and **Files options → Show ignored files** hides
+them for this browser. A folder Git ignores as a whole is read only when you
+expand it, one level at a time, and files written inside it while the session
+runs appear in Recent straight away. Follow never jumps to an ignored file.
+Explicit `respectGitignore` is a legacy initial visibility default, and a saved
+personal choice wins. `ignore.include` no longer has an effect. See
+[Files](./docs/FILES.md) for details.
 
 Every monospace surface in the app — rendered Markdown code blocks,
 AsciiDoc code blocks, the source view, the diff view, the terminal —

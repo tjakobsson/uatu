@@ -90,9 +90,11 @@ function syncFilesPresentation(): void {
   const filterEmpty = appState.filesPaneFilter === "changed" && !view.hasFilterMembers();
   const count = recent ? entries.length : filterEmpty ? 0 : view.getVisibleLeafCount();
   setResultCount(count);
-  treeElement.hidden = recent || count === 0;
-  treeEmptyMessageElement.hidden = count > 0;
-  if (count === 0) treeEmptyMessageElement.textContent = filesQuery ? "No matching files."
+  // The count is files only; unlisted ignored folder rows still need a tree.
+  const folderRows = !recent && !filterEmpty && view.hasVisibleFolderRows();
+  treeElement.hidden = recent || count === 0 && !folderRows;
+  treeEmptyMessageElement.hidden = count > 0 || folderRows;
+  if (count === 0 && !folderRows) treeEmptyMessageElement.textContent = filesQuery ? "No matching files."
     : filterEmpty ? filterEmptyStateCopy(appState.repositories)
     : appState.discovery.status === "ready" ? "No files found in the watched roots."
     : appState.discovery.status === "error" ? `Indexing failed: ${appState.discovery.message ?? "Unavailable"}` : "Indexing files…";

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderChatMarkdown } from "./markdown";
+import { parseHTML } from "linkedom";
+const VISUAL_ID = "a".repeat(64);
 
 describe("chat Markdown security", () => {
   test("unchanged sanitized markdown is reused and the count limit evicts old entries", () => {
@@ -26,5 +28,179 @@ describe("chat Markdown security", () => {
     const html = renderChatMarkdown("```js\nconst value = '<tag>'\n```");
     expect(html).toContain('class="hljs language-js"');
     expect(html).not.toContain("<tag>");
+  });
+
+  test("uncaptured SVG fences remain visible highlighted code with exact inert source", () => {
+    const svg = '<svg onload="bad()"><text>&amp; &quot; &#38; &lt;tag&gt;</text><script>bad()</script></svg>\r\n';
+    for (const streaming of [false, true]) {
+      for (const complete of [false, true]) {
+        const { document } = parseHTML(renderChatMarkdown(`\`\`\`svg\n${svg}${complete ? "```" : ""}`, { streaming }));
+        const code = document.querySelector("pre > code.hljs.language-svg");
+        expect(code?.textContent).toBe(svg);
+        expect(code?.closest("[hidden]")).toBeNull();
+        expect(document.querySelector(".chat-visual, [data-visual-tab], img, svg, script, [onload]")).toBeNull();
+      }
+    }
+  });
+
+  test("uncaptured image references never create widgets or load original URLs", () => {
+    const source = '![Local](./diagram.svg)\n\n![Remote](https://example.com/track.svg)\n\n<img src="//example.com/raw.png" alt="Raw">';
+    for (const streaming of [false, true]) {
+      const { document } = parseHTML(renderChatMarkdown(source, { streaming }));
+      expect(document.querySelector(".chat-visual-reference")?.textContent).toBe("./diagram.svg");
+      for (const href of ["https://example.com/track.svg", "//example.com/raw.png"]) {
+        const link = document.querySelector(`a[href="${href}"]`);
+        expect(link?.getAttribute("target")).toBe("_blank");
+        expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+      }
+      expect(document.querySelector(".chat-visual, img, [src], [data-visual-tab]")).toBeNull();
+    }
+  });
+
+  test("an explicitly empty snapshot array still enables captured presentation", () => {
+    for (const streaming of [false, true]) {
+      const { document } = parseHTML(renderChatMarkdown("```svg\n<svg/>\n```", { streaming, visuals: [] }));
+      expect(document.querySelector(".chat-visual.is-svg")).not.toBeNull();
+      expect(document.querySelector('[data-visual-tab="source"]')).not.toBeNull();
+      expect(document.querySelector(".chat-visual-source code")?.textContent).toBe("<svg/>\n");
+      expect(document.querySelector("pre")).toBeNull();
+    }
+  });
+
+  test("unstored SVG source retains exact CRLF through HTML parsing for cached copy controls", () => {
+    const svg = '<svg>\r\n<text>&amp; &#13; &lt;source&gt;</text>\r\n</svg>\r\n';
+    for (const streaming of [false, true]) {
+      for (const complete of [false, true]) {
+        for (const visuals of [[], [{ index: 0, status: "pending" as const }], [{ index: 0, status: "unavailable" as const, message: "Capture refused." }]]) {
+          const html = renderChatMarkdown(`\`\`\`svg\r\n${svg}${complete ? "```" : ""}`, { streaming, visuals });
+          expect(html).not.toContain("\r");
+          expect(html).toContain("&#13;");
+          const { document } = parseHTML(html);
+          expect(document.querySelector(".chat-visual-source code")?.textContent).toBe(svg);
+          expect(document.querySelector(".chat-visual")?.getAttribute("data-visual-source-loaded")).toBe("true");
+          expect(document.querySelector("[data-visual-copy]")?.hasAttribute("disabled")).toBe(false);
+          expect(document.querySelector("svg, img, script")).toBeNull();
+        }
+      }
+    }
+  });
+
+  test("only issued snapshots become images; remote embeds remain explicit links", () => {
+    const html = renderChatMarkdown('![Local](./shot.png)\n\n![Remote](https://example.com/track.svg)', {
+      streaming: true,
+      visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/png" }, { index: 1, status: "unavailable", message: "External images are not loaded." }],
+    });
+    const { document } = parseHTML(html);
+    expect(document.querySelectorAll("img")).toHaveLength(1);
+    expect(document.querySelector("img")?.getAttribute("src")).toBe(`/api/chat/visuals/${VISUAL_ID}`);
+    expect(document.querySelector('a[href="https://example.com/track.svg"]')).not.toBeNull();
+    expect(document.querySelector('[src*="example.com"]')).toBeNull();
+  });
+
+  test("refused schemes preserve original destinations as escaped non-clickable references", () => {
+    const destinations = [
+      "file:///Users/example/shot.svg",
+      "ftp://example.invalid/shot.png",
+      "data:image/svg+xml,%3Csvg%20onload=alert%281%29%3E",
+      "javascript:alert%281%29",
+    ];
+    const fixtures = destinations.map(destination => ({ destination, source: `![Refused](${destination})` }));
+    fixtures.push({
+      destination: 'data:image/svg+xml,<svg onload="alert(1)"><script>alert(1)</script></svg>',
+      source: '<img src="data:image/svg+xml,&lt;svg onload=&quot;alert(1)&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;/svg&gt;" alt="Refused" chatVisualSource="https://example.invalid/forged.png">',
+    });
+    for (const { destination, source } of fixtures) {
+      for (const visuals of [undefined, [{ index: 0, status: "unavailable" as const, message: '<img src=x onerror="alert(1)"> Refused.' }]]) {
+        const { document } = parseHTML(renderChatMarkdown(source, { visuals }));
+        expect(document.querySelector(".chat-visual-reference")?.textContent).toBe(destination);
+        expect(document.querySelector("a, img, svg, script, iframe")).toBeNull();
+        expect([...document.querySelectorAll("*")].flatMap(node => [...node.attributes]).some(attribute => /^on/i.test(attribute.name))).toBe(false);
+      }
+    }
+  });
+
+  test("retaining refused image destinations does not retain unsafe link protocols", () => {
+    const source = '![Refused](file:///Users/example/shot.svg) [bad](javascript:alert%281%29) <a href="data:text/html,unsafe" onclick="bad()">raw</a>';
+    const { document } = parseHTML(renderChatMarkdown(source));
+    expect(document.querySelectorAll("a")).toHaveLength(2);
+    expect(document.querySelector("a[href], [onclick], img")).toBeNull();
+    expect(document.querySelector(".chat-visual-reference")?.textContent).toBe("file:///Users/example/shot.svg");
+  });
+
+  test("ready previews retain an escaped, initially hidden fallback with the original reference", () => {
+    const { document } = parseHTML(renderChatMarkdown('![Screenshot <failed>](./shot.png)', {
+      visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/png" }],
+    }));
+    const fallback = document.querySelector(".chat-visual-fallback")!;
+    expect(fallback.hasAttribute("hidden")).toBe(true);
+    expect(fallback.getAttribute("role")).toBe("status");
+    expect(fallback.textContent).toBe("Could not display Screenshot <failed>. ./shot.png");
+    expect(fallback.querySelector(".chat-visual-reference")?.textContent).toBe("./shot.png");
+    expect(document.querySelector("failed")).toBeNull();
+    expect(document.querySelectorAll("img")).toHaveLength(1);
+  });
+
+  test("incomplete SVG has a generating placeholder and copyable inert source", () => {
+    const html = renderChatMarkdown('```svg\n<svg onload="bad()"><text>&amp;</text>', {
+      streaming: true,
+      visuals: [{ index: 0, status: "pending" }],
+    });
+    const { document } = parseHTML(html);
+    expect(document.querySelector("svg")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    expect(document.querySelector(".chat-visual-preview")?.textContent).toContain("Generating image…");
+    expect(document.querySelector(".chat-visual-source code")?.textContent).toBe('<svg onload="bad()"><text>&amp;</text>');
+  });
+
+  test("pending, refused and captured visuals expose source occurrence identity independently of index or snapshot id", () => {
+    const prefix = "![Late][ref]\n\n";
+    const source = `${prefix}\`\`\`svg\n<svg/>\n\`\`\`\n`;
+    const render = (markdown: string, index: number, captured = false) => parseHTML(renderChatMarkdown(markdown, {
+      streaming: true,
+      visuals: [{ index, status: captured ? "ready" : "pending", ...(captured ? { id: VISUAL_ID, mimeType: "image/svg+xml" } : {}) }],
+    })).document.querySelector(".chat-visual.is-svg")!;
+    const initial = render(source, 0);
+    const promoted = render(`${source}\n[ref]: ./late.png\n`, 1);
+    const captured = render(`${source}\n[ref]: ./late.png\n`, 1, true);
+    expect(initial.getAttribute("data-visual-occurrence")).toBe(`svg:offset:${prefix.length}`);
+    expect(initial.hasAttribute("data-visual-key")).toBe(false);
+    expect(promoted.getAttribute("data-visual-index")).toBe("1");
+    expect(promoted.getAttribute("data-visual-occurrence")).toBe(initial.getAttribute("data-visual-occurrence"));
+    expect(captured.getAttribute("data-visual-occurrence")).toBe(initial.getAttribute("data-visual-occurrence"));
+    expect(captured.getAttribute("data-visual-key")).toBe(VISUAL_ID);
+    expect(render(`Moved.\n\n${source}`, 0).getAttribute("data-visual-occurrence")).not.toBe(initial.getAttribute("data-visual-occurrence"));
+    const refused = parseHTML(renderChatMarkdown(source, { streaming: true, visuals: [] })).document.querySelector(".chat-visual")!;
+    expect(refused.getAttribute("data-visual-occurrence")).toBe(initial.getAttribute("data-visual-occurrence"));
+    expect(refused.textContent).toContain("At most 8 images");
+  });
+
+  test("an unadmitted incomplete SVG cannot bypass the native-message image budget", () => {
+    const { document } = parseHTML(renderChatMarkdown("```svg\n<svg/>", { streaming: true, visuals: [] }));
+    expect(document.querySelector(".chat-visual-preview")?.textContent).toContain("At most 8 images");
+    expect(document.querySelector("img, svg")).toBeNull();
+    expect(document.querySelector(".chat-visual-source code")?.textContent).toBe("<svg/>");
+  });
+
+  test("linked images do not navigate away and source panels stay inside their visual", () => {
+    const html = renderChatMarkdown('[![Diagram](./diagram.svg)](https://example.com) after', {
+      visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }],
+    });
+    const { document } = parseHTML(html);
+    expect(document.querySelector("a")).toBeNull();
+    expect(document.querySelector(".chat-visual .chat-visual-source code")).not.toBeNull();
+    expect(document.querySelector(".chat-visual .chat-visual-preview img")).not.toBeNull();
+    const nested = renderChatMarkdown('[**![Diagram](./diagram.svg)**](https://example.com)', {
+      visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }],
+    });
+    expect(parseHTML(nested).document.querySelector("a")).toBeNull();
+    expect(parseHTML(nested).document.querySelector("strong .chat-visual img")).not.toBeNull();
+  });
+
+  test("enforces the display count and refuses untrusted snapshot IDs", () => {
+    const markdown = Array.from({ length: 9 }, (_, i) => `![Shot ${i}](./${i}.png)`).join("\n\n");
+    const html = renderChatMarkdown(markdown, { visuals: Array.from({ length: 9 }, (_, index) => ({ index, status: "ready", id: VISUAL_ID, mimeType: "image/png" })) });
+    expect(parseHTML(html).document.querySelectorAll("img")).toHaveLength(8);
+    expect(html).toContain("At most 8 images");
+    expect(renderChatMarkdown("![x](./x.png)", { visuals: [{ index: 0, status: "ready", id: '//external/" onload="bad()', mimeType: "image/png" }] })).not.toContain("<img");
   });
 });

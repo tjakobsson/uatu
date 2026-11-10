@@ -32,13 +32,18 @@ The media route SHALL remain an internal child-proxied protocol, documented and 
 - **AND** delivery does not fall back to the other root
 
 #### Scenario: A file is not permitted
-- **WHEN** a request targets an excluded, secret-like, out-of-root, symlink-escaping, or unindexed file
+- **WHEN** a request targets an excluded, out-of-root, symlink-escaping, or unindexed file
 - **THEN** the system refuses delivery without streaming its contents
 
 #### Scenario: Authentication has expired
 - **WHEN** a new media or range request arrives without valid workspace access
 - **THEN** the request is refused through the normal Hub authentication boundary
 - **AND** no child credential is exposed to the browser
+
+#### Scenario: A render captured from a live write is delivered
+- **WHEN** an authenticated client requests `build/renders/take-5.wav`, which was indexed from a live write inside an unlisted ignored folder
+- **THEN** its bytes are delivered
+- **AND** the file stays indexed for the rest of the session even if later writes fill the live-write window
 
 ### Requirement: Media delivery defines range and HEAD semantics
 A successful full GET SHALL return 200, the media MIME type, the representation byte length, and Accept-Ranges: bytes. A satisfiable single explicit, open-ended, or suffix range SHALL return 206 with exact Content-Range and Content-Length for the returned bytes. An unsatisfiable range SHALL return 416 with Content-Range: bytes */size and no media body. Malformed or multiple ranges SHALL be ignored and answered with the normal full representation. HEAD SHALL return the full representation's metadata without a body and SHALL ignore Range. The Hub SHALL preserve these semantics without compression or byte transformation.

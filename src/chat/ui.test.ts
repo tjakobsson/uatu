@@ -3963,6 +3963,45 @@ describe("chat answering state", () => {
     }
   });
 
+  test("Latest preserves touch composer focus without cancelling the pointer sequence or taking over request focus", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "touch");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    let active: Element | null = null;
+    Object.defineProperty(document, "activeElement", { configurable: true, get: () => active });
+    const press = (element: Element, type: string, pointerType = "touch") => {
+      const event = Object.assign(new window.Event(type, { bubbles: true, cancelable: true }), { pointerType });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    try {
+      const { initChat } = await import(`./ui.ts?latest-composer-focus=${Date.now()}`);
+      initChat(questionApi(document));
+      const card = await waitForQuestionCard(document);
+      const composer = document.querySelector("#chat-input")!;
+      const requestField = card.querySelector("[data-question-custom-input]")!;
+      expect(requestField).not.toBeNull();
+      for (const id of ["chat-latest", "chat-drilldown-latest"]) {
+        const latest = document.getElementById(id)!;
+        active = composer;
+        expect(press(latest, "pointerdown")).toBe(false);
+        expect(press(latest, "mousedown")).toBe(true);
+        // A trackpad in touch UI causes the same tab-bar reflow.
+        expect(press(latest, "mousedown", "mouse")).toBe(true);
+        active = requestField;
+        expect(press(latest, "mousedown")).toBe(false);
+        active = null;
+        expect(press(latest, "mousedown")).toBe(false);
+        active = composer;
+        document.documentElement.setAttribute("data-ui-mode", "desktop");
+        expect(press(latest, "mousedown", "mouse")).toBe(false);
+        document.documentElement.setAttribute("data-ui-mode", "touch");
+      }
+    } finally { window.dispatchEvent(new Event("pagehide")); }
+  });
+
   test("a press on a request's answer controls does not blur the field first, whatever the pointer", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

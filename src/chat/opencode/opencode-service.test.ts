@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import {
   OpenCodeService,
@@ -8,6 +8,8 @@ import {
   resolveStartupTimeoutMs,
   type SpawnedOpenCode,
 } from "./opencode-service";
+
+const presentationGuidanceFile = { prepare: async () => "/uatu-state/instructions.md", remove: async () => {} };
 
 // What each generation's server answers on the two readiness resources,
 // verified against real binaries: 1.x knows `/global/health` and 404s the
@@ -101,6 +103,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     kill: signal => signals.push(signal),
   };
   const service = new OpenCodeService({
+    presentationGuidanceFile,
     workspacePath: "/workspace",
     env: { PATH: "/bin", HOME: "/home/user" },
     discoverCandidates: async () => ["/bin/opencode"],
@@ -123,6 +126,56 @@ function fixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe("OpenCodeService startup", () => {
+  test("adds process-only guidance while preserving inherited config and cleans up on disposal", async () => {
+    const removed: string[] = [];
+    const source = { PATH: "/bin", OPENCODE_CONFIG: "/existing/config.jsonc", OPENCODE_CONFIG_CONTENT: '{"instructions":["team.md"],"permissions":[{"effect":"deny","action":"edit","resource":"*"}]}' };
+    const { service, calls } = fixture({ env: source, presentationGuidanceFile: {
+      prepare: async () => "/uatu-state/owned/instructions.md",
+      remove: async (file: string) => { removed.push(file); },
+    } });
+    expect(await service.status()).toMatchObject({ state: "ready" });
+    const env = calls[0]!.options.env as Record<string, string>;
+    expect(env.OPENCODE_CONFIG).toBe(source.OPENCODE_CONFIG);
+    expect(JSON.parse(env.OPENCODE_CONFIG_CONTENT!)).toEqual({ ...JSON.parse(source.OPENCODE_CONFIG_CONTENT), instructions: ["team.md", "/uatu-state/owned/instructions.md"] });
+    expect(JSON.parse(source.OPENCODE_CONFIG_CONTENT).instructions).toEqual(["team.md"]);
+    await service.dispose();
+    expect(removed).toEqual(["/uatu-state/owned/instructions.md"]);
+  });
+
+  test.each(["not-json-secret", "null", "[]", '{"instructions":"secret"}', '{"instructions":[1]}'])("starts without optional guidance and preserves unmergeable inline config: %s", async content => {
+    let prepared = false;
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const { service, calls } = fixture({ env: { OPENCODE_CONFIG_CONTENT: content }, presentationGuidanceFile: {
+      prepare: async () => { prepared = true; return "/unused"; }, remove: async () => {},
+    }, probeVersion: async () => null });
+    try {
+      expect(await service.status()).toMatchObject({ state: "ready" });
+      expect(calls).toHaveLength(1);
+      expect((calls[0]!.options.env as Record<string, string>).OPENCODE_CONFIG_CONTENT).toBe(content);
+      expect(prepared).toBe(false);
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(String(warning.mock.calls[0])).toContain("without Uatu presentation hints");
+      expect(String(warning.mock.calls[0])).not.toContain("secret");
+    } finally { await service.dispose(); warning.mockRestore(); }
+  });
+
+  test("a read-only guidance state directory does not block native startup", async () => {
+    const content = '{"instructions":["team.md"],"permissions":[{"effect":"deny","action":"edit","resource":"*"}]}';
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const { service, calls } = fixture({ env: { OPENCODE_CONFIG_CONTENT: content }, presentationGuidanceFile: {
+      prepare: async () => { throw Object.assign(new Error("private-path-secret"), { code: "EROFS" }); }, remove: async () => {},
+    } });
+    try {
+      expect(await service.status()).toMatchObject({ state: "ready" });
+      const env = calls[0]!.options.env as Record<string, string>;
+      expect(env.OPENCODE_CONFIG_CONTENT).toBe(content);
+      expect(env.OPENCODE_PASSWORD).toBe("secret-password");
+      expect(env.OPENCODE_SERVER_PASSWORD).toBe("secret-password");
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(String(warning.mock.calls[0])).not.toContain("private-path-secret");
+    } finally { await service.dispose(); warning.mockRestore(); }
+  });
+
   test("reports missing OpenCode without spawning", async () => {
     const { service, calls } = fixture({ discoverCandidates: async () => [] });
     expect(await service.status()).toEqual(expect.objectContaining({ state: "unavailable", reason: "not-installed" }));
@@ -161,6 +214,7 @@ describe("OpenCodeService startup", () => {
     const passwords = ["first-secret", "second-secret"];
     const exits = [Promise.resolve(1), deferred<number | null>().promise];
     const service = new OpenCodeService({
+      presentationGuidanceFile,
       workspacePath: "/workspace",
       discoverCandidates: async () => ["/bin/opencode"],
       allocatePort: async () => ports.shift() as number,
@@ -187,6 +241,7 @@ describe("OpenCodeService startup", () => {
     let spawnCount = 0;
     const survivor = deferred<number | null>();
     const service = new OpenCodeService({
+      presentationGuidanceFile,
       workspacePath: "/workspace",
       discoverCandidates: async () => ["/bin/opencode"],
       probeVersion: async () => null,

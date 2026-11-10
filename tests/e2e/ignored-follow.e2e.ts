@@ -14,7 +14,7 @@ async function showIgnored(page: Page, value: boolean): Promise<void> {
 
 test.afterEach(async ({ request }) => { await request.post("/__e2e/reset"); });
 
-test("clients nominate visible Follow candidates independently using the same live connection", async ({ page, browser, request, baseURL }) => {
+test("no client follows an ignored file, shown or hidden, and each keeps one live connection", async ({ page, browser, request, baseURL }) => {
   test.setTimeout(60_000);
   await request.post("/__e2e/reset", { data: { git: true, follow: false, extras: { ".gitignore": "ignored.md\n", "ignored.md": "# Ignored\n", "visible.md": "# Visible\n" } } });
   const secondContext = await browser.newContext({ baseURL });
@@ -40,10 +40,17 @@ test("clients nominate visible Follow candidates independently using the same li
     for (const client of [page, second]) await client.locator("#follow-toggle").click();
     await fs.writeFile(workspacePath("visible.md"), "# Visible new write\n");
     for (const client of [page, second]) await expect(client.locator("#preview-path")).toHaveText("visible.md");
+    // Follow never jumps to a Gitignored file, even for the client that shows it.
     await fs.writeFile(workspacePath("ignored.md"), "# Ignored new write\n");
-    await expect(page.locator("#preview-path")).toHaveText("ignored.md");
-    await expect(second.locator("#preview-path")).toHaveText("visible.md");
-    await expect(second.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(async () => {
+      const state = await (await request.get("/api/state")).json();
+      return state.roots.flatMap((root: any) => root.docs).find((doc: any) => doc.relativePath === "ignored.md")?.mtimeMs ?? 0;
+    }).toBeGreaterThan(Date.now() - 10_000);
+    await page.waitForTimeout(500);
+    for (const client of [page, second]) {
+      await expect(client.locator("#preview-path")).toHaveText("visible.md");
+      await expect(client.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
+    }
     expect(streams).toEqual([1, 1]);
     // A context baseline containing an older eligible edit cannot steer a
     // following client merely because rows become visible again.

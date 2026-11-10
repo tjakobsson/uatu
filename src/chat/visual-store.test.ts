@@ -1,0 +1,1604 @@
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createWatchedVisualReader, isSafeSvg, VISUAL_CAPTURE_CONCURRENCY, VISUAL_MAX_BYTES, VisualReadError, VisualStore } from "./visual-store";
+import type { ChatVisualInput } from "./visual-types";
+import { parseChatEvent, parseConversationItem } from "./validation";
+import { MultiAgentChatService } from "./agents";
+import { ConversationReplay, ReplaySubscription } from "./replay";
+import { applyChatEvent, projectionFromSnapshot } from "./projection";
+import type { WorkspaceChatService } from "./service";
+import type { AssistantMessageItem, ChatEvent, ConversationSnapshot } from "./types";
+import { renderChatMarkdown } from "./markdown";
+import { parseHTML } from "linkedom";
+import { getChatVisuals } from "./visual-markdown";
+import { resolveWatchRoots } from "../server/roots";
+import { resolveStaticFileRequest } from "../server/static-files";
+import { selectCanonicalChatRoot } from "./workspace";
+
+let directory: string;
+beforeEach(async () => {
+  const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+  await fs.mkdir(scratch, { recursive: true });
+  directory = await fs.mkdtemp(path.join(scratch, "uatu-544-test-"));
+});
+afterEach(async () => { await fs.rm(directory, { recursive: true, force: true }); });
+const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+const svg = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="red"/></svg>';
+const file = (source = "image.png", index = 0): ChatVisualInput => ({ index, source, kind: "file", alt: "image", complete: true });
+const inline = (source = svg): ChatVisualInput => ({ ...file(), source, kind: "svg" });
+
+test.each([
+  { name: "table repair", prefix: '<table><tr><td>' + Array.from({ length: 8 }, (_, i) => `<img src="old-${i}.png">`).join("") + '</td></tr>', suffix: '<img src="new.png"></table>' },
+  { name: "late reference definitions", prefix: '![late][new]\n\n' + Array.from({ length: 8 }, (_, i) => `![${i}](old-${i}.png)`).join("\n\n"), suffix: '\n\n[new]: new.png' },
+])("eight persistent admissions survive streamed $name and fresh history reload", async ({ prefix, suffix }) => {
+  let markdown = prefix;
+  const snapshot = (): ConversationSnapshot => ({ conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown }] });
+  const events = new ReplaySubscription(() => undefined);
+  const provider = { history: async () => snapshot(), subscribe: async () => ({ snapshot: snapshot(), events }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const reads: string[] = [];
+  const makeService = () => {
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async source => { reads.push(source); return png; });
+    return new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  };
+  const service = makeService();
+  const subscription = await service.subscribe("a:c");
+  const first = (subscription.snapshot.items[0] as AssistantMessageItem).visuals!;
+  try {
+    expect(first).toHaveLength(8);
+    markdown += suffix;
+    events.push({ type: "item.text_delta", itemId: "m", delta: suffix, generation: "g", sequence: 1, conversationId: "c" });
+    const event = (await subscription.events[Symbol.asyncIterator]().next()).value as ChatEvent;
+    if (event.type !== "item.upsert" || event.item.type !== "assistant_message") throw new Error("expected repaired visual update");
+    expect([...reads].sort()).toEqual(Array.from({ length: 8 }, (_, i) => `old-${i}.png`));
+    expect(event.item.visuals).toEqual(first.map(visual => ({ ...visual, index: visual.index + 1 })));
+    expect(parseConversationItem(event.item)).toEqual(event.item);
+    const { document } = parseHTML(renderChatMarkdown(markdown, { visuals: event.item.visuals }));
+    expect(document.querySelectorAll("img")).toHaveLength(8);
+    expect(document.querySelector('[data-visual-index="8"] img')).not.toBeNull();
+    expect(document.querySelector('[data-visual-index="0"] img')).toBeNull();
+    const restarted = makeService();
+    try {
+      expect((await restarted.history("a:c")).items[0]).toEqual(event.item);
+      markdown = markdown.replace("old-0.png", "alt-0.png");
+      const changed = (await restarted.history("a:c")).items[0] as AssistantMessageItem;
+      expect(changed.visuals?.find(visual => visual.index === 1)).toMatchObject({ status: "unavailable", message: "Image source changed" });
+      expect(changed.visuals?.filter(visual => visual.status === "ready")).toHaveLength(7);
+      markdown = '<img src="only-new.png">';
+      const removed = (await restarted.history("a:c")).items[0] as AssistantMessageItem;
+      expect(removed.visuals).toEqual([]);
+      expect(renderChatMarkdown(markdown, { visuals: removed.visuals })).toContain("At most 8 images");
+      markdown = prefix + suffix;
+      expect((await restarted.history("a:c")).items[0]).toEqual(event.item);
+      expect(reads).toHaveLength(8);
+    } finally { await restarted.dispose(); }
+  } finally { subscription.events.cancel(); await service.dispose(); }
+});
+
+test("history remains readable if permanent admission cannot be persisted, and recovers without granting extra slots", async () => {
+  const root = path.join(directory, "blocked");
+  await fs.writeFile(root, "not a directory");
+  const store = new VisualStore("/workspace", root);
+  let reads = 0;
+  store.setReader(async () => { reads++; return png; });
+  const markdown = "Before\n\n" + Array.from({ length: 9 }, (_, i) => `![${i}](image-${i}.png)`).join("\n\n") + "\n\nAfter";
+  const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown }] };
+  const provider = { history: async () => snapshot, dispose: async () => {} } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  try {
+    const failed = (await service.history("a:c")).items[0] as AssistantMessageItem;
+    expect(failed.markdown).toBe(markdown);
+    expect(failed.visuals).toHaveLength(8);
+    expect(failed.visuals?.every(visual => visual.status === "unavailable" && visual.message === "Image snapshot could not be stored")).toBe(true);
+    expect(reads).toBe(0);
+    await fs.unlink(root);
+    const recovered = (await service.history("a:c")).items[0] as AssistantMessageItem;
+    expect(recovered.visuals?.every(visual => visual.status === "ready")).toBe(true);
+    expect(recovered.visuals).toHaveLength(8);
+    expect(reads).toBe(8);
+  } finally { await service.dispose(); }
+});
+
+describe("immutable visual snapshots", () => {
+  test.each(["```", "~~~"].flatMap(marker => ["newline", "completion"].map(boundary => ({ marker, boundary }))))("SVG text containing $marker labels never persists an EOF-prefix refusal before $boundary", async ({ marker, boundary }) => {
+    const store = new VisualStore("/workspace", directory);
+    const capture = (markdown: string, streaming: boolean, target = store) => target.captureMany("a:c", "svg-label", getChatVisuals(markdown, streaming).map(input => ({ messageId: "part:svg-label", input })), streaming);
+    const prefix = `${marker}svg\n<svg xmlns="http://www.w3.org/2000/svg"><text>\n${marker}`;
+    const continued = prefix + "label\n</text></svg>\n";
+    const eofClose = continued + marker + " \t";
+    const key = getChatVisuals(prefix, true)[0]!.key;
+    for (const markdown of [prefix, continued, eofClose]) {
+      expect(getChatVisuals(markdown, true)[0]).toMatchObject({ key, complete: false });
+      expect((await capture(markdown, true))[0]).toMatchObject({ status: "pending" });
+      // Slots are permanent, but a provisional parser interpretation must
+      // bind neither a canonical record nor retained/truncated SVG source.
+      expect((await fs.readdir(store.directory)).filter(name => /^[a-f\d]{64}(?:\.pending)?\.json$|\.(?:metadata\.json|preview\.bin|source\.bin)$/.test(name))).toEqual([]);
+    }
+    expect((await fs.readdir(store.directory)).filter(name => name.includes(".slot-"))).toHaveLength(1);
+    const markdown = eofClose + (boundary === "newline" ? "\n" : "");
+    const ready = await capture(markdown, boundary === "newline");
+    expect(ready[0]).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+    const expected = `<svg xmlns="http://www.w3.org/2000/svg"><text>\n${marker}label\n</text></svg>\n`;
+    const stored = await store.resolve(ready[0]!.id!);
+    expect(new TextDecoder().decode(stored?.sourceBytes)).toBe(expected);
+    expect(new TextDecoder().decode(stored?.bytes)).toBe(expected);
+    const canonical = path.join(store.directory, `${ready[0]!.id}.json`);
+    const original = await fs.readFile(canonical, "utf8");
+    const restarted = new VisualStore("/workspace", directory);
+    expect(await capture(markdown, false, restarted)).toEqual(ready);
+    expect(await restarted.resolve(ready[0]!.id!)).toEqual(stored);
+    expect(await fs.readFile(canonical, "utf8")).toBe(original);
+  });
+  test.each([false, true])("a provisional shortcut binds neither old bytes nor a missing-file hash before becoming inline (old missing=%s)", async missing => {
+    const store = new VisualStore("/workspace", directory);
+    const reads: string[] = [];
+    const newBytes = Uint8Array.from([...png.slice(0, -1), 2]);
+    store.setReader(async source => {
+      reads.push(source);
+      if (source === "old.png" && missing) throw new VisualReadError(true);
+      return source === "new.png" ? newBytes : png;
+    });
+    const prefix = "[shot]: old.png\n\n![shot]";
+    const capture = (markdown: string, streaming: boolean, target = store) => target.captureMany("a:c", "shortcut", getChatVisuals(markdown, streaming).map(input => ({ messageId: "part:shortcut", input })), streaming);
+    expect((await capture(prefix, true))[0]?.status).toBe("pending");
+    expect((await capture(prefix + "(new.p", true))[0]?.status).toBe("pending");
+    expect(reads).toEqual([]);
+    const markdown = prefix + "(new.png)";
+    const ready = await capture(markdown, true);
+    expect(ready[0]?.status).toBe("ready");
+    expect(reads).toEqual(["new.png"]);
+    expect((await store.resolve(ready[0]!.id!))?.bytes).toEqual(newBytes);
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async source => { reads.push(source); return png; });
+    expect(await capture(markdown, false, restarted)).toEqual(ready);
+    expect((await restarted.resolve(ready[0]!.id!))?.bytes).toEqual(newBytes);
+    expect(reads).toEqual(["new.png"]);
+  });
+  test.each(["newline", "completion"] as const)("split reference destinations capture only after %s", async boundary => {
+    const store = new VisualStore("/workspace", directory);
+    const reads: string[] = [];
+    store.setReader(async source => { reads.push(source); return png; });
+    const capture = (markdown: string, streaming: boolean) => store.captureMany("a:c", "native-ref", getChatVisuals(markdown, streaming).map(input => ({ messageId: "part:ref", input })), streaming);
+    const prefix = "![shot][ref]\n\n[ref]: a.p";
+    expect((await capture(prefix, true)).map(visual => visual.status)).toEqual(["pending"]);
+    expect((await capture(prefix + "ng", true)).map(visual => visual.status)).toEqual(["pending"]);
+    expect(reads).toEqual([]);
+    const markdown = prefix + "ng" + (boundary === "newline" ? "\n" : "");
+    const captured = await capture(markdown, boundary === "newline");
+    expect(captured).toEqual([expect.objectContaining({ status: "ready", mimeType: "image/png" })]);
+    expect(reads).toEqual(["a.png"]);
+    // A later unfinished, unrelated definition cannot turn a stored capture
+    // back into pending or change its bytes.
+    const later = markdown + "\n\n[other]: half.p";
+    expect(await capture(later, true)).toEqual(captured);
+    expect(reads).toEqual(["a.png"]);
+    expect((await store.resolve(captured[0]!.id!))?.bytes).toEqual(png);
+  });
+  test("a full admission ledger is read once for rejected later parts and repeated deltas", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let sourceReads = 0;
+    store.setReader(async () => { sourceReads++; return png; });
+    const requests = Array.from({ length: 8 }, (_, index) => ({ messageId: "first-part", input: file(`image-${index}.png`, index) }));
+    const first = await store.captureMany("a:c", "native-message", requests, true);
+    expect(first).toHaveLength(8);
+    const rejected = Array.from({ length: 1024 }, (_, index) => ({ messageId: "later-part", input: file(`later-${index}.png`, index) }));
+    // A fresh store must discover all eight immutable slots, but not reread
+    // them for each rejected occurrence or each subsequent enrichment delta.
+    const restarted = new VisualStore("/workspace", directory);
+    let slotReads = 0;
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]).includes(".slot-")) slotReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      expect(await restarted.captureMany("a:c", "native-message", rejected, true)).toEqual([]);
+      expect(slotReads).toBe(8);
+      expect(await restarted.captureMany("a:c", "native-message", rejected, true)).toEqual([]);
+      expect(slotReads).toBe(8);
+      // Full does not mean stop iterating: admitted IDs may follow refusals.
+      expect(await restarted.captureMany("a:c", "native-message", [...rejected, ...requests], false)).toEqual(first);
+      expect(slotReads).toBe(8);
+      expect(sourceReads).toBe(8);
+    } finally { readFile.mockRestore(); }
+  });
+  test("filling a blank ledger reserves each occurrence once and caches complete membership", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let sourceReads = 0, slotReads = 0;
+    store.setReader(async () => { sourceReads++; return png; });
+    const requests = Array.from({ length: 8 }, (_, index) => ({ messageId: "first-part", input: file(`image-${index}.png`, index) }));
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]).includes(".slot-")) slotReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      const first = await store.captureMany("a:c", "native-message", requests, true);
+      expect(first.every(snapshot => snapshot.status === "ready")).toBe(true);
+      // 36 occupied-slot reads (1 + ... + 8), plus eight initial ENOENTs.
+      expect(slotReads).toBe(44);
+      const rejected = Array.from({ length: 1024 }, (_, index) => ({ messageId: "later-part", input: file(`later-${index}.png`, index) }));
+      expect(await store.captureMany("a:c", "native-message", rejected, true)).toEqual([]);
+      expect(await store.captureMany("a:c", "native-message", [...rejected, ...requests], false)).toEqual(first);
+      expect(await store.capture("a:c", "later-part", file("ninth.png"), false, "native-message")).toMatchObject({ status: "unavailable", message: "Image limit exceeded" });
+      expect(slotReads).toBe(44);
+      expect(sourceReads).toBe(8);
+    } finally { readFile.mockRestore(); }
+  });
+  test.each([1, 3, 7])("captureMany reserves only once per occurrence with a partial %i-slot ledger", async count => {
+    const store = new VisualStore("/workspace", directory);
+    let slotReads = 0, sourceReads = 0;
+    store.setReader(async () => { sourceReads++; return png; });
+    const requests = Array.from({ length: count }, (_, index) => ({ messageId: `native-part-${index}`, input: file(`image-${index}.png`, index) }));
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]).includes(".slot-")) slotReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      const first = await store.captureMany("a:c", "native-message", requests, true);
+      expect(first).toHaveLength(count);
+      expect(first.every(snapshot => snapshot.status === "ready")).toBe(true);
+      // Each reservation scans through its owner once; a new slot also has
+      // one initial ENOENT. Capturing must not scan that partial ledger again.
+      const occupiedReads = count * (count + 1) / 2;
+      expect(slotReads).toBe(occupiedReads + count);
+      expect(sourceReads).toBe(count);
+      slotReads = 0;
+      expect(await store.captureMany("a:c", "native-message", requests, true)).toEqual(first);
+      expect(slotReads).toBe(occupiedReads);
+      slotReads = 0;
+      const restarted = new VisualStore("/workspace", directory);
+      expect(await restarted.captureMany("a:c", "native-message", requests, false)).toEqual(first);
+      expect(slotReads).toBe(occupiedReads);
+      expect(sourceReads).toBe(count);
+    } finally { readFile.mockRestore(); }
+  });
+  test("partial admissions observe another store filling slots and full caches stay group-local", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const other = new VisualStore("/workspace", directory);
+    for (const instance of [store, other]) instance.setReader(async () => png);
+    const first = await store.capture("a:c", "first-part", file(), true, "native-message");
+    const requests = Array.from({ length: 7 }, (_, index) => ({ messageId: "other-part", input: file(`other-${index}.png`, index) }));
+    const others = await other.captureMany("a:c", "native-message", requests, true);
+    expect(others).toHaveLength(7);
+    const ninth = { messageId: "later-part", input: file() };
+    expect(await store.captureMany("a:c", "native-message", [ninth, ...requests], false)).toEqual(others);
+    expect(await store.capture("a:c", "first-part", file(), false, "native-message")).toEqual(first);
+    expect(await store.capture("a:c", "later-part", file(), false, "native-message")).toMatchObject({ message: "Image limit exceeded" });
+    expect((await store.captureMany("a:c", "different-message", [ninth], false))[0]?.status).toBe("ready");
+    expect((await store.captureMany("b:c", "native-message", [ninth], false))[0]?.status).toBe("ready");
+  });
+  test("first processing establishes admissions without prioritizing or mutating pre-ledger capture records", async () => {
+    const names = ["old-0.png", "safe.svg", "unsafe.svg", ...Array.from({ length: 5 }, (_, i) => `old-${i + 3}.png`)];
+    const prefix = '<table><tr><td>' + names.map(name => `<img src="${name}">`).join("") + '</td></tr>';
+    const original = new VisualStore("/workspace", directory);
+    let reads = 0;
+    const unsafe = '<svg onload="alert(1)"/>';
+    original.setReader(async source => { reads++; return source === "safe.svg" ? new TextEncoder().encode(svg) : source === "unsafe.svg" ? new TextEncoder().encode(unsafe) : png; });
+    const before = await original.captureMany("a:c", "m", getChatVisuals(prefix, true).map(input => ({ messageId: "m", input })), true);
+    const bytes = await Promise.all(before.map(snapshot => original.resolve(snapshot.id!)));
+    const records = await Promise.all(before.map(snapshot => fs.readFile(path.join(original.directory, `${snapshot.id}.json`), "utf8")));
+    // Pre-ledger state used these same complete occurrence records, without
+    // any recoverable message grouping. Keep the records themselves untouched.
+    for (const filename of await fs.readdir(original.directory)) {
+      if (/\.slot-\d+\.json$|\.(?:metadata\.json|preview\.bin|source\.bin)$/.test(filename)) await fs.unlink(path.join(original.directory, filename));
+    }
+    const markdown = prefix + '<img src="new.png"></table>';
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async () => { reads++; return Uint8Array.from([0xff, 0xd8, 0xff]); });
+    const provider = { history: async () => ({ conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown }] }), dispose: async () => {} } as unknown as WorkspaceChatService;
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: restarted, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+    try {
+      const processed = (await service.history("a:c")).items[0] as AssistantMessageItem;
+      // Unreleased test-build compatibility is not an admission policy: the
+      // new leading occurrence takes a slot on first processing by this ledger.
+      expect(processed.visuals).toHaveLength(8);
+      expect(processed.visuals?.[0]).toMatchObject({ index: 0, status: "ready", mimeType: "image/jpeg" });
+      expect(processed.visuals?.slice(1)).toEqual(before.slice(0, 7).map(snapshot => ({ ...snapshot, index: snapshot.index + 1 })));
+      expect(processed.visuals?.some(snapshot => snapshot.id === before[7]!.id)).toBe(false);
+      expect(reads).toBe(9);
+      expect(await Promise.all(before.map(snapshot => restarted.resolve(snapshot.id!)))).toEqual(bytes);
+      expect(await Promise.all(before.map(snapshot => fs.readFile(path.join(original.directory, `${snapshot.id}.json`), "utf8")))).toEqual(records);
+      expect(new TextDecoder().decode(bytes[1]?.sourceBytes)).toBe(svg);
+      expect(new TextDecoder().decode(bytes[2]?.sourceBytes)).toBe(unsafe);
+      expect(bytes[2]?.bytes).toBeUndefined();
+      expect((await fs.readdir(original.directory)).filter(filename => /\.slot-\d+\.json$/.test(filename))).toHaveLength(8);
+    } finally { await service.dispose(); }
+  });
+  test("a completed reply's unfinished SVG refusal is terminal after restart, while streaming source may grow", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const unfinished = { ...inline("<svg>"), key: "offset:0", complete: false };
+    expect((await store.capture("a:c", "unfinished", unfinished, true)).status).toBe("pending");
+    expect((await store.capture("a:c", "unfinished", { ...unfinished, source: "<svg><rect/>" }, true)).status).toBe("pending");
+    const refused = await store.capture("a:c", "unfinished", unfinished, false);
+    expect(refused.status).toBe("unavailable");
+    const restarted = new VisualStore("/workspace", directory);
+    expect((await restarted.capture("a:c", "unfinished", { ...inline(), key: unfinished.key }, false))).toMatchObject({ status: "unavailable", message: "Image source changed" });
+    expect(await restarted.capture("a:c", "unfinished", unfinished, false)).toEqual(refused);
+  });
+  test("refused and removed occurrences retain slots across source changes, restarts and concurrent admissions", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const reads: string[] = [];
+    store.setReader(async source => { reads.push(source); throw new VisualReadError(); });
+    for (let i = 0; i < 8; i++) expect((await store.capture("a:c", "m", { ...file(`refused-${i}.png`, i), key: `key-${i}` }, false)).status).toBe("unavailable");
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async source => { reads.push(source); return png; });
+    const changed = await restarted.capture("a:c", "m", { ...file("changed.png", 100), key: "key-0" }, false);
+    expect(changed).toMatchObject({ index: 100, status: "unavailable", message: "Image source changed" });
+    const excess = await Promise.all(Array.from({ length: 20 }, (_, i) => restarted.capture("a:c", "m", { ...file(`new-${i}.png`, 0), key: `new-${i}` }, false)));
+    expect(excess.every(visual => visual.message === "Image limit exceeded")).toBe(true);
+    expect(reads).toHaveLength(8);
+  });
+  test("independent stores concurrently reserve at most eight distinct occurrences, including after restart", async () => {
+    const stores = Array.from({ length: 4 }, () => new VisualStore("/workspace", directory));
+    const reads: string[] = [];
+    for (const store of stores) store.setReader(async source => { reads.push(source); return png; });
+    const captures = await Promise.all(Array.from({ length: 32 }, (_, i) => stores[i % stores.length]!.capture("a:c", "race-budget", { ...file(`image-${i}.png`, i), key: `key-${i}` }, false)));
+    expect(captures.filter(visual => visual.status === "ready")).toHaveLength(8);
+    expect(reads).toHaveLength(8);
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async () => { throw new Error("must not read a ninth occurrence"); });
+    expect(await restarted.capture("a:c", "race-budget", { ...file("later.png"), key: "later" }, false)).toMatchObject({ status: "unavailable", message: "Image limit exceeded" });
+    for (let i = 0; i < captures.length; i++) {
+      const input = { ...file(`image-${i}.png`, 200 + i), key: `key-${i}` };
+      expect(await restarted.capture("a:c", "race-budget", input, false)).toEqual({ ...captures[i]!, index: 200 + i });
+    }
+  });
+  test("separate Bun processes share the same permanent eight-slot admission ledger", async () => {
+    const children = Array.from({ length: 4 }, (_, worker) => {
+      const program = `
+        import { VisualStore } from ${JSON.stringify(new URL("./visual-store.ts", import.meta.url).href)};
+        const store = new VisualStore("/workspace", ${JSON.stringify(directory)});
+        let reads = 0;
+        store.setReader(async () => { reads++; return Uint8Array.from([137,80,78,71,13,10,26,10,1]); });
+        const captures = await Promise.all(Array.from({ length: 12 }, (_, i) => store.capture("a:c", "process-race", {
+          index: i, key: ${JSON.stringify(`worker-${worker}-`)} + i, kind: "file", source: "image.png", alt: "Image", complete: true,
+        }, false)));
+        console.log(JSON.stringify({ reads, ready: captures.filter(capture => capture.status === "ready").length }));
+      `;
+      return Bun.spawn([process.execPath, "--eval", program], { stdout: "pipe", stderr: "pipe" });
+    });
+    try {
+      const results = await Promise.all(children.map(async child => {
+        const [exit, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+        expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+        return JSON.parse(stdout) as { reads: number; ready: number };
+      }));
+      expect(results.reduce((count, result) => count + result.ready, 0)).toBe(8);
+      expect(results.reduce((count, result) => count + result.reads, 0)).toBe(8);
+      const restarted = new VisualStore("/workspace", directory);
+      expect(await restarted.capture("a:c", "process-race", { ...file(), key: "ninth-after-process-exit" }, false)).toMatchObject({ status: "unavailable", message: "Image limit exceeded" });
+    } finally { for (const child of children) { if (child.exitCode === null) child.kill(); } }
+  });
+  test("large replies capture only eight occurrences with four readers, without making the cap a conversation lifetime quota", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let active = 0, maximum = 0, reads = 0;
+    let release!: () => void;
+    let fourStarted!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { fourStarted = resolve; });
+    store.setReader(async () => {
+      reads++; active++; maximum = Math.max(maximum, active);
+      if (active === VISUAL_CAPTURE_CONCURRENCY) fourStarted();
+      try { await gate; return png; } finally { active--; }
+    });
+    const markdown = Array.from({ length: 256 }, (_, i) => `![${i}](image-${i}.png)`).join("\n\n");
+    let messageId = "first";
+    const provider = { history: async () => ({ conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: messageId, type: "assistant_message", createdAt: 1, markdown }] }), dispose: async () => {} } as unknown as WorkspaceChatService;
+    const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+    const pending = service.history("a:c");
+    try {
+      await started;
+      expect(reads).toBe(VISUAL_CAPTURE_CONCURRENCY);
+      release();
+      const first = (await pending).items[0] as AssistantMessageItem;
+      expect(first.visuals).toHaveLength(8);
+      expect(reads).toBe(8);
+      expect(maximum).toBe(VISUAL_CAPTURE_CONCURRENCY);
+      expect(parseHTML(renderChatMarkdown(markdown, { visuals: first.visuals })).document.querySelectorAll("img")).toHaveLength(8);
+      messageId = "second";
+      const second = (await service.history("a:c")).items[0] as AssistantMessageItem;
+      expect(second.visuals).toHaveLength(8);
+      expect(reads).toBe(16);
+      expect(second.visuals?.[0]?.id).not.toBe(first.visuals?.[0]?.id);
+      expect(active).toBe(0);
+    } finally { release(); await pending; await service.dispose(); }
+  });
+  test("source keys survive rendered index shifts, including pending/refused metadata and mismatches", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let bytes = png;
+    store.setReader(async () => bytes);
+    const input = { ...file("later.png"), key: "offset:15" };
+    const first = await store.capture("a:c", "shift", input, true);
+    bytes = Uint8Array.from([0xff, 0xd8, 0xff, 4]);
+    const shifted = await store.capture("a:c", "shift", { ...input, index: 1 }, false);
+    expect(shifted).toEqual({ ...first, index: 1 });
+    expect((await store.resolve(shifted.id!))?.bytes).toEqual(png);
+    const introduced = await store.capture("a:c", "shift", { ...file("earlier.jpg"), key: "offset:0" }, false);
+    expect(introduced.id).not.toBe(first.id);
+    expect(introduced.index).toBe(0);
+    expect((await store.capture("a:c", "shift", { ...input, index: 2, source: "changed.png" }, false))).toMatchObject({ index: 2, status: "unavailable" });
+    expect((await store.capture("a:c", "shift", input, false)).index).toBe(0);
+    const restarted = new VisualStore("/workspace", directory);
+    expect(await restarted.capture("a:c", "shift", { ...input, index: 3 }, false)).toEqual({ ...first, index: 3 });
+    const pendingInput = { ...file("missing.png"), key: "offset:30" };
+    store.setReader(async () => { throw new VisualReadError(true); });
+    await store.capture("a:c", "shift", pendingInput, true);
+    expect(await store.capture("a:c", "shift", { ...pendingInput, index: 4 }, true)).toMatchObject({ index: 4, status: "pending" });
+    const refusedInput = { ...inline('<svg onload="alert(1)"/>'), key: "offset:60" };
+    const refused = await store.capture("a:c", "shift", refusedInput, false);
+    expect(await store.capture("a:c", "shift", { ...refusedInput, index: 5 }, false)).toEqual({ ...refused, index: 5 });
+    expect(await restarted.capture("a:c", "shift", { ...pendingInput, index: 6, source: "different.svg" }, false)).toMatchObject({ index: 6, status: "unavailable" });
+  });
+  test("admission permits and duplicate-key waits recover after persistence failures", async () => {
+    const root = path.join(directory, "blocked");
+    await fs.writeFile(root, "not a directory");
+    const store = new VisualStore("/workspace", root);
+    store.setReader(async () => png);
+    const attempts = await Promise.allSettled(Array.from({ length: 16 }, (_, index) => store.capture("a:c", `m-${index % 8}`, file(), false)));
+    expect(attempts.every(result => result.status === "rejected")).toBe(true);
+    await fs.unlink(root);
+    expect((await store.capture("a:c", "m-0", file(), false)).status).toBe("ready");
+  });
+  test("first successful bytes survive mutation, duplicates, restart and workspace/conversation isolation", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let bytes = png;
+    store.setReader(async () => bytes);
+    const first = await store.capture("a:c", "m", file(), true);
+    expect(first.status).toBe("ready");
+    bytes = new Uint8Array([0xff, 0xd8, 0xff, 7]);
+    expect(await store.capture("a:c", "m", file(), false)).toEqual(first);
+    const restarted = new VisualStore("/workspace", directory);
+    expect((await restarted.resolve(first.id!))?.bytes).toEqual(png);
+    expect(await restarted.capture("a:c", "m", file(), false)).toEqual(first);
+    expect((await store.capture("b:c", "m", file(), false)).id).not.toBe(first.id);
+    expect(await new VisualStore("/other", directory).resolve(first.id!)).toBeNull();
+    expect((await store.capture("a:c", "m", file("different.png"), false)).status).toBe("unavailable");
+    expect(await store.resolve("../secret")).toBeNull();
+  });
+  test("new captures, cold history and repeated preview/source reads never parse canonical base64 JSON", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const largePng = new Uint8Array(VISUAL_MAX_BYTES);
+    largePng.set(png);
+    let sourceReads = 0, canonicalReads = 0, canonicalMisses = 0, canonicalRecordReads = 0, previewReads = 0, svgSourceReads = 0;
+    store.setReader(async () => { sourceReads++; return largePng; });
+    const inputs = [file(), { ...inline("<svg><text>original</text></svg>"), index: 1 }, { ...inline('<svg onload="alert(1)"/>'), index: 2 }];
+    const requests = inputs.map(input => ({ messageId: "m", input }));
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        const filename = path.basename(String(args[0]));
+        const canonical = /^[a-f\d]{64}\.json$/.test(filename);
+        if (canonical) canonicalReads++;
+        if (filename.endsWith(".preview.bin")) previewReads++;
+        if (filename.endsWith(".source.bin")) svgSourceReads++;
+        return Reflect.apply(target, thisArg, args).then((value: string | Buffer) => {
+          if (canonical) canonicalRecordReads++;
+          return value;
+        }, (error: NodeJS.ErrnoException) => {
+          if (canonical && error.code === "ENOENT") canonicalMisses++;
+          throw error;
+        });
+      },
+    }));
+    try {
+      const captured = await store.captureMany("a:c", "m", requests, false);
+      expect(captured.map(snapshot => snapshot.status)).toEqual(["ready", "ready", "unavailable"]);
+      // Each new occurrence probes for a legacy canonical winner before
+      // capture. ENOENT supplies no JSON to parse; successful reads would.
+      expect(canonicalReads).toBe(inputs.length);
+      expect(canonicalMisses).toBe(inputs.length);
+      expect(canonicalRecordReads).toBe(0);
+      expect(sourceReads).toBe(1);
+      for (const snapshot of captured) {
+        const metadata = await fs.readFile(path.join(store.directory, `${snapshot.id}.metadata.json`), "utf8");
+        expect(metadata.length).toBeLessThan(1024);
+        expect(JSON.parse(metadata)).not.toHaveProperty("bytes");
+        expect(JSON.parse(metadata)).not.toHaveProperty("sourceBytes");
+      }
+      for (let iteration = 0; iteration < 3; iteration++) {
+        const restarted = new VisualStore("/workspace", directory);
+        restarted.setReader(async () => { throw new Error("must use immutable metadata, not workspace files"); });
+        expect(await restarted.captureMany("a:c", "m", requests, false)).toEqual(captured);
+        const restored = await Promise.all(captured.map(snapshot => restarted.resolve(snapshot.id!)));
+        expect(restored[0]?.bytes).toEqual(largePng);
+        expect(new TextDecoder().decode(restored[1]?.bytes)).toBe('<svg xmlns="http://www.w3.org/2000/svg"><text>original</text></svg>');
+        expect(new TextDecoder().decode(restored[1]?.sourceBytes)).toBe(inputs[1]!.source);
+        expect(restored[2]?.bytes).toBeUndefined();
+        expect(new TextDecoder().decode(restored[2]?.sourceBytes)).toBe(inputs[2]!.source);
+        // Neither cold metadata reads nor repeated byte delivery may add
+        // canonical probes, including failed ones, after initial capture.
+        expect(canonicalReads).toBe(inputs.length);
+        expect(canonicalMisses).toBe(inputs.length);
+        expect(canonicalRecordReads).toBe(0);
+      }
+      expect(previewReads).toBe(6);
+      expect(svgSourceReads).toBe(6);
+      expect(sourceReads).toBe(1);
+    } finally { readFile.mockRestore(); }
+  });
+  test.each(["ready", "unavailable"] as const)("legacy %s SVG materializes from its immutable canonical record only once", async status => {
+    const store = new VisualStore("/workspace", directory);
+    const source = status === "ready" ? "<svg><text>legacy</text></svg>" : '<svg onload="alert(1)"/>';
+    const preview = '<svg xmlns="http://www.w3.org/2000/svg"><text>legacy</text></svg>';
+    const input = inline(source);
+    const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+    const id = digest(JSON.stringify(["a:c", "legacy", "0"]));
+    const snapshot = { index: 0, status, id, mimeType: "image/svg+xml" };
+    const record = "\n" + JSON.stringify({
+      sourceHash: digest(JSON.stringify([input.kind, input.source])), snapshot,
+      ...(status === "ready" ? { bytes: Buffer.from(preview).toString("base64") } : {}),
+      sourceBytes: Buffer.from(source).toString("base64"),
+      // Unknown persisted filename fields must never become filesystem paths.
+      filename: "../outside", sourceFilename: "../outside",
+    }, null, 2) + "\n";
+    await fs.mkdir(store.directory, { recursive: true });
+    const canonical = path.join(store.directory, `${id}.json`);
+    await fs.writeFile(canonical, record);
+    const before = await fs.stat(canonical);
+    let canonicalReads = 0;
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        if (String(args[0]) === canonical) canonicalReads++;
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      // A source/preview GET may be the first read, without history enrichment.
+      const [first, duplicate] = await Promise.all([store.resolve(id), store.resolve(id)]);
+      expect(duplicate).toEqual(first);
+      expect(new TextDecoder().decode(first?.sourceBytes)).toBe(source);
+      expect(first?.bytes).toEqual(status === "ready" ? Buffer.from(preview) : undefined);
+      expect(canonicalReads).toBe(1);
+      for (let iteration = 0; iteration < 3; iteration++) {
+        const restarted = new VisualStore("/workspace", directory);
+        restarted.setReader(async () => { throw new Error("must not recapture a legacy occurrence"); });
+        expect(await restarted.capture("a:c", "legacy", input, false)).toEqual(snapshot);
+        expect(await restarted.resolve(id)).toEqual(first);
+      }
+      expect(canonicalReads).toBe(1);
+    } finally { readFile.mockRestore(); }
+    expect(await fs.readFile(canonical, "utf8")).toBe(record);
+    const after = await fs.stat(canonical);
+    expect({ ino: after.ino, size: after.size, mtimeMs: after.mtimeMs }).toEqual({ ino: before.ino, size: before.size, mtimeMs: before.mtimeMs });
+  });
+  test("independent stores racing publish a single complete winner", async () => {
+    const a = new VisualStore("/workspace", directory), b = new VisualStore("/workspace", directory);
+    a.setReader(async () => png);
+    b.setReader(async () => Uint8Array.from([0xff, 0xd8, 0xff]));
+    const results = await Promise.all([a.capture("a:c", "m", file(), true), b.capture("a:c", "m", file(), true)]);
+    expect(results[0]).toEqual(results[1]);
+    expect((await a.resolve(results[0]!.id!))?.mimeType).toBe(results[0]!.mimeType!);
+  });
+  test("interrupted sidecar publication resumes from the canonical winner without recapture or orphan files", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const input = inline("<svg><text>winner</text></svg>");
+    const originalLink = fs.link.bind(fs);
+    const link = spyOn(fs, "link").mockImplementation(async (existingPath, newPath) => {
+      if (String(newPath).endsWith(".source.bin")) throw Object.assign(new Error("sidecar publication interrupted"), { code: "EIO" });
+      return originalLink(existingPath, newPath);
+    });
+    try {
+      const first = await store.capture("a:c", "interrupted", input, false);
+      expect(first.status).toBe("ready");
+      // Derived cache failure cannot turn an immutable ready capture into a
+      // refusal or hide its original bytes, even before a repair can succeed.
+      expect(new TextDecoder().decode((await store.resolve(first.id!))?.sourceBytes)).toBe(input.source);
+    }
+    finally { link.mockRestore(); }
+    const filenames = await fs.readdir(store.directory);
+    const canonicalName = filenames.find(filename => /^[a-f\d]{64}\.json$/.test(filename))!;
+    const id = canonicalName.slice(0, -".json".length);
+    const canonical = await fs.readFile(path.join(store.directory, canonicalName), "utf8");
+    const preview = await fs.readFile(path.join(store.directory, `${id}.preview.bin`));
+    expect(filenames.some(filename => filename.endsWith(".metadata.json") || filename.endsWith(".tmp"))).toBe(false);
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async () => { throw new Error("canonical winner must not be recaptured"); });
+    const snapshot = await restarted.capture("a:c", "interrupted", input, false);
+    expect(snapshot).toMatchObject({ status: "ready", id });
+    const restored = await restarted.resolve(id);
+    expect(restored?.bytes).toEqual(preview);
+    expect(new TextDecoder().decode(restored?.sourceBytes)).toBe(input.source);
+    expect(await fs.readFile(path.join(store.directory, canonicalName), "utf8")).toBe(canonical);
+    expect((await fs.readdir(store.directory)).sort()).toEqual([
+      ...filenames.filter(filename => filename.includes(".slot-")), canonicalName,
+      `${id}.metadata.json`, `${id}.preview.bin`, `${id}.source.bin`,
+    ].sort());
+  });
+  test("legacy bytes remain readable without sidecar write access and missing sidecars repair when writes recover", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const snapshot = await store.capture("a:c", "read-only", inline(), false);
+    const expected = await store.resolve(snapshot.id!);
+    const canonical = path.join(store.directory, `${snapshot.id}.json`);
+    const original = await fs.readFile(canonical, "utf8");
+    for (const suffix of ["metadata.json", "preview.bin", "source.bin"]) await fs.unlink(path.join(store.directory, `${snapshot.id}.${suffix}`));
+    const restarted = new VisualStore("/workspace", directory);
+    const writeFile = spyOn(fs, "writeFile").mockImplementation(async () => {
+      throw Object.assign(new Error("read-only state"), { code: "EROFS" });
+    });
+    try { expect(await restarted.resolve(snapshot.id!)).toEqual(expected); }
+    finally { writeFile.mockRestore(); }
+    // Cached metadata must not hide the need to repair missing raw files.
+    expect(await restarted.resolve(snapshot.id!)).toEqual(expected);
+    const reads: string[] = [];
+    const originalReadFile = fs.readFile.bind(fs);
+    const readFile = spyOn(fs, "readFile").mockImplementation(new Proxy(originalReadFile, {
+      apply(target, thisArg, args) {
+        reads.push(String(args[0]));
+        return Reflect.apply(target, thisArg, args);
+      },
+    }));
+    try {
+      expect(await new VisualStore("/workspace", directory).resolve(snapshot.id!)).toEqual(expected);
+      expect(reads).not.toContain(canonical);
+      expect(reads).toContain(path.join(store.directory, `${snapshot.id}.source.bin`));
+      expect(reads).toContain(path.join(store.directory, `${snapshot.id}.preview.bin`));
+    } finally { readFile.mockRestore(); }
+    expect(await fs.readFile(canonical, "utf8")).toBe(original);
+  });
+  test("separate processes derive source and preview sidecars only from their shared canonical winner", async () => {
+    const sources = ["<svg><text>safe winner</text></svg>", '<svg onload="alert(1)"/>'];
+    const children = sources.map(source => {
+      const program = `
+        import { VisualStore } from ${JSON.stringify(new URL("./visual-store.ts", import.meta.url).href)};
+        const store = new VisualStore("/workspace", ${JSON.stringify(directory)});
+        store.setReader(async () => {
+          console.log("reader-ready");
+          await Bun.stdin.text();
+          return new TextEncoder().encode(${JSON.stringify(source)});
+        });
+        console.log(JSON.stringify(await store.capture("a:c", "same-process-race", {
+          index: 0, kind: "file", source: "image.svg", alt: "Image", complete: true,
+        }, false)));
+      `;
+      return Bun.spawn([process.execPath, "--eval", program], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    });
+    try {
+      // Both contenders must have read the absent canonical record before
+      // either can publish, rather than depending on process timing.
+      const readers = await Promise.all(children.map(async child => {
+        const reader = child.stdout.getReader();
+        const ready = await reader.read();
+        expect(new TextDecoder().decode(ready.value)).toBe("reader-ready\n");
+        return reader;
+      }));
+      for (const child of children) { child.stdin.write("publish"); child.stdin.end(); }
+      const results = await Promise.all(children.map(async (child, index) => {
+        const stdout = (async () => {
+          let output = "";
+          const decoder = new TextDecoder();
+          while (true) {
+            const next = await readers[index]!.read();
+            if (next.done) return output;
+            output += decoder.decode(next.value, { stream: true });
+          }
+        })();
+        const [exit, output, stderr] = await Promise.all([child.exited, stdout, new Response(child.stderr).text()]);
+        expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+        return JSON.parse(output) as { id: string; status: "ready" | "unavailable" };
+      }));
+      expect(results[0]).toEqual(results[1]);
+      const id = results[0]!.id;
+      const restarted = new VisualStore("/workspace", directory);
+      const canonical = JSON.parse(await fs.readFile(path.join(restarted.directory, `${id}.json`), "utf8"));
+      const restored = (await restarted.resolve(id))!;
+      const source = Buffer.from(canonical.sourceBytes, "base64");
+      expect(restored.sourceBytes).toEqual(source);
+      expect(source.toString()).toBe(results[0]!.status === "ready" ? sources[0]! : sources[1]!);
+      expect(restored.bytes).toEqual(canonical.bytes === undefined ? undefined : Buffer.from(canonical.bytes, "base64"));
+      expect((await fs.readdir(restarted.directory)).sort()).toEqual([
+        ...(await fs.readdir(restarted.directory)).filter(filename => filename.includes(".slot-")),
+        `${id}.json`, `${id}.metadata.json`, `${id}.source.bin`,
+        ...(results[0]!.status === "ready" ? [`${id}.preview.bin`] : []),
+      ].sort());
+    } finally { for (const child of children) { if (child.exitCode === null) child.kill(); } }
+  }, 15_000);
+  test("missing is tried once during streaming, once at completion, and not again after restart", async () => {
+    let reads = 0;
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async () => { reads++; throw new VisualReadError(true); });
+    expect((await store.capture("a:c", "m", file(), true)).status).toBe("pending");
+    expect((await store.capture("a:c", "m", file(), true)).status).toBe("pending");
+    expect(reads).toBe(1);
+    expect((await store.capture("a:c", "m", file(), false)).status).toBe("unavailable");
+    expect(reads).toBe(2);
+    const restarted = new VisualStore("/workspace", directory);
+    restarted.setReader(async () => { throw new Error("must not retry"); });
+    expect((await restarted.capture("a:c", "m", file(), false)).status).toBe("unavailable");
+  });
+  test("missing becomes ready on completion; invalid and incomplete content fail gracefully", async () => {
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async () => { throw new VisualReadError(true); });
+    await store.capture("a:c", "m", file(), true);
+    store.setReader(async () => png);
+    expect((await store.capture("a:c", "m", file(), false)).status).toBe("ready");
+    expect((await store.capture("a:c", "large", inline("x".repeat(VISUAL_MAX_BYTES + 1)), false)).status).toBe("unavailable");
+    expect((await store.capture("a:c", "incomplete", { ...inline(), complete: false }, true)).status).toBe("pending");
+    expect((await store.capture("a:c", "incomplete", { ...inline(), complete: false }, false)).status).toBe("unavailable");
+    for (let index = 0; index < 8; index++) await store.capture("a:c", "limit", file("image.png", index), false);
+    expect((await store.capture("a:c", "limit", file("image.png", 8), false)).message).toBe("Image limit exceeded");
+  });
+  test("SVG retains exact original bytes; invalid SVG is terminal", async () => {
+    const store = new VisualStore("/workspace", directory);
+    const ready = await store.capture("a:c", "svg", inline(), false);
+    expect(ready.mimeType).toBe("image/svg+xml");
+    expect(new TextDecoder().decode((await store.resolve(ready.id!))!.bytes)).toBe(svg);
+    expect((await store.capture("a:c", "bad", inline('<svg onload="alert(1)"/>'), true)).status).toBe("unavailable");
+    expect((await store.capture("a:c", "bad", inline(), false)).status).toBe("unavailable");
+    const fragment = '<?xml version="1.0" encoding="UTF-8"?><!-- <svg> --><svg><style>.x { fill:red }</style><rect class="x"/></svg>';
+    const normalized = await store.capture("a:c", "fragment", inline(fragment), false);
+    const stored = (await store.resolve(normalized.id!))!;
+    expect(new TextDecoder().decode(stored.sourceBytes)).toBe(fragment);
+    expect(new TextDecoder().decode(stored.bytes)).toBe('<!-- <svg> --><svg xmlns="http://www.w3.org/2000/svg"><style>.x { fill:red }</style><rect class="x"/></svg>');
+  });
+  test.each([
+    {
+      name: "comments before, inside and after a namespace-less root",
+      source: '<!-- <svg xmlns="http://evil.test"/> --><svg><text>A<!--comment-->B</text></svg><!-- <svg/> -->',
+      preview: '<!-- <svg xmlns="http://evil.test"/> --><svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg><!-- <svg/> -->',
+    },
+    {
+      name: "a commented namespace-less root before a namespaced root",
+      source: '<!-- <svg> --><svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg>',
+      preview: '<!-- <svg> --><svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg>',
+    },
+    {
+      name: "declaration removal without comment or text changes",
+      source: '<?xml version="1.0" encoding="UTF-8"?>\n<!-- <svg/> -->\n<svg><text>A<!--comment-->B</text></svg>\n<!--after-->',
+      preview: '\n<!-- <svg/> -->\n<svg xmlns="http://www.w3.org/2000/svg"><text>A<!--comment-->B</text></svg>\n<!--after-->',
+    },
+  ])("SVG preserves exact preview comments, text adjacency and original source: $name", async ({ source, preview }) => {
+    const store = new VisualStore("/workspace", directory);
+    const ready = await store.capture("a:c", "commented", inline(source), false);
+    expect(ready.status).toBe("ready");
+    const stored = (await store.resolve(ready.id!))!;
+    expect(new TextDecoder().decode(stored.bytes)).toBe(preview);
+    expect(new TextDecoder().decode(stored.sourceBytes)).toBe(source);
+    const restarted = new VisualStore("/workspace", directory);
+    expect(await restarted.capture("a:c", "commented", inline(source), false)).toEqual(ready);
+    expect(await restarted.resolve(ready.id!)).toEqual(stored);
+  });
+  test.each([
+    '<svg><!-- outer <!-- inner --> outer --></svg>',
+    '<svg><!--a---></svg>',
+    '<svg><!<!--comment-->--reconstructed--></svg>',
+    '<!DOC<!--comment-->TYPE svg><svg/>',
+    '<svg><te<!--comment-->xt>A</text></svg>',
+    '<svg id="A<!--comment-->B"/>',
+    '<svg><text>&am<!--comment-->p;</text></svg>',
+  ])("malformed commented SVG retains source without preview bytes: %s", async source => {
+    const store = new VisualStore("/workspace", directory);
+    const refused = await store.capture("a:c", "malformed", inline(source), false);
+    expect(refused).toMatchObject({ status: "unavailable", mimeType: "image/svg+xml" });
+    const stored = (await store.resolve(refused.id!))!;
+    expect(stored.bytes).toBeUndefined();
+    expect(new TextDecoder().decode(stored.sourceBytes)).toBe(source);
+  });
+  test("refused local SVG preserves first original across mutation, deletion and restart, without preview bytes", async () => {
+    const root = path.join(directory, "workspace");
+    await fs.mkdir(root);
+    const original = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const pathname = path.join(root, "unsafe.svg");
+    await fs.writeFile(pathname, original);
+    const store = new VisualStore(root, path.join(directory, "state"));
+    store.setReader(createWatchedVisualReader([{ kind: "dir", absolutePath: root } as never]));
+    const refused = await store.capture("a:c", "unsafe", file("unsafe.svg"), true);
+    expect(refused).toMatchObject({ status: "unavailable", mimeType: "image/svg+xml" });
+    expect(refused.id).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(refused)).not.toContain(original);
+    await fs.writeFile(pathname, svg);
+    expect(await store.capture("a:c", "unsafe", file("unsafe.svg"), false)).toEqual(refused);
+    await fs.unlink(pathname);
+    const restarted = new VisualStore(root, path.join(directory, "state"));
+    expect(await restarted.capture("a:c", "unsafe", file("unsafe.svg"), false)).toEqual(refused);
+    const stored = (await restarted.resolve(refused.id!))!;
+    expect(stored.bytes).toBeUndefined();
+    expect(new TextDecoder().decode(stored.sourceBytes)).toBe(original);
+    const fence = await store.capture("a:c", "fence", inline(original), false);
+    expect(new TextDecoder().decode((await store.resolve(fence.id!))?.sourceBytes)).toBe(original);
+    expect((await store.resolve(fence.id!))?.bytes).toBeUndefined();
+  });
+  test("source retention requires explicit SVG candidate, bounded valid UTF-8; arbitrary text never becomes source", async () => {
+    const store = new VisualStore("/workspace", directory);
+    let bytes = new TextEncoder().encode(svg);
+    store.setReader(async () => bytes);
+    for (const source of ["notes.txt", "README.md", "no-extension", "not-svg.png"]) {
+      const refused = await store.capture("a:c", source, file(source), false);
+      expect(refused.status).toBe("unavailable");
+      expect(refused.id).toBeUndefined();
+    }
+    bytes = Uint8Array.from([0xff, 0xfe, 0, 0x3c]);
+    expect((await store.capture("a:c", "invalid-utf8", file("invalid.svg"), false)).id).toBeUndefined();
+    bytes = new Uint8Array(VISUAL_MAX_BYTES + 1);
+    expect((await store.capture("a:c", "too-large", file("large.svg"), false)).id).toBeUndefined();
+    const emptyFence = await store.capture("a:c", "empty", inline(""), false);
+    expect(emptyFence.status).toBe("unavailable");
+    expect((await store.resolve(emptyFence.id!))?.sourceBytes?.length).toBe(0);
+  });
+  test("racing SVG captures publish source and preview availability as one immutable record", async () => {
+    const a = new VisualStore("/workspace", directory), b = new VisualStore("/workspace", directory);
+    const unsafe = '<svg onload="alert(1)"/>';
+    a.setReader(async () => new TextEncoder().encode(unsafe));
+    b.setReader(async () => new TextEncoder().encode(svg));
+    const [first, second] = await Promise.all([a.capture("a:c", "race-svg", file("image.svg"), true), b.capture("a:c", "race-svg", file("image.svg"), true)]);
+    expect(first).toEqual(second!);
+    const restored = (await new VisualStore("/workspace", directory).resolve(first!.id!))!;
+    expect(new TextDecoder().decode(restored.sourceBytes)).toBe(first!.status === "ready" ? svg : unsafe);
+    expect(restored.bytes !== undefined).toBe(first!.status === "ready");
+  });
+});
+
+describe("watched-root bounded reader", () => {
+  test("capture follows upstream visibility policy for build output and explicit exclusions", async () => {
+    const root = path.join(directory, "workspace");
+    await fs.mkdir(path.join(root, "build"), { recursive: true });
+    await fs.mkdir(path.join(root, "node_modules"));
+    for (const name of [".env", "build/image.png", "node_modules/image.png", "ignored.png", "excluded.png", ".DS_Store"]) {
+      await fs.writeFile(path.join(root, name), png);
+    }
+    await fs.writeFile(path.join(root, ".gitignore"), "ignored.png\n");
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.png"] } }));
+    const entries = await resolveWatchRoots([root], directory);
+    const reader = createWatchedVisualReader(entries);
+    const store = new VisualStore(root, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    for (const [index, name] of [".env", "build/image.png", "node_modules/image.png", "ignored.png"].entries()) {
+      expect(await reader(name, root)).toEqual(png);
+      expect(await store.capture("a:c", "upstream-policy", file(name, index), false)).toMatchObject({ status: "ready", mimeType: "image/png" });
+    }
+    for (const name of ["excluded.png", ".DS_Store"]) await expect(reader(name, root)).rejects.toMatchObject({ missing: false });
+  });
+  test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("nested watch roots can authorize a parent-excluded visual ($name)", async ({ aliased }) => {
+    const root = path.join(directory, "workspace");
+    await fs.mkdir(path.join(root, "images"), { recursive: true });
+    for (const name of ["diagram.svg", "blocked.svg", ".DS_Store"]) await fs.writeFile(path.join(root, "images", name), svg);
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["images/"] } }));
+    await fs.writeFile(path.join(root, "images", ".uatu.json"), JSON.stringify({ ignore: { exclude: ["blocked.svg"] } }));
+    await fs.writeFile(path.join(directory, "outside.svg"), svg);
+    await fs.symlink(path.join(directory, "outside.svg"), path.join(root, "images", "escape.svg"));
+    const watched = aliased ? path.join(directory, "alias") : root;
+    if (aliased) await fs.symlink(root, watched);
+    const entries = await resolveWatchRoots([watched, path.join(watched, "images")], directory);
+    const workspace = await fs.realpath(root);
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "images", "diagram.svg"), documentPath: path.join(watched, "images", "diagram.svg") });
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("images/diagram.svg", workspace))).toBe(svg);
+    expect(new TextDecoder().decode(await createWatchedVisualReader([...entries].reverse())("images/diagram.svg", workspace))).toBe(svg);
+    await expect(createWatchedVisualReader([entries[0]!])("images/diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+    for (const source of ["images/blocked.svg", "images/.DS_Store", "images/escape.svg", path.join(directory, "outside.svg")]) {
+      await expect(reader(source, workspace)).rejects.toMatchObject({ missing: false });
+    }
+    await expect(reader("images/missing.svg", workspace)).rejects.toMatchObject({ missing: true });
+    const store = new VisualStore(workspace, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    expect(await store.capture("a:c", "overlapping-roots", file("images/diagram.svg"), true)).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+  });
+  test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("single-file capture preserves static-file ignore scope ($name)", async ({ aliased }) => {
+    const root = path.join(directory, "workspace");
+    await fs.mkdir(root);
+    await fs.writeFile(path.join(root, "diagram.svg"), svg);
+    await fs.writeFile(path.join(root, "a.md"), "Explicit document");
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["diagram.svg", "a.md"] } }));
+    const watched = aliased ? path.join(directory, "alias") : root;
+    if (aliased) await fs.symlink(root, watched);
+    const entries = [{ kind: "file" as const, absolutePath: path.join(watched, "diagram.svg"), parentDir: watched }];
+    const workspace = await selectCanonicalChatRoot(entries);
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(workspace, "diagram.svg"), documentPath: path.join(watched, "diagram.svg") });
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("diagram.svg", workspace))).toBe(svg);
+    await expect(createWatchedVisualReader([{ kind: "dir", absolutePath: watched }])("diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+    await expect(reader("a.md", workspace)).rejects.toMatchObject({ missing: false });
+    const documentEntries = await resolveWatchRoots([path.join(watched, "a.md")], directory);
+    expect(new TextDecoder().decode(await createWatchedVisualReader(documentEntries)("a.md", workspace))).toBe("Explicit document");
+    const store = new VisualStore(workspace, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    expect(await store.capture("a:c", "explicit-file", file("diagram.svg"), true)).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+  });
+  test.each([{ name: "lexical", aliased: false }, { name: "aliased", aliased: true }])("unrelated single-file roots do not mask a later directory root ($name)", async ({ aliased }) => {
+    const workspace = path.join(directory, "workspace");
+    const images = path.join(workspace, "images");
+    await fs.mkdir(images, { recursive: true });
+    await fs.writeFile(path.join(workspace, "a.md"), "Watched document");
+    await fs.writeFile(path.join(images, "diagram.svg"), svg);
+    await fs.writeFile(path.join(images, "blocked.svg"), svg);
+    await fs.writeFile(path.join(images, ".DS_Store"), svg);
+    await fs.writeFile(path.join(images, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["blocked.svg"] } }));
+    await fs.writeFile(path.join(directory, "outside.svg"), svg);
+    await fs.symlink(path.join(directory, "outside.svg"), path.join(images, "escape.svg"));
+    const watched = aliased ? path.join(directory, "alias") : workspace;
+    if (aliased) await fs.symlink(workspace, watched);
+    const entries = await resolveWatchRoots([path.join(watched, "a.md"), path.join(watched, "images")], directory);
+    const canonical = await selectCanonicalChatRoot(entries);
+    expect(canonical).toBe(await fs.realpath(workspace));
+    expect(entries[0]!.kind).toBe("file");
+    expect(await resolveStaticFileRequest("diagram.svg", entries)).toEqual({ status: "found", filePath: path.join(canonical, "images", "diagram.svg"), documentPath: path.join(watched, "images", "diagram.svg") });
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("images/diagram.svg", canonical))).toBe(svg);
+    expect(new TextDecoder().decode(await createWatchedVisualReader([...entries].reverse())("images/diagram.svg", canonical))).toBe(svg);
+    for (const source of ["images/blocked.svg", "images/.DS_Store", "images/escape.svg", path.join(directory, "outside.svg")]) {
+      await expect(reader(source, canonical)).rejects.toMatchObject({ missing: false });
+    }
+    await expect(reader("images/missing.svg", canonical)).rejects.toMatchObject({ missing: true });
+    await expect(createWatchedVisualReader([entries[0]!])("images/diagram.svg", canonical)).rejects.toMatchObject({ missing: false });
+    expect(new TextDecoder().decode(await createWatchedVisualReader([entries[0]!])("a.md", canonical))).toBe("Watched document");
+    const store = new VisualStore(canonical, path.join(directory, "capture-state"));
+    store.setReader(reader);
+    expect(await store.capture("a:c", "mixed-roots", file("images/diagram.svg"), true)).toMatchObject({ status: "ready", mimeType: "image/svg+xml" });
+  });
+  test.each(["root", "parent"])("canonical workspace reads through a symlinked watch %s without bypassing policy", async kind => {
+    const parent = path.join(directory, "real");
+    const root = path.join(parent, "workspace");
+    const alias = path.join(directory, "alias");
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(path.join(root, "image.png"), png);
+    await fs.writeFile(path.join(root, ".gitignore"), "ignored.png\n");
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.png", "excluded/"] } }));
+    await fs.writeFile(path.join(root, "ignored.png"), png);
+    await fs.writeFile(path.join(root, "excluded.png"), png);
+    for (const name of ["excluded", ".git"]) {
+      await fs.mkdir(path.join(root, name));
+      await fs.writeFile(path.join(root, name, "image.png"), png);
+      await fs.symlink(path.join(root, name), path.join(root, `${name}-alias`));
+    }
+    await fs.writeFile(path.join(root, ".DS_Store"), png);
+    await fs.writeFile(path.join(directory, "outside.png"), png);
+    await fs.symlink(path.join(directory, "outside.png"), path.join(root, "escape.png"));
+    await fs.symlink(directory, path.join(root, "escape-parent"));
+    await fs.symlink(kind === "root" ? root : parent, alias);
+    const lexicalRoot = kind === "root" ? alias : path.join(alias, "workspace");
+    const entries = await resolveWatchRoots([lexicalRoot], directory);
+    const workspace = await selectCanonicalChatRoot(entries);
+    expect(workspace).toBe(await fs.realpath(root));
+    expect(await resolveStaticFileRequest("image.png", entries)).toEqual({ status: "found", filePath: path.join(workspace, "image.png"), documentPath: path.join(lexicalRoot, "image.png") });
+    const reader = createWatchedVisualReader(entries);
+    expect(await reader("image.png", workspace)).toEqual(png);
+    expect(await reader(path.join(workspace, "image.png"), workspace)).toEqual(png);
+    expect(await reader("image.png", lexicalRoot)).toEqual(png);
+    for (const denied of [".DS_Store", "excluded.png", "excluded-alias/image.png", ".git-alias/image.png", "escape.png", "escape-parent/outside.png"]) {
+      await expect(reader(denied, workspace)).rejects.toMatchObject({ missing: false });
+    }
+    await expect(reader("missing.png", workspace)).rejects.toMatchObject({ missing: true });
+    expect(await createWatchedVisualReader(entries, false)("ignored.png", workspace)).toEqual(png);
+    await expect(createWatchedVisualReader(entries, false)("excluded.png", workspace)).rejects.toMatchObject({ missing: false });
+  });
+  test.each([".git", "ordinary", "outside"].flatMap(target => [
+    { target, aliased: false }, { target, aliased: true },
+  ]))("parent swaps after the symlink walk cannot read or capture $target bytes (watch alias: $aliased)", async ({ target, aliased }) => {
+    const root = path.join(directory, "workspace");
+    const publicDirectory = path.join(root, "public");
+    const parkedDirectory = path.join(root, "parked");
+    const targetDirectory = target === "outside" ? path.join(directory, "outside") : path.join(root, target);
+    await fs.mkdir(publicDirectory, { recursive: true });
+    await fs.mkdir(targetDirectory);
+    const publicSource = "<svg><text>public</text></svg>";
+    const targetSource = `<svg><text>${target} target must not be captured</text></svg>`;
+    await fs.writeFile(path.join(publicDirectory, "diagram.svg"), publicSource);
+    await fs.writeFile(path.join(targetDirectory, "diagram.svg"), targetSource);
+    const watched = aliased ? path.join(directory, "alias") : root;
+    if (aliased) await fs.symlink(root, watched);
+    const workspace = await fs.realpath(root);
+    const entries = await resolveWatchRoots([watched], directory);
+    const reader = createWatchedVisualReader(entries);
+    expect(new TextDecoder().decode(await reader("public/diagram.svg", workspace))).toBe(publicSource);
+    if (target === ".git") await expect(reader(".git/diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+    if (target === "ordinary") expect(new TextDecoder().decode(await reader("ordinary/diagram.svg", workspace))).toBe(targetSource);
+    if (target === "outside") await expect(reader(path.join(targetDirectory, "diagram.svg"), workspace)).rejects.toMatchObject({ missing: false });
+    for (const mode of ["read", "capture"] as const) {
+      let leafChecks = 0, swaps = 0;
+      const opened: string[] = [];
+      const originalLstat = fs.lstat.bind(fs);
+      const originalOpen = fs.open.bind(fs);
+      const lstat = spyOn(fs, "lstat").mockImplementation(new Proxy(originalLstat, {
+        async apply(original, thisArg, args) {
+          if (String(args[0]) === path.join(watched, "public", "diagram.svg") && ++leafChecks === 2) {
+            // The walk already checked the real parent and leaf. Swap only
+            // when the shared resolver begins its own leaf check, so it sees
+            // the redirected realpath rather than the walked candidate.
+            await fs.rename(publicDirectory, parkedDirectory);
+            await fs.symlink(targetDirectory, publicDirectory);
+            swaps++;
+          }
+          return Reflect.apply(original, thisArg, args);
+        },
+      }));
+      const open = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+        opened.push(String(args[0]));
+        return originalOpen(...args);
+      });
+      try {
+        if (mode === "read") {
+          await expect(reader("public/diagram.svg", workspace)).rejects.toMatchObject({ missing: false });
+        } else {
+          const store = new VisualStore(workspace, path.join(directory, "capture-state"));
+          store.setReader(reader);
+          const captured = await store.capture("a:c", "swapped-parent", file("public/diagram.svg"), false);
+          expect(captured).toMatchObject({ status: "unavailable" });
+          expect(captured.id).toBeUndefined();
+          const records = (await fs.readdir(store.directory)).filter(name => /^[a-f\d]{64}\.json$/.test(name));
+          expect(records).toHaveLength(1);
+          const record = JSON.parse(await fs.readFile(path.join(store.directory, records[0]!), "utf8"));
+          expect(record.snapshot).toEqual(captured);
+          expect(record).not.toHaveProperty("bytes");
+          expect(record).not.toHaveProperty("sourceBytes");
+        }
+        expect(swaps).toBe(1);
+        expect(opened).toEqual([]);
+      } finally {
+        lstat.mockRestore();
+        open.mockRestore();
+        if (swaps) {
+          await fs.unlink(publicDirectory);
+          await fs.rename(parkedDirectory, publicDirectory);
+        }
+      }
+    }
+  });
+  test.each(["parent symlink", "new inode"] as const)("a %s replacement after open is refused before any bytes are read", async replacement => {
+    const root = path.join(directory, "workspace");
+    const publicDirectory = path.join(root, "public");
+    const targetDirectory = path.join(root, ".git");
+    await fs.mkdir(publicDirectory, { recursive: true });
+    await fs.mkdir(targetDirectory);
+    const filename = path.join(publicDirectory, "diagram.svg");
+    await fs.writeFile(filename, svg);
+    await fs.writeFile(path.join(targetDirectory, "diagram.svg"), "<svg><text>denied</text></svg>");
+    const reader = createWatchedVisualReader(await resolveWatchRoots([root], directory));
+    const canonicalFilename = await fs.realpath(filename);
+    let reads = 0, swaps = 0, closed = false;
+    const originalOpen = fs.open.bind(fs);
+    const open = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (String(args[0]) !== canonicalFilename) return handle;
+      if (replacement === "parent symlink") {
+        await fs.rename(publicDirectory, path.join(root, "parked"));
+        await fs.symlink(targetDirectory, publicDirectory);
+      } else {
+        await fs.rename(filename, path.join(publicDirectory, "old.svg"));
+        await fs.writeFile(filename, "<svg><text>replacement</text></svg>");
+      }
+      swaps++;
+      return new Proxy(handle, { get(target, property) {
+        if (property === "read") return async (buffer: Uint8Array, offset: number, length: number, position: number) => {
+          reads++;
+          return target.read(buffer, offset, length, position);
+        };
+        if (property === "close") return async () => { closed = true; return target.close(); };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    });
+    try {
+      await expect(reader("public/diagram.svg", root)).rejects.toBeInstanceOf(VisualReadError);
+      expect(swaps).toBe(1);
+      expect(reads).toBe(0);
+      expect(closed).toBe(true);
+    } finally { open.mockRestore(); }
+  });
+  test("tiny-file buffers track observed size plus one, and growth during reading is refused", async () => {
+    const root = path.join(directory, "root");
+    await fs.mkdir(root);
+    const pathname = path.join(root, "tiny.png");
+    await fs.writeFile(pathname, png);
+    const buffers: number[] = [];
+    let grow = false;
+    const originalOpen = fs.open.bind(fs);
+    const open = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      return new Proxy(handle, { get(target, property) {
+        if (property === "read") return async (buffer: Uint8Array, offset: number, length: number, position: number) => {
+          buffers.push(buffer.byteLength);
+          if (grow) { grow = false; await fs.appendFile(pathname, new Uint8Array(100)); }
+          return target.read(buffer, offset, length, position);
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    });
+    try {
+      const reader = createWatchedVisualReader([{ kind: "dir", absolutePath: root } as never]);
+      expect(await reader("tiny.png", root)).toEqual(png);
+      expect(buffers.length).toBeGreaterThan(0);
+      expect(buffers.every(size => size === png.length + 1)).toBe(true);
+      grow = true;
+      await expect(reader("tiny.png", root)).rejects.toBeInstanceOf(VisualReadError);
+      expect(buffers.every(size => size === png.length + 1)).toBe(true);
+    } finally { open.mockRestore(); }
+  });
+  test("workspace anchored PNG/JPEG/SVG reads, policy, symlink and traversal refusals", async () => {
+    const root = path.join(directory, "root");
+    await fs.mkdir(root);
+    await fs.writeFile(path.join(root, "image.png"), png);
+    await fs.writeFile(path.join(root, "image.jpg"), Uint8Array.from([0xff, 0xd8, 0xff]));
+    await fs.writeFile(path.join(root, "image.svg"), svg);
+    await fs.writeFile(path.join(root, ".gitignore"), "ignored.png\n");
+    await fs.writeFile(path.join(root, "ignored.png"), png);
+    await fs.writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.png"] } }));
+    await fs.writeFile(path.join(root, "excluded.png"), png);
+    await fs.writeFile(path.join(root, ".DS_Store"), png);
+    await fs.writeFile(path.join(directory, "outside.png"), png);
+    await fs.symlink(path.join(directory, "outside.png"), path.join(root, "escape.png"));
+    await fs.symlink(directory, path.join(root, "escape-parent"));
+    const reader = createWatchedVisualReader([{ kind: "dir", absolutePath: root } as never]);
+    expect(await reader("image.png", root)).toEqual(png);
+    expect(await reader(path.join(root, "image.jpg"), root)).toEqual(Uint8Array.from([0xff, 0xd8, 0xff]));
+    expect(new TextDecoder().decode(await reader("image.svg", root))).toBe(svg);
+    for (const denied of ["../outside.png", "%2e%2e/outside.png", "https://example.com/a.png", "//example.com/a.png", "file:///etc/passwd", ".DS_Store", "excluded.png", "escape.png", "escape-parent/outside.png", "image.png?x", "bad%00.png", "%ZZ"]) {
+      await expect(reader(denied, root)).rejects.toBeInstanceOf(VisualReadError);
+    }
+    await expect(reader("missing.png", root)).rejects.toMatchObject({ missing: true });
+    await fs.writeFile(path.join(root, "huge.png"), new Uint8Array(VISUAL_MAX_BYTES + 1));
+    await expect(reader("huge.png", root)).rejects.toMatchObject({ missing: false });
+    const noIgnore = createWatchedVisualReader([{ kind: "dir", absolutePath: root } as never], false);
+    expect(await noIgnore("ignored.png", root)).toEqual(png);
+    await expect(noIgnore("excluded.png", root)).rejects.toMatchObject({ missing: false });
+  });
+  test("additional watched roots never expand the agent workspace's capture boundary", async () => {
+    const workspace = path.join(directory, "workspace");
+    const secondary = path.join(directory, "secondary");
+    const nested = path.join(workspace, "images");
+    await fs.mkdir(nested, { recursive: true });
+    await fs.mkdir(secondary);
+    await fs.writeFile(path.join(nested, "inside.png"), png);
+    await fs.writeFile(path.join(secondary, "outside.png"), png);
+    const reader = createWatchedVisualReader([
+      { kind: "dir", absolutePath: nested } as never,
+      { kind: "dir", absolutePath: secondary } as never,
+    ]);
+    expect(await reader("images/inside.png", workspace)).toEqual(png);
+    expect(await reader(path.join(nested, "inside.png"), workspace)).toEqual(png);
+    for (const outside of [path.join(secondary, "outside.png"), path.join(secondary, "missing.png")]) {
+      await expect(reader(outside, workspace)).rejects.toMatchObject({ missing: false });
+    }
+    // A watched-root symlink must not turn an in-workspace lexical path into
+    // permission to read a sibling workspace's bytes.
+    await fs.symlink(secondary, path.join(workspace, "linked"));
+    const linkedReader = createWatchedVisualReader([{ kind: "dir", absolutePath: path.join(workspace, "linked") } as never]);
+    await expect(linkedReader("linked/outside.png", workspace)).rejects.toMatchObject({ missing: false });
+  });
+});
+
+describe("conservative SVG validation", () => {
+  test.each([{ name: "absent", hasNamespace: false }, { name: "present", hasNamespace: true }])("bounds full preview preparation with trailing whitespace and namespace $name", ({ hasNamespace }) => {
+    const source = '<svg id="x"' + (hasNamespace ? ' xmlns="http://www.w3.org/2000/svg"' : "") + " ".repeat(1_048_576) + "/>";
+    const moduleUrl = new URL("./visual-store.ts", import.meta.url).href;
+    const child = Bun.spawnSync([process.execPath, "--eval", `
+      import { VisualStore } from ${JSON.stringify(moduleUrl)};
+      const source = await Bun.stdin.text();
+      const store = new VisualStore("/workspace", ${JSON.stringify(directory)});
+      const capture = await store.capture("a:c", "bounded-preview", { kind: "svg", index: 0, source, alt: "bounded", complete: true }, false);
+      if (capture.status !== "ready") process.exit(1);
+      const stored = await store.resolve(capture.id);
+      const expected = ${hasNamespace} ? source : source.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+      if (new TextDecoder().decode(stored.bytes) !== expected || new TextDecoder().decode(stored.sourceBytes) !== source) process.exit(1);
+      console.log("ready");
+    `], { stdin: Buffer.from(source), stdout: "pipe", stderr: "pipe", timeout: 3_000, killSignal: "SIGKILL" });
+    expect({ exitCode: child.exitCode, stderr: child.stderr.toString(), stdout: child.stdout.toString() })
+      .toEqual({ exitCode: 0, stderr: "", stdout: "ready\n" });
+  });
+  test.each([
+    { name: "malformed XML comments", source: () => "<svg>" + "<!--".repeat(262_144) + "</svg>", accepted: false },
+    { name: "malformed CSS comments", source: () => "<svg><style>" + "/*x".repeat(349_525) + "</style></svg>", accepted: false },
+    { name: "leading attribute whitespace", source: () => "<svg" + " ".repeat(1_048_576) + 'id="x"/>', accepted: true },
+    { name: "trailing attribute whitespace", source: () => "<svg" + Array.from({ length: 8_192 }, (_, i) => ` a${i}="x"`).join("") + " ".repeat(1_048_576) + "/>", accepted: true },
+  ])("bounds $name validation without stalling the test process", ({ source, accepted }) => {
+    const moduleUrl = new URL("./visual-store.ts", import.meta.url).href;
+    const child = Bun.spawnSync([process.execPath, "--eval", `
+      import { isSafeSvg } from ${JSON.stringify(moduleUrl)};
+      if (isSafeSvg(await Bun.stdin.text()) !== ${accepted}) process.exit(1);
+      console.log("checked");
+    `], { stdin: Buffer.from(source()), stdout: "pipe", stderr: "pipe", timeout: 3_000, killSignal: "SIGKILL" });
+    expect({ exitCode: child.exitCode, stderr: child.stderr.toString(), stdout: child.stdout.toString() })
+      .toEqual({ exitCode: 0, stderr: "", stdout: "checked\n" });
+  });
+  test("CSS comments retain local paint while refusing hidden resources and unfinished comments", () => {
+    expect(isSafeSvg('<svg><style>/*before*/.x { fill: url(/*paint*/#g); }/*after*/</style><rect style="fill:/*color*/red"/></svg>')).toBe(true);
+    expect(isSafeSvg('<svg><style>.x { fill:u/*comment*/rl(https://evil.test/x); }</style></svg>')).toBe(false);
+    expect(isSafeSvg('<svg><style>.x { fill:red; }/*unfinished</style></svg>')).toBe(false);
+  });
+  test.each([
+    '<!--before--><svg/><!--after-->',
+    '<svg><!--inside--><text>A<!--comment-->B</text></svg>',
+    '<!-- <svg xmlns="http://evil.test"><script/></svg> --><svg/>',
+    '<svg><!-- <!DOCTYPE svg> <?instruction?> &unknown; ]]> --><rect/></svg>',
+    '<svg><!----><text>A<!-- - -->B</text></svg>',
+  ])("valid XML comments are inert tokens: %s", source => {
+    expect(isSafeSvg(source)).toBe(true);
+  });
+  test.each([
+    '<svg><!-- outer <!-- inner --> outer --></svg>',
+    '<svg><!--<!-- --></svg>',
+    '<svg><!--a--b--></svg>',
+    '<svg><!--a---></svg>',
+    '<svg><!--unterminated</svg>',
+    '<!--before--!><svg/>',
+    '<svg/ >',
+    '<svg id="x"/ >',
+    '<svg><!<!--comment-->--reconstructed--></svg>',
+    '<!DOC<!--comment-->TYPE svg><svg/>',
+    '<svg><te<!--comment-->xt>A</text></svg>',
+    '<svg id="A<!--comment-->B"/>',
+    '<svg><text>&am<!--comment-->p;</text></svg>',
+    '<!--before--><?xml version="1.0"?><svg/>',
+    '<svg><style>.x { fill:e<!--comment-->xpression(1) }</style></svg>',
+    '<svg><style>.x { fill:h<!--comment-->ttps:evil }</style></svg>',
+    '<svg><style><g>@import url(https://evil.test/x.css);</g></style></svg>',
+    '<svg><!--before--><!DOCTYPE svg></svg>',
+    '<svg><!--before--><?instruction?></svg>',
+    '<svg><!--before--><script/></svg>',
+    '<svg><!--before--><use href="https://evil.test/x"/></svg>',
+    '<!-- <svg xmlns="http://www.w3.org/2000/svg"/> --><svg xmlns="http://evil.test"/>',
+  ])("comments never repair malformed XML or bypass resource checks: %s", source => {
+    expect(isSafeSvg(source)).toBe(false);
+  });
+  test("basic shapes, gradients and local references", () => {
+    expect(isSafeSvg(svg)).toBe(true);
+    expect(isSafeSvg('<svg><defs><linearGradient id="g"><stop offset="1"/></linearGradient></defs><rect fill="url(#g)"/><use href="#g"/></svg>')).toBe(true);
+    expect(isSafeSvg(`<svg><!-- ordinary comment --><defs><linearGradient id="paint"><stop offset="0" stop-color="red"/></linearGradient><clipPath id="clip"><rect width="1"/></clipPath></defs><style>.x { fill: url( '#paint' ); clip-path: URL( "#clip" ) }</style><rect class="x" fill="url( #paint )"/></svg>`)).toBe(true);
+  });
+  test("malicious and malformed XML never reaches preview", () => {
+    for (const value of [
+      '<svg><script>alert(1)</script></svg>', '<svg onLoad="x"/>', '<svg><foreignObject/></svg>',
+      '<svg><image href="https://evil.test/x"/></svg>', '<svg><use href="data:image/svg+xml,x"/></svg>',
+      '<svg><use href="&#x68;ttps://evil.test"/></svg>', '<svg><style>@import "https://evil.test";</style></svg>',
+      '<svg style="fill:url(https://evil.test)"/>', '<svg style="fill:u\\72l(https://evil.test)"/>',
+      '<svg><style>svg { background:image-set("//evil.test/x") }</style></svg>',
+      '<svg><style>svg { fill:u/**/rl(https://evil.test/x) }</style></svg>',
+      '<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg>&x;</svg>', '<?xml-stylesheet href="https://evil.test"?><svg/>',
+      '<svg xmlns:x="http://evil.test"><x:script/></svg>', '<svg><g></svg>', '<svg></SVG>', '<svg/><svg/>', '<svg onclick=x/>',
+      '<svg id="x" id="y"/>', '<svg><animate attributeName="href"/></svg>', '<svg><set attributeName="onload"/></svg>',
+      '<svg>&unknown;</svg>', '<svg><rect', 'not SVG', '<html><svg/></html>',
+      '<svg><![CDATA[<script>alert(1)</script>]]></svg>', '<svg>\u0000</svg>', '<svg xmlns="http://evil.test"/>',
+      '<svg><style>.x { fill: url( "https://evil.test/x" ) }</style></svg>', '<svg fill="url( //evil.test/x )"/>',
+    ]) expect(isSafeSvg(value)).toBe(false);
+  });
+});
+
+test("assistant snapshot wire validation", () => {
+  const item: AssistantMessageItem = { id: "m", type: "assistant_message", createdAt: 1, markdown: "", visuals: [{ index: 0, status: "ready", id: "a".repeat(64), mimeType: "image/png" }] };
+  expect(parseConversationItem(item)).toEqual(item);
+  expect(parseConversationItem({ ...item, visuals: [{ index: 0, status: "unavailable", id: "a".repeat(64), mimeType: "image/svg+xml" }] })).toHaveProperty("visuals.0.status", "unavailable");
+  expect(parseConversationItem({ ...item, visuals: [{ ...item.visuals![0], index: 80 }] })).toHaveProperty("visuals.0.index", 80);
+  for (const visuals of [[{ index: 0, status: "ready" }], [{ index: Number.MAX_SAFE_INTEGER + 1, status: "pending" }], [{ index: 0, status: "pending" }, { index: 0, status: "pending" }], [{ index: 0, status: "ready", id: "../secret", mimeType: "image/png" }], Array.from({ length: 9 }, (_, index) => ({ index, status: "pending" }))]) {
+    expect(() => parseConversationItem({ ...item, visuals })).toThrow();
+  }
+});
+
+test("genuine history and streamed deltas capture immediately, terminal status retries pending without invented sequence IDs", async () => {
+  const store = new VisualStore("/workspace", directory);
+  let exists = true;
+  store.setReader(async () => { if (!exists) throw new VisualReadError(true); return png; });
+  const message: AssistantMessageItem = { id: "m", type: "assistant_message", createdAt: 1, markdown: "![first](first.png)" };
+  const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [message] };
+  const events = new ReplaySubscription(() => undefined);
+  const provider = {
+    history: async () => snapshot,
+    subscribe: async () => ({ snapshot, events }),
+    dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const history = await service.history("a:c");
+  expect((history.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
+  const subscription = await service.subscribe("a:c");
+  const iterator = subscription.events[Symbol.asyncIterator]();
+  exists = false;
+  events.push({ generation: "g", sequence: 1, conversationId: "c", type: "item.text_delta", itemId: "m", delta: "\n![second](second.png)" });
+  const update = (await iterator.next()).value as ChatEvent;
+  expect(update.type).toBe("item.upsert");
+  if (update.type !== "item.upsert" || update.item.type !== "assistant_message") throw new Error("expected assistant upsert");
+  expect(update.item.visuals?.map(visual => visual.status)).toEqual(["ready", "pending"]);
+  expect(update.sequence).toBe(1);
+  expect(parseChatEvent(update)).toEqual(update);
+  exists = true;
+  const nativeStatus: ChatEvent = { generation: "g", sequence: 2, conversationId: "c", type: "conversation.status", status: "completed" };
+  events.push(nativeStatus);
+  const complete = (await iterator.next()).value as ChatEvent;
+  expect(complete).toEqual({ ...nativeStatus, conversationId: "a:c" });
+  expect(parseChatEvent(complete)).toEqual(complete);
+  const resync = (await iterator.next()).value as ChatEvent;
+  expect(parseChatEvent(resync)).toEqual({ type: "resync", reason: "conversation-rewritten", generation: nativeStatus.generation, conversationId: "a:c", sequence: nativeStatus.sequence });
+  snapshot.items = [{ ...message, markdown: message.markdown + "\n![second](second.png)" }];
+  snapshot.conversation.status = "completed";
+  const terminal = await service.history("a:c");
+  expect((terminal.items[0] as AssistantMessageItem).markdown).toBe(message.markdown + "\n![second](second.png)");
+  expect((terminal.items[0] as AssistantMessageItem).visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
+  snapshot.conversation.status = "running";
+  exists = false;
+  snapshot.items = [
+    { ...message, id: "old", completedAt: 2, markdown: "![old](old.png)" },
+    { id: "u", type: "user_message", createdAt: 2, text: "next turn" },
+    { ...message, id: "new", createdAt: 3, markdown: "![new](new.png)" },
+  ];
+  const inferred = await service.history("a:c");
+  expect((inferred.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("unavailable");
+  expect((inferred.items[2] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+  exists = true;
+  snapshot.items = [{ ...message, id: "many", markdown: Array.from({ length: 9 }, (_, index) => `![${index}](image-${index}.png)`).join("\n") }];
+  expect((await service.history("a:c")).items[0]).toHaveProperty("visuals.length", 8);
+  subscription.events.cancel();
+  await service.dispose();
+});
+
+test("reconnect backlog deltas are forwarded unchanged and never appended to the current snapshot twice", async () => {
+  const replay = new ConversationReplay("generation", "c", 100_000);
+  const message: AssistantMessageItem = { id: "m", type: "assistant_message", createdAt: 1, markdown: "Hello" };
+  const conversation = { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" as const };
+  replay.publish({ type: "item.upsert", item: message });
+  const cursor = replay.latestCursor();
+  const initial: ConversationSnapshot = { conversation, configuration: {}, generation: "generation", cursor, items: [message] };
+  let client = projectionFromSnapshot({ ...initial, conversation: { ...conversation, id: "a:c" } });
+  const backlog = replay.publish({ type: "item.text_delta", itemId: "m", delta: " world" });
+  const current = { ...initial, items: [{ ...message, markdown: "Hello world" }] };
+  const provider = {
+    subscribe: async (_id: string, options?: { cursor?: string; signal?: AbortSignal }) => {
+      const handoff = replay.handoff(cursor => ({ ...current, cursor }), options?.cursor, options?.signal);
+      return { snapshot: handoff.snapshot, events: handoff.subscription };
+    },
+    dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  const store = new VisualStore("/workspace", directory);
+  store.setReader(async () => png);
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const subscription = await service.subscribe("a:c", { cursor });
+  expect((subscription.snapshot.items[0] as AssistantMessageItem).markdown).toBe("Hello world");
+  const iterator = subscription.events[Symbol.asyncIterator]();
+  const replayed = (await iterator.next()).value as ChatEvent;
+  expect(replayed).toEqual({ ...backlog, conversationId: "a:c" });
+  client = applyChatEvent(client, replayed).projection;
+  expect((client.items[0] as AssistantMessageItem).markdown).toBe("Hello world");
+  const live = replay.publish({ type: "item.text_delta", itemId: "m", delta: "!" });
+  const next = (await iterator.next()).value as ChatEvent;
+  expect(next.type).toBe("item.text_delta");
+  expect(next.sequence).toBe(live.sequence);
+  client = applyChatEvent(client, next).projection;
+  expect((client.items[0] as AssistantMessageItem).markdown).toBe("Hello world!");
+  replay.publish({ type: "item.text_delta", itemId: "m", delta: "\n![image](image.png)" });
+  const visual = (await iterator.next()).value as ChatEvent;
+  client = applyChatEvent(client, visual).projection;
+  expect((client.items[0] as AssistantMessageItem).markdown).toBe("Hello world!\n![image](image.png)");
+  expect((client.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
+  subscription.events.cancel();
+  expect(replay.subscriberCount()).toBe(0);
+  await service.dispose();
+});
+
+test("terminal cursor replay resyncs once when snapshot enrichment alone turns a cached pending visual ready", async () => {
+  const store = new VisualStore("/workspace", directory);
+  let exists = false;
+  store.setReader(async () => { if (!exists) throw new VisualReadError(true); return png; });
+  const replay = new ConversationReplay("g", "c", 100_000);
+  const message: AssistantMessageItem = { id: "m", type: "assistant_message", createdAt: 1, markdown: "![image](image.png)" };
+  replay.publish({ type: "item.upsert", item: message });
+  let current: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: replay.latestCursor(), items: [message] };
+  const provider = {
+    history: async () => ({ ...current, cursor: replay.latestCursor() }),
+    subscribe: async (_id: string, options?: { cursor?: string }) => {
+      const handoff = replay.handoff(cursor => ({ ...current, cursor }), options?.cursor);
+      return { snapshot: handoff.snapshot, events: handoff.subscription };
+    }, dispose: async () => {},
+  } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const cached = await service.history("a:c");
+  expect((cached.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+  const nativeDelta = replay.publish({ type: "item.text_delta", itemId: "m", delta: " done" });
+  const terminal = replay.publish({ type: "conversation.status", status: "completed" });
+  current = { ...current, conversation: { ...current.conversation, status: "completed" }, items: [{ ...message, markdown: message.markdown + " done" }] };
+  exists = true;
+  const subscription = await service.subscribe("a:c", { cursor: cached.cursor });
+  expect((subscription.snapshot.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
+  const iterator = subscription.events[Symbol.asyncIterator]();
+  const delta = (await iterator.next()).value as ChatEvent;
+  expect(delta).toEqual({ ...nativeDelta, conversationId: "a:c" });
+  expect(delta).not.toHaveProperty("item");
+  const status = (await iterator.next()).value as ChatEvent;
+  expect(status).toEqual({ ...terminal, conversationId: "a:c" });
+  expect(parseChatEvent(status)).toEqual(status);
+  const resync = (await iterator.next()).value as ChatEvent;
+  expect(parseChatEvent(resync)).toEqual({ type: "resync", reason: "conversation-rewritten", generation: terminal.generation, conversationId: "a:c", sequence: terminal.sequence });
+  subscription.events.cancel();
+  const fresh = await service.history("a:c");
+  expect(fresh.cursor).toBe(replay.latestCursor());
+  expect(fresh.generation).toBe(terminal.generation);
+  expect((fresh.items[0] as AssistantMessageItem).markdown).toBe(message.markdown + " done");
+  expect((fresh.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
+  const resumed = await service.subscribe("a:c", { cursor: fresh.cursor });
+  const liveStatus = replay.publish({ type: "conversation.status", status: "completed" });
+  expect((await resumed.events[Symbol.asyncIterator]().next()).value).toEqual({ ...liveStatus, conversationId: "a:c" });
+  resumed.events.cancel();
+  await service.dispose();
+});
+
+test("plain-text streaming preserves 100 native 1-KiB deltas without growing full-item replay payloads", async () => {
+  const store = new VisualStore("/workspace", directory);
+  let reads = 0;
+  store.setReader(async () => { reads++; return png; });
+  const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown: "" }] };
+  const events = new ReplaySubscription(() => undefined);
+  const provider = { subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const subscription = await service.subscribe("a:c");
+  const iterator = subscription.events[Symbol.asyncIterator]();
+  let deliveredTextBytes = 0;
+  for (let sequence = 1; sequence <= 100; sequence++) {
+    const event: ChatEvent = { type: "item.text_delta", itemId: "m", delta: "x".repeat(1024), generation: "g", conversationId: "c", sequence };
+    events.push(event);
+    const delivered = (await iterator.next()).value as ChatEvent;
+    expect(delivered).toEqual({ ...event, conversationId: "a:c" });
+    if (delivered.type !== "item.text_delta") throw new Error("unexpected growing upsert");
+    deliveredTextBytes += Buffer.byteLength(delivered.delta);
+  }
+  expect(deliveredTextBytes).toBe(102_400);
+  expect(reads).toBe(0);
+  subscription.events.cancel();
+  await service.dispose();
+});
+
+test("split image syntax and whitespace-separated SVG fences deliver metadata on their first complete occurrence", async () => {
+  const store = new VisualStore("/workspace", directory);
+  store.setReader(async () => png);
+  const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, markdown: "" }] };
+  const events = new ReplaySubscription(() => undefined);
+  const provider = { subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const subscription = await service.subscribe("a:c");
+  const iterator = subscription.events[Symbol.asyncIterator]();
+  let sequence = 0;
+  const delta = async (text: string): Promise<ChatEvent> => {
+    events.push({ type: "item.text_delta", itemId: "m", delta: text, generation: "g", conversationId: "c", sequence: ++sequence });
+    return (await iterator.next()).value as ChatEvent;
+  };
+  await delta("~~~");
+  await delta(" svg\n");
+  await delta("<svg><rect width=\"1\"/></svg>\n");
+  const fence = await delta("~~~\n");
+  expect(fence.type).toBe("item.upsert");
+  if (fence.type !== "item.upsert" || fence.item.type !== "assistant_message") throw new Error("expected completed SVG");
+  expect(fence.item.visuals?.[0]?.status).toBe("ready");
+  expect((await delta("\ntrailing prose")).type).toBe("item.text_delta");
+  await delta("\n![image](");
+  const image = await delta("image.png)");
+  expect(image.type).toBe("item.upsert");
+  if (image.type !== "item.upsert" || image.item.type !== "assistant_message") throw new Error("expected completed image");
+  expect(image.item.visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
+  expect((await delta(" more prose")).type).toBe("item.text_delta");
+  subscription.events.cancel();
+  await service.dispose();
+});
+
+test("concurrent history and subscribe enrichment share one store's four-reader admission limit", async () => {
+  const store = new VisualStore("/workspace", directory);
+  let active = 0, maximum = 0, reads = 0;
+  let release!: () => void;
+  let fourStarted!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { fourStarted = resolve; });
+  store.setReader(async () => {
+    active++; reads++; maximum = Math.max(maximum, active);
+    if (active === VISUAL_CAPTURE_CONCURRENCY) fourStarted();
+    try { await gate; return png; }
+    finally { active--; }
+  });
+  const items: AssistantMessageItem[] = Array.from({ length: 8 }, (_, index) => ({
+    id: `m-${index}`, type: "assistant_message", createdAt: index,
+    markdown: Array.from({ length: 8 }, (_, visual) => `![${visual}](image-${visual}.png)`).join("\n"),
+  }));
+  const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "completed" }, configuration: {}, generation: "g", cursor: "c", items };
+  const events = new ReplaySubscription(() => undefined);
+  const provider = { history: async () => snapshot, subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  const pending = Promise.all([service.history("a:c"), service.history("a:c"), service.subscribe("a:c")]);
+  try {
+    await started;
+    expect(active).toBe(VISUAL_CAPTURE_CONCURRENCY);
+    expect(reads).toBe(VISUAL_CAPTURE_CONCURRENCY);
+    release();
+    const [first, second, subscription] = await pending;
+    expect(maximum).toBe(VISUAL_CAPTURE_CONCURRENCY);
+    expect(reads).toBe(64);
+    expect(active).toBe(0);
+    expect(first.items).toEqual(second.items);
+    expect(subscription.snapshot.items).toEqual(first.items);
+  } finally {
+    release();
+    events.cancel();
+    try { await pending; } finally { await service.dispose(); }
+  }
+});
+
+test("subscribe cancels the provider handoff if snapshot enrichment fails or its signal aborts during capture", async () => {
+  let cleanups = 0;
+  let events = new ReplaySubscription(() => { cleanups++; });
+  const snapshot: ConversationSnapshot = { conversation: { id: "c", title: "c", createdAt: 1, updatedAt: 1, status: "running" }, configuration: {}, generation: "g", cursor: "c", items: [{ id: "m", type: "assistant_message", createdAt: 1, get markdown(): string { throw new Error("broken snapshot"); } }] };
+  const store = new VisualStore("/workspace", directory);
+  const provider = { subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
+  type Setup = Awaited<ReturnType<MultiAgentChatService["subscribe"]>>;
+  type Outcome = { type: "resolved"; value: Setup } | { type: "rejected"; error: unknown };
+  const setups: Array<Promise<Outcome>> = [];
+  const observe = (promise: Promise<Setup>) => {
+    const state = { settled: false };
+    // Attach both handlers immediately, before the capture is allowed to abort.
+    // A rejection matcher must not wait ahead of the action that triggers it.
+    const outcome = promise.then(value => { state.settled = true; return { type: "resolved" as const, value }; },
+      (error: unknown) => { state.settled = true; return { type: "rejected" as const, error }; });
+    setups.push(outcome);
+    return { state, outcome };
+  };
+  const captureMany = store.captureMany.bind(store);
+  const captures: Array<ReturnType<VisualStore["captureMany"]>> = [];
+  const capture = spyOn(store, "captureMany").mockImplementation((...args) => { const pending = captureMany(...args); captures.push(pending); return pending; });
+  const entered = Promise.withResolvers<void>(), triggerAbort = Promise.withResolvers<void>(), finishCapture = Promise.withResolvers<void>();
+  const stop = new AbortController();
+  const registrations = () => (service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers;
+  let currentBytes = png, reads = 0;
+  try {
+    const failed = await observe(service.subscribe("a:c")).outcome;
+    expect(failed.type).toBe("rejected");
+    if (failed.type === "rejected") expect(failed.error).toMatchObject({ message: "broken snapshot" });
+    expect(cleanups).toBe(1);
+    expect(registrations().size).toBe(0);
+    expect((await events[Symbol.asyncIterator]().next()).done).toBe(true);
+    expect(captures).toHaveLength(0);
+
+    // A separate, acquired source is aborted from inside its still-blocked
+    // reader. Setup must reject promptly, not return a closed snapshot after
+    // waiting for this uncancellable capture to finish.
+    events = new ReplaySubscription(() => { cleanups++; });
+    store.setReader(async () => {
+      reads++;
+      const bytes = currentBytes.slice();
+      entered.resolve(); await triggerAbort.promise;
+      stop.abort(); await finishCapture.promise;
+      return bytes;
+    });
+    snapshot.items = [{ id: "m", type: "assistant_message", createdAt: 1, markdown: "![image](image.png)" }];
+    const aborted = observe(service.subscribe("a:c", { signal: stop.signal }));
+    await entered.promise;
+    expect(registrations().get("a:c")?.size).toBe(1);
+    triggerAbort.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // Check settlement before awaiting it, so a regression reaches finally
+    // and releases the reader rather than stranding the process at this await.
+    expect(aborted.state.settled).toBe(true);
+    const outcome = await aborted.outcome;
+    expect(outcome.type).toBe("rejected");
+    if (outcome.type === "rejected") expect(outcome.error).toMatchObject({ name: "AbortError" });
+    expect(cleanups).toBe(2);
+    expect(registrations().size).toBe(0);
+    events.push({ type: "conversation.status", status: "completed", generation: "g", conversationId: "c", sequence: 1 });
+    expect((await events[Symbol.asyncIterator]().next()).done).toBe(true);
+
+    currentBytes = Uint8Array.from([...png, 99]);
+    finishCapture.resolve();
+    const captured = await Promise.all(captures);
+    expect(captured).toHaveLength(1);
+    const visual = captured[0]![0]!;
+    expect(visual.status).toBe("ready");
+    expect((await store.resolve(visual.id!))?.bytes).toEqual(png);
+    const reloaded = new VisualStore("/workspace", directory);
+    reloaded.setReader(async () => { throw new Error("late capture must remain immutable after reload"); });
+    expect((await reloaded.resolve(visual.id!))?.bytes).toEqual(png);
+    expect(reads).toBe(1);
+    expect(cleanups).toBe(2); // Late capture cannot reopen or re-cancel the source.
+    expect(registrations().size).toBe(0);
+  } finally {
+    triggerAbort.resolve(); finishCapture.resolve();
+    try {
+      try { await service.dispose(); }
+      finally {
+        try { for (const outcome of await Promise.all(setups)) if (outcome.type === "resolved") outcome.value.events.cancel(); }
+        finally { await Promise.allSettled(captures); }
+      }
+    } finally { events.cancel(); capture.mockRestore(); }
+  }
+});

@@ -628,11 +628,16 @@ test("observation save failure never throws into chat, invalidates privately and
 });
 
 test("hung observation I/O warns privately while repeated source updates coalesce behind one save", async () => {
-  const { store } = await fixture();
+  const { store, file } = await fixture();
   await store.reconcile(scope, async () => evidence(), { executionId: "execution-1", expectedRevision: 0, operation: "dismiss" });
   let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
   const original = fs.rename.bind(fs); let writes = 0;
-  const rename = spyOn(fs, "rename").mockImplementation(async (source, target) => { writes++; await blocked; await original(source, target); });
+  const rename = spyOn(fs, "rename").mockImplementation(async (source, target) => {
+    // A rejected private read may leave another store's bounded retry in
+    // flight. Count and block only saves owned by this fixture, not all I/O.
+    if (String(target) !== file) return original(source, target);
+    writes++; await blocked; await original(source, target);
+  });
   let warning!: () => void; const warned = new Promise<void>(resolve => { warning = resolve; });
   let commit!: () => void; const committed = new Promise<void>(resolve => { commit = resolve; });
   let notices = 0;

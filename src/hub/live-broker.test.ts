@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { encodeReplayCursor } from "../chat/replay";
 import { MetricsRegistry } from "../debug/metrics";
 import { upstreamActiveGauge, upstreamCounter } from "../debug/stream-metrics";
-import { documentContextKey, type LiveEnvelope } from "../shared/live-protocol";
+import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, documentContextKey, type LiveEnvelope } from "../shared/live-protocol";
 import type { DocumentSnapshot, DocumentPatch } from "../shared/document-updates";
 import { BUILD_SUMMARY, createWatchSession } from "../server/watch-session";
 import {
@@ -36,7 +36,7 @@ type FakeUpstream = {
   readonly cancelled: boolean;
 };
 
-function fakeSource(options: { running?: Set<string>; workspaces?: string[]; refuse?: (path: string) => Response | Error | null } = {}) {
+function fakeSource(options: { running?: Set<string>; workspaces?: string[]; refuse?: (path: string) => Response | Error | null; headers?: (path: string) => Record<string, string> } = {}) {
   const running = options.running ?? new Set(["ws"]);
   const opened: FakeUpstream[] = [];
   const listeners = new Set<(change: LiveSessionChange) => void>();
@@ -87,7 +87,7 @@ function fakeSource(options: { running?: Set<string>; workspaces?: string[]; ref
         }
       }, { once: true });
       opened.push(upstream);
-      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      return new Response(body, { headers: { "content-type": "text/event-stream", ...options.headers?.(path) } });
     },
     onSessionChange(listener) {
       listeners.add(listener);
@@ -141,6 +141,44 @@ function broker(source: LiveUpstreamSource, options: ConstructorParameters<typeo
   const created = new LiveBroker(source, { lingerMs: 60, retryMinMs: 30, retryMaxMs: 120, inventoryOpenGraceMs: 20, ...options });
   brokers.push(created);
   return created;
+}
+
+function trailerClock() {
+  let nextId = 0;
+  const timers = new Map<number, { run(): void; ms: number }>();
+  return {
+    timers,
+    clock: {
+      setTimer(run: () => void, ms: number) { const id = ++nextId; timers.set(id, { run, ms }); return id; },
+      clearTimer(timer: unknown) { timers.delete(timer as number); },
+    },
+    fire() { const pending = [...timers.values()]; timers.clear(); for (const timer of pending) timer.run(); },
+  };
+}
+
+const replayFrame = <T extends { generation: string; sequence: number }>(data: T, event = "chat") =>
+  `id: ${cursorOf(data.generation, data.sequence)}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+async function visualCatchUp(hintedCursor: string | null = cursorOf("g1", 5), reconnect = false) {
+  const before = cursorOf("g1", 2), boundary = cursorOf("g1", 5);
+  const replayPath = `?cursor=${encodeURIComponent(before)}`;
+  const child = fakeSource({ headers: (pathname): Record<string, string> => pathname.includes(replayPath) && hintedCursor !== null
+    ? { [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: hintedCursor } : {} });
+  const clock = trailerClock();
+  const live = broker(child.source, { catchUpTrailerClock: clock.clock });
+  const opener = sink();
+  live.subscribe(opener, "ws", { topic: "conversation", key: "c" });
+  await waitFor(() => child.opened.length === 1, "shared conversation upstream");
+  const shared = child.opened[0]!;
+  shared.push(`event: open\ndata: ${JSON.stringify({ cursor: boundary })}\n\n`);
+  await waitFor(() => kinds(opener.envelopes).includes("ready"), "shared origin ready");
+  const behind = sink();
+  const attachment = live.subscribe(behind, "ws", { topic: "conversation", key: "c", cursor: before }, { reconnect });
+  await waitFor(() => child.byPath(replayPath).length === 1, "private visual replay");
+  const replay = child.byPath(replayPath)[0]!;
+  const status = { type: "conversation.status", status: "failed", message: "Provider failed after generating the image", generation: "g1", sequence: 5, conversationId: "c" };
+  const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 5, conversationId: "c" };
+  return { child, clock, live, opener, shared, behind, replay, attachment, before, boundary, status, resync };
 }
 
 // Failures are part of what these tests stage; the default sink's log line
@@ -243,6 +281,347 @@ describe("refcounted upstreams (2.1)", () => {
 });
 
 describe("cursors, replay, and topic-scoped resync (2.2)", () => {
+  test("a browser recovery that creates a replacement shared stream flags only that child open", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const s = sink();
+    const cursor = cursorOf("g1", 5);
+    const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 5, conversationId: "c" };
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor }, { reconnect: true });
+    await waitFor(() => child.opened.length === 1, "browser recovery's replacement child stream");
+    const recovery = new URL(child.opened[0]!.path, "http://child");
+    expect(recovery.searchParams.get("cursor")).toBe(cursor);
+    expect(recovery.searchParams.get("reconnect")).toBe("1");
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n${replayFrame(resync, "resync")}`);
+    await waitFor(() => s.envelopes.some(envelope => envelope.event.kind === "resync"), "native same-cursor visual repair");
+    expect(s.envelopes.at(-1)).toMatchObject({ cursor, event: { kind: "resync", data: resync } });
+    expect(live.upstreamCount()).toBe(0);
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor });
+    await waitFor(() => child.opened.length === 2, "post-history fresh attachment");
+    expect(new URL(child.opened[1]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
+    await waitFor(() => s.envelopes.at(-1)?.event.kind === "ready", "fresh attachment ready");
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "resync")).toHaveLength(1);
+    live.dispose();
+    expect(child.opened.every(upstream => upstream.cancelled)).toBe(true);
+  });
+
+  test("a recovering joiner cannot mutate a fresh shared child request that is already opening", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const cursor = cursorOf("g1", 5);
+    const fresh = sink();
+    live.subscribe(fresh, "ws", { topic: "conversation", key: "c", cursor });
+    await waitFor(() => child.opened.length === 1, "fresh child opening");
+    const recovering = sink();
+    live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor }, { reconnect: true });
+    expect(recovering.envelopes).toEqual([]);
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
+    await waitFor(() => fresh.envelopes.length === 1 && recovering.envelopes.length === 1, "independent attach outcomes");
+    expect(kinds(fresh.envelopes)).toEqual(["ready"]);
+    expect(kinds(recovering.envelopes)).toEqual(["ready"]);
+    expect(child.opened).toHaveLength(1);
+    expect(child.opened[0]!.cancelled).toBe(false);
+  });
+
+  test.each([5, 7])("a recovering browser at cursor %i needs no snapshot on a healthy stream with no remembered trailer", async sequence => {
+    const child = fakeSource();
+    const clock = trailerClock();
+    const live = broker(child.source, { catchUpTrailerClock: clock.clock });
+    const keeper = sink();
+    const head = cursorOf("g1", 5);
+    live.subscribe(keeper, "ws", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 1, "healthy shared child");
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n`);
+    await waitFor(() => kinds(keeper.envelopes).includes("ready"), "keeper ready");
+    for (let round = 0; round < 2; round++) {
+      const recovering = sink();
+      const cancelled = live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", sequence) }, { reconnect: true });
+      expect(kinds(recovering.envelopes)).toEqual(["ready"]);
+      expect(recovering.envelopes[0]).toMatchObject({ ws: "ws", key: "c", event: { kind: "ready" } });
+      expect(kinds(keeper.envelopes)).toEqual(["ready"]);
+      expect(child.opened).toHaveLength(1);
+      expect(clock.timers.size).toBe(0); // No additional replay lease.
+      const fresh = live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: head });
+      expect(kinds(recovering.envelopes)).toEqual(["ready", "ready"]);
+      cancelled.detach(); fresh.detach();
+    }
+    // Recovery intent must not contaminate another freshly opened topic.
+    live.subscribe(sink(), "ws", { topic: "conversation", key: "other", cursor: head });
+    await waitFor(() => child.opened.length === 2, "unrelated fresh topic");
+    expect(new URL(child.opened[1]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.running.add("other-workspace");
+    live.subscribe(sink(), "other-workspace", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 3, "unrelated fresh workspace");
+    expect(child.opened[2]!.workspaceId).toBe("other-workspace");
+    expect(new URL(child.opened[2]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    live.dispose();
+    expect(child.opened.every(upstream => upstream.cancelled)).toBe(true);
+    expect(clock.timers.size).toBe(0);
+  });
+
+  test.each(["same chunk", "separate chunks"] as const)("a forwarded same-cursor trailer survives upstream drop/reopen and repairs only its full conversation key (%s)", async chunks => {
+    const child = fakeSource({ running: new Set(["ws", "other-workspace"]) });
+    const live = broker(child.source);
+    const key = "opencode:c", head = cursorOf("g1", 5);
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "conversation", key, cursor: cursorOf("g1", 4) });
+    await waitFor(() => child.opened.length === 1, "initial upstream");
+    const status = { type: "conversation.status", status: "completed", generation: "g1", sequence: 5, conversationId: key };
+    const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 5, conversationId: key };
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: cursorOf("g1", 4) })}\n\n`);
+    await waitFor(() => kinds(first.envelopes).includes("ready"), "initial ready");
+    if (chunks === "same chunk") child.opened[0]!.push(replayFrame(status) + replayFrame(resync, "resync"));
+    else {
+      child.opened[0]!.push(replayFrame(status));
+      await waitFor(() => kinds(first.envelopes).includes("data"), "status acknowledged without trailer");
+      child.opened[0]!.push(replayFrame(resync, "resync"));
+    }
+    await waitFor(() => live.upstreamCount() === 0, "trailer drops upstream");
+    expect(kinds(first.envelopes)).toEqual(["ready", "data", "resync"]);
+    const keeper = sink();
+    live.subscribe(keeper, "ws", { topic: "conversation", key, cursor: head });
+    await waitFor(() => child.opened.length === 2, "fresh post-history upstream");
+    child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n`);
+    await waitFor(() => kinds(keeper.envelopes).includes("ready"), "fresh attachment never loops");
+    for (let round = 0; round < 2; round++) {
+      const recovering = sink();
+      live.subscribe(recovering, "ws", { topic: "conversation", key, cursor: head }, { reconnect: true });
+      expect(kinds(recovering.envelopes)).toEqual(["resync"]);
+      expect(child.opened).toHaveLength(2);
+      expect(kinds(keeper.envelopes)).toEqual(["ready"]);
+    }
+    for (const [workspace, otherKey] of [["ws", "claude:c"], ["other-workspace", key]] as const) {
+      const unrelated = sink();
+      live.subscribe(unrelated, workspace, { topic: "conversation", key: otherKey, cursor: head });
+      await waitFor(() => child.opened.length === (workspace === "ws" ? 3 : 4), "unrelated scope opens");
+      child.opened.at(-1)!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n`);
+      await waitFor(() => kinds(unrelated.envelopes).includes("ready"), "unrelated scope ready");
+      const resumed = sink();
+      live.subscribe(resumed, workspace, { topic: "conversation", key: otherKey, cursor: head }, { reconnect: true });
+      expect(kinds(resumed.envelopes)).toEqual(["ready"]);
+    }
+    // An earlier trailer does not poison later ordinary at-head resumes.
+    child.opened[1]!.push(replayFrame({ ...status, sequence: 6 }));
+    await waitFor(() => keeper.envelopes.some(envelope => envelope.cursor === cursorOf("g1", 6)), "new ordinary head");
+    const later = sink();
+    live.subscribe(later, "ws", { topic: "conversation", key, cursor: cursorOf("g1", 6) }, { reconnect: true });
+    expect(kinds(later.envelopes)).toEqual(["ready"]);
+    child.opened[1]!.push(replayFrame({ ...resync, sequence: 6 }, "resync"));
+    await waitFor(() => kinds(keeper.envelopes).includes("resync"), "latest trailer supersedes previous cursor");
+    const fresh = sink();
+    live.subscribe(fresh, "ws", { topic: "conversation", key, cursor: cursorOf("g1", 6) });
+    await waitFor(() => child.opened.length === 5, "newest fresh upstream");
+    child.opened[4]!.push(`event: open\ndata: ${JSON.stringify({ cursor: cursorOf("g1", 6) })}\n\n`);
+    await waitFor(() => kinds(fresh.envelopes).includes("ready"), "newest fresh ready");
+    const newest = sink();
+    live.subscribe(newest, "ws", { topic: "conversation", key, cursor: cursorOf("g1", 6) }, { reconnect: true });
+    expect(kinds(newest.envelopes)).toEqual(["resync"]);
+    const retained = (live as unknown as { conversationTrailers: Map<string, Map<string, string>> }).conversationTrailers;
+    expect([...retained.get("ws")!.values()]).toEqual([cursorOf("g1", 6)]); // One latest cursor, not duplicate event history.
+  });
+
+  test.each(["linger", "stop", "forget", "dispose"] as const)("private hinted trailers survive upstream linger, but retire with their %s owner", async lifecycle => {
+    const workspaces = ["ws"], head = cursorOf("g1", 5);
+    const child = fakeSource({ workspaces, headers: () => ({ [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: head }) });
+    let live = broker(child.source, { lingerMs: 0 });
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "conversation", key: "c", cursor: head }, { reconnect: true });
+    await waitFor(() => child.opened.length === 1, "initial recovery child");
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n${replayFrame({ type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 5, conversationId: "c" }, "resync")}`);
+    await waitFor(() => live.upstreamCount() === 0, "hinted initial trailer consumed");
+    const idle = sink();
+    const attachment = live.subscribe(idle, "ws", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 2, "post-history child");
+    child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n`);
+    await waitFor(() => kinds(idle.envelopes).includes("ready"), "post-history ready");
+    attachment.detach();
+    await waitFor(() => child.opened[1]!.cancelled, "linger releases child without forgetting trailer");
+    if (lifecycle === "stop") { child.setRunning("ws", false); child.setRunning("ws", true); }
+    else if (lifecycle === "forget") { child.unregister("ws"); workspaces.push("ws"); }
+    else if (lifecycle === "dispose") { live.dispose(); live = broker(child.source); }
+    const keeper = sink();
+    live.subscribe(keeper, "ws", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 3, "replacement shared child");
+    child.opened[2]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n`);
+    await waitFor(() => kinds(keeper.envelopes).includes("ready"), "replacement shared ready");
+    const recovering = sink();
+    live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: head }, { reconnect: true });
+    expect(kinds(recovering.envelopes)).toEqual([lifecycle === "linger" ? "resync" : "ready"]);
+    expect(child.opened).toHaveLength(3);
+  });
+
+  test.each(["retention-gap", "generation-changed", "invalid-cursor", "conversation-rewritten"] as const)("an unhinted opening %s resync is not evidence of a forwarded visual trailer", async reason => {
+    const child = fakeSource(), live = broker(child.source), head = cursorOf("g1", 5);
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 1, "initial child");
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n${replayFrame({ type: "resync", reason, generation: "g1", sequence: 5, conversationId: "c" }, "resync")}`);
+    await waitFor(() => live.upstreamCount() === 0, "ordinary child invalidation");
+    const keeper = sink();
+    live.subscribe(keeper, "ws", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 2, "fresh child");
+    child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n`);
+    await waitFor(() => kinds(keeper.envelopes).includes("ready"), "fresh child ready");
+    const recovering = sink();
+    live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: head }, { reconnect: true });
+    expect(kinds(recovering.envelopes)).toEqual(["ready"]);
+  });
+
+  test("a browser recovering behind a shared origin retains native replay before its visual resync", async () => {
+    const h = await visualCatchUp(cursorOf("g1", 5), true);
+    expect(new URL(h.shared.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    expect(new URL(h.replay.path, "http://child").searchParams.get("reconnect")).toBe("1");
+    const delta = { type: "item.text_delta", itemId: "answer", delta: "generated", conversationId: "c", generation: "g1", sequence: 3 };
+    const continued = { ...delta, delta: " image", sequence: 4 };
+    h.replay.push(replayFrame(delta) + replayFrame(continued) + replayFrame(h.status) + replayFrame(h.resync, "resync"));
+    await waitFor(() => h.behind.envelopes.some(envelope => envelope.event.kind === "resync"), "replayed visual reconciliation");
+    expect(h.behind.envelopes.map(envelope => envelope.event)).toEqual([
+      { kind: "data", data: delta }, { kind: "data", data: continued }, { kind: "data", data: h.status }, { kind: "resync", data: h.resync },
+    ]);
+    expect(h.behind.envelopes.filter(envelope => envelope.event.kind === "data").map(envelope => envelope.cursor)).toEqual([3, 4, 5].map(sequence => cursorOf("g1", sequence)));
+    expect(kinds(h.opener.envelopes)).toEqual(["ready"]);
+    expect(h.child.opened).toHaveLength(2);
+    expect(h.replay.cancelled).toBe(true);
+    expect(h.clock.timers.size).toBe(0);
+  });
+
+  test.each(["same chunk", "separate chunks"] as const)("visual catch-up preserves status then its same-cursor resync across %s before fresh reattachment is ready", async chunks => {
+    const h = await visualCatchUp();
+    expect(h.clock.timers.size).toBe(0); // No deadline during fetch/early replay.
+    h.replay.push(`event: open\ndata: ${JSON.stringify({ cursor: h.boundary })}\n\n`);
+    const delta = { type: "item.text_delta", generation: "g1", sequence: 3, conversationId: "c", itemId: "answer", delta: " generated" };
+    h.replay.push(replayFrame(delta));
+    await waitFor(() => h.behind.envelopes.length === 1, "early native delta");
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.behind.envelopes[0]!.event).toEqual({ kind: "data", data: delta });
+    const secondDelta = { ...delta, sequence: 4, delta: " image" };
+    h.replay.push(replayFrame(secondDelta));
+    await waitFor(() => h.behind.envelopes.length === 2, "contiguous native replay");
+    const ordinary = sink();
+    h.live.subscribe(ordinary, "ws", { topic: "conversation", key: "c", cursor: h.boundary });
+    expect(kinds(ordinary.envelopes)).toEqual(["ready"]);
+    if (chunks === "same chunk") h.replay.push(replayFrame(h.status) + replayFrame(h.resync, "resync"));
+    else {
+      h.replay.push(replayFrame(h.status));
+      await waitFor(() => h.behind.envelopes.length === 3, "terminal status without its trailer");
+      expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "data"]);
+      expect(h.replay.cancelled).toBe(false);
+      expect([...h.clock.timers.values()].map(timer => timer.ms)).toEqual([10_000]);
+      const another = sink();
+      h.live.subscribe(another, "ws", { topic: "conversation", key: "c", cursor: h.before });
+      expect(kinds(another.envelopes)).toEqual(["resync"]);
+      expect(h.child.opened).toHaveLength(2); // Still one private replay.
+      h.replay.push(replayFrame(h.resync, "resync"));
+    }
+    await waitFor(() => kinds(h.behind.envelopes).includes("resync"), "visual reconciliation before any ready");
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "data", "resync"]);
+    expect(h.behind.envelopes[2]).toMatchObject({ cursor: h.boundary, event: { kind: "data", data: h.status } });
+    expect(h.behind.envelopes[3]).toMatchObject({ cursor: h.boundary, event: { kind: "resync", data: h.resync } });
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+    expect(h.shared.cancelled).toBe(false);
+    h.clock.fire();
+    expect(h.behind.envelopes).toHaveLength(4);
+    // The client has now read the enriched snapshot at this cursor. Only its
+    // explicit fresh attachment may report ready; it must not resync-loop.
+    const resumed = h.live.subscribe(h.behind, "ws", { topic: "conversation", key: "c", cursor: h.boundary });
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "data", "resync", "ready"]);
+    const recovering = sink();
+    h.live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: h.boundary }, { reconnect: true });
+    expect(kinds(recovering.envelopes)).toEqual(["resync"]); // The privately forwarded trailer also survives on the shared owner.
+    const next = { ...delta, sequence: 6, delta: " next turn" };
+    h.shared.push(replayFrame(next));
+    await waitFor(() => h.behind.envelopes.length === 6 && ordinary.envelopes.length === 2, "normal shared delivery after recovery");
+    expect(h.behind.envelopes.filter(envelope => envelope.event.kind === "data").map(envelope => envelope.cursor)).toEqual([3, 4, 5, 6].map(sequence => cursorOf("g1", sequence)));
+    expect(h.behind.envelopes.at(-1)!.event).toEqual({ kind: "data", data: next });
+    expect(h.child.opened).toHaveLength(2);
+    resumed.detach(); h.attachment.detach(); h.live.dispose();
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.live.upstreamCount()).toBe(0);
+  });
+
+  test.each([null, "not-a-cursor", cursorOf("foreign", 5), cursorOf("g1", 1), cursorOf("g1", 4)])("nonvisual or inapplicable visual hint %s retains immediate normal merge without a timer", async hint => {
+    const h = await visualCatchUp(hint);
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => kinds(h.behind.envelopes).includes("ready"), "ordinary merge");
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "ready"]);
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+  });
+
+  test("the trailer-only deadline releases the replay before one failure resync, never ready", async () => {
+    const h = await visualCatchUp();
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "trailer watchdog armed at the origin");
+    const overdue = [...h.clock.timers.values()][0]!;
+    expect(overdue.ms).toBe(10_000);
+    const write = h.behind.write;
+    // This subscriber's sink also proves cancellation precedes recovery.
+    h.behind.write = envelope => { if (envelope.event.kind === "resync") expect(h.replay.cancelled).toBe(true); write(envelope); };
+    h.clock.fire();
+    expect(h.replay.cancelled).toBe(true);
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "resync"]);
+    expect(h.behind.envelopes[1]!.event).toEqual({ kind: "resync" });
+    overdue.run(); // A stale callback cannot cause a second recovery.
+    h.replay.push(replayFrame(h.resync, "resync"));
+    expect(h.behind.envelopes).toHaveLength(2);
+    h.live.subscribe(h.behind, "ws", { topic: "conversation", key: "c", cursor: h.boundary });
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "resync", "ready"]);
+    const recovering = sink();
+    h.live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: h.boundary }, { reconnect: true });
+    expect(kinds(recovering.envelopes)).toEqual(["ready"]); // The Hub's watchdog resync was not a child trailer.
+    expect(h.child.opened).toHaveLength(2);
+    expect(h.clock.timers.size).toBe(0);
+  });
+
+  test("a later hinted boundary cannot extend the lease once replay reaches the shared origin", async () => {
+    const h = await visualCatchUp(cursorOf("g1", 7));
+    h.replay.push(`event: open\ndata: ${JSON.stringify({ cursor: cursorOf("g1", 7) })}\n\n`);
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "origin reached before the later hinted boundary");
+    expect(kinds(h.behind.envelopes)).toEqual(["data"]);
+    const deadline = [...h.clock.timers.keys()][0]!;
+    h.replay.push(replayFrame({ ...h.status, sequence: 6 }));
+    await waitFor(() => h.behind.envelopes.length === 2, "one later native event");
+    expect([...h.clock.timers.keys()]).toEqual([deadline]); // Never re-arm on progress.
+    h.clock.fire();
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "data", "resync"]);
+    expect(h.replay.cancelled).toBe(true);
+  });
+
+  test.each(["source end", "wrong cursor", "wrong generation", "wrong conversation", "missing trailer", "generation changed"] as const)("a hinted replay's %s releases its watchdog and uses existing recovery", async failure => {
+    const h = await visualCatchUp();
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "awaiting hinted trailer");
+    if (failure === "source end") h.replay.end();
+    else if (failure === "wrong cursor") h.replay.push(replayFrame({ ...h.resync, sequence: 6 }, "resync"));
+    else if (failure === "wrong generation") h.replay.push(replayFrame({ ...h.resync, generation: "foreign" }, "resync"));
+    else if (failure === "wrong conversation") h.replay.push(replayFrame({ ...h.resync, conversationId: "another" }, "resync"));
+    else if (failure === "missing trailer") h.replay.push(": keepalive\n\n");
+    else h.shared.push(replayFrame({ ...h.status, generation: "new-generation", sequence: 1 }));
+    await waitFor(() => kinds(h.behind.envelopes).includes("resync"), "bounded topic recovery");
+    expect(kinds(h.behind.envelopes)).toEqual(["data", "resync"]);
+    expect(h.behind.envelopes.at(-1)!.event).toEqual({ kind: "resync" });
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+    h.clock.fire();
+    expect(h.behind.envelopes).toHaveLength(2);
+  });
+
+  test.each(["detach", "dispose"] as const)("%s cancels a hinted trailer wait without late recovery or leaked timers", async action => {
+    const h = await visualCatchUp();
+    h.replay.push(replayFrame(h.status));
+    await waitFor(() => h.clock.timers.size === 1, "waiting on the trailer");
+    const stale = [...h.clock.timers.values()][0]!;
+    if (action === "detach") h.attachment.detach(); else h.live.dispose();
+    expect(h.clock.timers.size).toBe(0);
+    expect(h.replay.cancelled).toBe(true);
+    stale.run(); h.clock.fire();
+    expect(kinds(h.behind.envelopes)).toEqual(["data"]);
+    if (action === "dispose") expect(h.live.upstreamCount()).toBe(0);
+  });
   for (const catchUp of [false, true]) {
     test(`disposing during a ${catchUp ? "private catch-up" : "shared live"} burst stops the remainder after its yield`, async () => {
       const child = fakeSource();
@@ -344,6 +723,44 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     child.opened[0]!.push(`event: state\ndata: ${JSON.stringify({ ...patch, previousRevision: 8, revision: 9 })}\n\n`);
     await waitFor(() => child.opened[0]!.cancelled, "gap recovery");
     expect(first.envelopes.at(-1)?.event.kind).toBe("unavailable");
+  });
+  test("document joiners receive Git-ignored folder entries and listing patches in the materialized snapshot", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "document", key: "" });
+    await waitFor(() => child.opened.length === 1, "document upstream");
+    const root = { id: "/docs", path: "/docs", label: "docs", hiddenCount: 0 };
+    const initial: DocumentSnapshot = {
+      ...createWatchSession([], true).getStatePayload(), kind: "snapshot", epoch: "child", revision: 0, build: BUILD_SUMMARY,
+      roots: [{ ...root, docs: [], folders: [{ id: "/docs/build", rootId: "/docs", relativePath: "build/", listed: false, revision: 0 }] }],
+      discovery: { status: "ready", discovered: 0 }, repositoryState: { status: "ready", generation: 1 },
+    };
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(initial)}\n\n`);
+    await waitFor(() => first.envelopes.length === 2, "initial snapshot and ready");
+    const listing: DocumentPatch = {
+      kind: "patch", epoch: "child", previousRevision: 0, revision: 1, generatedAt: Date.now() + 1,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "1", changedId: null, removals: [],
+      upserts: [{ id: "/docs/build/CMakeCache.txt", rootId: "/docs", name: "CMakeCache.txt", relativePath: "build/CMakeCache.txt", mtimeMs: 1, revision: 1, kind: "text", gitIgnoreStatus: "ignored" }],
+      folderUpserts: [
+        { id: "/docs/build", rootId: "/docs", relativePath: "build/", listed: true, revision: 1 },
+        { id: "/docs/build/renders", rootId: "/docs", relativePath: "build/renders/", listed: false, revision: 1 },
+      ],
+    };
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(listing)}\n\n`);
+    await waitFor(() => first.envelopes.length === 3, "listing patch");
+    expect(first.envelopes[2]!.event).toEqual({ kind: "data", data: listing });
+    const removal: DocumentPatch = { ...listing, previousRevision: 1, revision: 2, generatedAt: listing.generatedAt + 1, upserts: [], folderUpserts: undefined,
+      folderRemovals: [{ rootId: "/docs", id: "/docs/build/renders" }] };
+    delete removal.folderUpserts;
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(removal)}\n\n`);
+    await waitFor(() => first.envelopes.length === 4, "folder removal");
+    const joiner = sink();
+    live.subscribe(joiner, "ws", { topic: "document", key: "" });
+    await waitFor(() => joiner.envelopes.length === 2, "joined snapshot");
+    expect(joiner.envelopes[0]!.event).toMatchObject({ kind: "data", data: { kind: "snapshot", revision: 2, roots: [{
+      docs: listing.upserts, folders: [{ id: "/docs/build", relativePath: "build/", listed: true, revision: 1 }],
+    }] } });
   });
   test("a stale conversation cursor resyncs the conversation topic while the document topic replays", async () => {
     const child = fakeSource({
@@ -887,16 +1304,123 @@ describe("failure and child exit (2.3)", () => {
     const s = sink();
     live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 0) });
     await waitFor(() => child.opened.length === 1, "upstream");
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
     child.opened[0]!.push(": open\n\n");
     child.opened[0]!.push(chatFrame("g1", 1));
     await waitFor(() => s.envelopes.length === 2, "ready + data");
     child.opened[0]!.end();
     await waitFor(() => child.opened.length === 2, "reopen");
     expect(child.opened[1]!.path).toContain(`cursor=${encodeURIComponent(cursorOf("g1", 1))}`);
+    expect(new URL(child.opened[1]!.path, "http://child").searchParams.get("reconnect")).toBe("1");
     child.opened[1]!.push(": open\n\n");
     child.opened[1]!.push(chatFrame("g1", 2));
     await waitFor(() => s.envelopes.length === 5, "unavailable, ready, data");
     expect(kinds(s.envelopes)).toEqual(["ready", "data", "unavailable", "ready", "data"]);
+  });
+
+  test.each(["stream end", "session restart"] as const)("%s after terminal status explicitly repairs the same-cursor visual resync without flagging fresh attachments", async failure => {
+    const child = fakeSource();
+    const clock = trailerClock();
+    const live = broker(child.source, { retryMinMs: failure === "session restart" ? 5_000 : 20, retryMaxMs: 5_000, catchUpTrailerClock: clock.clock });
+    const s = sink();
+    const interrupt = (upstream: FakeUpstream) => {
+      if (failure === "stream end") upstream.end();
+      else { child.setRunning("ws", false); child.setRunning("ws", true); }
+    };
+    const initial = cursorOf("g1", 0), terminalCursor = cursorOf("g1", 1);
+    const status = { type: "conversation.status", status: "failed", message: "Provider failed after image generation", generation: "g1", sequence: 1, conversationId: "c" };
+    const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 1, conversationId: "c" };
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: initial });
+    await waitFor(() => child.opened.length === 1, "fresh conversation stream");
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: initial })}\n\n`);
+    await waitFor(() => kinds(s.envelopes).includes("ready"), "initial ready");
+    child.opened[0]!.push(replayFrame(status));
+    await waitFor(() => s.envelopes.some(envelope => envelope.event.kind === "data"), "original native status received");
+    expect(s.envelopes.at(-1)).toMatchObject({ cursor: terminalCursor, event: { kind: "data", data: status } });
+    interrupt(child.opened[0]!);
+    await waitFor(() => child.opened.length === 2, "transport recovery");
+    const recovering = new URL(child.opened[1]!.path, "http://child");
+    expect(recovering.searchParams.get("cursor")).toBe(terminalCursor);
+    expect(recovering.searchParams.get("reconnect")).toBe("1");
+    // The actual child uses this explicit flag to return its cached visual
+    // resync even though no new native event or sequence is available.
+    child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor: terminalCursor })}\n\n${replayFrame(resync, "resync")}`);
+    await waitFor(() => s.envelopes.some(envelope => envelope.event.kind === "resync"), "same-cursor visual repair");
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "data")).toEqual([
+      expect.objectContaining({ cursor: terminalCursor, event: { kind: "data", data: status } }),
+    ]);
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "resync")).toEqual([
+      expect.objectContaining({ cursor: terminalCursor, event: { kind: "resync", data: resync } }),
+    ]);
+    expect(child.opened[1]!.cancelled).toBe(true);
+    expect(live.upstreamCount("conversation")).toBe(0);
+
+    for (let round = 0; round < 2; round++) {
+      const freshIndex = child.opened.length;
+      const readyCount = s.envelopes.filter(envelope => envelope.event.kind === "ready").length;
+      live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: terminalCursor });
+      await waitFor(() => child.opened.length === freshIndex + 1, "fresh post-history attachment");
+      const fresh = child.opened[freshIndex]!;
+      const path = new URL(fresh.path, "http://child");
+      expect(path.searchParams.get("cursor")).toBe(terminalCursor);
+      expect(path.searchParams.has("reconnect")).toBe(false);
+      fresh.push(`event: open\ndata: ${JSON.stringify({ cursor: terminalCursor })}\n\n`);
+      await waitFor(() => s.envelopes.filter(envelope => envelope.event.kind === "ready").length === readyCount + 1, "fresh ready without another message");
+      expect(s.envelopes.filter(envelope => envelope.event.kind === "resync")).toHaveLength(round + 1);
+      if (round === 0) {
+        const unavailableCount = s.envelopes.filter(envelope => envelope.event.kind === "unavailable").length;
+        // Repeat the selected failure mode. A session restart recovers on
+        // its start event; an EOF alone correctly waits the 5-second retry
+        // floor deliberately configured for that variant.
+        interrupt(fresh);
+        await waitFor(() => s.envelopes.filter(envelope => envelope.event.kind === "unavailable").length === unavailableCount + 1, "cached transport observed unavailable");
+        await waitFor(() => child.opened.length === freshIndex + 2, "cached-cursor transport recovery");
+        const cached = child.opened[freshIndex + 1]!;
+        expect(new URL(cached.path, "http://child").searchParams.get("reconnect")).toBe("1");
+        cached.push(`event: open\ndata: ${JSON.stringify({ cursor: terminalCursor })}\n\n${replayFrame(resync, "resync")}`);
+        await waitFor(() => s.envelopes.filter(envelope => envelope.event.kind === "resync").length === 2, "second cached repair");
+      }
+    }
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "data")).toHaveLength(1);
+    expect(clock.timers.size).toBe(0); // Shared recovery is not a private trailer lease.
+    live.dispose();
+    expect(child.opened.every(upstream => upstream.cancelled)).toBe(true);
+    expect(live.upstreamCount()).toBe(0);
+  });
+
+  test("recovery retains the child's learned origin before any chat data has arrived", async () => {
+    const child = fakeSource();
+    const live = broker(child.source, { retryMinMs: 20, retryMaxMs: 40 });
+    const s = sink();
+    live.subscribe(s, "ws", { topic: "conversation", key: "c" });
+    await waitFor(() => child.opened.length === 1, "unpositioned initial stream");
+    expect(child.opened[0]!.path).toBe("/api/chat/conversations/c/events");
+    const origin = cursorOf("g1", 7);
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: origin })}\n\n`);
+    await waitFor(() => kinds(s.envelopes).includes("ready"), "origin learned");
+    child.opened[0]!.end();
+    await waitFor(() => child.opened.length === 2, "origin-only recovery");
+    const recovered = new URL(child.opened[1]!.path, "http://child");
+    expect(recovered.searchParams.get("cursor")).toBe(origin);
+    expect(recovered.searchParams.get("reconnect")).toBe("1");
+    const snapshotRecovery = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 7, conversationId: "c" };
+    child.opened[1]!.push(replayFrame(snapshotRecovery, "resync"));
+    await waitFor(() => kinds(s.envelopes).includes("resync"), "origin-only visual repair");
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "data")).toEqual([]);
+  });
+
+  test("a conversation's first child open after a stopped workspace starts is not transport recovery", async () => {
+    const child = fakeSource({ running: new Set() });
+    const live = broker(child.source, { retryMinMs: 5_000, retryMaxMs: 5_000 });
+    const s = sink();
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 5) });
+    expect(child.opened).toHaveLength(0);
+    child.setRunning("ws", true);
+    await waitFor(() => child.opened.length === 1, "first child transport");
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[0]!.push(": open\n\n");
+    await waitFor(() => kinds(s.envelopes).includes("ready"), "fresh attachment ready");
   });
 
   test("a stopped workspace is unavailable at once and a session start recovers it promptly", async () => {

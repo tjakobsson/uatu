@@ -13,21 +13,22 @@ afterEach(async () => {
 });
 
 describe("asset root helpers", () => {
-  test("narrow output includes share direct exposure policy, containment and runtime removal", async () => {
+  test("output folders are served without configuration while explicit exclusions, built-ins and containment hold", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-static-output-"));
     const outside = await mkdtemp(path.join(os.tmpdir(), "uatu-static-output-outside-"));
     tempDirectories.push(root, outside);
     await mkdir(path.join(root, "build/renders/private"), { recursive: true });
     await mkdir(path.join(root, "build/objects"));
-    await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"], exclude: ["build/renders/private/**"] } }));
-    for (const name of ["build/renders/public.txt", "build/renders/private/no.txt", "build/renders/.env", "build/objects/no.txt"]) await writeFile(path.join(root, name), "bytes");
+    await writeFile(path.join(root, ".gitignore"), "/build*/\n");
+    for (const name of ["build/renders/public.txt", "build/renders/private/no.txt", "build/renders/.env", "build/objects/main.o", "build/renders/.DS_Store"]) await writeFile(path.join(root, name), "bytes");
     await writeFile(path.join(outside, "outside.txt"), "outside");
     await symlink(outside, path.join(root, "build/renders/link"));
     const entries = [{ kind: "dir" as const, absolutePath: root }];
+    for (const name of ["build/renders/public.txt", "build/renders/.env", "build/objects/main.o", "build/renders/private/no.txt"]) expect((await resolveStaticFileRequest(`/${name}`, entries)).status).toBe("found");
+    for (const name of ["build/renders/.DS_Store", "build/renders/link/outside.txt"]) expect((await resolveStaticFileRequest(`/${name}`, entries)).status).toBe("not-found");
+    await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["build/renders/private/**"] } }));
+    expect((await resolveStaticFileRequest("/build/renders/private/no.txt", entries)).status).toBe("not-found");
     expect((await resolveStaticFileRequest("/build/renders/public.txt", entries)).status).toBe("found");
-    for (const name of ["build/renders/private/no.txt", "build/renders/.env", "build/objects/no.txt", "build/renders/link/outside.txt"]) expect((await resolveStaticFileRequest(`/${name}`, entries)).status).toBe("not-found");
-    await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { include: [] } }));
-    expect((await resolveStaticFileRequest("/build/renders/public.txt", entries)).status).toBe("not-found");
   });
   test("getAssetRoots returns dir paths for dirs and parent dirs for files", () => {
     const roots = getAssetRoots([
@@ -73,7 +74,7 @@ describe("asset root helpers", () => {
       { respectGitignore: true },
     );
 
-    expect(resolved).toEqual({ status: "found", filePath: await realpath(path.join(tempDirectory, "secret.txt")) });
+    expect(resolved).toEqual({ status: "found", filePath: await realpath(path.join(tempDirectory, "secret.txt")), documentPath: path.join(tempDirectory, "secret.txt") });
     await writeFile(path.join(tempDirectory, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["secret.txt"] } }));
     expect(await resolveStaticFileRequest("/secret.txt", [{ kind: "dir", absolutePath: tempDirectory }])).toEqual({ status: "not-found" });
   });
@@ -110,7 +111,7 @@ describe("asset root helpers", () => {
       { respectGitignore: false },
     );
 
-    expect(resolved).toEqual({ status: "found", filePath: await realpath(secretPath) });
+    expect(resolved).toEqual({ status: "found", filePath: await realpath(secretPath), documentPath: secretPath });
   });
 
   test("resolveStaticFileRequest rejects symlink escapes", async () => {
@@ -141,16 +142,28 @@ describe("asset root helpers", () => {
     expect(resolved).toEqual({ status: "not-found" });
   });
 
-  test("resolveStaticFileRequest rejects secret-like files", async () => {
+  test("resolveStaticFileRequest serves secret-like files unless explicitly excluded", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-secret-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, ".env.local"), "TOKEN=secret\n");
+    const entries = [{ kind: "dir" as const, absolutePath: tempDirectory }];
 
-    const resolved = await resolveStaticFileRequest(
-      "/.env.local",
-      [{ kind: "dir", absolutePath: tempDirectory }],
-    );
+    expect((await resolveStaticFileRequest("/.env.local", entries)).status).toBe("found");
+    await writeFile(path.join(tempDirectory, ".uatu.json"), JSON.stringify({ ignore: { exclude: [".env*"] } }));
+    expect(await resolveStaticFileRequest("/.env.local", entries)).toEqual({ status: "not-found" });
+  });
 
-    expect(resolved).toEqual({ status: "not-found" });
+  test("a file served through a symlinked watch root is identified by its watched-root path", async () => {
+    const real = await mkdtemp(path.join(os.tmpdir(), "uatu-static-real-root-"));
+    const linkParent = await mkdtemp(path.join(os.tmpdir(), "uatu-static-link-root-"));
+    tempDirectories.push(real, linkParent);
+    const linked = path.join(linkParent, "workspace");
+    await symlink(real, linked);
+    await mkdir(path.join(real, "build"));
+    await writeFile(path.join(real, "build", "a.png"), "png");
+    const served: string[] = [];
+    const response = await staticFileResponse("/build/a.png", [{ kind: "dir", absolutePath: linked }], { onServe: id => served.push(id) });
+    expect(response?.status).toBe(200);
+    expect(served).toEqual([path.join(linked, "build", "a.png")]);
   });
 });

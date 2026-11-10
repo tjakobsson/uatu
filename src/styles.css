@@ -10509,6 +10509,116 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
   cursor: default;
 }
 
+/* Agent visuals are part of the answer, not attachment thumbnails. */
+.chat-visual {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  margin-block: 0.85rem;
+}
+
+.chat-visual-preview,
+.chat-visual-source {
+  display: block;
+  min-width: 0;
+}
+
+.chat-visual [hidden] {
+  display: none;
+}
+
+.chat-visual-enlarge {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0.4rem;
+  background: var(--surface);
+  cursor: zoom-in;
+}
+
+/* A viewBox-only SVG needs a definite containing width; shrink-to-fit
+   creates a percentage-sizing cycle and can collapse the image to zero. */
+.chat-visual.is-svg .chat-visual-enlarge {
+  width: 100%;
+}
+
+.chat-visual-enlarge img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: none;
+  border-radius: inherit;
+}
+
+.chat-visual-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.chat-visual-controls button {
+  min-height: 2rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.35rem;
+  color: var(--text-strong);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-visual-controls button:hover,
+.chat-visual-controls button[aria-pressed="true"] {
+  border-color: var(--border-medium);
+  background: var(--surface-raised);
+}
+
+.chat-visual-controls [data-visual-copy] {
+  margin-left: auto;
+}
+
+.chat-visual-controls button:focus-visible,
+.chat-visual-enlarge:focus-visible {
+  outline: 2px solid var(--text-strong);
+  outline-offset: 3px;
+}
+
+.chat-visual-enlarge:focus-visible {
+  outline-offset: -2px;
+}
+
+.chat-visual-fallback,
+.chat-visual-status {
+  color: var(--text-strong);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.chat-visual-reference {
+  white-space: normal;
+}
+
+.chat-visual-source > code {
+  display: block;
+  max-width: 100%;
+  padding: 0.8rem;
+  overflow: auto;
+  white-space: pre;
+  border-radius: 0.4rem;
+  background: var(--surface-raised);
+}
+
+.chat-visual-status:not(:empty) {
+  display: block;
+  margin-top: 0.4rem;
+}
+
 /* Full-size attachment viewer. */
 .chat-image-viewer {
   padding: 0;
@@ -10524,6 +10634,7 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
 
 .chat-image-viewer-body {
   margin: 0;
+  width: min(92vw, 1400px);
   display: grid;
   justify-items: center;
   gap: 0.5rem;
@@ -11075,6 +11186,11 @@ html[data-ui-mode="touch"] .chat-surface:has(#chat-work-dock > details[open]:not
 .chat-aside-header button { flex: 0 0 auto; }
 #chat-aside-answer { min-width: 0; overflow-wrap: anywhere; margin-block: 16px; user-select: text; }
 #chat-aside-answer :is(table, pre) { display: block; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+/* Shared code-copy controls are absolute children of their source block,
+   not of the reader dialog beneath its sticky header. */
+#chat-aside-answer pre { position: relative; }
+#chat-aside-answer pre:hover > .code-copy,
+#chat-aside-answer pre:focus-within > .code-copy { opacity: 1; }
 #chat-aside-answer :is(p, a) { overflow-wrap: anywhere; }
 #chat-aside-answer :is(td, th) { white-space: nowrap; }
 .chat-aside-ready { position: absolute; bottom: 0; left: 8px; z-index: 2; max-width: calc(50% - 12px); padding: 10px 8px; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; isolation: isolate; }

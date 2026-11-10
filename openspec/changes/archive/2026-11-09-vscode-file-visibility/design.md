@@ -32,7 +32,7 @@ VS Code's model, which this change adopts:
 
 ### 1. Built-in exclusions are VS Code's `files.exclude` defaults
 
-The remaining built-ins are `.git`, `.svn`, `.hg`, `CVS`, `.DS_Store`, and `Thumbs.db`. Every other denial is deleted: dependency names, cache names, virtual environments, editor temp suffixes, and secret patterns. The VCS directories stay mandatory, because the watcher must not traverse Git internals and `.git/config` can hold credentials. The implementation verifies this list against VS Code's current `files.exclude` default and records the version it checked.
+The remaining built-ins are `.git`, `.svn`, `.hg`, `.jj`, `.DS_Store`, and `Thumbs.db`. Every other denial is deleted: dependency names, cache names, virtual environments, editor temp suffixes, and secret patterns. The VCS directories stay mandatory, because the watcher must not traverse Git internals and `.git/config` can hold credentials. The implementation verifies this list against VS Code's current `files.exclude` default and records the version it checked.
 
 *Alternative:* keep the secret denylist as a security floor. The user rejected it. Rationale recorded for the docs: Hub authentication is the boundary, and an authenticated user already has the same file access through the embedded terminal and agents. Explicit `ignore.exclude` remains available.
 
@@ -86,6 +86,7 @@ The key never reached a stable release. Parsing and the soft-exclusion branch ar
 - [Eviction removes a file from one client's tree that another client is about to open] → Opening it pins it. If an evicted row was already gone, the existing unavailable-destination rules apply, and expanding the folder restores it.
 - [A wire change touches the Hub broker, replay, and both clients] → Covered by contract tests, the API revision bump, and an e2e test through the Hub.
 - [The Chokidar fallback cannot see live writes in unlisted ignored folders] → Documented. The native watcher is the default on supported platforms.
+- [Chokidar cannot defer a traversal decision, so in polling mode a folder Git starts ignoring after discovery is walked like any other folder] → Folders known at discovery and listed levels behave as in native mode; the next recovery (for example a `.gitignore` edit) reclassifies the late folder. Documented with the other polling limits.
 
 ## Migration Plan
 

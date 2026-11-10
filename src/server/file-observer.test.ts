@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat, lstat, readdir } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -111,7 +112,7 @@ test("native rename reconciliation removes a target replaced with a symlink", as
   expect(events.map(({ event, file }) => ({ event, file }))).toEqual([{ event: "unlink", file }]);
 });
 
-test("native discovery prunes denied directories and supplies file stats", async () => {
+test("native discovery prunes explicit exclusions and symlinks and supplies file stats", async () => {
   const root = await fixture();
   for (const name of ["generated", "private", "node_modules", "docs"]) await mkdir(path.join(root, name));
   await writeFile(path.join(root, ".gitignore"), "generated/\n");
@@ -121,10 +122,10 @@ test("native discovery prunes denied directories and supplies file stats", async
   const work: string[] = [];
   const { events, policy } = await observed({ kind: "dir", absolutePath: root }, false, kind => work.push(kind));
   const files = events.filter(event => event.event === "add");
-  expect(files.map(event => path.relative(root, event.file)).sort()).toEqual([".gitignore", ".uatu.json", "docs/keep.md", "generated/skip.md"]);
+  expect(files.map(event => path.relative(root, event.file)).sort()).toEqual([".env", ".gitignore", ".uatu.json", "docs/keep.md", "generated/skip.md", "node_modules/skip.md"]);
   expect(files.every(event => event.stats?.isFile())).toBe(true);
   expect(work.filter(kind => kind === "watch")).toHaveLength(1);
-  expect(work.filter(kind => kind === "directory")).toHaveLength(3);
+  expect(work.filter(kind => kind === "directory")).toHaveLength(4);
   expect(policy.hidden.size).toBe(1);
 });
 
@@ -728,3 +729,243 @@ test("a child handed to polling Chokidar is reported and then polled", async () 
   expect(events.filter(event => event.event === "addDir" && event.file === folder)).toHaveLength(1);
   expect(chokidarWatcher.getWatched()[folder]).toEqual(["a.md"]);
 });
+
+for (const polling of [false, true]) {
+  test(`${polling ? "polling" : "native"} observation does not read unlisted ignored folders and reads a level once revealed`, async () => {
+    const root = await fixture();
+    await mkdir(path.join(root, "build/renders"), { recursive: true });
+    await mkdir(path.join(root, "build/objects"), { recursive: true });
+    await Promise.all(["README.md", "build/CMakeCache.txt", "build/renders/take.wav", "build/objects/a.o"].map(file => writeFile(path.join(root, file), "x")));
+    const listed = new Set<string>();
+    const unlisted = (directory: string) => {
+      const relative = path.relative(root, directory).split(path.sep).join("/");
+      return (relative === "build" || relative.startsWith("build/")) && !listed.has(relative);
+    };
+    const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+    const entry = { kind: "dir" as const, absolutePath: root };
+    const directoriesRead: string[] = [];
+    const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, usePolling: polling, unlisted,
+      onWork: (kind, file) => { if (kind === "directory" && file) directoriesRead.push(path.relative(root, file).split(path.sep).join("/")); } });
+    observers.push(observer);
+    const events: { event: string; file: string }[] = [];
+    observer.on("all", (event, file) => events.push({ event, file: path.relative(root, file).split(path.sep).join("/") }));
+    await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+    const added = () => events.filter(event => event.event === "add").map(event => event.file).sort();
+    // Native observation reports files from live events even inside an
+    // unlisted folder (the live-write window), so it is checked by what was
+    // read: only the root. Polling has no live events there at all.
+    if (polling) expect(added()).toEqual(["README.md"]);
+    else expect([...new Set(directoriesRead)]).toEqual([""]);
+    listed.add("build");
+    observer.reveal?.(path.join(root, "build"));
+    await until(() => added().includes("build/CMakeCache.txt"), "revealed level");
+    await Bun.sleep(polling ? 400 : 100);
+    // Only the revealed level: its subfolders stay unread.
+    if (polling) expect(added()).toEqual(["README.md", "build/CMakeCache.txt"]);
+    else expect([...new Set(directoriesRead)].sort()).toEqual(["", "build"]);
+    // A listed level stays watched.
+    await writeFile(path.join(root, "build/CMakeFiles.txt"), "x");
+    await until(() => added().includes("build/CMakeFiles.txt"), "write in a listed level");
+  });
+}
+
+test("paths inside ignored folders are inspected after ordinary paths queued later", async () => {
+  const root = await fixture();
+  await mkdir(path.join(root, "node_modules"));
+  const installed = Array.from({ length: 200 }, (_, i) => path.join(root, "node_modules", `f${i}.js`));
+  await Promise.all([...installed, path.join(root, "notes.md")].map(file => writeFile(file, "x")));
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    unlisted: directory => directory === path.join(root, "node_modules"),
+    background: file => file.startsWith(path.join(root, "node_modules") + path.sep) });
+  observers.push(observer);
+  const added: string[] = [];
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  const notes = path.join(root, "notes.md");
+  const notesReported = Promise.withResolvers<void>();
+  observer.on("all", (event, file) => {
+    if (event !== "add" && event !== "change") return;
+    added.push(path.relative(root, file));
+    if (file === notes) notesReported.resolve();
+  });
+  await writeFile(notes, "edited during the install");
+  const installedPaths = new Set(installed);
+  const occupied = Promise.withResolvers<void>();
+  const held = new Map<string, () => void>();
+  const started: string[] = [];
+  const readStat = filesystem.lstat;
+  let released = false;
+  // Gate only this fixture's background lstat completions. Real reads still
+  // supply the metadata; unrelated filesystem work passes through unchanged.
+  const inspection = spyOn(filesystem, "lstat").mockImplementation((async (...args: Parameters<typeof lstat>) => {
+    const file = String(args[0]);
+    if (file === notes || installedPaths.has(file)) started.push(file);
+    const stats = await readStat(...args);
+    if (installedPaths.has(file) && !released) {
+      const gate = Promise.withResolvers<void>();
+      held.set(file, gate.resolve);
+      if (held.size === 16) occupied.resolve();
+      await gate.promise;
+      held.delete(file);
+    }
+    return stats;
+  }) as typeof lstat);
+  try {
+    for (const file of installed) control.notify("change", file);
+    await occupied.promise;
+    expect(started).toHaveLength(16);
+    expect(added).toEqual([]);
+    // All remaining background paths are queued. The later ordinary path must
+    // take the first released slot rather than wait behind that backlog.
+    control.notify("change", notes);
+    held.values().next().value!();
+    await notesReported.promise;
+    expect(started).toContain(notes);
+    expect(started.indexOf(notes)).toBeLessThanOrEqual(16);
+    // Completion order otherwise depends on filesystem latency, not priority:
+    // hold the other background reads until the ordinary report is observed.
+    released = true;
+    for (const release of held.values()) release();
+    await until(() => added.length === 201, "every report");
+    expect(added.indexOf("notes.md")).toBeLessThanOrEqual(16);
+  } finally {
+    released = true;
+    for (const release of held.values()) release();
+    await observer.close();
+    inspection.mockRestore();
+  }
+});
+
+test("Git classification of many new directories never holds up an ordinary edit", async () => {
+  const root = await fixture();
+  await writeFile(path.join(root, "notes.md"), "# before");
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const gate = Promise.withResolvers<boolean>();
+  let classifications = 0;
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    classifyNew: () => { classifications++; return gate.promise; } });
+  observers.push(observer);
+  const events: string[] = [];
+  observer.on("all", (event, file) => events.push(`${event} ${path.relative(root, file)}`));
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  for (let i = 0; i < 20; i++) {
+    await mkdir(path.join(root, `out${i}`));
+    await writeFile(path.join(root, `out${i}`, "a.o"), "x");
+    control.notify("rename", path.join(root, `out${i}`));
+  }
+  await until(() => classifications === 4, "four classifications at a time");
+  await writeFile(path.join(root, "notes.md"), "# after, longer");
+  control.notify("change", path.join(root, "notes.md"));
+  await until(() => events.includes("change notes.md"), "ordinary edit while Git is busy");
+  // Nothing under the waiting folders was read yet.
+  expect(events.some(event => event.includes("a.o"))).toBe(false);
+  gate.resolve(false);
+  await until(() => events.filter(event => event.startsWith("add ") && event.endsWith("a.o")).length === 20, "folders read once Git answers");
+  expect(classifications).toBe(20);
+});
+
+test("an atomic save of a tracked file inside an unlisted folder is noticed from a source-only rename", async () => {
+  const root = await fixture();
+  await mkdir(path.join(root, "build"));
+  const tracked = path.join(root, "build", "a.md");
+  await writeFile(tracked, "# before");
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    unlisted: directory => directory === path.join(root, "build") });
+  observers.push(observer);
+  const events: string[] = [];
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  observer.on("all", (event, file) => events.push(`${event} ${path.relative(root, file)}`));
+  observer.track?.(tracked);
+  await until(() => events.includes("add build/a.md"), "tracked file known");
+  const temporary = path.join(root, "build", ".a.md.tmp");
+  await writeFile(temporary, "# after, a longer body");
+  await rename(temporary, tracked);
+  control.notify("rename", temporary);
+  await until(() => events.includes("change build/a.md"), "atomic save noticed");
+});
+
+test("deleting a folder above a tracked file inside an unlisted folder removes the file", async () => {
+  const root = await fixture();
+  await mkdir(path.join(root, "build", "nested"), { recursive: true });
+  const tracked = path.join(root, "build", "nested", "a.md");
+  await writeFile(tracked, "# opened");
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const build = path.join(root, "build");
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    unlisted: directory => directory === build || directory.startsWith(build + path.sep) });
+  observers.push(observer);
+  const events: string[] = [];
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  observer.on("all", (event, file) => events.push(`${event} ${path.relative(root, file)}`));
+  observer.track?.(tracked);
+  await until(() => events.includes("add build/nested/a.md"), "tracked file known");
+  await rm(path.join(root, "build", "nested"), { recursive: true });
+  control.notify("rename", path.join(root, "build", "nested"));
+  await until(() => events.includes("unlink build/nested/a.md"), "removal noticed through the deleted folder");
+});
+
+test("deleting a folder above a live-written file inside an unlisted folder removes the file", async () => {
+  const root = await fixture();
+  const build = path.join(root, "build");
+  await mkdir(build);
+  const control = controlledNativeWatch();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+  const entry = { kind: "dir" as const, absolutePath: root };
+  const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+    unlisted: directory => directory === build || directory.startsWith(build + path.sep) });
+  observers.push(observer);
+  const events: string[] = [];
+  await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+  observer.on("all", (event, file) => events.push(`${event} ${path.relative(root, file)}`));
+  await mkdir(path.join(build, "nested"));
+  await writeFile(path.join(build, "nested", "a.md"), "# written");
+  control.notify("change", path.join(build, "nested", "a.md"));
+  await until(() => events.includes("add build/nested/a.md"), "live write reported");
+  await Bun.sleep(50);
+  await rm(path.join(build, "nested"), { recursive: true });
+  control.notify("rename", path.join(build, "nested"));
+  await until(() => events.includes("unlink build/nested/a.md"), "removal noticed through the deleted folder");
+});
+
+for (const event of ["rename", "change"] as const) {
+  test(`replacing an unlisted folder rechecks the files tracked below its subfolders (${event} names only the folder)`, async () => {
+    const root = await fixture();
+    const build = path.join(root, "build");
+    await mkdir(path.join(build, "nested"), { recursive: true });
+    const tracked = path.join(build, "nested", "a.md");
+    await writeFile(tracked, "# before");
+    await writeFile(path.join(build, "sibling.md"), "# never listed");
+    const control = controlledNativeWatch();
+    const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true });
+    const entry = { kind: "dir" as const, absolutePath: root };
+    const observer = observeFiles(entry, { ignored: createWatchPolicy(entry, matcher).ignored, watch: control.watch,
+      unlisted: directory => directory === build || directory.startsWith(build + path.sep) });
+    observers.push(observer);
+    const events: string[] = [];
+    await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
+    observer.on("all", (kind, file) => events.push(`${kind} ${path.relative(root, file)}`));
+    observer.track?.(tracked);
+    await until(() => events.includes("add build/nested/a.md"), "tracked file known");
+    await until(() => events.includes("addDir build/nested"), "its folders registered");
+    // A build swaps in a fresh output folder carrying an updated file.
+    const fresh = path.join(root, "build.next");
+    await mkdir(path.join(fresh, "nested"), { recursive: true });
+    await writeFile(path.join(fresh, "nested", "a.md"), "# after, a longer body");
+    await writeFile(path.join(fresh, "other.md"), "# also never listed");
+    await rm(build, { recursive: true });
+    await rename(fresh, build);
+    control.notify(event, build);
+    await until(() => events.includes("change build/nested/a.md"), "tracked file below the replaced folder rechecked");
+    // Still only what was tracked: the rest of the unlisted folder stays unread.
+    expect(events.some(line => line.includes("other.md") || line.includes("sibling.md"))).toBe(false);
+  });
+}

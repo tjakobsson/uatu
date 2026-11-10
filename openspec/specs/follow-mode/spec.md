@@ -33,9 +33,9 @@ The system SHALL implement exactly four behavioral rules linking Follow to selec
 
 **Rule A (user explicitly navigates through the tree):** Activating a file SHALL select that document and set `followEnabled` to `false`, including when the file is already selected. Manually collapsing any ancestor of the active file SHALL instead clear the document selection and preview, establish intentional-empty selection, and set `followEnabled` to `false`. Reopening the directory SHALL NOT restore the document. Opening a folder, collapsing an unrelated folder, moving focus without an ancestor collapse, or collapsing with no active document SHALL leave the active document and Follow unchanged. Both Rule A outcomes MUST fire only for genuine user interactions, including pointer, touch, and supported keyboard activation/collapse; programmatic or library-driven callbacks during mount, refresh, reset, or filter reconciliation MUST NOT trigger them (see "Tree-mount user-click guard" below).
 
-**Rule B (user clicks the Follow chip):** `followEnabled` MUST be flipped. When the flip is `false → true`, intentional-empty selection SHALL be cleared and the selection MUST jump to the newest-mtime non-binary document in the current session if that document differs from the current selection. Images are not candidates for this catch-up: their modification times often reflect a checkout rather than an edit, so Follow switches to an image only when it changes (Rule C).
+**Rule B (user clicks the Follow chip):** `followEnabled` MUST be flipped. When the flip is `false → true`, intentional-empty selection SHALL be cleared and the selection MUST jump to the newest-mtime non-binary document in the current session that Git does not ignore, if that document differs from the current selection. Images are not candidates for this catch-up: their modification times often reflect a checkout rather than an edit, so Follow switches to an image only when it changes (Rule C).
 
-**Rule C (file changes on disk, Follow on):** Selection MUST move to the changed file when the preview can show it: a Markdown, AsciiDoc, or text document, or an image the preview renders inline. A change to any other binary file MUST NOT change the selection. The exception is an image embedded in the document the preview currently shows: its change MUST NOT move the selection, and the embedded image refreshes in place instead. Which images a document embeds SHALL be determined from the document's rendered content, not from what the preview currently displays, so the exception holds whether the document is shown Rendered, as Source, as a Diff, or in a split layout. Until the images the shown document's current revision embeds are known, an image change MUST NOT move the selection; the decision SHALL wait for them and then apply this rule, provided Follow is still on, the same document is still selected at the same revision, and no later file change, selection, or Follow switch has decided the selection meanwhile. If they cannot be determined (the lookup fails or goes unanswered for 10 seconds), the image SHALL be followed. A document change arriving meanwhile is followed at once and the waiting image decision is dropped.
+**Rule C (file changes on disk, Follow on):** Selection MUST move to the changed file when the preview can show it: a Markdown, AsciiDoc, or text document, or an image the preview renders inline. A change to any other binary file MUST NOT change the selection. A change to a file Git ignores MUST NOT change the selection, whatever its type and whether or not ignored files are shown. While a changed file's ignore status is still being determined, the Follow decision SHALL wait for it; if the status cannot be determined, the file SHALL be treated as not ignored. The exception is an image embedded in the document the preview currently shows: its change MUST NOT move the selection, and the embedded image refreshes in place instead. Which images a document embeds SHALL be determined from the document's rendered content, not from what the preview currently displays, so the exception holds whether the document is shown Rendered, as Source, as a Diff, or in a split layout. Until the images the shown document's current revision embeds are known, an image change MUST NOT move the selection; the decision SHALL wait for them and then apply this rule, provided Follow is still on, the same document is still selected at the same revision, and no later file change, selection, or Follow switch has decided the selection meanwhile. If they cannot be determined (the lookup fails or goes unanswered for 10 seconds), the image SHALL be followed. A document change arriving meanwhile is followed at once and the waiting image decision is dropped.
 
 **Rule D (file changes on disk, Follow off):** Selection MUST NOT change. If the changed document equals the current selection, the preview MUST reload its content in place. If the changed document differs from the current selection, no preview reload occurs but the tree MUST still refresh its row set. Intentional-empty selection SHALL remain empty: a file event MUST NOT choose a default document or restore a previously closed document.
 
@@ -127,6 +127,28 @@ The system SHALL implement exactly four behavioral rules linking Follow to selec
 
 #### Scenario: Rule B — turning Follow on does not jump to a newer image
 - **WHEN** Follow is off, the selection is `README.md`, and the newest-mtime file in the session is `hero.svg` while the newest-mtime document is `guides/setup.md`
+- **AND** the user clicks the Follow chip
+- **THEN** the selection moves to `guides/setup.md`
+
+#### Scenario: Rule C — a change to an ignored file is not followed
+- **WHEN** Follow is on, the selection is `README.md`, Show ignored files is on, Git ignores `build/`, and a watcher event reports that `build/renders/take-3.wav` or `build/report.md` changed
+- **THEN** the selection remains `README.md`
+- **AND** the changed file still appears and updates in the Files views
+
+#### Scenario: Rule C — a batch mixing ignored output and a document follows the document
+- **WHEN** Follow is on and one batch contains an edit to `guides/setup.md` followed by writes under an ignored `dist/`
+- **THEN** the selection moves to `guides/setup.md`
+
+#### Scenario: Rule C — a tracked file inside an output folder is followed
+- **WHEN** Follow is on, Git tracks `dist/index.html`, and it changes
+- **THEN** the selection moves to `dist/index.html`
+
+#### Scenario: Rule C — an opened ignored file still refreshes
+- **WHEN** the user has opened the ignored `build/report.md` and a rebuild rewrites it
+- **THEN** the selection remains `build/report.md` and its preview shows the new content
+
+#### Scenario: Rule B — turning Follow on skips newer ignored files
+- **WHEN** Follow is off, the newest-mtime non-binary file in the session is the ignored `build/report.md`, and the newest-mtime document Git does not ignore is `guides/setup.md`
 - **AND** the user clicks the Follow chip
 - **THEN** the selection moves to `guides/setup.md`
 
@@ -282,12 +304,16 @@ Only work belonging to the current selection and preview mode SHALL update the p
 
 ### Requirement: Discovery does not impersonate file edits
 
-Initial discovery SHALL populate the file tree without causing Follow to visit each discovered file. On completion, an untouched initial session SHALL use the existing newest-mtime non-binary default selection. Explicit navigation, restored selection, direct links, deliberate emptiness, and newer live-event selection SHALL take precedence over that default. Discovery SHALL NOT move keyboard focus, change the active surface, or enable Follow. Catch-up requested while indexing is incomplete SHALL finish once the inventory is ready only if no newer user action or live-event selection has superseded it.
+Initial discovery SHALL populate the file tree without causing Follow to visit each discovered file. On completion, an untouched initial session SHALL use the existing newest-mtime non-binary default selection, excluding files Git ignores. Explicit navigation, restored selection, direct links, deliberate emptiness, and newer live-event selection SHALL take precedence over that default. Discovery SHALL NOT move keyboard focus, change the active surface, or enable Follow. Catch-up requested while indexing is incomplete SHALL finish once the inventory is ready only if no newer user action or live-event selection has superseded it.
 
 #### Scenario: Follow is on during discovery
 - **WHEN** many existing files are discovered before the inventory is complete
 - **THEN** the tree fills without a preview load for every discovered file
 - **AND** an otherwise untouched session selects the newest eligible file once discovery completes
+
+#### Scenario: Discovery finds a newer ignored file than any document
+- **WHEN** the newest non-binary file discovered is Gitignored and Follow is on in an untouched session
+- **THEN** discovery completion selects the newest non-binary file Git does not ignore
 
 #### Scenario: The user navigates before discovery finishes
 - **WHEN** the user selects a file or deliberately clears selection during indexing

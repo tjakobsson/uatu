@@ -9,6 +9,7 @@ import { consumeChildPolicyDescriptor } from "../../src/hub/child-policy-bootstr
 import { MultiAgentChatService } from "../../src/chat/agents";
 import { LazyChatService, type AgentRuntime } from "../../src/chat/service";
 import { createOpenCodeV2Provider } from "../../src/chat/opencode/v2/provider";
+import { VisualStore } from "../../src/chat/visual-store";
 import { CLAUDE_PERMISSION_SCOPE_NOTE } from "../../src/chat/claude/provider";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../../src/chat/opencode/v1/provider";
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
@@ -172,11 +173,15 @@ const fakeAttachmentStore = {
   },
   resolve: (id: string) => fakeChatAgent.resolveAttachment(id),
 };
+// Keep capture state in the test fixture, never the operator's real Uatu state.
+// All routers represent the same workspace and share its reader and snapshots.
+const fakeVisualStore = new VisualStore(E2E_WORKSPACE_ROOT, path.join(E2E_WORKSPACE_ROOT, "..", "chat-visual-state"));
 
 const singleAgentRouter = new MultiAgentChatService({
   workspacePath: E2E_WORKSPACE_ROOT,
   agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: fakeChatAgent }],
   attachmentStore: fakeAttachmentStore,
+  visualStore: fakeVisualStore,
 });
 const dualAgentRouter = new MultiAgentChatService({
   workspacePath: E2E_WORKSPACE_ROOT,
@@ -185,6 +190,7 @@ const dualAgentRouter = new MultiAgentChatService({
     { descriptor: { id: "claude", name: "Claude Code" }, service: fakeSecondAgent },
   ],
   attachmentStore: fakeAttachmentStore,
+  visualStore: fakeVisualStore,
 });
 // The real 2.x stack (opencode-v2-steering D13): the real ChatAdapter and
 // OpenCodeV2Provider over a scripted fake OpenCode 2.0.28 server, selected
@@ -224,6 +230,7 @@ function openCodeV2Stack(backgroundPreview = true): MultiAgentChatService {
     workspacePath: E2E_WORKSPACE_ROOT,
     agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }],
     attachmentStore: fakeAttachmentStore,
+    visualStore: fakeVisualStore,
   });
   return openCodeV2Router;
 }
@@ -916,6 +923,7 @@ await boundary.ready;
 const navigationFetch = createNavigationFetchHandler({
   getUnscopedRoots: () => watchSession.getUnscopedRoots(),
   ensureDocument: id => watchSession.ensureDocument(id),
+  pinDocument: id => watchSession.pinDocument(id),
   isIndexComplete: () => watchSession.getDiscoveryState().status === "ready",
   getEntries: () => activeEntries,
   getRespectGitignore: () => activeRespectGitignore,

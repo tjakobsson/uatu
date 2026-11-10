@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, test as base } from "./fixtures";
 import { withEngineBrowsers } from "./page-diagnostics";
-import { openChatPanel, openChatPending } from "./chat-helpers";
+import { installClipboardMock, openChatPanel, openChatPending, readClipboardMock } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 
 const test = withEngineBrowsers(base);
@@ -211,6 +211,54 @@ test("side reader uses safe chat markdown with locally scrolling tables", async 
   await expect(reader).toBeHidden();
   await expect(notice).toBeFocused();
   await expect(page.locator("#chat-input")).toHaveValue("Keep my selection");
+});
+for (const touch of [false, true]) test(`side-reader SVG stays visible ordinary code with copy and inert image references (${touch ? "mobile" : "desktop"})`, async ({ launchBrowser, baseURL, request }) => {
+  const browser = await launchBrowser(engine);
+  const page = await browser.newPage({ baseURL, viewport: touch ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: touch, isMobile: touch });
+  try {
+    await boot(page, request);
+    await installClipboardMock(page);
+    const imageRequests: string[] = [];
+    page.on("request", req => {
+      if (/external-image\.invalid|\/api\/chat\/visuals\/|\/side-reader\.svg/.test(req.url())) imageRequests.push(req.url());
+    });
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 80"><text x="10" y="40">Side answer</text></svg>\n';
+    await page.route("**/aside", route => route.fulfill({ json: { text: `\`\`\`svg\n${svg}\`\`\`\n\n![Local](./side-reader.svg)\n\n![Remote](https://external-image.invalid/aside.svg)\n\n<img src="https://external-image.invalid/raw.png" alt="Raw">` } }));
+    await page.locator("#chat-input").fill("/btw Show the diagram source");
+    await page.locator("#chat-send").click();
+    const notice = page.locator("#chat-aside-ready");
+    await expect(notice).toHaveText("Side answer ready");
+    await notice.click();
+    const reader = page.locator("#chat-aside-dialog");
+    await expect(reader).toHaveAttribute("aria-modal", String(touch));
+    const answer = reader.locator("#chat-aside-answer");
+    await expect(answer.locator("pre > code.hljs.language-svg")).toBeVisible();
+    expect(await answer.locator("pre > code").textContent()).toBe(svg);
+    await expect(answer.locator(".chat-visual, img, svg, [data-visual-tab]")).toHaveCount(0);
+    await expect(answer.locator(".chat-visual-reference")).toHaveText("./side-reader.svg");
+    await expect(answer.locator('a[href="https://external-image.invalid/aside.svg"]')).toBeVisible();
+    await expect(answer.locator('a[href="https://external-image.invalid/raw.png"]')).toBeVisible();
+    const copy = answer.getByRole("button", { name: "Copy code to clipboard", exact: true });
+    if (!touch) await answer.locator("pre").hover();
+    await expect(copy).toHaveCSS("opacity", "1");
+    await expect.poll(() => copy.evaluate(button => {
+      const block = button.closest("pre")!.getBoundingClientRect();
+      const dialog = button.closest("dialog")!;
+      const header = dialog.querySelector(".chat-aside-header")!.getBoundingClientRect();
+      const reader = dialog.getBoundingClientRect();
+      const box = button.getBoundingClientRect();
+      return box.width > 0 && box.height > 0 && box.left >= block.left && box.right <= block.right
+        && box.top >= Math.max(block.top, header.bottom) && box.bottom <= Math.min(block.bottom, reader.bottom, window.innerHeight)
+        && button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+    }), { message: "the code-copy target stays in its source block below the sticky header and receives native input" }).toBe(true);
+    await copy.click();
+    await expect(answer.locator("pre > .code-copy")).toHaveText("Copied!");
+    expect(await readClipboardMock(page)).toBe(svg);
+    expect(imageRequests).toEqual([]);
+    await page.locator("#chat-aside-close").click();
+    await expect(reader).toBeHidden();
+    await expect(notice).toBeFocused();
+  } finally { await browser.close(); }
 });
 for (const mode of ["desktop", "touch"] as const) test(`side-reader workspace links open in-app without losing the answer or admitting another prompt (${mode})`, async ({ launchBrowser, baseURL, request }, info) => {
   const browser = await launchBrowser(engine);

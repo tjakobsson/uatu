@@ -30,10 +30,10 @@ const matchingClient: ClientBuildIdentity = {
 };
 
 describe("buildsMismatch", () => {
-  test("revision 2 assets must reload against revision 3 even at the same product build", () => {
-    expect(BUNDLED_WEB_REVISION).toBe(3);
+  test("revision 3 assets must reload against revision 4 even at the same product build", () => {
+    expect(BUNDLED_WEB_REVISION).toBe(4);
     const server = serverBuild({ ...CLIENT_BUILD_IDENTITY });
-    const oldClient = { ...CLIENT_BUILD_IDENTITY, bundledWebRevision: 2 };
+    const oldClient = { ...CLIENT_BUILD_IDENTITY, bundledWebRevision: 3 };
     expect(evaluateFreshness(oldClient, server, null)).toBe("reload");
     expect(evaluateFreshness(oldClient, server, serverIdentityKey(server))).toBe("notice");
     expect(evaluateFreshness(CLIENT_BUILD_IDENTITY, server, null)).toBe("in-sync");

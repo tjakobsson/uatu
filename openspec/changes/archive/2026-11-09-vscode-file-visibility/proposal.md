@@ -4,7 +4,7 @@ Uatu decides what Files may show with a hard-coded list of about 30 names: `buil
 
 ## What Changes
 
-- **BREAKING** (relative to v0.8.0): the built-in exclusions shrink to VS Code's `files.exclude` defaults: VCS metadata (`.git`, `.svn`, `.hg`, `CVS`) and OS litter (`.DS_Store`, `Thumbs.db`). Every other hard-coded name, suffix, and secret pattern is removed, including `build`, `dist`, `node_modules`, `.venv`, `.env`, `*.pem`, and `*.swp`. A project hides more with `.uatu.json ignore.exclude`, which plays the role of VS Code's `files.exclude`.
+- **BREAKING** (relative to v0.8.0): the built-in exclusions shrink to VS Code's `files.exclude` defaults: VCS metadata (`.git`, `.svn`, `.hg`, `.jj`) and OS litter (`.DS_Store`, `Thumbs.db`). Every other hard-coded name, suffix, and secret pattern is removed, including `build`, `dist`, `node_modules`, `.venv`, `.env`, `*.pem`, and `*.swp`. A project hides more with `.uatu.json ignore.exclude`, which plays the role of VS Code's `files.exclude`.
 - **BREAKING**: secret-like files (`.env`, private keys, credential files) are listed, previewed, and served like other files. VS Code works the same way. In Uatu the protection is Hub authentication, and an authenticated user already has the same access through the embedded terminal. A project that wants them out of Uatu excludes them explicitly.
 - Git decides what is ignored. Ignored files keep the muted display and the Show ignored files preference added by #607.
 - Folders that Git ignores as a whole (for example `node_modules/`, `build/`, `.venv/`, `target/`) are listed but not read during discovery. Expanding one lists that level on demand, as VS Code's Explorer does. A level that has been listed stays known for the session.
