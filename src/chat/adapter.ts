@@ -90,6 +90,7 @@ type BackgroundRecovery = {
   timer?: ReturnType<typeof setTimeout>;
   checkingStarted?: true;
   checking?: { finish: () => void };
+  readLifetime?: AbortController;
 };
 
 function workerRecoveryProgress(item: BackgroundTaskItem): WorkerRecoveryProgress {
@@ -158,8 +159,9 @@ class WorkerSourceRead {
     return () => { this.followers.delete(read); };
   }
   assertCurrent(): void {
-    if (this.guards.some(({ guard }) => !guard.isCurrent())) throw new HistoryReadChangedError();
+    if (!this.isCurrent()) throw new HistoryReadChangedError();
   }
+  isCurrent(): boolean { return !this.signal.aborted && this.guards.every(({ guard }) => guard.isCurrent()); }
   hasAccountingPage(key: string): boolean {
     return this.guards.some(({ accountingKey }) => accountingKey === key);
   }
@@ -2118,6 +2120,7 @@ export class ChatAdapter {
   private forgetActivity(conversationId: string): void {
     const recovery = this.backgroundRecoveries.get(conversationId);
     recovery?.checking?.finish();
+    recovery?.readLifetime?.abort();
     if (recovery) clearTimeout(recovery.timer);
     this.backgroundRecoveries.delete(conversationId);
     for (const [key, admission] of this.admittingSteers) if (admission.conversationId === conversationId) {
@@ -2182,7 +2185,7 @@ export class ChatAdapter {
     this.questionReads.clear();
     for (const admission of this.admittingSteers.values()) admission.retired = true;
     this.admittingSteers.clear();
-    for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.checking?.finish(); }
+    for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.checking?.finish(); recovery.readLifetime?.abort(); }
     this.backgroundRecoveries.clear();
     this.backgroundRecoveryFloorUntil = 0;
     this.backgroundRecoverySourceStartedAt = -Infinity;
@@ -5488,6 +5491,7 @@ export class ChatAdapter {
           this.backgroundRecoveryFloorUntil = 0;
           this.backgroundRecoverySourceStartedAt = -Infinity;
           for (const [id, recovery] of this.backgroundRecoveries) {
+            recovery.readLifetime?.abort();
             recovery.checking?.finish();
             delete recovery.checkingStarted;
             clearTimeout(recovery.timer);
@@ -5698,6 +5702,7 @@ export class ChatAdapter {
   private retireBackgroundRecovery(id: string): void {
     const recovery = this.backgroundRecoveries.get(id);
     recovery?.checking?.finish();
+    recovery?.readLifetime?.abort();
     if (recovery?.exhaustedAt !== undefined) {
       if (Date.now() >= this.backgroundRecoveryFloorUntil) this.backgroundRecoverySourceStartedAt = -Infinity;
       this.backgroundRecoveryFloorUntil = Math.max(this.backgroundRecoveryFloorUntil, recovery.exhaustedAt + BACKGROUND_EXHAUSTED_COOLDOWN_MS);
@@ -5860,16 +5865,30 @@ export class ChatAdapter {
       }
       const checking = recovery.checking;
       const fence = readProjection.beginHistoryRead();
+      const lifetime = new AbortController();
+      recovery.readLifetime = lifetime;
+      const signal = AbortSignal.any([lifetime.signal, ...(this.pumpController ? [this.pumpController.signal] : [])]);
+      const workerSources = new WorkerSourceRead(signal);
+      let sourceDeadline: ReturnType<typeof setTimeout> | undefined;
       const pending = this.requireSession(id).then(() => {
-        if (this.disposed) throw new Error("Background recovery disposed");
+        if (this.disposed || signal.aborted) throw new Error("Background recovery disposed");
         return Promise.all([
-          this.provider.reconcileBackgroundTasks!(id),
+          this.provider.reconcileBackgroundTasks!(id, { signal, onSource: source => {
+            if (signal.aborted) return;
+            // Queue/ownership IO is not a retained source. Start the bounded
+            // handoff only when native evidence actually transfers its lease.
+            if (!sourceDeadline) {
+              sourceDeadline = setTimeout(() => lifetime.abort(), this.historyReadTimeoutMs);
+              sourceDeadline.unref?.();
+            }
+            workerSources.observe(source.workerSource);
+          } }),
           Promise.allSettled([this.pendingPermissions(id), this.pendingQuestions(id)]),
         ]);
       }).then(([tasks, interactions]) => {
         if (this.disposed || this.backgroundRecoveries.get(id) !== recovery || generation !== this.backgroundStreamGeneration) return;
         const projection = this.projection(id);
-        if (projection !== readProjection || !fence.current() || this.reversibleMutations.has(id) || this.revertReconciliations.has(id)) {
+        if (projection !== readProjection || !fence.current() || !workerSources.isCurrent() || this.reversibleMutations.has(id) || this.revertReconciliations.has(id)) {
           recovery.dirty = true;
           recovery.inconclusiveReads++;
           recovery.progress = this.backgroundProgressBaseline(id);
@@ -5892,7 +5911,7 @@ export class ChatAdapter {
         for (const item of safeTasks) recoveryUpdates.push({ kind: "upsert", item });
         if (!projection.recover(recoveryUpdates, () => !this.disposed && this.backgroundRecoveries.get(id) === recovery
           && generation === this.backgroundStreamGeneration && this.projections.get(id) === projection && fence.current()
-          && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) {
+          && workerSources.isCurrent() && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) {
           recovery.dirty = true;
           return;
         }
@@ -5936,15 +5955,24 @@ export class ChatAdapter {
         recovery.inconclusiveReads = recovery.dirty || projection.find(item => item.type === "background_task" && item.status === "running" && item.stateUncertain === true) ? recovery.inconclusiveReads + 1 : 0;
       }, () => {
         if (this.disposed || this.backgroundRecoveries.get(id) !== recovery || generation !== this.backgroundStreamGeneration) return;
+        if (!workerSources.isCurrent()) {
+          recovery.dirty = true;
+          recovery.inconclusiveReads++;
+          recovery.progress = this.backgroundProgressBaseline(id);
+          return;
+        }
         if (!readProjection.recover(readProjection.items().flatMap(known => known.type === "background_task" && known.status === "running"
           && !fence.changed(known.id) && !fence.workerChanged(known)
           ? [{ kind: "upsert" as const, item: unverifyWorkerTask(known) }] : []),
         () => !this.disposed && this.backgroundRecoveries.get(id) === recovery && generation === this.backgroundStreamGeneration
-          && this.projections.get(id) === readProjection && fence.current()
+          && this.projections.get(id) === readProjection && fence.current() && workerSources.isCurrent()
           && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) recovery.dirty = true;
         this.syncBackgroundState(id);
         recovery.failures++;
       }).finally(() => {
+        clearTimeout(sourceDeadline);
+        lifetime.abort();
+        if (recovery.readLifetime === lifetime) delete recovery.readLifetime;
         checking?.finish();
         fence.release();
         this.backgroundPending.delete(pending);

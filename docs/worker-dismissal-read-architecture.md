@@ -38,10 +38,22 @@ Overlapping foreground invocations of the same owned child also withhold outcome
 attribution without adding worker rows. Processed changes to the consumed parent
 launch inventory revoke dependent outcome sources; ordinary parent output and
 unchanged launcher replays do not require a quiet window.
+Fresh parent-history reads provide the same scoped counterproof before SSE:
+nonoverlapping reads can revoke an older launch inventory, while conflicting
+overlapping responses cannot supersede later consumed evidence. Native read
+order survives transport reuse.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
 and concurrent terminal updates keep their existing precedence.
+Automatic inventory recovery also holds and validates source leases through
+its pending permission/question reads and final publication. Its bounded cycle
+owner releases them on completion, failure, cancellation or supersession;
+unavailable evidence cannot publish a stale terminal worker.
+The handoff deadline starts at native source capture, not queue/ownership IO.
+Cancellation releases authority without increasing concurrency over an old
+transport still draining. Identical pending-notice replays preserve authority;
+payload changes and delivery/removal still revoke it.
 
 ## Browser consistency and recovery
 

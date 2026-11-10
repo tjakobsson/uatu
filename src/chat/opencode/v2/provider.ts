@@ -60,7 +60,7 @@ type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; o
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentChanges?: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, string | null>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[] };
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges?: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, string | null>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string> };
 
 export function createOpenCodeV2Provider(options: {
   endpoint: string;
@@ -96,6 +96,8 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly backgroundReads = new Map<string, BackgroundRead>();
   private readonly backgroundVisibilityReads = new Set<{ sessionId: string; invalidated: boolean }>();
   private childHistoryObservationClock = 0;
+  private parentHistoryReadClock = 0;
+  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
   // Read-side observations are not live-event admission or Stop evidence.
   // Fixed-size digests and at most 128 timestamps bound this separate cache;
@@ -1401,6 +1403,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         }
         source.pendingFingerprint = fingerprint;
         source.pendingIds = fallbacks.map(fallback => fallback.resultId);
+        source.pendingContent = new Map(fallbacks.map(fallback => [fallback.resultId, pendingResultSignature(fallback)]));
       },
       capture: () => { source.phase = "captured"; }, release: () => { initialOwner.abort(); } };
   }
@@ -1558,17 +1561,44 @@ export class OpenCodeV2Provider implements ChatProvider {
     // session event invalidates its entry (including an in-flight read),
     // and reconnect starts cold because V2 offers no provider event replay.
     signal.throwIfAborted();
+    const owners = [...this.historyWorkerSources].filter(source => source.parent === sessionId && source.phase === "collecting");
     const messages = await this.historyReuse.readShared(sessionId, this.streamConnected ? String(this.streamGeneration) : undefined,
       ownerSignal => {
         const sharedSignal = this.readSignal(ownerSignal);
         return this.coveredRead(sharedSignal, () => this.readAllMessages(sessionId, sharedSignal));
       }, signal);
     signal.throwIfAborted();
+    const sources = [...this.historyWorkerSources].filter(source => source.parent === sessionId);
+    if (!owners.length && !sources.some(source => source.historyParentRead)) return messages;
+    const order = this.historyReadOrders.get(messages)!;
+    const launches = messages.flatMap(message => [...prepareStoredMessage(message).tools.values()].map(tool => tool.fact));
+    const signature = (facts: readonly LauncherEvidence[], child: string) => historyVersion([...new Set(facts
+      .filter(fact => fact.workerType === "agent" && (fact.reportedChild === child || fact.requestedChild === child))
+      .map(fact => JSON.stringify([fact.call, fact.message, fact.child, fact.reportedChild, fact.requestedChild, fact.background,
+        fact.created, fact.ran, fact.completed ?? fact.reportedCompletion, fact.inputFingerprint])))].sort());
+    for (const source of sources) {
+      if (!source.historyParentRead) continue;
+      const previous = source.historyParentRead;
+      const children = new Set([...previous.launches, ...launches].flatMap(fact =>
+        fact.workerType === "agent" ? [fact.reportedChild, fact.requestedChild].filter((child): child is string => child !== undefined) : []));
+      for (const child of children) {
+        if (signature(previous.launches, child) === signature(launches, child)) continue;
+        // Only a nonoverlapping native read can supersede earlier evidence.
+        // An overlapping stale response instead withdraws its own inference.
+        for (const target of order.started > previous.completed ? [source] : owners) {
+          (target.historyParentChanges ??= new Set()).add(child);
+          if (target.historyPositiveChildren?.has(child) && target.historyChildren?.has(child)) target.revision++;
+        }
+      }
+    }
+    for (const source of owners) if (!source.historyParentRead || order.completed >= source.historyParentRead.completed)
+      source.historyParentRead = { completed: order.completed, launches };
     return messages;
   }
 
   private async readAllMessages(sessionId: string, signal: AbortSignal): Promise<StoredMessage[]> {
     const finish = measureChatWork("opencode-read");
+    const started = ++this.parentHistoryReadClock;
     try {
       const byId = new Map<string, StoredMessage>();
       let cursor: string | undefined;
@@ -1582,7 +1612,9 @@ export class OpenCodeV2Provider implements ChatProvider {
         for (const item of page.data as StoredMessage[]) byId.set(messageIdentity(item), item);
         cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
       } while (cursor);
-      return [...byId.values()].sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right));
+      const messages = [...byId.values()].sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right));
+      this.historyReadOrders.set(messages, { started, completed: ++this.parentHistoryReadClock });
+      return messages;
     } finally { finish(); }
   }
 
@@ -1692,8 +1724,13 @@ export class OpenCodeV2Provider implements ChatProvider {
               // Retire captured pending text before ownership enrichment can
               // await. A newer enqueue/delivery is not the old read's payload.
               const resultId = stringValue(asRecord(asRecord(event).data).inboxID);
+              const item = asRecord(asRecord(asRecord(event).data).item);
+              const replay = stringValue(asRecord(event).type) === "session.inbox.enqueued" && resultId
+                ? this.workerResultFallbacks({ ...asRecord(item.payload), id: resultId, type: item.type, time: { created: asRecord(event).created } })[0] : undefined;
+              const replaySignature = replay && pendingResultSignature(replay);
               for (const source of this.historyWorkerSources) if (source.parent === parent && source.pendingFingerprint !== undefined
-                && resultId && (source.pendingIds === undefined || source.pendingIds.includes(resultId))) source.revision++;
+                && resultId && (source.pendingIds === undefined || source.pendingIds.includes(resultId))
+                && (!replaySignature || source.pendingContent?.get(resultId) !== replaySignature)) source.revision++;
             }
             // Persist negative evidence before any ownership await, including
             // when Stop starts while that read is still pending. This never
@@ -2823,6 +2860,11 @@ function backgroundIdentityCandidates(parent: string, messages: StoredMessage[])
 function syntheticNoticeIdentities(messages: StoredMessage[]): Set<string> {
   return new Set(messages.flatMap(message => message.type === "synthetic"
     ? normalizeStoredMessage(message).filter(item => item.type === "notice").map(item => item.id) : []));
+}
+
+function pendingResultSignature({ fallback, ...relation }: WorkerResultFallback): string {
+  const { createdAt: _deliveryClock, ...content } = fallback;
+  return historyVersion([relation, content]);
 }
 
 function storedHistoryVisibility(complete: StoredMessage[], info: SessionRecord | null) {

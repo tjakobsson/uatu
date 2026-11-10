@@ -1189,6 +1189,12 @@ same owned child, without becoming worker rows or outcome targets. Read-owned
 sources retain the consumed parent launch inventory: a processed new or changed
 relevant launcher revokes dependent outcome recovery before publication, while
 ordinary parent text and unchanged launch replays do not.
+Later native parent-history reads also compare the relevant launch inventory
+against retained sources. Only a nonoverlapping native read can supersede the
+earlier inventory; a conflicting overlapping response withdraws its own
+inference instead. Transport reuse keeps the original native read order, and
+ordinary output or launches for other children do not revoke independent
+outcome authority.
 The adapter also retracts an already cached history-only completion when the
 covered complete source returns the same qualified execution as unresolved.
 That replacement clears stale terminal fields instead of merging them back.
@@ -1228,6 +1234,16 @@ Staged-parent visibility rereads own an additional bounded source lease, since
 their visible/full-history folds can first consume an outcome after the inventory
 source is captured. That lease is published to source observers and checked
 alongside inventory authority before returning the reconciled workers.
+Automatic background recovery retains those same sources while its concurrent
+permission and question reads finish, and validates them again at projection
+admission. One cycle owner uses the covered-history deadline (25 seconds by
+default), starting when native source evidence transfers rather than during
+queue/ownership IO; completion, error, cancellation, reconnect and retirement
+release its leases. Cancelled transports still drain before another read takes
+their scheduler slot. Identical pending-notice enqueue replays are checked by
+normalized content, not delivery clocks; changed payloads and delivery/removal
+still revoke the source. Superseded evidence cannot publish completion or consume recovery
+progress, while compatible output does not require another quiet window.
 
 Explicit reports remain readable when their occurrence is ambiguous; in particular, a report before or tied to a
 known accepted-running success cannot settle that launch, and an ambiguous

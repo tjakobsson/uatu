@@ -3,6 +3,203 @@ import { createOpenCodeV2Provider } from "./provider";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 import { ChatAdapter } from "../../adapter";
 
+for (const change of ["revert", "append", "parent-report", "reconnect", "interaction-error"] as const)
+test(`automatic recovery retains consumed outcomes through pending interactions (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, changed = false;
+  let folded!: () => void, interactionsEntered!: () => void, release!: () => void;
+  const consumed = new Promise<void>(resolve => { folded = resolve; });
+  const interactions = new Promise<void>(resolve => { interactionsEntered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const leases: AbortSignal[] = [], released: Promise<void>[] = [];
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/permission/request" || route === "/api/form") {
+      interactionsEntered(); await held;
+      if (change === "interaction-error" && changed) return new Response(null, { status: 503 });
+    }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(); body.data[0].time = { created: 20 };
+      body.data[0].content[0].time = { created: 20, ran: 20, completed: 30 };
+      if (change === "parent-report") body.data.push({ id: "parent-result", type: "synthetic", time: { created: 45 },
+        text: "Explicit parent report", metadata: { source: "subagent", childID: child, state: "completed" } });
+      return Response.json(body);
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-reverted", type: "user", text: "Reversible suffix", time: { created: 35 } },
+      { id: "child-outcome", type: "idle", time: { created: 40 }, outcome: "succeeded" },
+      ...(changed && change === "append" ? [{ id: "later-assistant", type: "assistant", time: { created: 50 }, content: [{ type: "text", text: "Continued child output" }] }] : []),
+    ], cursor: {} });
+    if (changed && change !== "append" && route === `/api/session/${child}`) {
+      const body = await response.json(); body.data.revert = { messageID: "child-reverted" }; return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const tasks = await nativeRecovery(id, options?.onSource ? { ...options, onSource: source => options.onSource!({ ...source, workerSource: {
+      isCurrent: source.workerSource.isCurrent,
+      retain: signal => {
+        leases.push(signal);
+        released.push(signal.aborted ? Promise.resolve() : new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true })));
+        return source.workerSource.retain(signal);
+      },
+    } }) } : options);
+    folded(); return tasks;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  const abort = new AbortController();
+  let pump: Promise<void> | undefined, events: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  try {
+    parent = (await provider.createSession("Automatic outcome handoff")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    fake.settleWorker(child, "completed", "No inferred parent report");
+    const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+    events = (async () => { for await (const event of subscription.events) {
+      if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
+    } throw new Error("Recovery subscription ended before publication"); })();
+    void events.catch(() => undefined);
+    pump = adapter.startEventPump();
+    await Promise.all([consumed, interactions]);
+    changed = true;
+    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    const status = change === "append" || change === "parent-report" ? "completed" : "running";
+    expect(current.find(task => task.taskId === worker.taskId)?.status).toBe(status);
+    if (change === "reconnect") {
+      await adapter.stopEventPump();
+      await Promise.all(released);
+      expect(leases.every(signal => signal.aborted)).toBe(true);
+    }
+    release();
+    if (change === "reconnect") pump = adapter.startEventPump();
+    const published = await events;
+    expect(published.status).toBe(status);
+    if (change === "parent-report") expect(published).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
+    if (leases.length) {
+      await Promise.all(released);
+      expect(leases.every(signal => signal.aborted)).toBe(true);
+    }
+  } finally { release(); abort.abort(); await adapter.dispose(); await pump; await events?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
+test("an overlapping older parent history cannot revoke the later consumed launch inventory", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reads = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, entered!: () => void, release!: () => void, applied!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const observed = new Promise<void>(resolve => { applied = resolve; });
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 30, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {});
+      request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const firstRead = ++reads === 1, body = await response.json(), first = body.data[0];
+      first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const competitor = structuredClone(first); competitor.id = "competing-parent"; competitor.time = { created: 15 };
+      competitor.content[0].id = "competing-call"; competitor.content[0].time = { created: 15, ran: 16, completed: 25 };
+      if (firstRead) { entered(); await held; }
+      return Response.json({ data: [first, ...(firstRead ? [] : [competitor])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-outcome", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const abort = new AbortController();
+  let pump: Promise<void> | undefined, older: ReturnType<typeof provider.listMessages> | undefined;
+  try {
+    parent = (await provider.createSession("Overlapping parent observations")).id;
+    child = fake.launchRequestWorker(parent).childId; fake.settleWorker(child, "completed", "No parent report");
+    pump = (async () => { for await (const event of provider.events(abort.signal)) if (event.eventType === "diagnostic.parent-output-applied") applied(); })();
+    await provider.waitForEventStream!(abort.signal);
+    older = provider.listMessages(parent, { limit: 100, signal: abort.signal });
+    await reading;
+    frame("session.message.content.updated", { sessionID: parent, messageID: "ordinary-output", content: [{ type: "text", text: "Parent streaming" }] });
+    frame("diagnostic.parent-output-applied", {}); await observed;
+    const current = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
+    expect(current.items.filter(item => item.type === "background_task")).toHaveLength(2);
+    expect(current.items.filter(item => item.type === "background_task").every(item => item.status === "running")).toBe(true);
+    expect(current.workerSource?.isCurrent()).toBe(true);
+    release();
+    const stale = await older;
+    expect(stale.workerSource?.isCurrent()).toBe(false);
+    expect(current.workerSource?.isCurrent()).toBe(true);
+  } finally { release(); abort.abort(); await pump; await older?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
+});
+
+for (const read of ["retained-source", "adapter-history"] as const)
+for (const change of ["competing-launch", "parent-output", "child-output", "different-child"] as const)
+test(`${read} observes later parent history ${change} before SSE without requiring quiet output`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, otherChild: string | undefined, changed = false, armed = false, heldOnce = false;
+  let entered!: () => void, release!: () => void;
+  const atHandoff = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0];
+      first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const competitor = structuredClone(first); competitor.id = "observed-parent-launch"; competitor.time = { created: 15 };
+      competitor.content[0].id = "observed-parent-call"; competitor.content[0].time = { created: 15, ran: 16, completed: 25 };
+      if (change === "different-child") competitor.content[0].state.metadata.sessionID = otherChild;
+      return Response.json({ data: [first,
+        ...(changed && (change === "competing-launch" || change === "different-child") ? [competitor] : []),
+        ...(changed && change === "parent-output" ? [{ id: "later-parent-output", type: "assistant", time: { created: 30 }, content: [{ type: "text", text: "Parent output" }] }] : []),
+      ], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-outcome", type: "idle", time: { created: 20 }, outcome: "succeeded" },
+      ...(changed && change === "child-output" ? [{ id: "later-child-output", type: "assistant", time: { created: 30 }, content: [{ type: "text", text: "Child output" }] }] : []),
+    ], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  const sources: import("../../provider").WorkerSourceGuard[] = [];
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => {
+      options?.onSource?.(source);
+      if (armed) sources.push(source.workerSource.retain(abort.signal));
+    } });
+    if (armed && !heldOnce) { heldOnce = true; entered(); await held; }
+    return tasks;
+  };
+  const adapter = read === "adapter-history" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }) : undefined;
+  let pending: Promise<unknown> | undefined;
+  try {
+    parent = (await provider.createSession("Observed parent inventory counterproof")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    fake.settleWorker(child, "completed", "No parent report");
+    if (change === "different-child") { otherChild = fake.launchRequestWorker(parent).childId; fake.settleWorker(otherChild, "completed", "No unrelated report"); }
+    if (adapter) expect((await adapter.history(parent)).items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    armed = true;
+    pending = adapter ? adapter.history(parent) : provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    void pending.catch(() => undefined);
+    await atHandoff;
+    expect(sources.every(source => source.isCurrent())).toBe(true);
+    changed = true;
+    const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(change === "competing-launch" ? "running" : "completed");
+    release();
+    if (adapter) {
+      const snapshot = await pending as Awaited<ReturnType<ChatAdapter["history"]>>;
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: change === "competing-launch" ? "running" : "completed" }));
+    } else await pending;
+    expect(sources.every(source => source.isCurrent())).toBe(change !== "competing-launch");
+  } finally { release(); abort.abort(); await pending?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
 for (const read of ["listMessages", "reconcileBackgroundTasks", "adapter-history"] as const)
 for (const change of read === "adapter-history" ? ["competing-launch", "ordinary-output"] as const : ["competing-launch", "ordinary-output", "replay"] as const)
 for (const cachedTerminal of read === "adapter-history" && change === "competing-launch" ? [false, true] : [false])
