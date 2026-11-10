@@ -509,6 +509,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Register the entire source inventory before bounded verification starts:
     // capacity, timeout or cancellation can leave candidates unattempted.
     this.trackHistoryWorkerCandidates(sessionId, children);
+    // Parent launch facts are deny-only dependencies before ownership resolves.
+    // They cannot authorize child reads, rows, controls or positive activity.
+    for (const source of this.historyWorkerSources) if (source.parent === sessionId && source.phase === "collecting") {
+      for (const child of children) (source.historyParentLaunches ??= new Map()).set(child,
+        competitionLaunches.filter(fact => fact.workerType === "agent" && counterproofChild(fact) === child));
+    }
     const contradictedChildren = new Set<string>();
     const unavailableOwnership = await this.verifyChildren(children, sessionId, signal, child => verified.add(child), optionalEnrichment, (child, actualParent) => {
       contradictedChildren.add(child);
@@ -541,7 +547,6 @@ export class OpenCodeV2Provider implements ChatProvider {
           for (const source of historySources) {
             const dependencies = source.historyChildren ??= new Map();
             dependencies.set(child, (dependencies.get(child) ?? 0) + 1);
-            (source.historyParentLaunches ??= new Map()).set(child, competitionLaunches.filter(fact => fact.workerType === "agent" && counterproofChild(fact) === child));
             (source.historyActivityChildren ??= new Set()).add(child);
           }
           const complete = await this.allMessages(child, signal);
@@ -1782,7 +1787,6 @@ export class OpenCodeV2Provider implements ChatProvider {
             if (parent) for (const launcher of evidence.launchers) memory.workers.observeLauncher(parent, launcher);
             if (parent) for (const source of this.historyWorkerSources) if (source.parent === parent) {
               for (const [child, launches] of source.historyParentLaunches ?? []) {
-                if (!source.historyChildren?.has(child) && !source.historyPublishedActivity.has(child)) continue;
                 if (evidence.launchers.some(fact => {
                   if (fact.historical) return false;
                   const previous = launches.find(launch => launch.call === fact.call);

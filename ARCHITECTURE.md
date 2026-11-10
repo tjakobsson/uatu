@@ -1209,6 +1209,9 @@ as parent inventory reads; returning through worker folding is not required.
 The adapter also retracts an already cached history-only completion when the
 covered complete source returns the same qualified execution as unresolved.
 That replacement clears stale terminal fields instead of merging them back.
+It also accepts covered Working/Needs-answer evidence after a committed child
+revert removes an inferred end, restoring running state, progress and the
+execution clock. Missing Stop proof does not negate that activity authority.
 Explicit parent reports and terminal updates received during the read retain
 their existing precedence; an unguarded provider or ambiguous identity supplies
 no such replacement authority.
@@ -1259,6 +1262,10 @@ activity nor Stop projection borrows the newer cohort's valid basis.
 Native-read and SSE parent-launch counterproof use the same dependency predicate
 for outcomes and returned activity. A source with already observed launch
 counterproof cannot acquire new history-only activity publication authority.
+The parent-launch baseline is registered before the first child ownership await.
+Changes observed there remain deny-only until outcome or activity authority is
+used: unverified launch intent grants neither ownership, child reads nor Stop,
+and collecting counterproof alone does not invalidate unrelated control reads.
 Activity-only child observation also remains continuous before return, including
 the final parent lookup. Ordered idle counterproof is retained during that
 window without blanket invalidation of prepublication Stop reads; acquiring

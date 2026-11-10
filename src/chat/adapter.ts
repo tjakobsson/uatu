@@ -128,12 +128,16 @@ function indexRecoveredBackgroundTasks(tasks: readonly BackgroundTaskItem[]) {
 
 /** Covered native evidence may withdraw an inference, never an explicit report. */
 function replacesHistoryOnlyOutcome(current: ConversationItem | undefined, source: ConversationItem | undefined): boolean {
+  // Working evidence is independent of Stop proof: control projection may
+  // mark the row uncertain without withdrawing its covered native activity.
   return current?.type === "background_task" && current.status !== "running" && !current.resultId
     && current.summary === undefined && current.terminalReportedAt === undefined
-    && source?.type === "background_task" && source.status === "running" && source.stateUncertain === true
+    && source?.type === "background_task" && source.status === "running"
     && source.id === current.id && source.taskId === current.taskId && source.taskType === current.taskType
     && source.childConversationId !== undefined && source.childConversationId === current.childConversationId
-    && source.activity?.kind === "unavailable" && source.activity.executionId !== undefined
+    && (source.activity?.kind === "unavailable" && source.stateUncertain === true
+      || source.activity?.kind === "working" || source.activity?.kind === "needs-answer")
+    && source.activity.executionId !== undefined
     && source.activity.executionId === current.activity?.executionId;
 }
 

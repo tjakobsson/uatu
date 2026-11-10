@@ -3,6 +3,134 @@ import { createOpenCodeV2Provider } from "./provider";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 import { ChatAdapter } from "../../adapter";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { workerExecutionClockRuns } from "../../worker-state";
+
+for (const read of ["history", "automatic-recovery"] as const)
+for (const proof of ["same-execution", "parent-report", "changed-identity"] as const)
+test(`${read} resumes active work after withdrawing an inferred outcome (${proof})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, resumed = false, armed = false;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, finished!: () => void;
+  const published = new Promise<void>(resolve => { finished = resolve; });
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 50, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route === "/api/session/active") return Response.json({ data: resumed && child ? { [child]: { status: "running" } } : {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0], changed = resumed && proof === "changed-identity";
+      first.time = { created: changed ? 30 : 10 }; first.content[0].time = changed ? { created: 30, ran: 31, completed: 32 } : { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first, ...(proof === "parent-report" ? [{ id: "parent-result", type: "synthetic", time: { created: 25 }, text: "Explicit parent report", metadata: { source: "subagent", childID: child, state: "completed" } }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: resumed ? [] : [
+      { id: "reverted-child-input", type: "user", text: "Committed reverted suffix", time: { created: 15 } },
+      { id: "reverted-child-idle", type: "idle", time: { created: 20 }, outcome: "succeeded" },
+    ], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+  provider.reconcileBackgroundTasks = (id, options) => nativeRecovery(id, options?.onSource ? { ...options, onSource: source => options.onSource!({ ...source, workerSource: {
+    isCurrent: source.workerSource.isCurrent,
+    retain: signal => {
+      if (armed) { if (signal.aborted) finished(); else signal.addEventListener("abort", () => finished(), { once: true }); }
+      return source.workerSource.retain(signal);
+    },
+  } }) } : options);
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), abort = new AbortController();
+  try {
+    parent = (await provider.createSession("Resumed history-only outcome")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const warm = (await adapter.history(parent)).items.find(item => item.type === "background_task" && item.taskId === worker.taskId);
+    expect(warm).toMatchObject({ type: "background_task", status: "completed", activity: { kind: "ended" } });
+    // Model the persisted result of a committed child revert: its input/idle
+    // suffix is gone, no staged boundary remains, and native inventory resumes
+    // the same execution. No provider activity or adapter row is fabricated.
+    resumed = true;
+    const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    expect(fresh[0]).toMatchObject({ status: proof === "parent-report" ? "completed" : "running", activity: { kind: proof === "parent-report" ? "ended" : "working" } });
+    expect(fresh[0]?.activity?.executionId === (warm?.type === "background_task" ? warm.activity?.executionId : undefined)).toBe(proof !== "changed-identity");
+    if (proof === "same-execution") expect(fresh[0]?.control?.available).toBe(false);
+    armed = true;
+    let items: import("../../types").ConversationItem[];
+    if (read === "history") items = (await adapter.history(parent)).items;
+    else {
+      frame("session.message.content.updated", { sessionID: parent, messageID: "ordinary-parent-output", content: [{ type: "text", text: "Resume progress" }] });
+      await published;
+      items = (await adapter.subscribe(parent, { signal: abort.signal })).snapshot.items;
+    }
+    const current = items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    expect(current?.status).toBe(proof === "same-execution" ? "running" : "completed");
+    expect(workerExecutionClockRuns(current!)).toBe(proof === "same-execution");
+    if (proof === "same-execution") { expect(current?.activity?.kind).toBe("working"); expect(adapter.activity().working).toBe(true); }
+    if (proof === "parent-report") expect(current).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
+  } finally { armed = false; abort.abort(); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
+for (const change of ["competing", "unchanged", "ordinary-output", "unrelated-parent"] as const)
+test(`parent counterproof survives the first ownership await (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, changed = false, lookups = 0, first: any, competitor: any;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, entered!: () => void, release!: () => void, applied!: () => void;
+  const ownershipPending = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const observed = new Promise<void>(resolve => { applied = resolve; });
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 30, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(); first = body.data[0]; first.time = { created: 10 };
+      first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      competitor = structuredClone(first); competitor.id = "ownership-race-message"; competitor.time = { created: 15 };
+      competitor.content[0].id = "ownership-race-call"; competitor.content[0].time = { created: 15, ran: 16, completed: 25 };
+      return Response.json({ data: [first, ...(changed ? [competitor] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}` && ++lookups === 1) { entered(); await held; }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-outcome", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const abort = new AbortController(), firstAbort = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined, recovery: ReturnType<NonNullable<typeof provider.reconcileBackgroundTasks>> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Pre-ownership parent counterproof")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId; fake.settleWorker(child, "completed", "No parent report");
+    const unrelated = (await provider.createSession("Independent parent")).id;
+    const unrelatedWorker = fake.launchRequestWorker(unrelated);
+    pump = (async () => { for await (const event of provider.events(abort.signal)) if (event.eventType === "diagnostic.ownership-counterproof-applied") applied(); })();
+    await provider.waitForEventStream!(abort.signal);
+    recovery = provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal, onSource: source => guards.push(source.workerSource.retain(abort.signal)) });
+    void recovery.catch(() => undefined); await ownershipPending;
+    changed = change === "competing";
+    const content = change === "ordinary-output" ? [{ type: "text", text: "Parent output" }]
+      : change === "unchanged" ? first.content : structuredClone(competitor.content);
+    if (change === "unrelated-parent") content[0].state.metadata.sessionID = unrelatedWorker.childId;
+    frame("session.message.content.updated", { sessionID: change === "unrelated-parent" ? unrelated : parent,
+      messageID: change === "unchanged" ? first.id : competitor.id, content });
+    frame("diagnostic.ownership-counterproof-applied", {});
+    // Stream enrichment has a finite deadline; it cannot authorize the held
+    // required lookup. Counterproof must be recorded before that enrichment.
+    await observed; release();
+    const result = await recovery.then(tasks => ({ tasks }), error => ({ error }));
+    if (changed) { expect(result).toMatchObject({ error: expect.any(Error) }); expect(guards.some(guard => !guard.isCurrent())).toBe(true); }
+    else { expect(result).toMatchObject({ tasks: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] }); expect(guards.every(guard => guard.isCurrent())).toBe(true); }
+    const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    expect(fresh).toHaveLength(changed ? 2 : 1);
+    expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(changed ? "running" : "completed");
+  } finally { release(); firstAbort.abort(); abort.abort(); await firstPump; await pump; await recovery?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
+}, 10_000);
 
 test("an overlapping stale child read and transport reuse preserve newer owned working activity", async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

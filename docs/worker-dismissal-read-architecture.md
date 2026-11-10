@@ -46,6 +46,10 @@ unchanged launcher replays do not require a quiet window.
 Requested-child veto facts remain in that baseline with reported-child
 precedence, so repeating the same pending snapshot does not restart a covered
 history/evidence read. Changed facts still fence the old source.
+Parent-launch baselines are registered before the first ownership lookup.
+Changes observed during that await remain deny-only counterproof until outcome
+or activity authority is used; unverified intent grants no ownership, child
+read or Stop authority, and does not itself invalidate unrelated controls.
 Fresh parent-history reads provide the same scoped counterproof before SSE:
 nonoverlapping reads can revoke an older launch inventory, while conflicting
 overlapping responses cannot supersede later consumed evidence. Native read
@@ -57,6 +61,9 @@ A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
 and concurrent terminal updates keep their existing precedence.
+A covered Working/Needs-answer replacement for that exact execution also clears
+the inferred end and resumes the running clock and background progress. Its
+activity authority does not require available Stop controls.
 The automatic scheduler uses the same guarded exact-execution replacement rule,
 so its upserts cannot restore a revoked report-free completion either.
 Automatic inventory recovery also holds and validates source leases through
