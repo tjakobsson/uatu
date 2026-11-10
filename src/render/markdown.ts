@@ -18,11 +18,12 @@ const CODE_BLOCK_PATTERN = /<pre><code(?:\s+class="language-([^"]+)")?>([\s\S]*?
 
 export const SYNTAX_HIGHLIGHT_BYTES_LIMIT = 1_048_576;
 
-// Start from hast-util-sanitize's default schema (modeled on GitHub's allowlist)
+// Shared by document and chat Markdown. Start from hast-util-sanitize's default
+// schema (modeled on GitHub's allowlist)
 // and extend it with the README idioms GitHub also permits but which aren't in
 // the base default: `align` on block elements, and `alt`/`title`/`width`/`height`
 // on `<img>` so inline image sizing survives.
-const sanitizeSchema: Schema = {
+export const markdownSanitizeSchema: Schema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
@@ -80,7 +81,7 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
   });
 
   const tree = fromHtml(rawHtml, { fragment: true });
-  const safe = sanitize(tree, sanitizeSchema);
+  const safe = sanitize(tree, markdownSanitizeSchema);
   markExternalAnchors(safe);
   return { html: highlightCodeBlocks(toHtml(safe)), metadata };
 }

@@ -6,6 +6,7 @@ type Timer = ReturnType<typeof setTimeout>;
 type Schedule = (callback: () => void, delay: number) => Timer;
 type Cancel = (timer: Timer) => void;
 const feedbackTimers = new WeakMap<HTMLButtonElement, Timer>();
+const originalLabels = new WeakMap<HTMLButtonElement, string>();
 
 export async function copyChatText(
   button: HTMLButtonElement,
@@ -20,7 +21,8 @@ export async function copyChatText(
 
   const previous = feedbackTimers.get(button);
   if (previous !== undefined) cancel(previous);
-  const originalLabel = "Copy code block";
+  const originalLabel = originalLabels.get(button) ?? button.getAttribute("aria-label") ?? (button.textContent?.trim() || "Copy code block");
+  originalLabels.set(button, originalLabel);
   button.dataset.state = copied ? "copied" : "failed";
   button.setAttribute("aria-label", copied ? "Copied" : "Copy failed");
   button.title = copied ? "Copied" : "Copy failed";

@@ -183,6 +183,101 @@ for (const name of ["subagent", "shell"]) test(`${name} result follows its launc
   expect(host.textContent!.match(/Canonical report/g)).toHaveLength(1);
 });
 
+test("unfinished SVG preserves Source while each delta refreshes exact inert source and status", () => {
+  const renderer = new TimelineRenderer();
+  const target = dom.document.createElement("div") as unknown as HTMLElement;
+  const source = '<svg>\r\n<text>&amp; &lt;tag&gt;';
+  const item: Extract<ConversationItem, { type: "assistant_message" }> = { id: "growing-svg", type: "assistant_message", createdAt: 1, markdown: `\`\`\`svg\r\n${source}`, visuals: [{ index: 0, status: "pending" }] };
+  try {
+    renderer.render(target, projectionWith([item]), new Set());
+    target.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+    for (const suffix of [" updated", " updated</text>\r\n</svg>\r\n"]) {
+      renderer.render(target, projectionWith([{ ...item, markdown: item.markdown + suffix }]), new Set());
+      const visual = target.querySelector<HTMLElement>(".chat-visual")!;
+      expect(visual.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+      expect(visual.querySelector('[data-visual-tab="source"]')!.getAttribute("aria-pressed")).toBe("true");
+      expect(visual.querySelector("code")!.textContent).toBe(source + suffix);
+      expect(visual.querySelector(".chat-visual-preview")!.textContent).toContain("Generating image…");
+      expect(visual.querySelector("[data-visual-copy]")!.hasAttribute("disabled")).toBe(false);
+      expect(visual.querySelector("img, svg, code.hljs")).toBeNull();
+    }
+    renderer.render(target, projectionWith([{ ...item, markdown: item.markdown + " final", visuals: [{ index: 0, status: "unavailable", message: "Capture refused." }], completedAt: 2 }]), new Set());
+    expect(target.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+    expect(target.querySelector(".chat-visual-preview")!.textContent).toContain("SVG block is unfinished.");
+    expect(target.querySelector(".chat-visual-source code")!.textContent).toBe(source + " final");
+  } finally { renderer.reset(); }
+});
+
+test("late references shift visual indices without moving Source to a different logical occurrence or bubble", () => {
+  const renderer = new TimelineRenderer();
+  const target = dom.document.createElement("div") as unknown as HTMLElement;
+  const markdown = "![Late][ref]\n\n```svg\n<svg/>\n```\n";
+  const item: Extract<ConversationItem, { type: "assistant_message" }> = { id: "reference-svg", type: "assistant_message", createdAt: 1, markdown, visuals: [{ index: 0, status: "pending" }] };
+  const sibling = { ...item, id: "other-native-bubble", createdAt: 2 };
+  const own = () => target.querySelector<HTMLElement>('[data-chat-item-id="reference-svg"]')!;
+  try {
+    renderer.render(target, projectionWith([item, sibling]), new Set());
+    own().querySelector('[data-visual-tab="source"]')!.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+    const updated = { ...item, markdown: markdown + "\n[ref]: ./missing.png\n", visuals: [{ index: 0, status: "unavailable" as const }, { index: 1, status: "pending" as const }] };
+    renderer.render(target, projectionWith([updated, { ...sibling, markdown: markdown + "\nMore prose." }]), new Set());
+    expect(own().querySelector(".is-svg")!.getAttribute("data-visual-index")).toBe("1");
+    expect(own().querySelector<HTMLElement>(".is-svg .chat-visual-source")!.hidden).toBe(false);
+    expect(target.querySelector<HTMLElement>('[data-chat-item-id="other-native-bubble"] .chat-visual-source')!.hidden).toBe(true);
+    renderer.render(target, projectionWith([{ ...updated, markdown: "Different offset.\n\n" + updated.markdown }, sibling]), new Set());
+    expect(own().querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(true);
+  } finally { renderer.reset(); }
+});
+
+test("an unadmitted SVG keeps its own Source view without becoming admitted as source grows", () => {
+  const renderer = new TimelineRenderer();
+  const target = dom.document.createElement("div") as unknown as HTMLElement;
+  const item: Extract<ConversationItem, { type: "assistant_message" }> = { id: "refused-svg", type: "assistant_message", createdAt: 1, markdown: "```svg\n<svg>prefix", visuals: [] };
+  try {
+    renderer.render(target, projectionWith([item]), new Set());
+    target.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+    renderer.render(target, projectionWith([{ ...item, markdown: item.markdown + " updated</svg>\n```\n" }]), new Set());
+    expect(target.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+    expect(target.querySelector(".chat-visual-source code")!.textContent).toBe("<svg>prefix updated</svg>\n");
+    expect(target.querySelector(".chat-visual-preview")!.textContent).toContain("At most 8 images");
+    expect(target.querySelector("img, svg, [data-visual-key]")).toBeNull();
+  } finally { renderer.reset(); }
+});
+
+test("identical captured bytes in separate occurrences retain separate nodes and tab state", () => {
+  const renderer = new TimelineRenderer();
+  const target = dom.document.createElement("div") as unknown as HTMLElement;
+  const item: Extract<ConversationItem, { type: "assistant_message" }> = { id: "repeated-snapshot", type: "assistant_message", createdAt: 1, markdown: "```svg\n<svg/>\n```\n\n```svg\n<svg/>\n```\n", visuals: [0, 1].map(index => ({ index, status: "ready" as const, id: "a".repeat(64), mimeType: "image/svg+xml" })) };
+  try {
+    renderer.render(target, projectionWith([item]), new Set());
+    const visuals = Array.from(target.querySelectorAll<HTMLElement>(".chat-visual"));
+    for (const visual of visuals) visual.dataset.visualSourceLoaded = "true";
+    visuals[0]!.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+    const images = Array.from(target.querySelectorAll("img"));
+    renderer.render(target, projectionWith([{ ...item, markdown: item.markdown + "\nMore explanation." }]), new Set());
+    expect(Array.from(target.querySelectorAll(".chat-visual"))).toEqual(visuals);
+    expect(Array.from(target.querySelectorAll("img"))).toEqual(images);
+    expect(visuals[0]!.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+    expect(visuals[1]!.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(true);
+  } finally { renderer.reset(); }
+});
+
+test("streaming prose retains a captured visual and its selected source view", () => {
+  const renderer = new TimelineRenderer();
+  const target = dom.document.createElement("div") as unknown as HTMLElement;
+  const item: ConversationItem = { id: "visual-answer", type: "assistant_message", createdAt: 1, markdown: "![Diagram](./diagram.svg)", visuals: [{ index: 0, status: "ready", id: "a".repeat(64), mimeType: "image/svg+xml" }] };
+  renderer.render(target, projectionWith([item]), new Set());
+  const visual = target.querySelector<HTMLElement>(".chat-visual")!;
+  const code = visual.querySelector("code")!;
+  code.textContent = "<svg>frozen source</svg>";
+  visual.dataset.visualSourceLoaded = "true";
+  visual.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+  renderer.render(target, projectionWith([{ ...item, markdown: `${item.markdown}\n\nMore explanation.` }]), new Set());
+  expect(target.querySelector(".chat-visual")).toBe(visual);
+  expect(visual.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+  expect(code.textContent).toBe("<svg>frozen source</svg>");
+  renderer.reset();
+});
+
 describe("persistent shell rendering", () => {
   for (const input of ["wheel", "touch", "keyboard", "scrollbar", "untouched", "closed"]) test(`${input} inspection controls row and group completion`, () => {
     const oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;

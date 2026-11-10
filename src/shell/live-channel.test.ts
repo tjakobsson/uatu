@@ -10,6 +10,7 @@ import {
 } from "../shared/live-protocol";
 import {
   CONTROL_TIMEOUT_MS,
+  LIVE_CONNECT_URL_MAX_BYTES,
   createLiveChannel,
   reconnectDelay,
   RECONNECT_MAX_DELAY_MS,
@@ -845,6 +846,144 @@ describe("createLiveChannel — subscription control", () => {
     expect(extra.calls).toEqual(["unavailable g1"]);
     expect(h.posts.map(post => post.body)).toEqual([{ add: [{ topic: "conversation", key: "c0", cursor: "replaced" }] }]);
     expect(h.channel.subscriptions()).toHaveLength(LIVE_MAX_SUBSCRIPTIONS);
+  });
+
+  test("URL-deferred conversation recovery stays per-add in a mixed recovery/fresh batch and clears on same-cursor history resubscribe", async () => {
+    const h = createHarness();
+    const key = `opencode:${"/".repeat(LIVE_MAX_KEY_BYTES - "opencode:".length)}`;
+    const cursor = "same-terminal-cursor";
+    const handle = h.channel.subscribe({ topic: "conversation", key }, {}, { cursor });
+    h.channel.subscribe({ topic: "inventory" }, {}, { cursor: "inventory-cursor" });
+    h.channel.connect();
+    expect(h.latest().url.length).toBeLessThanOrEqual(LIVE_CONNECT_URL_MAX_BYTES);
+    expect(h.subs(h.latest())).toEqual([{ topic: "inventory", cursor: "inventory-cursor" }]);
+    h.latest().hello("fresh"); await settle();
+    expect(h.posts[0]!.body.add).toEqual([{ topic: "conversation", key, cursor }]);
+    h.channel.connect({ resumed: true });
+    expect(h.latest().url.length).toBeLessThanOrEqual(LIVE_CONNECT_URL_MAX_BYTES);
+    expect(h.query(h.latest()).get("reconnect")).toBe("1");
+    h.channel.subscribe({ topic: "conversation", key: "opencode:new-after-connect" }, {}, { cursor });
+    h.latest().hello("resumed"); await settle();
+    expect(h.posts[1]!.body.add).toEqual([
+      { topic: "conversation", key, cursor, reconnect: true },
+      { topic: "conversation", key: "opencode:new-after-connect", cursor },
+    ]);
+    handle.resubscribe(cursor); await settle();
+    expect(h.posts[2]!.body.add).toEqual([{ topic: "conversation", key, cursor }]);
+    expect(h.channel.subscriptions().every(subscription => subscription.reconnect === undefined)).toBe(true);
+    h.channel.dispose();
+    expect(h.scheduled).toEqual([]);
+  });
+
+  test.each([0, 503, 408, 429])("deferred recovery survives control failure %i without enlarging the connect URL", async status => {
+    const h = createHarness();
+    const key = `opencode:${"/".repeat(LIVE_MAX_KEY_BYTES - "opencode:".length)}`;
+    h.channel.subscribe({ topic: "conversation", key }, {}, { cursor: "native" });
+    h.channel.connect({ resumed: true });
+    h.postStatuses.push(status);
+    h.latest().hello(); await settle();
+    expect(h.posts[0]!.body.add).toEqual([{ topic: "conversation", key, cursor: "native", reconnect: true }]);
+    h.runPendingTimer(); await settle();
+    expect(h.posts[1]!.body).toEqual(h.posts[0]!.body);
+    expect(h.sources).toHaveLength(1);
+    expect(h.latest().url.length).toBeLessThanOrEqual(LIVE_CONNECT_URL_MAX_BYTES);
+    h.channel.dispose();
+    expect(h.scheduled).toEqual([]);
+  });
+
+  test("deferred recovery survives stream loss before hello and an in-flight control add", async () => {
+    const h = createHarness();
+    const key = `opencode:${"/".repeat(LIVE_MAX_KEY_BYTES - "opencode:".length)}`;
+    h.channel.subscribe({ topic: "conversation", key }, {}, { cursor: "native" });
+    h.channel.connect({ resumed: true });
+    h.latest().fail();
+    h.runPendingTimer();
+    const staleReply = h.holdNextPost();
+    h.latest().hello("second"); await settle();
+    expect(h.posts[0]!.body.add).toEqual([{ topic: "conversation", key, cursor: "native", reconnect: true }]);
+    h.latest().fail();
+    expect(h.signals[0]!.aborted).toBe(true);
+    h.runPendingTimer();
+    h.latest().hello("third"); await settle();
+    staleReply(200); await settle();
+    expect(h.posts.map(post => post.body)).toEqual([h.posts[0]!.body, h.posts[0]!.body]);
+    expect(h.posts[1]!.url).toBe("/api/hub/live/third/subscriptions");
+    expect(h.sources).toHaveLength(3);
+    expect(h.sources.every(source => source.url.length <= LIVE_CONNECT_URL_MAX_BYTES)).toBe(true);
+    h.channel.dispose();
+    expect(h.scheduled).toEqual([]);
+  });
+
+  test("a timed-out deferred recovery retries its intent and ignores the late acceptance", async () => {
+    const h = createHarness();
+    const key = `opencode:${"/".repeat(LIVE_MAX_KEY_BYTES - "opencode:".length)}`;
+    const handle = h.channel.subscribe({ topic: "conversation", key }, {}, { cursor: "native" });
+    h.channel.connect({ resumed: true });
+    const staleReply = h.holdNextPost();
+    h.latest().hello(); await settle();
+    expect(h.runPendingTimer()).toBe(CONTROL_TIMEOUT_MS);
+    expect(h.signals[0]!.aborted).toBe(true);
+    h.runPendingTimer(); await settle();
+    expect(h.posts[1]!.body).toEqual(h.posts[0]!.body);
+    expect(h.posts[1]!.body.add?.[0]?.reconnect).toBe(true);
+    staleReply(200); await settle();
+    handle.resubscribe("native"); await settle();
+    expect(h.posts[2]!.body.add).toEqual([{ topic: "conversation", key, cursor: "native" }]);
+    h.channel.dispose();
+    expect(h.scheduled).toEqual([]);
+  });
+
+  test.each(["before hello", "while accepted", "while retrying"] as const)("same-cursor post-history resubscribe %s clears deferred recovery", async timing => {
+    const h = createHarness();
+    const key = `opencode:${"/".repeat(LIVE_MAX_KEY_BYTES - "opencode:".length)}`;
+    const handle = h.channel.subscribe({ topic: "conversation", key }, {}, { cursor: "same-native" });
+    h.channel.connect({ resumed: true });
+    if (timing === "before hello") {
+      handle.resubscribe("same-native"); h.latest().hello(); await settle();
+      expect(h.posts[0]!.body.add).toEqual([{ topic: "conversation", key, cursor: "same-native" }]);
+    } else {
+      const release = h.holdNextPost();
+      h.latest().hello(); await settle();
+      expect(h.posts[0]!.body.add?.[0]?.reconnect).toBe(true);
+      handle.resubscribe("same-native");
+      release(timing === "while accepted" ? 200 : 503); await settle();
+      if (timing === "while retrying") { h.runPendingTimer(); await settle(); }
+      expect(h.posts[1]!.body.add).toEqual([{ topic: "conversation", key, cursor: "same-native" }]);
+    }
+    h.channel.dispose();
+  });
+
+  test("a stale accepted control response cannot clear a newer generation's deferred recovery", async () => {
+    const h = createHarness();
+    const key = `opencode:${"/".repeat(LIVE_MAX_KEY_BYTES - "opencode:".length)}`;
+    h.channel.subscribe({ topic: "conversation", key }, {}, { cursor: "native" });
+    h.channel.connect({ resumed: true });
+    const oldReply = h.holdNextPost();
+    h.latest().hello("old"); await settle();
+    h.channel.connect({ resumed: true });
+    expect(h.signals[0]!.aborted).toBe(true);
+    const newReply = h.holdNextPost();
+    h.latest().hello("new"); await settle();
+    oldReply(200); await settle();
+    expect(h.delays()).toEqual([CONTROL_TIMEOUT_MS]);
+    newReply(503); await settle();
+    h.runPendingTimer(); await settle();
+    expect(h.posts).toHaveLength(3);
+    expect(h.posts.every(post => post.body.add?.[0]?.reconnect === true)).toBe(true);
+    expect(h.posts[2]!.url).toBe("/api/hub/live/new/subscriptions");
+    h.channel.dispose();
+    expect(h.scheduled).toEqual([]);
+  });
+
+  test.each(["close", "replacement"] as const)("%s before hello removes the old deferred recovery intent", async action => {
+    const h = createHarness();
+    const key = `opencode:${"/".repeat(LIVE_MAX_KEY_BYTES - "opencode:".length)}`;
+    const old = h.channel.subscribe({ topic: "conversation", key }, {}, { cursor: "native" });
+    h.channel.connect({ resumed: true });
+    if (action === "replacement") h.channel.subscribe({ topic: "conversation", key }, {}, { cursor: "native" });
+    old.close(); h.latest().hello(); await settle();
+    expect(h.posts.map(post => post.body)).toEqual(action === "close" ? [] : [{ add: [{ topic: "conversation", key, cursor: "native" }] }]);
+    h.channel.dispose();
   });
 
   test("a subscription set too long for one URL presents the rest over the control route after hello", async () => {

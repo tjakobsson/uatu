@@ -167,24 +167,38 @@ test("listed levels survive recovery while their folder is still ignored", async
 test("files a client opens or is served stay indexed when later writes overflow the window", async () => {
   const cwd = await fixture();
   await writeFile(path.join(cwd, ".gitignore"), "/build*/\n");
-  await files(cwd, ["README.md"]);
-  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { ignoredWindowLimit: 2 });
+  // Seed an existing ignored tree so discovery establishes its unlisted
+  // status before any writes. Creating it later races asynchronous directory
+  // classification: files admitted in the ordinary lane do not use the window.
+  await files(cwd, ["README.md", "build/renders/.keep"]);
+  // Pinned files count toward the total window. Leave one moving slot so
+  // later writes can enter it while the two client-owned entries stay pinned.
+  const session = createWatchSession([{ kind: "dir", absolutePath: cwd }], false, { ignoredWindowLimit: 3 });
   const render = (name: string) => path.join(cwd, "build/renders", name);
   try {
     await session.start();
-    await mkdir(path.join(cwd, "build/renders"), { recursive: true });
+    expect(folders(rootOf(session))).toEqual(["build/"]);
+    expect(paths(rootOf(session))).not.toContain("build/renders/.keep");
     for (const name of ["opened.md", "served.png"]) await writeFile(render(name), "x");
     await wait(() => !!session.findDocument(render("opened.md")) && !!session.findDocument(render("served.png")), "windowed renders");
     expect(await session.ensureDocument(render("opened.md"))).toBeDefined();
     session.pinDocument(render("served.png"));
-    for (const name of ["a.wav", "b.wav", "c.wav"]) { await writeFile(render(name), "x"); await Bun.sleep(30); }
-    await wait(() => !!session.findDocument(render("c.wav")), "later renders");
+    for (const name of ["a.wav", "b.wav", "c.wav"]) {
+      await writeFile(render(name), "x");
+      // Synchronize on observed writes rather than assuming a 30ms pause
+      // establishes observer/classifier order under CI load.
+      await wait(() => !!session.findDocument(render(name)), `later render ${name}`);
+    }
+    // The newest upsert and the older removal may arrive in separate patches.
+    await wait(() => !session.findDocument(render("a.wav")), "older unpinned render eviction");
     expect(session.findDocument(render("opened.md"))).toBeDefined();
     expect(session.findDocument(render("served.png"))).toBeDefined();
     // Unpinned older writes left the window.
     expect(session.findDocument(render("a.wav"))).toBeUndefined();
+    expect(session.findDocument(render("c.wav"))).toBeDefined();
+    expect(folders(rootOf(session))).toEqual(["build/"]);
   } finally { await session.stop(); }
-});
+}, 20_000);
 
 test("Follow skips ignored output in every batch, follows tracked output, and the default skips newer ignored files", async () => {
   const cwd = await fixture();

@@ -33,6 +33,7 @@ import { revealWorkerRequest } from "./worker-dismissal-client-request";
 import { CompactWorkersView } from "./compact-workers-view";
 import { expandedWorkBudget } from "./work-budget";
 import { renderChatMarkdown } from "./markdown";
+import { decorateChatVisuals } from "./visual-ui";
 import { SHELL_WORKER_STOP_WARNING, SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
@@ -3820,6 +3821,12 @@ export function initChat(api = new ChatApiClient()): void {
   latestButton.addEventListener("click", () => {
     parentScroll.latest();
   });
+  for (const button of [latestButton, childLatest]) button?.addEventListener("mousedown", event => {
+    // Blurring the touch composer reveals the tab bar and moves Latest before
+    // mouseup. Keep focus, but let the pointer sequence produce its click
+    // (cancelling touch pointerdown can suppress that click in WebKit).
+    if (document.documentElement.getAttribute("data-ui-mode") === "touch" && document.activeElement === input) event.preventDefault();
+  });
 
   /**
    * Expanding an activity group inside a transcript, for whichever timeline
@@ -4977,6 +4984,7 @@ export function initChat(api = new ChatApiClient()): void {
     else {
       content.innerHTML = renderChatMarkdown(text);
       decorateFileLinks(content);
+      decorateChatVisuals(content);
     }
     asideDialog.dataset.conversation = id!;
     asideDialog.returnValue = "";

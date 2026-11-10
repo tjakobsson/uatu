@@ -2,6 +2,30 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 15 / Workspace 37 - Unreleased (inline assistant visuals and recovery intent)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- `assistant_message` gains optional `visuals`: ordered references to immutable PNG, JPEG, and SVG snapshots captured from explicit Markdown images and fenced SVG. References report pending, ready, or unavailable state; image bytes remain outside the conversation stream.
+- Local images retain the first successful capture for each occurrence. Existing workspace file-access policy still applies. External images and SVG resource requests are blocked. Internal authenticated workspace routes serve previews and inert original SVG source.
+- Admission is permanent for the first eight observed logical occurrences per native API assistant message, shared across its text parts and including refusals. Each reference's `index` is its current rendered position, not its admission slot; it can exceed seven after reordering. The `visuals` array still contains at most eight entries, and each image is bounded to 10 MiB.
+- A streamed assistant text delta may arrive as a full `item.upsert` carrying newly captured visuals. A terminal capture can request the existing conversation resync rather than introducing synthetic sequence identifiers.
+- The closed Hub `LiveSubscription` conversation variant now publishes optional boolean `reconnect` for both opening GET `subs` and later `hubUpdateLiveSubscriptions` additions. True requires a nonempty cursor of at most 1024 UTF-8 bytes. Other topics do not accept the field. The GET's `reconnect=1` is a recovery-intent default for opening conversations, not diagnostics alone; a per-conversation boolean overrides it. Later POST additions use only their own flag.
+- Recovery repairs possibly missed same-cursor visual metadata only when visual evidence calls for it. A healthy shared conversation already at its head requests resync only when the presented cursor equals its last remembered visual-trailer cursor; otherwise it sends ready without a full snapshot. No new event or cursor fields are introduced.
+- Bundled-web revision 4 refreshes older cached web assets before they consume the new assistant payload.
+
+### Migration
+
+Regenerate Hub request types and strict validators for revision 15: revision 14's closed conversation subscription schema rejects the optional `reconnect` property. For a replacement stream, set the GET query `reconnect=1` and present retained cursors in `subs`; an explicit conversation `reconnect: false` overrides that default for a fresh attachment. When URL limits defer a recovering conversation until the POST, send its retained nonempty cursor and `reconnect: true`. Later additions with omitted or false flags remain fresh, independent of the opening GET. Do not expect a snapshot on every reconnect; honor ready, replay and the existing resync signal. Older Hubs may ignore the optional field, so deferred visual repair is not guaranteed with a new client and an old Hub. Existing requests without the field remain valid.
+
+Regenerate strict workspace payload validators for revision 37: `assistant_message` is a closed object, so revision 36 validators reject its new `visuals` field. Apply `item.upsert` as replacement by item id and honor the existing resync protocol. Clients that do not present visuals can continue to show the original Markdown. This Hub correction leaves workspace revision 37 and bundled-web revision 4 unchanged; it does not add a public workspace-child HTTP route.
+
+Match references by their current rendered `index`, accepting nonnegative safe integers rather than assuming indexes zero through seven. Occurrences omitted from an explicit `visuals` array were not admitted; retain their inert fallback instead of fetching their original destinations.
+
+Compatibility with admission choices made by intermediate unreleased test builds is not supported. Existing stored files, IDs, and bytes remain untouched and resolvable. Permanent admission begins on first processing by the new implementation; an old test conversation may therefore display a different set of up to eight previews after upgrading.
+
 ## Hub 14 / Workspace 36 - Unreleased (ignored folders listed on demand)
 
 Compatibility: breaking (workspace)

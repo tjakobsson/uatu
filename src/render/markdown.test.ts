@@ -91,6 +91,16 @@ Visit https://example.com and ~~remove~~ text.`);
     expect(html).not.toContain("javascript:");
   });
 
+  test("the Markdown allowlist keeps formatting while refusing image and link schemes", () => {
+    const { html } = renderMarkdownToHtml('<div align="center"><h2 align="right">Title</h2><table align="center"><tr align="right"><th align="left">Key</th><td align="center">Value</td></tr></table><img src="file:///refused.svg" alt="refused" title="image" width="120" height="80" onerror="bad()"><a href="data:text/html,unsafe" onclick="bad()">Link</a></div>');
+    expect(html).toContain('<div align="center"><h2 align="right">Title</h2>');
+    expect(html).toContain('<table align="center">');
+    expect(html).toContain('<tr align="right"><th align="left">Key</th><td align="center">Value</td>');
+    expect(html).toContain('<img alt="refused" title="image" width="120" height="80">');
+    expect(html).toContain('<a>Link</a>');
+    expect(html).not.toMatch(/file:|data:|onerror|onclick/);
+  });
+
   test("leaves relative URLs in the rendered HTML untouched", () => {
     // With <base href> driving resolution in the browser, the server no longer
     // needs to rewrite the HTML — relative URLs stay as the author wrote them.

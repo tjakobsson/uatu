@@ -1433,6 +1433,8 @@ test("idle entry and byte pressure preserve fresh guard headroom for retained co
   }
 });
 
+// Saturation correctness, not a wall-clock performance contract: retain the
+// full serialization oracle on every iteration, with headroom under CI load.
 test("actual controls and disposable projection jointly respect the live aggregate", () => {
   const controls = new BackgroundControls({ changed: () => workers.enforceBudget() });
   const workers = new BackgroundWorkers({ retained: () => controls.usage, onSaturation: () => controls.projectionSaturated() });
@@ -1448,7 +1450,7 @@ test("actual controls and disposable projection jointly respect the live aggrega
     expect(controlsState.records.size).toBeLessThanOrEqual(2_048);
   }
   expect(retained(workers).recoveryOnly).toBe(true);
-});
+}, 20_000);
 
 test("control-budget serialization scales with changed entries, not the retained collection", () => {
   const stringify = JSON.stringify;
