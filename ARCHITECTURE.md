@@ -1191,11 +1191,26 @@ new Stop authority; its execution clock does not restart. Boundaries before a
 new admission, unrelated/foreign events, a first execution starting after
 background admission, and exact start replays do not create that veto. This is a
 read of the existing bounded ledger, not another observation cache or buffer.
+Distinct-start counterproof keeps the greatest observed native start clock (or
+an unknown-clock veto) in one scalar inside the existing ledger record. An older
+start replay may not erase that negative evidence or revive the old execution;
+the scalar never supplies a positive start, end, outcome or Stop timestamp.
 
 Pending notifications are folded after stored messages, not necessarily in their
 native chronological order. During complete-history recovery, a dated report
 cannot invalidate an occurrence whose launch begins after that report. It may
 settle its eligible earlier occurrence; undated reports remain conservative.
+Pending-inbox reports also participate in outcome-source counterproof, including
+when the original inbox was empty and transferred no pending-text lease. Native
+inbox request order is retained in one read-owned snapshot of compact report
+digests (256 facts / 64 KiB serialized UTF-16), under the existing source deadline.
+The outcome source, not the separate text source, carries this dependency through
+scheduler interaction reads and admission. Unchanged, ordinary-text, pre-launch
+and other-child observations do not revoke independent outcomes. Overlapping
+older responses cannot poison later owned evidence; pending ownerless observations
+are provisional deny-only facts. Cancellation is checked before observation and
+released leases retire the slot. Overflow withholds dependent history authority,
+never ownership, fabricated results or Stop proof.
 
 A bare idle boundary alone never completes a worker. Native child idle records
 with an explicit `succeeded`, `failed` or `interrupted` outcome can recover the

@@ -91,6 +91,16 @@ digest per native launch child, not report text or a result log; provisional
 digests share the existing count/byte budget. Native ordering protects newer
 observations from stale arrivals. Public prefix recovery, not the fingerprint,
 decides which explicit reports remain visible after a parent revert.
+The outcome source also retains a native pending-inbox observation, even when
+the inbox is empty and no text lease is transferred. Later relevant pending
+reports therefore fence inferred outcomes before scheduler admission. One
+read-owned snapshot stores at most 256 compact digests / 64 KiB serialized
+UTF-16, not inbox text or an observation log. Native request ordering protects
+newer owned reads from older arrivals and carries provisional counterproof for
+first pending consumers. Unchanged/ordinary-text, earlier-execution and
+other-child reports leave independent outcomes current. Aborted observations
+cannot revoke evidence; released leases retire the snapshot. Saturation is
+deny-only and cannot grant ownership, result text or Stop authority.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
@@ -108,6 +118,9 @@ dismissal evidence rather than being held active by another execution. Prior
 boundaries outside the new admission and unrelated/foreign events do not veto it;
 a first start and its exact replay are not a second execution. No new retention
 structure or budget is introduced.
+The ledger retains distinct-start counterproof as one greatest observed clock
+(or unknown-clock veto), independent of the latest arrival. Replaying an older
+start cannot revive the previous execution or create a positive timestamp.
 A covered Working/Needs-answer replacement for that exact execution also clears
 the inferred end and resumes the running clock and background progress. Its
 activity authority does not require available Stop controls.

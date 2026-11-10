@@ -64,8 +64,11 @@ type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradict
 type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { started: number; completed: number; launches: readonly LauncherEvidence[]; reports: ReadonlyMap<string, string>; pending?: true; overflow?: true }; historyParentChanges: Set<string>; historyChildChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Map<string, WorkerOccurrenceEvidence | undefined>; historyActivityContradicted: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { started: number; completed: number; signature: string; pending?: true }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string>;
   pendingParentLaunches?: LauncherEvidence[];
   parentLaunchOverflow?: true;
+  historyPendingRead?: PendingOutcomeRead;
+  historyPendingConsumer?: true;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
+type PendingOutcomeRead = { started: number; completed: number; reports: readonly { child: string; at?: number; digest: string }[]; overflow?: true; provisional?: true };
 const parentCounterproofMaxFacts = 256;
 const parentCounterproofMaxBytes = 65_536;
 
@@ -839,6 +842,7 @@ export class OpenCodeV2Provider implements ChatProvider {
 
   private async readBackgroundTasks(sessionId: string, signal: AbortSignal, controlRead: ControlRead, observe: (source: WorkerRecoverySource) => void, isCurrent: () => boolean): Promise<BackgroundSnapshot> {
     const source = this.beginWorkerSourceRead(sessionId, signal, isCurrent);
+    source.source.historyPendingConsumer = true;
     let pendingSource: ReturnType<OpenCodeV2Provider["beginWorkerSourceRead"]> | undefined;
     let pendingFallbacks: WorkerResultFallback[] | undefined;
     let observed = false;
@@ -856,10 +860,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     const activeRead = this.client.session.active({ signal }).catch(() => undefined);
     const [history, pending] = await Promise.all([
       this.allMessages(sessionId, signal, source.source),
-      this.client.session.inbox.list({ sessionID: sessionId }, { signal }),
+      this.readPendingOutcomes(sessionId, signal),
     ]);
+    signal.throwIfAborted();
+    this.observePendingOutcomes(sessionId, pending.observation, source.source);
     const stored = new Set(history.map(message => message.id));
-    const notifications = (pending as unknown as StoredMessage[]).filter(entry => entry.type === "synthetic" && !stored.has(entry.id))
+    const notifications = (pending.entries as unknown as StoredMessage[]).filter(entry => entry.type === "synthetic" && !stored.has(entry.id))
       .map(entry => ({ ...asRecord(entry.payload), id: entry.id, type: "synthetic", time: entry.time }));
     pendingFallbacks = notifications.flatMap(message => this.workerResultFallbacks(message));
     signal.throwIfAborted();
@@ -1620,6 +1626,71 @@ export class OpenCodeV2Provider implements ChatProvider {
       })) {
         source.historyParentChanges.add(child);
         if (dependsOnWorkerHistory(source, child)) source.revision++;
+      }
+    }
+  }
+
+  private async readPendingOutcomes(sessionId: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    const started = ++this.parentHistoryReadClock;
+    const entries = await this.client.session.inbox.list({ sessionID: sessionId }, { signal });
+    signal.throwIfAborted();
+    const completed = ++this.parentHistoryReadClock;
+    const reports: Array<{ child: string; at?: number; digest: string }> = [], seen = new Set<string>();
+    let bytes = 0, overflow: true | undefined;
+    for (const value of entries as Array<Record<string, unknown>>) {
+      if (value.type !== "synthetic") continue;
+      const message = { ...asRecord(value.payload), id: value.id, type: value.type, time: value.time };
+      const report = prepareStoredMessage(message).notification;
+      if (report?.source !== "subagent" || !report.valid || !report.status || !report.worker) continue;
+      const at = numberField(asRecord(value.time).created);
+      const digest = historyVersion([value.id, at, report]);
+      if (seen.has(digest)) continue;
+      const fact = { child: report.worker, at, digest }, size = JSON.stringify(fact).length * 2;
+      if (reports.length >= parentCounterproofMaxFacts || bytes + size > parentCounterproofMaxBytes) { overflow = true; break; }
+      reports.push(fact); seen.add(digest); bytes += size;
+    }
+    return { entries, observation: { started, completed, reports, ...(overflow ? { overflow } : {}) } satisfies PendingOutcomeRead };
+  }
+
+  private observePendingOutcomes(parent: string, observation: PendingOutcomeRead, owner?: HistoryWorkerSource): void {
+    const signature = (read: PendingOutcomeRead, child: string, launches: readonly LauncherEvidence[]) => {
+      let start: number | undefined = Infinity;
+      for (const launch of launches) {
+        const at = launch.ran ?? launch.created;
+        if (at === undefined) { start = undefined; break; }
+        start = Math.min(start, at);
+      }
+      if (start === Infinity) start = undefined;
+      return historyVersion([...new Set(read.reports.filter(report => report.child === child
+        && (start === undefined || report.at === undefined || report.at >= start)).map(report => report.digest))].sort());
+    };
+    let conflictingOverlap = false;
+    for (const source of this.historyWorkerSources) {
+      if (source.parent !== parent || source.pendingFingerprint !== undefined || !source.historyPendingConsumer) continue;
+      const previous = source.historyPendingRead;
+      if (source.phase === "collecting" && source !== owner && (!previous || previous.provisional)) {
+        // One bounded deny-only snapshot for a pending consumer, including an
+        // empty inbox. It grants no child read, result admission or Stop proof.
+        if (!previous || observation.started > previous.started) source.historyPendingRead = { ...observation, provisional: true };
+        continue;
+      }
+      if (!previous || previous.provisional && source === owner && observation.started >= previous.started) continue;
+      if (previous.overflow && source !== owner) continue;
+      const target = observation.started > previous.completed ? source : owner;
+      if (!target) continue;
+      for (const [child, launches] of target.historyParentLaunches ?? []) {
+        if (!previous.overflow && !observation.overflow && signature(previous, child, launches) === signature(observation, child, launches)) continue;
+        if (observation.started <= previous.completed) conflictingOverlap = true;
+        target.historyParentChanges.add(child);
+        if (dependsOnWorkerHistory(target, child)) target.revision++;
+      }
+    }
+    if (owner && !conflictingOverlap && (!owner.historyPendingRead || observation.completed >= owner.historyPendingRead.completed)) {
+      owner.historyPendingRead = observation;
+      if (observation.overflow) for (const child of owner.historyParentLaunches?.keys() ?? []) {
+        owner.historyParentChanges.add(child);
+        if (dependsOnWorkerHistory(owner, child)) owner.revision++;
       }
     }
   }
@@ -2574,7 +2645,9 @@ export class OpenCodeV2Provider implements ChatProvider {
    */
   async listPendingInbox(sessionId: string, options?: { signal?: AbortSignal }): Promise<PendingInboxEntry[]> {
     const signal = options?.signal ? AbortSignal.any([options.signal, this.readLifetime.signal]) : this.readLifetime.signal;
-    const entries = await this.client.session.inbox.list({ sessionID: sessionId }, { signal });
+    const pending = await this.readPendingOutcomes(sessionId, signal);
+    this.observePendingOutcomes(sessionId, pending.observation);
+    const entries = pending.entries;
     return (entries as Array<Record<string, unknown>>).flatMap(entry => {
       if (entry.type !== "user" || entry.delivery !== "steer") return [];
       const pending = pendingInboxEntry(entry);

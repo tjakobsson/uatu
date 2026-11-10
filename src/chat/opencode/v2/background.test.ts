@@ -8,6 +8,25 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`distinct-start counterproof survives replay in constant ledger space (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  const first = nativeProof({ id: "first-start", created: 11 }, { child: "child", phase: "started" });
+  const later = nativeProof({ id: "later-start", created: 35 }, { child: "child", phase: "started" });
+  workers.executionStarted("child", first); expect(workers.coldActivityContradicted(candidate)).toBe(false);
+  workers.executionStarted("child", later); expect(workers.coldActivityContradicted(candidate)).toBe(true);
+  for (let replay = 0; replay < 300; replay++) workers.executionStarted("child", first);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true); // Replays do not consume a growing history budget.
+  workers.executionStarted("child", nativeProof({ id: "undated-start" }, { child: "child", phase: "started" }));
+  workers.executionStarted("child", first);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+});
+
 for (const budget of [{ entries: 8 }, { bytes: 200 }])
 test(`unowned native ends share the existing worker budget (${JSON.stringify(budget)})`, () => {
   const workers = new BackgroundWorkers(budget);

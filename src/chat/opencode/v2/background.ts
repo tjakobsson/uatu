@@ -761,7 +761,10 @@ export class BackgroundWorkers {
   private readonly tasks = new Map<string, WorkerTask>();
   private readonly notices = new Map<string, { proof?: NativeProof; occurrence?: string; discarded?: { parent: string; worker: string; at?: number } }>();
   private readonly invocations = new Map<string, { fact: LauncherEvidence; occurrence?: string }>();
-  private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests }>();
+  private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests;
+    /** Greatest known distinct-start clock; null means its clock is unknown.
+     * Negative evidence only, never a positive execution start/end timestamp. */
+    startCounterproof?: number | null }>();
   private readonly unmatched = new Map<string, { parent: string; worker: string; item: BackgroundTaskItem; correlatable: boolean; published: boolean }>();
   private readonly ended = new Map<string, number[]>();
   private readonly aliases = new Map<string, string>();
@@ -903,13 +906,13 @@ export class BackgroundWorkers {
       const window = this.admissionWindow(launch);
       return !window || end >= window.start;
     }))) return true;
-    // The existing closed prelaunch marker records another distinct execution
-    // before any launcher was retained. A first start may legitimately follow
-    // background admission; a later execution beyond it cannot revive it.
-    const start = boundary?.started?.proof;
-    return !!start && boundary?.prelaunch?.closed === true && candidate.launches.some(launch => {
+    // Another distinct execution before launcher retention is counterproof.
+    // A first start may legitimately follow background admission, but a later
+    // execution beyond it cannot revive it, even after an older start replay.
+    const start = boundary?.startCounterproof;
+    return start !== undefined && candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
-      return !window || start.created === undefined || start.created > window.end;
+      return !window || start === null || start > window.end;
     });
   }
 
@@ -1247,7 +1250,17 @@ export class BackgroundWorkers {
       this.bound();
       return;
     }
+    let startCounterproof = previous?.startCounterproof;
+    if (proof && previous && !candidates.length) {
+      // Arrival order can regress on an older replay. Preserve the greatest
+      // already observed distinct-start clock in one budgeted scalar, without
+      // changing the current proof's positive binding/ownership semantics.
+      const priorStart = previous.started?.proof;
+      startCounterproof = startCounterproof === null || proof.created === undefined || priorStart && priorStart.created === undefined
+        ? null : Math.max(startCounterproof ?? -Infinity, priorStart?.created ?? -Infinity, proof.created);
+    }
     if (proof) this.set(this.terminalProofs, child, { ...(previous ?? { occurrences: [] }), started: { proof },
+      ...(startCounterproof === undefined ? {} : { startCounterproof }),
       // A second native execution before launcher admission is reuse, not a
       // newborn's first execution. Do not start another provisional window.
       prelaunch: previous && !candidates.length ? { tools: [], closed: true } : undefined });
