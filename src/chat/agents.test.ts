@@ -735,6 +735,179 @@ test.each(["result", "updated", "footer"] as const)("paged-in Claude pending row
   } finally { second.events.cancel(); await h.cleanup(); }
 });
 
+test.each(["during-enrichment", "earlier-history", "before-native-handoff", "page-still-enriching"] as const)("initial subscribe retains paged Claude visuals across %s and the queued native end", async timing => {
+  const h = await visualSubscriptionHarness("claude");
+  h.subscription.events.cancel(); // Only the attaching subscriber may do the retry.
+  const memory = createClaudeEventMemory();
+  const nativeAssistant = (uuid: string, timestamp: number, source: string) => normalizeClaudeMessage({ type: "assistant", uuid, timestamp,
+    message: { id: `${uuid}-native`, content: [{ type: "text", text: `![${uuid}](${source})` }] } }, memory, "live").updates
+    .flatMap(update => update.kind === "upsert" && update.item.type === "assistant_message" ? [update.item] : []);
+  const paged = nativeAssistant("paged", 1, "later.png");
+  const seed = nativeAssistant("seed", 2, "seed.png");
+  h.projection.seed(seed);
+  const seedStarted = Promise.withResolvers<void>(), seedGate = Promise.withResolvers<void>();
+  const nativeGate = Promise.withResolvers<void>(), historyGate = Promise.withResolvers<void>();
+  const pageStarted = Promise.withResolvers<void>(), pageGate = Promise.withResolvers<void>();
+  const seedBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const pageBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 2]);
+  let available = false;
+  const reads = { seed: 0, page: 0 };
+  h.store.setReader(async source => {
+    if (source === "seed.png") { reads.seed++; seedStarted.resolve(); await seedGate.promise; return seedBytes; }
+    expect(source).toBe("later.png"); reads.page++;
+    const missing = !available;
+    pageStarted.resolve();
+    if (timing === "page-still-enriching" && reads.page === 1) await pageGate.promise;
+    if (missing) throw new VisualReadError(true);
+    return pageBytes;
+  });
+  const originalSubscribe = h.provider.subscribe;
+  h.provider.subscribe = async (id, options) => {
+    const handoff = await originalSubscribe(id, options);
+    if (timing === "before-native-handoff") await nativeGate.promise;
+    return handoff;
+  };
+  h.provider.history = async (_id, options) => {
+    if (!options?.cursor) return { ...h.current(), items: seed };
+    const snapshot = { ...h.current(), items: paged };
+    if (timing === "earlier-history") await historyGate.promise;
+    h.projection.seed(paged); // The real adapter's silent older-page admission.
+    return snapshot;
+  };
+  let loading: ReturnType<MultiAgentChatService["history"]> | undefined;
+  let subscribing: ReturnType<MultiAgentChatService["subscribe"]> | undefined;
+  let attached: { cancel(): void } | undefined;
+  let restarted: MultiAgentChatService | undefined;
+  try {
+    if (timing === "earlier-history") loading = h.service.history("claude:c", { cursor: "older" });
+    subscribing = h.service.subscribe("claude:c");
+    void subscribing.catch(() => undefined);
+    if (timing !== "before-native-handoff") await seedStarted.promise;
+    loading ??= h.service.history("claude:c", { cursor: "older" });
+    historyGate.resolve();
+    await pageStarted.promise;
+    if (timing !== "page-still-enriching") {
+      expect(((await loading).items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+    }
+    nativeGate.resolve();
+    await seedStarted.promise;
+    const boundary = h.replay.latestCursor();
+    available = true;
+    let terminal: ChatEvent | undefined;
+    for (const update of normalizeClaudeMessage({ type: "result", uuid: "actual-end", timestamp: 10, subtype: "success" }, memory, "live").updates) terminal = h.projection.apply(update);
+    seedGate.resolve();
+    const client = await subscribing; attached = client.events;
+    expect(client.snapshot.cursor).toBe(boundary);
+    expect(client.snapshot.items.map(item => item.id)).toEqual([seed[0]!.id]);
+    expect((client.snapshot.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("ready");
+    expect(reads).toEqual({ seed: 1, page: 1 });
+    // Start consuming the genuine end while the enrolled page can still be
+    // blocked; no seed visual is pending, so only the older page owes resync.
+    const iterator = client.events[Symbol.asyncIterator]();
+    const next = iterator.next();
+    pageGate.resolve();
+    const loaded = await loading;
+    expect((loaded.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+    expect((await next).value).toEqual({ ...terminal!, conversationId: "claude:c" });
+    expect((await iterator.next()).value).toEqual({ generation: terminal!.generation, sequence: terminal!.sequence, conversationId: "claude:c", type: "resync", reason: "conversation-rewritten" });
+    expect(reads).toEqual({ seed: 1, page: 2 }); // The end, not history, retried.
+    available = false;
+    const ready = (await h.service.history("claude:c", { cursor: "older" })).items[0] as AssistantMessageItem;
+    expect(ready.markdown).toBe(paged[0]!.markdown);
+    expect(ready.visuals?.[0]?.status).toBe("ready");
+    expect((await h.service.resolveVisual(ready.visuals![0]!.id!))?.bytes).toEqual(pageBytes);
+    expect((await h.service.resolveVisual((client.snapshot.items[0] as AssistantMessageItem).visuals![0]!.id!))?.bytes).toEqual(seedBytes);
+    const store = new VisualStore("/workspace", h.directory);
+    store.setReader(async () => { throw new Error("sealed visuals must not be reread on reload"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "claude", name: "claude" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reload = (await restarted.history("claude:c", { cursor: "older" })).items[0] as AssistantMessageItem;
+    expect(reload.visuals).toEqual(ready.visuals);
+    expect((await restarted.resolveVisual(reload.visuals![0]!.id!))?.bytes).toEqual(pageBytes);
+    expect(reads).toEqual({ seed: 1, page: 2 });
+    expect((loaded.items[0] as AssistantMessageItem).visuals?.[0]?.status).toBe("pending");
+  } finally {
+    seedGate.resolve(); nativeGate.resolve(); historyGate.resolve(); pageGate.resolve();
+    attached?.cancel();
+    await subscribing?.then(value => value.events.cancel(), () => undefined);
+    await loading?.catch(() => undefined);
+    await restarted?.dispose(); await h.cleanup();
+  }
+});
+
+test.each(["abort", "dispose"] as const)("%s during initial visual enrichment promptly retires enrollment and the native subscription", async cancellation => {
+  const h = await visualSubscriptionHarness("claude");
+  h.subscription.events.cancel();
+  h.projection.seed(normalizeTranscriptEntries([{ kind: "assistant", uuid: "seed", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null,
+    message: { id: "seed-native", content: [{ type: "text", text: "![Seed](seed.png)" }] } }]).items);
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+  const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  h.store.setReader(async () => { entered.resolve(); await gate.promise; return bytes; });
+  const captureMany = h.store.captureMany.bind(h.store);
+  const captures: Array<ReturnType<VisualStore["captureMany"]>> = [];
+  const capture = spyOn(h.store, "captureMany").mockImplementation((...args) => { const promise = captureMany(...args); captures.push(promise); return promise; });
+  const abort = new AbortController();
+  const subscribing = h.service.subscribe("claude:c", { signal: abort.signal });
+  const rejected = expect(subscribing).rejects.toMatchObject({ name: "AbortError" });
+  const registrations = () => (h.service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers;
+  try {
+    await entered.promise;
+    expect(h.replay.subscriberCount()).toBe(1);
+    if (cancellation === "abort") abort.abort(); else await h.service.dispose();
+    await rejected; // Must settle before releasing the slow capture.
+    expect(h.replay.subscriberCount()).toBe(0);
+    expect(registrations().size).toBe(0);
+    gate.resolve();
+    const captured = await Promise.all(captures);
+    expect(captured[0]?.[0]?.status).toBe("ready");
+    expect((await h.service.resolveVisual(captured[0]![0]!.id!))?.bytes).toEqual(bytes);
+    expect(registrations().size).toBe(0); // A late capture cannot re-register.
+  } finally { gate.resolve(); await Promise.allSettled(captures); capture.mockRestore(); await h.cleanup(); }
+});
+
+test.each(["native", "enrichment"] as const)("failed %s subscribe removes early history enrollment and closes any acquired native source", async phase => {
+  const h = await visualSubscriptionHarness("claude");
+  h.subscription.events.cancel();
+  const expected = new Error(`failed ${phase}`);
+  const failing = phase === "enrichment" ? spyOn(h.service as unknown as { enrichSnapshot(snapshot: ConversationSnapshot): Promise<ConversationSnapshot> }, "enrichSnapshot").mockRejectedValueOnce(expected) : undefined;
+  if (phase === "native") h.provider.subscribe = async () => { throw expected; };
+  try {
+    await expect(h.service.subscribe("claude:c")).rejects.toBe(expected);
+    expect(h.replay.subscriberCount()).toBe(0);
+    expect((h.service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers.size).toBe(0);
+  } finally { failing?.mockRestore(); await h.cleanup(); }
+});
+
+test("aborting before a delayed native handoff cancels the late source without retaining a history hook", async () => {
+  const h = await visualSubscriptionHarness("claude");
+  h.subscription.events.cancel();
+  const original = h.provider.subscribe;
+  const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  const lateCancelled = Promise.withResolvers<void>();
+  let cancelSource: { mockRestore(): void } | undefined;
+  h.provider.subscribe = async (id, options) => {
+    const result = await original(id, options);
+    const cancel = result.events.cancel.bind(result.events);
+    let cancellations = 0;
+    cancelSource = spyOn(result.events, "cancel").mockImplementation(() => {
+      cancel();
+      if (++cancellations === 2) lateCancelled.resolve(); // Signal abort, then late router handoff.
+    });
+    entered.resolve(); await gate.promise; return result;
+  };
+  const abort = new AbortController();
+  const subscribing = h.service.subscribe("claude:c", { signal: abort.signal });
+  const rejected = expect(subscribing).rejects.toMatchObject({ name: "AbortError" });
+  try {
+    await entered.promise;
+    abort.abort(); await rejected;
+    expect(h.replay.subscriberCount()).toBe(0);
+    gate.resolve();
+    await lateCancelled.promise;
+    expect(h.replay.subscriberCount()).toBe(0);
+    expect((h.service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers.size).toBe(0);
+  } finally { gate.resolve(); await subscribing.catch(() => undefined); cancelSource?.mockRestore(); await h.cleanup(); }
+});
+
 test("completion waits for an in-flight older page and cancellation releases its enrollment", async () => {
   const h = await visualSubscriptionHarness("claude");
   const abort = new AbortController();

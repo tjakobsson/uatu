@@ -174,9 +174,13 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   // Keep boundary-time decisions out of the wire and reuse them when seeding
   // the ordered live accumulator after snapshot enrichment finishes.
   private readonly snapshotVisualLiveness = new WeakMap<AgentConversationSnapshot, ReadonlyMap<string, boolean>>();
-  // Entries exist only while a conversation has active event subscriptions.
+  // Entries exist only while a conversation has attaching/active subscriptions.
   // History contributes pending assistant rows, never a second event stream.
   private readonly visualHistorySubscribers = new Map<string, Set<VisualHistorySubscriber>>();
+  // Request-owned promises only, never a completed-page/row cache. A subscribe
+  // starting during an older read must join it before either await completes.
+  private readonly visualHistoryReads = new Set<{ id: string; page: Promise<AgentConversationSnapshot> }>();
+  private disposed = false;
   private readonly inventoryHub = new MergedInventoryHub(async () =>
     (await Promise.all(this.order.map(agent => {
       const subscribe = agent.service.subscribeInventory().catch(() => null);
@@ -358,6 +362,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const { agent, conversationId } = this.resolve(id);
     const page = agent.service.history(conversationId, options).then(snapshot =>
       this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot), !options?.cursor));
+    const read = { id, page };
+    this.visualHistoryReads.add(read);
+    void page.finally(() => this.visualHistoryReads.delete(read)).catch(() => undefined);
     for (const subscriber of this.visualHistorySubscribers.get(id) ?? []) subscriber.read(page);
     return page;
   }
@@ -376,28 +383,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     replayVisualResyncCursor?: string;
   }> {
     const { agent, conversationId } = this.resolve(id);
-    const { snapshot, events } = await agent.service.subscribe(conversationId, options);
-    let qualified: AgentConversationSnapshot;
-    try {
-      qualified = await this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot));
-    } catch (error) {
-      events.cancel();
-      throw error;
-    }
-    let boundary = decodeReplayCursor(snapshot.cursor);
-    const requestedCursor = options?.cursor ? decodeReplayCursor(options.cursor) : null;
-    const hasVisualMetadata = qualified.items.some(item => item.type === "assistant_message" && item.visuals?.length);
-    let replayNeedsVisualResync = Boolean(boundary && requestedCursor
-      && boundary.generation === requestedCursor.generation && requestedCursor.sequence < boundary.sequence
-      && hasVisualMetadata);
-    // A terminal status and its visual resync deliberately share a native
-    // sequence. Losing the latter leaves an equal cursor but stale visuals.
-    // Only transport recovery needs this initial invalidation: a fresh stream
-    // opened from enriched history at the same cursor must not resync-loop.
-    const initialVisualResync: ChatEvent | undefined = options?.reconnect && boundary && requestedCursor
-      && boundary.generation === requestedCursor.generation && requestedCursor.sequence === boundary.sequence && hasVisualMetadata
-      ? { generation: boundary.generation, sequence: boundary.sequence, conversationId: qualified.conversation.id, type: "resync", reason: "conversation-rewritten" }
-      : undefined;
+    if (this.disposed) throw new Error("Chat service is disposed");
+    let boundary: ReturnType<typeof decodeReplayCursor> = null;
     type Assistant = Extract<ConversationItem, { type: "assistant_message" }>;
     type Tracked = { item: Assistant; live: boolean; enrichedAt: number; historyBoundary?: ReturnType<typeof decodeReplayCursor> };
     // No tool output or other timeline rows belong in the visual accumulator.
@@ -407,8 +394,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const cancelledPages = new Promise<void>(resolve => { cancelPendingPages = resolve; });
     let closed = false;
     let historyEpoch = 0;
-    let streaming = isVisualTurnLive(qualified.conversation);
-    const seed = (current: AgentConversationSnapshot) => {
+    let streaming = false;
+    const seed = (current: AgentConversationSnapshot, preservePages = false) => {
+      const pages = preservePages ? [...items.values()].filter(tracked => tracked.historyBoundary !== undefined) : [];
       items.clear();
       streaming = isVisualTurnLive(current.conversation);
       const liveness = this.snapshotVisualLiveness.get(current)!;
@@ -417,8 +405,87 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
           items.set(item.id, { item, live: liveness.get(item.id) ?? false, enrichedAt: -Infinity });
         }
       }
+      for (const tracked of pages) {
+        if (!items.has(tracked.item.id) && (!boundary || !tracked.historyBoundary || tracked.historyBoundary.generation === boundary.generation)) items.set(tracked.item.id, tracked);
+      }
     };
-    seed(qualified);
+    let wrapped: QualifyingEventSubscription | undefined;
+    let events: ChatEventSubscription | undefined;
+    const subscribers = this.visualHistorySubscribers.get(id) ?? new Set<VisualHistorySubscriber>();
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      cancelPendingPages();
+      historyEpoch++;
+      items.clear();
+      pendingPages.clear();
+      options?.signal?.removeEventListener("abort", cancel);
+      subscribers.delete(historySubscriber);
+      if (!subscribers.size && this.visualHistorySubscribers.get(id) === subscribers) this.visualHistorySubscribers.delete(id);
+      // Once wrapped, its close owns native cancellation. Before handoff we
+      // must release the source ourselves; a late source is cancelled below.
+      if (!wrapped) events?.cancel();
+    };
+    const cancel = () => wrapped ? wrapped.cancel() : close();
+    const historySubscriber: VisualHistorySubscriber = {
+      read: page => {
+        if (closed) return;
+        const epoch = historyEpoch;
+        const pending: Promise<void> = page.then(current => {
+          if (closed || epoch !== historyEpoch || !isVisualTurnLive(current.conversation)) return;
+          const cursor = decodeReplayCursor(current.cursor);
+          if (boundary && cursor && cursor.generation !== boundary.generation) return;
+          const liveness = this.snapshotVisualLiveness.get(current)!;
+          for (const item of current.items) {
+            // Keep only pending assistants and their already-frozen liveness.
+            // Initial seeding preserves these absent rows, not page snapshots.
+            if (item.type !== "assistant_message" || items.has(item.id) || liveness.get(item.id) !== true || !item.visuals?.some(visual => visual.status === "pending")) continue;
+            items.set(item.id, { item, live: true, enrichedAt: Date.now(), historyBoundary: cursor });
+          }
+        }, () => undefined).finally(() => pendingPages.delete(pending));
+        pendingPages.add(pending);
+      },
+      cancel,
+    };
+    subscribers.add(historySubscriber);
+    this.visualHistorySubscribers.set(id, subscribers);
+    for (const read of this.visualHistoryReads) if (read.id === id) historySubscriber.read(read.page);
+    options?.signal?.addEventListener("abort", cancel, { once: true });
+    if (options?.signal?.aborted) cancel();
+    const setup = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, cancelledPages.then(() => {
+      throw new DOMException("Conversation subscription cancelled", "AbortError");
+    })]);
+    let native: Awaited<ReturnType<WorkspaceChatService["subscribe"]>>;
+    let qualified: AgentConversationSnapshot;
+    try {
+      if (closed) throw new DOMException("Conversation subscription cancelled", "AbortError");
+      native = await setup(agent.service.subscribe(conversationId, options).then(result => {
+        events = result.events;
+        if (closed) events.cancel();
+        return result;
+      }));
+      if (closed) throw new DOMException("Conversation subscription cancelled", "AbortError");
+      const snapshot = native.snapshot;
+      boundary = decodeReplayCursor(snapshot.cursor);
+      qualified = await setup(this.enrichSnapshot(this.qualifySnapshot(agent.descriptor, snapshot)));
+      if (closed) throw new DOMException("Conversation subscription cancelled", "AbortError");
+    } catch (error) {
+      cancel();
+      throw error;
+    }
+    const snapshot = native.snapshot;
+    seed(qualified, true);
+    const requestedCursor = options?.cursor ? decodeReplayCursor(options.cursor) : null;
+    const hasVisualMetadata = qualified.items.some(item => item.type === "assistant_message" && item.visuals?.length);
+    let replayNeedsVisualResync = Boolean(boundary && requestedCursor
+      && boundary.generation === requestedCursor.generation && requestedCursor.sequence < boundary.sequence
+      && hasVisualMetadata);
+    // Terminal resyncs share their native status cursor. Only transport
+    // recovery needs the initial invalidation for an equal-cursor reconnect.
+    const initialVisualResync: ChatEvent | undefined = options?.reconnect && boundary && requestedCursor
+      && boundary.generation === requestedCursor.generation && requestedCursor.sequence === boundary.sequence && hasVisualMetadata
+      ? { generation: boundary.generation, sequence: boundary.sequence, conversationId: qualified.conversation.id, type: "resync", reason: "conversation-rewritten" }
+      : undefined;
     const coveredByHistory = (tracked: Tracked, event: ChatEvent) => Boolean(tracked.historyBoundary
       && tracked.historyBoundary.generation === event.generation && event.sequence <= tracked.historyBoundary.sequence);
     // Bound the actual Markdown parse and store work, not just highlighting.
@@ -513,7 +580,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       }
       return changed;
     };
-    const wrapped = new QualifyingEventSubscription(events, async raw => {
+    wrapped = new QualifyingEventSubscription(native.events, async raw => {
         const event = this.qualifyEvent(agent.descriptor, raw);
         if (event.type === "resync") {
           // Rewrites can replace text without an upsert. Never append a future
@@ -599,40 +666,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
           }
         }
         return [event];
-      }, () => {
-        closed = true;
-        cancelPendingPages();
-        historyEpoch++;
-        items.clear();
-        pendingPages.clear();
-        options?.signal?.removeEventListener("abort", onAbort);
-        subscribers.delete(historySubscriber);
-        if (!subscribers.size) this.visualHistorySubscribers.delete(id);
-      }, initialVisualResync);
-    const subscribers = this.visualHistorySubscribers.get(id) ?? new Set<VisualHistorySubscriber>();
-    const historySubscriber: VisualHistorySubscriber = {
-      read: page => {
-        const epoch = historyEpoch;
-        const pending: Promise<void> = page.then(current => {
-          if (closed || epoch !== historyEpoch || !isVisualTurnLive(current.conversation)) return;
-          const cursor = decodeReplayCursor(current.cursor);
-          if (boundary && cursor && cursor.generation !== boundary.generation) return;
-          for (const item of current.items) {
-            // Completed old turns were enriched terminally and cannot enroll.
-            // Do not overwrite an existing live accumulator with paged text.
-            if (item.type !== "assistant_message" || items.has(item.id) || !item.visuals?.some(visual => visual.status === "pending")) continue;
-            items.set(item.id, { item, live: true, enrichedAt: Date.now(), historyBoundary: cursor });
-          }
-        }, () => undefined).finally(() => pendingPages.delete(pending));
-        pendingPages.add(pending);
-      },
-      cancel: () => wrapped.cancel(),
-    };
-    subscribers.add(historySubscriber);
-    this.visualHistorySubscribers.set(id, subscribers);
-    const onAbort = () => wrapped.cancel();
-    options?.signal?.addEventListener("abort", onAbort, { once: true });
-    if (options?.signal?.aborted) wrapped.cancel();
+      }, close, initialVisualResync);
     return { snapshot: qualified, events: wrapped,
       ...(replayNeedsVisualResync || initialVisualResync ? { replayVisualResyncCursor: snapshot.cursor } : {}) };
   }
@@ -831,6 +865,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async readUsage(agentId: string, requestId: string, mode: UsageReadMode): Promise<UsageReadResult> { return this.requireAgent(agentId).service.readUsage(requestId, mode); }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
     for (const unsubscribe of this.notificationUnsubscribes) unsubscribe();
     this.notificationFeed.dispose();
     this.inventoryHub.dispose();
@@ -838,6 +873,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     for (const subscribers of [...this.visualHistorySubscribers.values()]) {
       for (const subscriber of [...subscribers]) subscriber.cancel();
     }
+    this.visualHistoryReads.clear();
     await Promise.all(this.order.map(agent => agent.service.dispose().catch(() => undefined)));
   }
 

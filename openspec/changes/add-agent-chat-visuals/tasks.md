@@ -112,6 +112,7 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.36 Diagnose `dd857132` CI failures without weakening assertions: repeated cached-cursor recovery after a session restart, and the existing live aggregate integration test's default five-second timeout. Preserve recovery semantics and aggregate bounds.
 - [ ] 6.37 Preserve browser-to-Hub reconnect intent through endpoint attachments, including replacement upstreams and recovery attachments joining an already healthy shared stream at the terminal cursor. Recover missed visual resyncs without flagging fresh post-history subscriptions or changing metrics.
 - [ ] 6.38 Diagnose the existing observer-priority failure on `a82af71e`: an ordinary edit must not wait behind more than 16 already-running background inspections. Preserve the workload and priority assertion; use source-backed synchronization or report an actual production defect.
+- [ ] 6.39 Address Codex on `bdfcd598`: enroll or buffer paged pending visuals before initial subscription snapshot capture awaits I/O. An older-page request finishing during that await must still receive its turn-completion retry and resync, with cancellation and failed-setup cleanup preserved.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including
