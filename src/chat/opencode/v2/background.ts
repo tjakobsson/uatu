@@ -891,6 +891,28 @@ export class BackgroundWorkers {
     });
   }
 
+  /** Read-only negative evidence for history-only activity. A reverted child
+   * transcript cannot erase an already observed end across this admission.
+   * This neither attributes the end to this task nor supplies an outcome. */
+  coldActivityContradicted(candidate: WorkerOccurrenceEvidence): boolean {
+    if (candidate.kind !== "agent") return false;
+    const boundary = this.terminalProofs.get(candidate.worker);
+    if (boundary?.proof && boundary.proof.created === undefined) return true;
+    const ends = this.ended.get(candidate.worker) ?? [];
+    if (ends.some(end => candidate.launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || end >= window.start;
+    }))) return true;
+    // The existing closed prelaunch marker records another distinct execution
+    // before any launcher was retained. A first start may legitimately follow
+    // background admission; a later execution beyond it cannot revive it.
+    const start = boundary?.started?.proof;
+    return !!start && boundary?.prelaunch?.closed === true && candidate.launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || start.created === undefined || start.created > window.end;
+    });
+  }
+
   // Control projection retains its canonical-ID semantics. Activity lookups
   // below resolve proven aliases separately, without substituting Stop bases.
   occurrence(taskId: string): WorkerOccurrenceEvidence | undefined { return this.tasks.get(taskId)?.evidence; }
@@ -1208,6 +1230,9 @@ export class BackgroundWorkers {
   executionStarted(child: string, proof?: NativeProof): void {
     if (this.recoveryOnly || !identity(child) || this.startReplay(child, proof)) return;
     const birth = this.births.get(child), previous = this.terminalProofs.get(child);
+    // An unbound start replay is not another run and must not close the cold
+    // first-execution window or discard its pending request evidence.
+    if (proof && sameProof(previous?.started?.proof, proof)) return;
     const candidates = [...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent");
     const initial = candidates.length === 1 ? candidates[0] : undefined;
     // Only a covered newborn's first execution can enrich a pending launch.
@@ -1310,7 +1335,10 @@ export class BackgroundWorkers {
   }
 
   executionEnded(child: string, at: number, proof?: NativeProof): void {
-    if (this.recoveryOnly || !this.parents.has(child)) return;
+    // A scoped native end can precede the first ownership/launcher read after
+    // reconnect. Keep it as budgeted negative evidence, not child ownership.
+    // A history callback without native proof still needs verified ownership.
+    if (this.recoveryOnly || !identity(child) || !this.parents.has(child) && !proof) return;
     if (this.terminalReplay(child, proof)) return;
     if (proof) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child), proof, prelaunch: undefined, occurrences: Object.freeze([...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent").map(task => task.evidence.key)) });
     else {

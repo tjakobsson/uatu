@@ -1167,6 +1167,18 @@ still do. Missing child history, foreign ownership, a later idle boundary,
 or retained live contradictions still withhold Working. Shells retain their
 cold-start generation fence because their history cannot reconstruct equivalent
 execution intervals. None of these activity reads restores revoked Stop proof.
+Before granting history-only Working, recovery also consults the existing scoped
+execution ledger, even when no launcher was retained. An observed end at or after
+the admission window's lower bound, or a later distinct execution starting beyond
+its upper bound, vetoes attribution of active-session membership to that launch.
+Scoped native end proofs observed before the first child ownership read are kept
+under the same ledger budget, without admitting a parent/child association.
+A committed child revert cannot erase this already processed counterproof.
+The old row becomes activity-unavailable with no invented outcome/end clock or
+new Stop authority; its execution clock does not restart. Boundaries before a
+new admission, unrelated/foreign events, a first execution starting after
+background admission, and exact start replays do not create that veto. This is a
+read of the existing bounded ledger, not another observation cache or buffer.
 
 Pending notifications are folded after stored messages, not necessarily in their
 native chronological order. During complete-history recovery, a dated report

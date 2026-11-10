@@ -905,20 +905,21 @@ export class OpenCodeV2Provider implements ChatProvider {
         && [...folded.occurrences.values()].filter(other => other.worker === occurrence.worker && other.kind === occurrence.kind
           && runningTaskIds.has(other.taskId)).length === 1;
       const liveOccurrence = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
+      const coldContradicted = !liveOccurrence && occurrence && this.eventMemory?.workers.coldActivityContradicted(occurrence);
       // A complete owned agent transcript reconstructs execution intervals
       // independently of the event subscription's generation. Reconnect loses
       // live observation, not the authority of a fresh history + active read.
       // Shell history has no equivalent execution boundaries; keep its original
       // cold-start fence so a same-ID shell rebirth cannot revive old work.
       const coveredColdRead = item.taskType === "agent" || this.streamGeneration === 0 || this.streamGeneration === 1 && this.streamConnected;
-      const compatibleCurrent = !liveOccurrence && coveredColdRead || !!live && !live.uncertain;
+      const compatibleCurrent = !liveOccurrence && coveredColdRead && !coldContradicted || !!live && !live.uncertain;
       // An end clock needs the same independent occurrence attribution as
       // running inventory. Ownership/command alone also match a same-ID rebirth.
       // A previously proven live execution end remains authoritative below.
       const shellEndedAt = confirmed && unique && compatibleCurrent ? inventoryShellEnd : undefined;
       const verified = confirmed && unique && compatibleCurrent
         && (item.taskType === "shell" ? shellExecuting : true);
-      const coldIdentity = unique && !liveOccurrence && coveredColdRead ? this.coldActivityIdentity(occurrence) : undefined;
+      const coldIdentity = unique && !liveOccurrence && coveredColdRead && !coldContradicted ? this.coldActivityIdentity(occurrence) : undefined;
       const previousActivity = this.eventMemory?.workers.lastActivity(item.taskId, occurrence);
       const lastSeen = previousActivity?.observedAt
         ?? (coldIdentity ? this.coldActivityObservations.get(coldIdentity) : undefined);
@@ -927,7 +928,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         ? { kind: "ended", observedAt: lastSeen, endedAt: live?.executionEnd?.created ?? shellEndedAt, executionId, generation: this.streamGeneration }
         : verified || confirmed && live && !live.uncertain && live.executionStart
           ? { kind: "working", observedAt, executionId, generation: this.streamGeneration }
-          : { kind: confirmed && item.taskType === "agent" ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
+          : { kind: confirmed && item.taskType === "agent" && !coldContradicted ? "session-active" : "unavailable", observedAt: lastSeen, executionId, generation: this.streamGeneration };
       if (executionAliases.length) activity.executionAliases = executionAliases;
       const launchRef = confirmed && unique && compatibleCurrent && (item.taskType !== "shell" || shellExecuting || shellEndedAt !== undefined)
         ? this.workerLaunchReference(occurrence) : undefined;

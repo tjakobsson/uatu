@@ -8,6 +8,25 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+for (const budget of [{ entries: 8 }, { bytes: 200 }])
+test(`unowned native ends share the existing worker budget (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "cold-child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "cold-child", reportedChild: "cold-child", created: 10, ran: 11, completed: 12 }] };
+  for (let index = 0; index < 16; index++) {
+    const child = index === 0 ? "cold-child" : `unknown-child-${index}`;
+    const proof = nativeProof({ id: `native-end-${index}`, created: 20 + index }, { child, phase: "ended" });
+    workers.executionEnded(child, 20 + index, proof);
+    expect(workers.ownershipParent(child)).toBeUndefined();
+    expect(workers.evidenceSnapshot().size).toBe(0);
+  }
+  expect(workers.controlEvidenceAvailable).toBe(false);
+  expect(workers.hasRetainedReference(candidate)).toBe(true); // Saturation blocks cold positive recovery.
+  workers.verifyChild("cold-child", "parent");
+  expect(workers.ownershipParent("cold-child")).toBeUndefined();
+  expect(workers.controlEvidenceAvailable).toBe(false);
+});
+
 test("activity contradiction projection requires native negative facts, not missing aggregate or control evidence", () => {
   const history = new BackgroundWorkers();
   history.launchPrepared("parent", prepareTool(launch("call", "shell"), 12, "snapshot", "message"), 12);

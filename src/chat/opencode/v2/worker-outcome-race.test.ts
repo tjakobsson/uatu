@@ -4,6 +4,85 @@ import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 import { ChatAdapter } from "../../adapter";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { workerCanStop, workerExecutionClockRuns } from "../../worker-state";
+import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
+
+for (const boundary of ["succeed-revert-start", "history-only-child", "history-only-terminal", "terminal-only", "no-boundary", "initial-start", "initial-late-start", "initial-start-replay", "newer-start-only", "earlier-boundary", "other-child", "foreign-workspace"] as const)
+test(`cold generation-2 activity respects processed execution boundaries (${boundary})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, interrupts = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
+  const observed = new Promise<void>(resolve => { applied = resolve; });
+  const frame = (type: string, data: unknown, created: number, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory: location } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/interrupt")) interrupts++;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
+      first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "new-prompt", type: "user", text: "Current child prompt", time: { created: 35 } }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const firstAbort = new AbortController(), abort = new AbortController();
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Cold boundary attribution")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const unrelated = (await provider.createSession("Unrelated boundary owner")).id;
+    const unrelatedChild = fake.launchRequestWorker(unrelated).childId;
+    pump = (async () => { for await (const event of provider.events(abort.signal)) if (event.eventType === "diagnostic.cold-boundaries-applied") applied(); })();
+    await provider.waitForEventStream!(abort.signal);
+    const subject = boundary === "other-child" ? unrelatedChild : child;
+    const location = boundary === "foreign-workspace" ? `${directory}/foreign` : directory;
+    // Ownership/birth is observed, but no launcher is streamed or recovered
+    // until after all native execution counterproof has been processed.
+    if (boundary !== "history-only-child" && boundary !== "history-only-terminal")
+      frame("session.created", { sessionID: subject, parentID: subject === child ? parent : unrelated, location: { directory } }, boundary === "earlier-boundary" ? 3 : 11);
+    if (boundary === "initial-start" || boundary === "initial-late-start" || boundary === "initial-start-replay") {
+      frame("session.execution.started", { sessionID: child }, boundary === "initial-late-start" ? 20 : 11);
+      if (boundary === "initial-start-replay") frame("session.execution.started", { sessionID: child }, 11);
+    }
+    else if (boundary === "newer-start-only") {
+      frame("session.execution.started", { sessionID: child }, 11);
+      frame("session.execution.started", { sessionID: child }, 35);
+    }
+    else if (boundary === "history-only-child" || boundary === "history-only-terminal") {
+      frame("session.execution.succeeded", { sessionID: child }, 20);
+      frame("session.revert.committed", { sessionID: child, to: "old-idle" }, 30);
+      if (boundary === "history-only-child") frame("session.execution.started", { sessionID: child }, 35);
+    }
+    else if (boundary !== "no-boundary") {
+      frame("session.execution.started", { sessionID: subject }, boundary === "earlier-boundary" ? 4 : 11, location);
+      frame("session.execution.succeeded", { sessionID: subject }, boundary === "earlier-boundary" ? 5 : 20, location);
+      frame("session.revert.committed", { sessionID: subject, to: "old-idle" }, 30, location);
+      if (boundary !== "terminal-only") frame("session.execution.started", { sessionID: subject }, boundary === "earlier-boundary" ? 11 : 35, location);
+    }
+    frame("diagnostic.cold-boundaries-applied", {}, 40); await observed;
+    const [row] = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    const denied = boundary === "succeed-revert-start" || boundary === "history-only-child" || boundary === "history-only-terminal" || boundary === "terminal-only" || boundary === "newer-start-only";
+    expect(row).toBeDefined();
+    expect(row?.status).toBe("running");
+    expect(row?.activity?.kind).toBe(denied ? "unavailable" : "working");
+    expect(workerExecutionClockRuns(row!)).toBe(!denied);
+    expect(workerDismissalEvidence(row)?.dismissible).toBe(denied);
+    expect(row?.activity?.endedAt).toBeUndefined();
+    expect(row?.resultId).toBeUndefined(); expect(row?.summary).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();
+    expect(workerCanStop(row!)).toBe(false); expect(row?.control?.available).toBe(false);
+    if (denied) expect(row?.activity?.launchRef).toBeUndefined();
+    await expect(provider.stopTask!(parent, worker.taskId)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
+    expect(interrupts).toBe(0);
+  } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
 
 for (const read of ["history", "automatic-recovery"] as const)
 for (const proof of ["same-execution", "parent-report", "changed-identity"] as const)

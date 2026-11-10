@@ -95,6 +95,19 @@ A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
 and concurrent terminal updates keep their existing precedence.
+Cold activity recovery checks already processed child execution boundaries even
+without a retained launcher. Active-session membership cannot revive an older
+admission after an observed end or later distinct execution. Reverting the stored
+idle does not erase that scoped counterproof. Native end proofs arriving before
+the first ownership lookup remain negative-only facts under the existing ledger
+entry/byte limits; saturation stays fail-closed without creating ownership.
+The old row remains outcome-unknown
+and activity-unavailable, with its clock stopped and no new Stop authority or
+fabricated end timestamp. An otherwise qualified unavailable row can supply
+dismissal evidence rather than being held active by another execution. Prior
+boundaries outside the new admission and unrelated/foreign events do not veto it;
+a first start and its exact replay are not a second execution. No new retention
+structure or budget is introduced.
 A covered Working/Needs-answer replacement for that exact execution also clears
 the inferred end and resumes the running clock and background progress. Its
 activity authority does not require available Stop controls.
