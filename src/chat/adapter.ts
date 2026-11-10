@@ -7506,7 +7506,8 @@ function snapshotClaudeItem(item: ConversationItem, turns?: Map<ClaudeTurn, Clau
   if (!turn || Object.isFrozen(turn)) return item;
   let captured = turns?.get(turn);
   if (!captured) { captured = Object.freeze({ completed: turn.completed }); turns?.set(turn, captured); }
-  return { ...item, [CLAUDE_TURN]: captured };
+  const snapshot: ConversationItem & ClaudeTextIdentity = { ...item, [CLAUDE_TURN]: captured };
+  return snapshot;
 }
 
 function snapshotClaudeTurns(items: ConversationItem[]): ConversationItem[] {
@@ -7522,7 +7523,8 @@ function snapshotClaudeTurns(items: ConversationItem[]): ConversationItem[] {
 function orderedClaudeItem(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (incoming.type !== "assistant_message" || !(incoming as typeof incoming & ClaudeTextIdentity)[CLAUDE_TURN]) return incoming;
   const retained = (current as (ConversationItem & ClaudeTextIdentity) | undefined)?.[CLAUDE_TURN];
-  return { ...incoming, [CLAUDE_TURN]: retained && Object.isFrozen(retained) ? retained : Object.freeze({ completed: false }) };
+  const ordered: typeof incoming & ClaudeTextIdentity = { ...incoming, [CLAUDE_TURN]: retained && Object.isFrozen(retained) ? retained : Object.freeze({ completed: false }) };
+  return ordered;
 }
 
 /** Native row ids do not move between turns. Once closed, stale history cannot reopen one. */

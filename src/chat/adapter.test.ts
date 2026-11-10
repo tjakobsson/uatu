@@ -51,7 +51,8 @@ test("weak native text-start evidence preserves only the established timestamp, 
   const incoming = { id: "part:reply:text:0", type: "assistant_message" as const, createdAt: 25, markdown: "After", model: { providerId: "fixture", modelId: "new" }, usage: { output: 20 }, [OPENCODE_TEXT_START_FALLBACK]: true };
   const event = projection.apply({ kind: "upsert", item: incoming });
   expect(event).toMatchObject({ type: "item.upsert", item: { createdAt: 10, markdown: "After", model: incoming.model, usage: { input: 100, output: 20 } } });
-  projection.apply({ kind: "upsert", item: { ...incoming, createdAt: 12, [OPENCODE_TEXT_START_FALLBACK]: false } });
+  const authoritative: typeof incoming = { ...incoming, createdAt: 12, [OPENCODE_TEXT_START_FALLBACK]: false };
+  projection.apply({ kind: "upsert", item: authoritative });
   expect(projection.get(incoming.id)).toMatchObject({ createdAt: 12, markdown: "After", model: incoming.model }); // Real part-start correction is not suppressed.
 });
 
