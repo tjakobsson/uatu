@@ -1263,6 +1263,16 @@ Native-read and SSE parent-launch counterproof use the same dependency predicate
 for outcomes and returned activity. A source with already observed launch
 counterproof cannot acquire new history-only activity publication authority.
 The parent-launch baseline is registered before the first child ownership await.
+Each read owns its baseline from native parent-history consumption through its
+visible/full folds and publication; an overlapping older response cannot assign
+facts to a newer read, even when transcript transport is shared.
+An overlapping response that abstains is not promoted to a new native
+counterproof baseline against later reuse of the newer observation. Direct
+child-history owners retain their own ordered observations for the same rule.
+Launcher events received before that initial response are buffered on the read and compared when
+its inventory becomes known. The deny-only buffer coalesces exact replays and is
+limited to 256 facts / 64 KiB of serialized UTF-16 evidence; saturation withholds
+dependent history authority rather than granting ownership or Stop authority.
 Changes observed there remain deny-only until outcome or activity authority is
 used: unverified launch intent grants neither ownership, child reads nor Stop,
 and collecting counterproof alone does not invalidate unrelated control reads.

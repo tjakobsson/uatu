@@ -47,6 +47,13 @@ Requested-child veto facts remain in that baseline with reported-child
 precedence, so repeating the same pending snapshot does not restart a covered
 history/evidence read. Changed facts still fence the old source.
 Parent-launch baselines are registered before the first ownership lookup.
+The baseline belongs to the consuming read, not every collecting read for that
+parent. Shared transports and visible/full folds preserve that owner; older
+overlapping responses cannot overwrite a newer inventory. While the initial
+parent response is pending, the read buffers launcher counterproof and compares
+it with its own eventual inventory. Exact replays coalesce; the buffer is capped
+at 256 facts / 64 KiB of serialized UTF-16 evidence. Saturation withholds dependent
+history authority, without granting ownership or invalidating unrelated controls.
 Changes observed during that await remain deny-only counterproof until outcome
 or activity authority is used; unverified intent grants no ownership, child
 read or Stop authority, and does not itself invalidate unrelated controls.
