@@ -3,7 +3,7 @@ import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-sto
 import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, LOGIN_FAILED_NOTICE_CODE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
 import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
 import { nativeVisualMessageIdentity } from "../visual-identity";
-import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeStepStatus } from "./normalization-types";
+import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, OPENCODE_TEXT_START_FALLBACK, type OpenCodeStepStatus } from "./normalization-types";
 
 /**
  * The normalization core both OpenCode generations share.
@@ -31,6 +31,7 @@ export type ProviderEvent = Record<string, unknown>;
 export type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle };
 
 export type RecordValue = Record<string, unknown>;
+type TextStart = Readonly<{ createdAt: number; authoritative: boolean }>;
 
 export type ProviderEventMemory = {
   roles: Map<string, string>;
@@ -38,7 +39,7 @@ export type ProviderEventMemory = {
   // answers when the event does not name it (the v2 record has no `parentID`).
   prompts: Map<string, string>;
   // Bounded text-part start times, shared by native and classic text paths.
-  textStarts?: Map<string, number>;
+  textStarts?: Map<string, TextStart>;
 };
 
 export function createProviderEventMemory(): ProviderEventMemory {
@@ -338,7 +339,7 @@ function preserveClassicTextStarts(matched: KnownEvent, type: string, data: Reco
   const partId = optionalString(part.id);
   if (!partId) return matched;
   const sessionId = context.conversationId ?? optionalString(part.sessionID);
-  const starts = memory ? memory.textStarts ??= new Map<string, number>() : undefined;
+  const starts = memory ? memory.textStarts ??= new Map<string, TextStart>() : undefined;
   const key = JSON.stringify([sessionId, partId]);
   const messageTime = record(data.message).time;
   const messageStart = completionTime(record(messageTime).created).completedAt ?? completionTime(messageTime).completedAt;
@@ -352,8 +353,9 @@ function preserveClassicTextStarts(matched: KnownEvent, type: string, data: Reco
     // Retain the first part start, including a native stream for this same ID.
     // A first-seen completed part can use its own genuine start, but never
     // invent an earlier timestamp when no creation evidence exists.
-    const createdAt = messageStart ?? starts?.get(key) ?? completionTime(record(part.time).start).completedAt ?? item.createdAt;
-    if (starts) remember(starts, key, createdAt);
+    const known = starts?.get(key), partStart = completionTime(record(part.time).start).completedAt;
+    const createdAt = messageStart ?? known?.createdAt ?? partStart ?? item.createdAt;
+    if (starts) remember(starts, key, { createdAt, authoritative: messageStart !== undefined || (known ? known.authoritative : partStart !== undefined) });
     return { ...update, item: { ...item, createdAt } };
   }) };
 }
@@ -418,7 +420,7 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
         message: text(data.text) || "Context updated",
       } }] };
     case "session.text.started":
-      return textUpdate(data, eventId, createdAt, "cumulative", "", memory);
+      return textUpdate(data, eventId, createdAt, "cumulative", "", memory, false, true);
     case "session.text.delta":
       return textUpdate(data, eventId, createdAt, "incremental", text(data.delta ?? data.text), memory);
     case "session.text.ended":
@@ -864,17 +866,20 @@ function normalizeDiffs(data: RecordValue, createdAt: number): NormalizedProvide
   });
 }
 
-export function textUpdate(data: RecordValue, fallbackId: string, createdAt: number, mode: "cumulative" | "incremental", value: string, memory?: ProviderEventMemory, ended = false): KnownEvent {
+export function textUpdate(data: RecordValue, fallbackId: string, createdAt: number, mode: "cumulative" | "incremental", value: string, memory?: ProviderEventMemory, ended = false, started = false): KnownEvent {
   const partId = optionalString(data.textID) ?? optionalString(data.partID) ?? optionalString(data.id) ?? fallbackId;
   const itemId = `part:${partId}`;
+  const nativeStart = started ? completionTime(data.timestamp ?? data.timeCreated).completedAt : undefined;
+  let start: TextStart = { createdAt: nativeStart ?? createdAt, authoritative: nativeStart !== undefined };
   if (memory) {
-    const starts = memory.textStarts ??= new Map<string, number>();
+    const starts = memory.textStarts ??= new Map<string, TextStart>();
     const key = JSON.stringify([optionalString(data.sessionID), partId]);
-    const start = starts.get(key);
-    if (start === undefined) remember(starts, key, createdAt);
-    else createdAt = start;
+    const known = starts.get(key);
+    if (known && (known.authoritative || nativeStart === undefined)) start = known;
+    else remember(starts, key, start);
   }
-  const item = { id: itemId, type: "assistant_message" as const, createdAt, markdown: ended ? value : "", ...nativeVisualMessageIdentity("opencode", optionalString(data.messageID) ?? optionalString(data.assistantMessageID)), ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
+  const item = { id: itemId, type: "assistant_message" as const, createdAt: start.createdAt, markdown: ended ? value : "", ...nativeVisualMessageIdentity("opencode", optionalString(data.messageID) ?? optionalString(data.assistantMessageID)),
+    [OPENCODE_TEXT_START_FALLBACK]: !start.authoritative, ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
   return {
     conversationId: optionalString(data.sessionID),
     // A real ended frame must reach projection even when its cumulative text

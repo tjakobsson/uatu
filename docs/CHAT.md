@@ -1007,6 +1007,8 @@ completion fallback; universal stale-alias rejection is not guaranteed.
 Completed stored V2 text still finalizes image syntax immediately: existing
 files can be captured before another tool changes them, while missing files
 keep their execution-end retry.
+Syntax-only completion also preserves a history-seeded reply's start time;
+the first delta observed after reconnect is not authoritative creation evidence.
 Claude uses native turn-end records rather than text-block completion: completed
 turns stay terminal, while a live turn retains its pending visuals across history
 pages. Pending visuals loaded after the live subscription starts also receive
@@ -1014,6 +1016,8 @@ the turn-completion retry; they do not require a manual history reload.
 Claude snapshot turn liveness is frozen with its native text and cursor before
 the asynchronous handoff, so later completion cannot prematurely finalize an
 unfinished SVG prefix in that snapshot.
+Retained projection rows follow ordered turn-completion events rather than
+producer-token lookahead, so queued closing frames cannot seal an earlier prefix.
 Streaming shorthand references can preview once their already-terminated
 reference definition resolves and following syntax or a native text end makes
 the interpretation unambiguous. A trailing `![label]` remains provisional while

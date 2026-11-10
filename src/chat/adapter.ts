@@ -16,7 +16,7 @@ import { ProviderTextReconciler } from "./text-reconciler";
 import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-order";
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
 import { isLiveConversationStatus } from "./types";
-import { OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus } from "./opencode/normalization-types";
+import { OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_START_FALLBACK, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextStart } from "./opencode/normalization-types";
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
@@ -6902,7 +6902,7 @@ export class ConversationProjection {
 
   seed(items: ConversationItem[]): void {
     this.mutationRevision++;
-    for (const item of items) {
+    for (const item of snapshotClaudeTurns(items)) {
       const current = this.timeline.get(item.id);
       const interaction = mergeInteraction(current, item);
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
@@ -6935,7 +6935,7 @@ export class ConversationProjection {
         staged.delete(update.itemId); touched.add(update.itemId); settled.add(update.itemId);
         continue;
       }
-      const incoming = preserveClaudeTurn(prior.get(update.item.id), update.item), current = staged.get(incoming.id);
+      const incoming = preserveClaudeTurn(prior.get(update.item.id), snapshotClaudeItem(update.item)), current = staged.get(incoming.id);
       const interaction = mergeInteraction(current, incoming);
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       if ((merged.type === "permission" || merged.type === "question") && merged.status !== "pending") settled.add(merged.id);
@@ -6998,7 +6998,7 @@ export class ConversationProjection {
     const revision = this.mutationRevision, cursor = this.replay.latestCursor(), prior = this.timeline;
     const staged = new Map<string, ConversationItem>(), text = new ProviderTextReconciler();
     const notifications: ConversationItem[] = [], prunedFallbacks = new Set<string>();
-    for (const item of items) {
+    for (const item of snapshotClaudeTurns(items)) {
       const current = staged.get(item.id), interaction = mergeInteraction(current, preserveClaudeTurn(prior.get(item.id), item));
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       const fallback = this.workerFallbacks.get(merged.id);
@@ -7034,7 +7034,7 @@ export class ConversationProjection {
   }
 
   apply(update: NormalizedProviderUpdate): ChatEvent | undefined {
-    if (update.kind === "upsert") return this.upsert(update.item);
+    if (update.kind === "upsert") return this.upsert(orderedClaudeItem(this.timeline.get(update.item.id), update.item));
     if (update.kind === "remove") {
       this.workerOrigins.delete(update.itemId);
       this.workerFallbacks.delete(update.itemId);
@@ -7064,7 +7064,7 @@ export class ConversationProjection {
     // before updates reach a projection; one that arrives here is a no-op.
     if (update.kind === "inbox") return undefined;
     const wasNew = update.item !== undefined && !this.timeline.has(update.itemId);
-    if (wasNew && update.item) this.timeline.set(update.itemId, update.item);
+    if (wasNew && update.item) this.timeline.set(update.itemId, orderedClaudeItem(undefined, update.item));
     const before = this.text.value(update.identity);
     const delta = update.mode === "cumulative"
       ? this.text.cumulative(update.identity, update.text)
@@ -7094,6 +7094,7 @@ export class ConversationProjection {
   }
 
   upsert(item: ConversationItem): ChatEvent | undefined {
+    item = snapshotClaudeItem(item);
     const current = this.timeline.get(item.id);
     const interaction = mergeInteraction(current, item);
     const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
@@ -7500,15 +7501,28 @@ function latestModel(byMessage: Map<string, MessageModel> | undefined): string |
  * awaiting service/router resumes. Never freeze or mutate that native token:
  * queued frames still need it, and ordered status sealing replaces retained
  * rows independently. Copies belong only to this bounded snapshot. */
+function snapshotClaudeItem(item: ConversationItem, turns?: Map<ClaudeTurn, ClaudeTurn>): ConversationItem {
+  const turn = (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
+  if (!turn || Object.isFrozen(turn)) return item;
+  let captured = turns?.get(turn);
+  if (!captured) { captured = Object.freeze({ completed: turn.completed }); turns?.set(turn, captured); }
+  return { ...item, [CLAUDE_TURN]: captured };
+}
+
 function snapshotClaudeTurns(items: ConversationItem[]): ConversationItem[] {
   const turns = new Map<ClaudeTurn, ClaudeTurn>();
-  return items.map(item => {
-    const turn = (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
-    if (!turn || Object.isFrozen(turn)) return item;
-    let captured = turns.get(turn);
-    if (!captured) { captured = Object.freeze({ completed: turn.completed }); turns.set(turn, captured); }
-    return { ...item, [CLAUDE_TURN]: captured };
-  });
+  return items.map(item => snapshotClaudeItem(item, turns));
+}
+
+/** Native apply is ordered; producer normalization is not. A result may already
+ * have mutated its native token while this earlier row awaited requireSession.
+ * Enroll immutable projection-owned evidence, never that producer's future
+ * completion. Historical seed/recover/replace retain their snapshot authority;
+ * an already-closed native row id cannot be reopened by a late alias. */
+function orderedClaudeItem(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
+  if (incoming.type !== "assistant_message" || !(incoming as typeof incoming & ClaudeTextIdentity)[CLAUDE_TURN]) return incoming;
+  const retained = (current as (ConversationItem & ClaudeTextIdentity) | undefined)?.[CLAUDE_TURN];
+  return { ...incoming, [CLAUDE_TURN]: retained && Object.isFrozen(retained) ? retained : Object.freeze({ completed: false }) };
 }
 
 /** Native row ids do not move between turns. Once closed, stale history cannot reopen one. */
@@ -7538,7 +7552,12 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
     return { ...incoming, ...preserved };
   }
   if (current.type === "assistant_message" && incoming.type === "assistant_message") {
-    return preserveClaudeTurn(current, mergeAssistantMessage(current, incoming));
+    const merged = mergeAssistantMessage(current, incoming);
+    // A reconnect's first observed delta is not this retained part's birth.
+    // Preserve only against explicitly weak text-start evidence, not against
+    // real native starts or general message/model/usage corrections.
+    return preserveClaudeTurn(current, (incoming as typeof incoming & OpenCodeTextStart)[OPENCODE_TEXT_START_FALLBACK] === true
+      ? { ...merged, createdAt: current.createdAt } : merged);
   }
   // Resolved interactions are terminal. The merged provider streams preserve
   // order only within themselves, so a delayed classic alias of an ask can

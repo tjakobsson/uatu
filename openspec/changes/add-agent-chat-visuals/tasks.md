@@ -124,6 +124,8 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.48 Address the follow-up maintainer review: preserve ready-without-refetch for caught-up reconnects with no visual trailer. Remember the last forwarded visual-trailer cursor per conversation across upstream replacement; require resync only when recovery presents that cursor.
 - [ ] 6.49 Publish the conversation recovery flag in the Hub contract, update query semantics and migration guidance, and raise Hub revision to 15 while retaining Workspace/web revisions 37/4. Include schema/runtime parity coverage.
 - [ ] 6.50 Move the child replay-resync header constant to the shared live protocol and update its imports without changing its wire value.
+- [ ] 6.51 Give retained Claude projection rows turn liveness owned by ordered completion boundaries, so producer-side result consumption cannot prematurely finalize an unfinished snapshot while closing frames are still queued.
+- [ ] 6.52 Preserve history-seeded OpenCode V2 text timestamps through reconnect deltas and native text-end updates. Ordinary and visual replies must remain before later steers without suppressing syntax completion or genuine field updates.
 
 Follow-up maintainer checkpoint: the optional V1 older-page liveness comment
 remains within the explicitly accepted, documented compatibility limit; no full

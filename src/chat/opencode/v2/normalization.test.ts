@@ -12,6 +12,62 @@ import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
 import { visualAdmissionIdentity } from "../../visual-identity";
 import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
+import { ConversationProjection } from "../../adapter";
+import { ConversationReplay, decodeReplayCursor } from "../../replay";
+import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "../../projection";
+
+test.each([
+  { entry: "seed", visual: false }, { entry: "seed", visual: true },
+  { entry: "recover", visual: false }, { entry: "recover", visual: true },
+] as const)("fresh V2 normalization after history $entry preserves an established text start through delta and syntax end (visual=$visual)", ({ entry, visual }) => {
+  const initial = visual ? "![shot][ref]\n\n[ref]: result.p" : "Answer", delta = visual ? "ng" : " continued", final = initial + delta;
+  const projection = new ConversationProjection(new ConversationReplay("g", "s", 100_000));
+  const history = normalizeStoredMessage({ id: "reply", type: "assistant", time: { created: 10 }, content: [{ type: "text", text: initial }] });
+  history.push(...normalizeStoredMessage({ id: "steer", type: "user", time: { created: 20 }, text: "Keep going" }));
+  if (entry === "seed") projection.seed(history);
+  else expect(projection.recover(history.map(item => ({ kind: "upsert" as const, item })))).toBe(true);
+  projection.status = "running";
+  const snapshot = () => ({ conversation: { id: "s", title: "s", createdAt: 1, updatedAt: 1, status: "running" as const }, configuration: {}, generation: "g", cursor: projection.replay.latestCursor(), items: projection.items() });
+  let browser = projectionFromSnapshot(snapshot());
+  const normalize = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  const emit = (type: "session.text.delta" | "session.text.ended", created: number, data: Record<string, unknown>) => normalize({ id: `event-${created}`, type, created, location: { directory: "/workspace" }, data: { sessionID: "s", assistantMessageID: "reply", ordinal: 0, ...data } }, memory).updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+  const beforeSequence = decodeReplayCursor(projection.replay.latestCursor())!.sequence;
+  const streamed = emit("session.text.delta", 25, { delta });
+  expect(streamed).toHaveLength(1);
+  expect(streamed[0]).toMatchObject({ type: "item.text_delta", itemId: "part:reply:text:0", delta, sequence: beforeSequence + 1 });
+  for (const event of streamed) browser = applyChatEvent(browser, event).projection;
+  expect(projection.get("part:reply:text:0")).toMatchObject({ createdAt: 10, markdown: final });
+  const ended = emit("session.text.ended", 30, { text: final });
+  expect(ended).toHaveLength(1); // Unchanged nonempty text still carries its real syntax boundary.
+  expect(ended[0]).toMatchObject({ type: "item.upsert", sequence: beforeSequence + 2, item: { id: "part:reply:text:0", createdAt: 10, markdown: final } });
+  expect((projection.get("part:reply:text:0") as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+  expect(projection.get("part:reply:text:0")).not.toHaveProperty("completedAt");
+  for (const event of ended) browser = applyChatEvent(browser, event).projection;
+  const order = [["part:reply:text:0", 10], ["message:steer", 20]];
+  expect(projection.items().map(item => [item.id, item.createdAt])).toEqual(order);
+  expect(browser.items.map(item => [item.id, item.createdAt])).toEqual(order);
+  expect(prependSnapshot(browser, snapshot()).items.map(item => [item.id, item.createdAt])).toEqual(order);
+});
+
+test.each([
+  { history: false, start: undefined, expected: 25 }, { history: true, start: undefined, expected: 10 },
+  { history: false, start: 12, expected: 12 }, { history: true, start: 12, expected: 12 },
+] as const)("V2 text start uses actual part evidence, not an earlier usage-only step (history=$history, start=$start)", ({ history, start, expected }) => {
+  const normalize = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  const projection = new ConversationProjection(new ConversationReplay("g", "s", 100_000));
+  const emit = (type: string, created: number, data: Record<string, unknown>) => {
+    const normalized = normalize({ id: `event-${created}`, type, created, location: { directory: "/workspace" }, data: { sessionID: "s", assistantMessageID: "reply", ...data } }, memory);
+    for (const update of normalized.updates) projection.apply(update);
+  };
+  emit("session.step.started", 3, { started: 3, agent: "build", model: { providerID: "fixture", id: "model" } });
+  emit("session.step.ended", 4, { finish: "tool-calls", cost: 0, tokens: { input: 100, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } });
+  if (history) projection.seed(normalizeStoredMessage({ id: "reply", type: "assistant", time: { created: 10 }, content: [{ type: "text", text: "Answer" }] }));
+  if (start !== undefined) emit("session.text.started", start, { ordinal: 0 });
+  emit("session.text.delta", 25, { ordinal: 0, delta: history ? " continued" : "Answer" });
+  emit("session.text.ended", 30, { ordinal: 0, text: "Answer continued" });
+  expect(projection.get("part:reply:text:0")).toMatchObject({ createdAt: expected, markdown: "Answer continued" });
+  expect((projection.get("part:reply:text:0") as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+});
 
 test("native shell exit evidence uses the typed identity and terminal process status", () => {
   const normalize = createOpenCodeV2Normalizer("/ws");

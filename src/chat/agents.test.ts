@@ -376,9 +376,11 @@ test.each(["completed", "failed", "interrupted"] as const)("delayed Claude drain
   let restarted: MultiAgentChatService | undefined;
   try {
     // The provider gets all the way through result before the subscriber pulls
-    // even its first event. Earlier items now hold the sealed shared token.
+    // even its first event. Producer tokens are sealed, but queued projection
+    // rows must retain their immutable ordered turn evidence.
     stream({ type: "message_start", message: { id: "delayed-native" } });
     const opened = stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })[0]!;
+    const producerToken = memory.visualTurn!;
     const prefixEvent = stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: prefix } })[0]!;
     const closeEvent = stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: close } })[0]!;
     stream({ type: "content_block_stop", index: 0 });
@@ -387,7 +389,9 @@ test.each(["completed", "failed", "interrupted"] as const)("delayed Claude drain
     emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "write-image", content: "Created later.png" }] } });
     const terminal = emit({ type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, ...(failed ? { errors: ["Turn failed after Write"] } : {}) })[0]!;
     if (opened.type !== "item.upsert") throw new Error("expected native opened text");
-    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect(producerToken.completed).toBe(true);
+    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect(Object.isFrozen((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN])).toBe(true);
     expect(h.files.reads).toBe(0);
 
     let client = projectionFromSnapshot(h.subscription.snapshot);
@@ -491,6 +495,7 @@ test.each([
     stream({ type: "message_start", message: { id: "svg-native" } });
     const opened = stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })[0]!;
     stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: prefix } });
+    const producerToken = memory.visualTurn!;
     const boundaryCursor = h.replay.latestCursor();
     const loading = entry === "subscribe"
       ? h.service.subscribe("claude:c").then(value => ({ snapshot: value.snapshot, events: value.events }))
@@ -498,13 +503,15 @@ test.each([
     await firstReadStarted;
     // The first row is blocked in file capture, but the last row's text still
     // belongs to the unfinished snapshot prefix. The provider now seals the
-    // same shared token before that last row gets its enrichment turn.
+    // producer's shared token before that last row gets its enrichment turn.
     stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: close } });
     stream({ type: "content_block_stop", index: 0 });
     emit({ type: "assistant", uuid: "durable-svg", message: { id: "svg-native", content: [{ type: "text", text: prefix + close }] } });
     const terminal = emit({ type: "result", subtype: "success" })[0]!;
     if (opened.type !== "item.upsert") throw new Error("expected native open text item");
-    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect(producerToken.completed).toBe(true);
+    expect((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect(Object.isFrozen((opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN])).toBe(true);
     release();
     const loaded = await loading;
     subscribed = loaded.events;
@@ -567,6 +574,57 @@ test.each(["status-error", "updated"] as const)("visual terminal refresh preserv
     if (kind === "updated") expect(first.projection.conversation?.title).toBe("Renamed by provider");
     expect(applyChatEvent(first.projection, delivered[1]!).outcome).toBe("resync");
   } finally { await h.cleanup(); }
+});
+
+test.each([false, true])("V2 reconnect text end keeps history order and captures the final EOF reference before overwrite (missing=%s)", async missing => {
+  const h = await visualSubscriptionHarness("opencode"); h.subscription.events.cancel();
+  const initial = "![shot][ref]\n\n[ref]: result.p", markdown = initial + "ng";
+  const native = { id: "reply", type: "assistant", time: { created: 10 }, content: [{ type: "text", text: initial }] };
+  h.projection.seed(normalizeOpenCodeV2History(native, true, undefined, prepareStoredMessage(native), true));
+  h.projection.seed(normalizeOpenCodeV2History({ id: "steer", type: "user", time: { created: 20 }, text: "Keep going" }));
+  const original = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]), replacement = Uint8Array.from([...original.slice(0, -1), 2]);
+  let available = !missing, bytes = original, reads = 0;
+  h.store.setReader(async source => { expect(source).toBe("result.png"); reads++; if (!available) throw new VisualReadError(true); return bytes; });
+  const normalize = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  const emit = (type: string, created: number, data: Record<string, unknown>) => normalize({ id: `event-${created}`, type, created, location: { directory: "/workspace" }, data: { sessionID: "c", assistantMessageID: "reply", ordinal: 0, ...data } }, memory).updates.flatMap(update => { const event = h.projection.apply(update); return event ? [event] : []; });
+  let attached: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined, restarted: MultiAgentChatService | undefined;
+  try {
+    attached = await h.service.subscribe("opencode:c");
+    let browser = projectionFromSnapshot(attached.snapshot);
+    const iterator = attached.events[Symbol.asyncIterator]();
+    const project = (event: ChatEvent) => { const applied = applyChatEvent(browser, event); expect(applied.outcome).toBe(event.type === "resync" ? "resync" : "applied"); browser = applied.projection; };
+    expect(reads).toBe(0); // The EOF definition is not yet a complete source.
+    const delta = emit("session.text.delta", 25, { delta: "ng" })[0]!;
+    await deliveredBatch(h.replay, iterator, project);
+    expect(browser.items.map(item => [item.id, item.createdAt])).toEqual([["part:reply:text:0", 10], ["message:steer", 20]]);
+    const end = emit("session.text.ended", 30, { text: markdown })[0]!;
+    const delivered = await deliveredBatch(h.replay, iterator, project);
+    expect(delivered).toHaveLength(1);
+    expect(end.sequence).toBeGreaterThan(delta.sequence);
+    expect(delivered[0]).toMatchObject({ type: "item.upsert", sequence: end.sequence, item: { id: "part:reply:text:0", createdAt: 10, markdown, visuals: [{ status: missing ? "pending" : "ready" }] } });
+    expect(browser.items.map(item => [item.id, item.createdAt])).toEqual([["part:reply:text:0", 10], ["message:steer", 20]]);
+    expect(reads).toBe(1);
+    const captured = browser.items.find(item => item.id === "part:reply:text:0") as AssistantMessageItem;
+    if (!missing) expect((await h.service.resolveVisual(captured.visuals![0]!.id!))?.bytes).toEqual(original);
+    // A later tool overwrites/creates the source only AFTER native text end.
+    available = true; bytes = replacement;
+    const during = await h.service.history("opencode:c");
+    expect((during.items.find(item => item.id === captured.id) as AssistantMessageItem).visuals).toEqual(captured.visuals);
+    expect(reads).toBe(1); // A missing source still owes its one execution-end retry.
+    emit("session.execution.succeeded", 40, {});
+    const terminal = await deliveredBatch(h.replay, iterator, project);
+    expect(terminal.filter(event => event.type === "resync")).toHaveLength(missing ? 1 : 0);
+    const completed = await h.service.history("opencode:c"), final = completed.items.find(item => item.id === captured.id) as AssistantMessageItem;
+    expect(final.createdAt).toBe(10); expect(final.visuals?.[0]?.status).toBe("ready");
+    expect((await h.service.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
+    expect(reads).toBe(missing ? 2 : 1);
+    const reloadedStore = new VisualStore("/workspace", h.directory); reloadedStore.setReader(async () => { throw new Error("must not reread overwritten bytes"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.provider as unknown as WorkspaceChatService }] });
+    const reloaded = await restarted.history("opencode:c");
+    expect((reloaded.items.find(item => item.id === captured.id) as AssistantMessageItem).visuals).toEqual(final.visuals);
+    expect((await restarted.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(missing ? replacement : original);
+    expect(reloaded.items.map(item => [item.id, item.createdAt])).toEqual([["part:reply:text:0", 10], ["message:steer", 20]]);
+  } finally { attached?.events.cancel(); await restarted?.dispose(); await h.cleanup(); }
 });
 
 test.each(["history", "subscribe"] as const)("%s freezes all OpenCode execution membership before a blocked visual read and queued execution end", async entry => {

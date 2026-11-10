@@ -4,6 +4,12 @@ import { isLiveConversationStatus, type ConversationStatus } from "../types";
 export const OPENCODE_TEXT_END = Symbol("opencode-text-end");
 export type OpenCodeTextIdentity = { [OPENCODE_TEXT_END]?: true };
 
+/** This frame's start is only the first observed delta/end, not a native part
+ * start. A retained row already owns its start; syntax completion must not
+ * replace that established value with this subscription-local fallback. */
+export const OPENCODE_TEXT_START_FALLBACK = Symbol("opencode-text-start-fallback");
+export type OpenCodeTextStart = { readonly [OPENCODE_TEXT_START_FALLBACK]?: boolean };
+
 /** Snapshot-owned execution membership, independent of API-message completion.
  * true: no native execution end follows this row; false: a native end seals it.
  * Copy the primitive when replacing a row; never mutate an earlier frame. */
