@@ -208,7 +208,7 @@ describe("agent visual Markdown", () => {
     for (let index = 0; index < 16_000; index++) {
       const tag = `<${index % 2 ? "IMG" : "image"} src="p${index}.png" alt="a&amp;b" class="keep">\n`;
       sourceParts.push(tag);
-      expected.push({ index, key: `offset:${offset}`, kind: "file", source: `p${index}.png`, alt: "a&b", complete: true });
+      expected.push({ index, key: `offset:${offset}`, kind: "file" as const, source: `p${index}.png`, alt: "a&b", complete: true });
       offset += tag.length;
     }
     sourceParts.push("</div>\n");
