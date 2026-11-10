@@ -89,6 +89,7 @@ export function quietCancellation(fetch: FetchLike): typeof globalThis.fetch {
 
 export { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
+import { catalogContextWindow, type OpenCodeCatalogLimit } from "../context-window";
 
 export class OpenCodeV1Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
@@ -176,7 +177,8 @@ export class OpenCodeV1Provider implements ChatProvider {
           provider: provider.name,
           name: model.name,
           ...(variants.length ? { variants } : {}),
-          ...(model.limit?.context ? { contextLimit: model.limit.context, contextWindow: { source: "catalog" as const, freshness: "current" as const } } : {}),
+          // The 1.x SDK type omits `limit.input`, but 1.x servers send it.
+          ...catalogContextWindow(model.limit as OpenCodeCatalogLimit | undefined),
           ...(imageInput ? { imageInput } : {}),
         };
       }))

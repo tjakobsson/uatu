@@ -30,6 +30,7 @@ import { BackgroundControls, BackgroundWorkers, launcherChanged, nativeLauncherT
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, pendingInboxEntry, prepareStoredMessage, storedAccounting, storedExecutionLiveness, storedPromptId, supportedFormFields, type V2Evidence } from "./normalization";
 import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 import { TASK_OUTPUT_TAIL_MAX_BYTES } from "../../types";
+import { catalogContextWindow } from "../context-window";
 
 /**
  * The OpenCode 2.x provider: the same `ChatProvider` seam as the 1.x stack,
@@ -236,7 +237,7 @@ export class OpenCodeV2Provider implements ChatProvider {
           provider: providerNames.get(model.providerID) ?? model.providerID,
           name: model.name,
           ...(variants.length ? { variants } : {}),
-          ...(model.limit.context ? { contextLimit: model.limit.context, contextWindow: { source: "catalog" as const, freshness: "current" as const } } : {}),
+          ...catalogContextWindow(model.limit),
           ...(imageInput ? { imageInput } : {}),
         };
       })
