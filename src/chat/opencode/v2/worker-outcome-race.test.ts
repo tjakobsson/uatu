@@ -142,6 +142,131 @@ test(`parent counterproof survives the ${boundary === "ownership" ? "first owner
   } finally { release(); firstAbort.abort(); abort.abort(); await firstPump; await pump; await recovery?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
+for (const change of ["committed-revert", "unchanged", "append", "late-ownerless"] as const)
+test(`ownerless reversible history covers the first pending child response (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reads = 0, changed = false;
+  let entered!: () => void, release!: () => void, wire!: ReadableStreamDefaultController<Uint8Array>, secondEntered!: () => void, releaseSecond!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const secondPending = new Promise<void>(resolve => { secondEntered = resolve; }), secondHeld = new Promise<void>(resolve => { releaseSecond = resolve; });
+  const reverted = change === "committed-revert" || change === "late-ownerless";
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "server.connected", data: {}, location: { directory } })}\n\n`));
+      request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0];
+      first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      const index = ++reads, first = index === 1, delayed = change === "late-ownerless" && index === 2;
+      const data = changed && reverted && !delayed ? [] : [
+        { id: "child-input", type: "user", text: "Reverted suffix", time: { created: 15 } },
+        { id: "child-idle", type: "idle", time: { created: 20 }, outcome: "succeeded" },
+        ...(changed && change === "append" ? [{ id: "later-output", type: "assistant", time: { created: 25 }, content: [{ type: "text", text: "Continued output" }] }] : []),
+      ];
+      if (first) { entered(); await held; }
+      if (delayed) { secondEntered(); await secondHeld; }
+      return Response.json({ data, cursor: {} });
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const abort = new AbortController();
+  let older: ReturnType<typeof provider.listMessages> | undefined, pump: Promise<void> | undefined,
+    delayed: ReturnType<NonNullable<typeof provider.getReversibleHistoryState>> | undefined;
+  try {
+    parent = (await provider.createSession("Pending child / ownerless native read")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const unrelated = (await provider.createSession("Independent reuse invalidation")).id;
+    pump = (async () => { for await (const _event of provider.events(abort.signal)) {} })();
+    await provider.waitForEventStream!(abort.signal);
+    older = provider.listMessages(parent, { limit: 100, signal: abort.signal }); void older.catch(() => undefined);
+    await pending;
+    // A committed revert's persisted suffix removal is discovered by a native
+    // reader, not SSE. An independent fresh recovery invalidates shared reuse.
+    changed = true;
+    await provider.reconcileBackgroundTasks!(unrelated, { fresh: true, signal: abort.signal });
+    if (change === "late-ownerless") {
+      delayed = provider.getReversibleHistoryState!(child); void delayed.catch(() => undefined); await secondPending;
+      await provider.reconcileBackgroundTasks!(unrelated, { fresh: true, signal: abort.signal });
+    }
+    const state = await provider.getReversibleHistoryState!(child);
+    expect(state.canUndo).toBe(!reverted);
+    expect(reads).toBe(change === "late-ownerless" ? 3 : 2);
+    // The older ownerless request returns last and must neither replace the
+    // newer cached transcript nor overwrite its pending counterproof slot.
+    releaseSecond(); await delayed;
+    release();
+    const stale = await older;
+    expect(stale.workerSource?.isCurrent()).toBe(!reverted);
+    if (!reverted) expect(stale.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    // Reuse must still contain the newer transcript, not the late old response.
+    expect((await provider.getReversibleHistoryState!(child)).canUndo).toBe(!reverted);
+    expect(reads).toBe(change === "late-ownerless" ? 3 : 2);
+    const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]?.status).toBe(reverted ? "running" : "completed");
+  } finally { release(); releaseSecond(); abort.abort(); await older?.catch(() => undefined); await delayed?.catch(() => undefined); await pump; await provider.dispose(); await fake.stop(); }
+}, 10_000);
+
+for (const arrival of ["after-owned", "while-owned-pending"] as const)
+test(`a stale ownerless reversible response cannot revoke later owned child evidence or its reuse (${arrival})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reads = 0;
+  let entered!: () => void, release!: () => void, newerEntered!: () => void, releaseNewer!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const newerPending = new Promise<void>(resolve => { newerEntered = resolve; }), newerHeld = new Promise<void>(resolve => { releaseNewer = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "server.connected", data: {}, location: { directory } })}\n\n`));
+      request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0];
+      first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      const first = ++reads === 1;
+      if (first) { entered(); await held; }
+      else if (arrival === "while-owned-pending") { newerEntered(); await newerHeld; }
+      return Response.json({ data: [{ id: "child-idle", type: "idle", time: { created: 20 }, outcome: first ? "succeeded" : "failed" }], cursor: {} });
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const abort = new AbortController(), guards: import("../../provider").WorkerSourceGuard[] = [];
+  let older: ReturnType<NonNullable<typeof provider.getReversibleHistoryState>> | undefined, pump: Promise<void> | undefined,
+    recovery: ReturnType<NonNullable<typeof provider.reconcileBackgroundTasks>> | undefined;
+  try {
+    parent = (await provider.createSession("Ownerless overlap ordering")).id; child = fake.launchRequestWorker(parent).childId;
+    pump = (async () => { for await (const _event of provider.events(abort.signal)) {} })();
+    await provider.waitForEventStream!(abort.signal);
+    older = provider.getReversibleHistoryState!(child); void older.catch(() => undefined); await pending;
+    recovery = provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal,
+      onSource: source => guards.push(source.workerSource.retain(abort.signal)) });
+    void recovery.catch(() => undefined);
+    if (arrival === "while-owned-pending") { await newerPending; release(); await older; releaseNewer(); }
+    const current = await recovery;
+    expect(current[0]?.status).toBe("failed"); expect(guards.length).toBeGreaterThan(0);
+    release(); await older;
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    const reused = await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal });
+    expect(reused[0]?.status).toBe("failed"); expect(reads).toBe(2);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+  } finally { release(); releaseNewer(); abort.abort(); await older?.catch(() => undefined); await recovery?.catch(() => undefined); await pump; await provider.dispose(); await fake.stop(); }
+}, 10_000);
+
 for (const outcome of ["terminal", "activity"] as const)
 for (const pressure of ["count-at-limit", "count-over-limit", "bytes-below-limit", "bytes-over-limit", "count-replays", "byte-replays"] as const)
 test(`prebaseline buffer ${pressure} preserves bounded ${outcome} authority`, async () => {
@@ -229,7 +354,7 @@ test(`prebaseline buffer ${pressure} preserves bounded ${outcome} authority`, as
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ taskId: other.taskId, status: "running", activity: { kind: "working", executionId: before[0]?.activity?.executionId }, control: { available: true } });
     expect(workerCanStop(after[0]!)).toBe(true);
-  } finally { release(); abort.abort(); await recovery?.catch(() => undefined); await pump; await provider.dispose(); await fake.stop(); }
+  } finally { release(); abort.abort(); await recovery?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const replay of [false, true])
@@ -293,7 +418,7 @@ test(`older parent response cannot overwrite a newer read's launch baseline (rep
     const next = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(next).toHaveLength(2);
     expect(next.find(task => task.taskId === worker.taskId)?.status).toBe("running");
-  } finally { releaseOld(); releaseChild(); abort.abort(); await old?.catch(() => undefined); await fresh?.catch(() => undefined); await pump; await provider.dispose(); await fake.stop(); }
+  } finally { releaseOld(); releaseChild(); abort.abort(); await old?.catch(() => undefined); await fresh?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 test("an overlapping stale child read and transport reuse preserve newer owned working activity", async () => {

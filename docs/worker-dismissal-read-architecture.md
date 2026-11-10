@@ -64,6 +64,12 @@ order survives transport reuse.
 The shared native-history boundary also observes idle counterproof from direct
 child history, accounting and inspection reads; it is not limited to a parent
 worker fold.
+If a parent's first child response is still pending, an ownerless reversible
+history read can fill that registered dependency's existing observation slot
+with deny-only idle evidence. Native request order, not arrival order, controls
+replacement and vetoes; a stale ownerless response cannot poison newer owned
+evidence or shared transport reuse. The slot keeps the enclosing read's lifetime
+and introduces neither a global cache nor new child associations.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports

@@ -60,7 +60,7 @@ type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; o
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges: Set<string>; historyChildChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string>;
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges: Set<string>; historyChildChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { started: number; completed: number; signature: string; pending?: true }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string>;
   pendingParentLaunches?: LauncherEvidence[];
   parentLaunchOverflow?: true;
 };
@@ -1635,11 +1635,24 @@ export class OpenCodeV2Provider implements ChatProvider {
     const observationOwners = [...owners, ...childOwners];
     if (childSources.length || observationOwners.length) {
       let conflictingOverlap = false;
-      const observation = { completed: order.completed, signature: historyVersion(messages.filter(message => message.type === "idle")
+      const observation = { started: order.started, completed: order.completed, signature: historyVersion(messages.filter(message => message.type === "idle")
         .map(message => [messageIdentity(message), asRecord(message.time).created, message.outcome])
         .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))) };
       for (const source of childSources) {
         const previous = source.historyObservations?.get(sessionId);
+        if (!childOwners.includes(source) && (!previous || previous.pending)) {
+          // An ownerless reader can supply deny-only evidence while this
+          // source's first child transcript is still pending. Reuse the one
+          // observation slot for an already registered dependency: no global
+          // history, new child association, positive grant or renewed lifetime.
+          if ((source.historyChildren?.has(sessionId) || source.historyActivityChildren?.has(sessionId))
+            && (!previous || order.started > previous.started))
+            (source.historyObservations ??= new Map()).set(sessionId, { ...observation, pending: true });
+          continue;
+        }
+        // A provisional observation from an earlier native request cannot veto
+        // this later consuming response merely because it arrived first.
+        if (previous?.pending && order.started > previous.started) continue;
         if (!previous || previous.signature === observation.signature) continue;
         if (order.started <= previous.completed) conflictingOverlap = true;
         for (const target of order.started > previous.completed ? [source] : childOwners) {

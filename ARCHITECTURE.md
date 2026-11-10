@@ -1206,6 +1206,13 @@ Idle counterproof is observed at that shared native-history boundary too, so
 direct child history, accounting and inspection reads can revoke an older parent
 outcome. They use the same native ordering and overlapping-response abstention
 as parent inventory reads; returning through worker folding is not required.
+Ownerless reversible-history reads also cover a parent's first pending child
+response. Their idle signature and native read order occupy the existing
+observation slot only for an already registered child dependency, under its
+read lease/deadline. This provisional evidence is deny-only: a later native
+observation can veto an older pending outcome, but an older arrival cannot
+overwrite newer counterproof or veto a later owned response. No global
+observation cache or additional per-read event buffer is retained.
 The adapter also retracts an already cached history-only completion when the
 covered complete source returns the same qualified execution as unresolved.
 That replacement clears stale terminal fields instead of merging them back.
