@@ -70,6 +70,14 @@ with deny-only idle evidence. Native request order, not arrival order, controls
 replacement and vetoes; a stale ownerless response cannot poison newer owned
 evidence or shared transport reuse. The slot keeps the enclosing read's lifetime
 and introduces neither a global cache nor new child associations.
+Ownerless native parent reads likewise fill the pending source's existing parent
+observation slot before its first consumed baseline. The provisional launcher
+snapshot is deny-only and bounded to 256 facts / 64 KiB of serialized UTF-16
+evidence, sharing the SSE counterproof limits. Native request order prevents an
+older arrival from overwriting newer evidence or vetoing a later owned response;
+joining the same native transport is not a contradiction. Snapshot replacement
+does not accumulate facts. Saturation denies only the older pending consumer,
+not fresh inventory, child ownership, or independent Stop authority.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports

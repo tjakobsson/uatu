@@ -1213,6 +1213,15 @@ read lease/deadline. This provisional evidence is deny-only: a later native
 observation can veto an older pending outcome, but an older arrival cannot
 overwrite newer counterproof or veto a later owned response. No global
 observation cache or additional per-read event buffer is retained.
+The same boundary covers a parent's first pending transcript: an ownerless
+parent read retains a provisional launcher snapshot in that source's existing
+parent-observation slot. Only a consuming older native response can be vetoed;
+equal-order shared transport and later owned responses keep their own authority.
+The provisional snapshot coalesces exact facts and uses the same 256-fact /
+64-KiB serialized UTF-16 limits as SSE counterproof. Overflow withholds that
+pending consumer's history authority, never becoming a partial inventory that
+can veto another read. Newer native observations replace the slot without
+accumulation; neither provisional evidence nor saturation grants child IO or Stop.
 The adapter also retracts an already cached history-only completion when the
 covered complete source returns the same qualified execution as unresolved.
 That replacement clears stale terminal fields instead of merging them back.

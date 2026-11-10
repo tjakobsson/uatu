@@ -60,11 +60,13 @@ type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; o
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges: Set<string>; historyChildChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { started: number; completed: number; signature: string; pending?: true }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string>;
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { started: number; completed: number; launches: readonly LauncherEvidence[]; pending?: true; overflow?: true }; historyParentChanges: Set<string>; historyChildChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { started: number; completed: number; signature: string; pending?: true }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string>;
   pendingParentLaunches?: LauncherEvidence[];
   parentLaunchOverflow?: true;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
+const parentCounterproofMaxFacts = 256;
+const parentCounterproofMaxBytes = 65_536;
 
 export function createOpenCodeV2Provider(options: {
   endpoint: string;
@@ -1592,7 +1594,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       for (const fact of current) {
         const signature = JSON.stringify(fact);
         if (signatures.has(signature)) continue;
-        if (pending.length >= 256 || bytes + signature.length * 2 > 65_536) { source.parentLaunchOverflow = true; break; }
+        if (pending.length >= parentCounterproofMaxFacts || bytes + signature.length * 2 > parentCounterproofMaxBytes) { source.parentLaunchOverflow = true; break; }
         pending.push(fact); signatures.add(signature); bytes += signature.length * 2;
       }
       return;
@@ -1668,7 +1670,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         (source.historyObservations ??= new Map()).set(sessionId, observation);
     }
     const sources = [...this.historyWorkerSources].filter(source => source.parent === sessionId);
-    if (!owners.length && !sources.some(source => source.historyParentRead)) return messages;
+    if (!owners.length && !sources.some(source => source.historyParentRead || source.phase === "collecting")) return messages;
     const launches = messages.flatMap(message => [...prepareStoredMessage(message).tools.values()].map(tool => tool.fact));
     const signature = (facts: readonly LauncherEvidence[], child: string) => historyVersion([...new Set(facts
       .filter(fact => fact.workerType === "agent" && counterproofChild(fact) === child)
@@ -1676,14 +1678,36 @@ export class OpenCodeV2Provider implements ChatProvider {
         fact.created, fact.ran, fact.completed ?? fact.reportedCompletion, fact.inputFingerprint])))].sort());
     let conflictingParentOverlap = false;
     for (const source of sources) {
-      if (!source.historyParentRead) continue;
       const previous = source.historyParentRead;
+      if (source.phase === "collecting" && !owners.includes(source) && (!previous || previous.pending)) {
+        if (!previous || order.started > previous.started) {
+          // An ownerless native parent reader can veto the pending response,
+          // not supply its consumed inventory. Reuse its one read-owned slot,
+          // bounded like SSE counterproof, without registering child ownership.
+          const retained: LauncherEvidence[] = [], signatures = new Set<string>();
+          let bytes = 0, overflow: true | undefined;
+          for (const fact of launches) {
+            if (fact.workerType !== "agent" || !counterproofChild(fact)) continue;
+            const serialized = JSON.stringify(fact);
+            if (signatures.has(serialized)) continue;
+            if (retained.length >= parentCounterproofMaxFacts || bytes + serialized.length * 2 > parentCounterproofMaxBytes) { overflow = true; break; }
+            retained.push(fact); signatures.add(serialized); bytes += serialized.length * 2;
+          }
+          source.historyParentRead = { started: order.started, completed: order.completed, launches: retained, pending: true, ...(overflow ? { overflow } : {}) };
+        }
+        continue;
+      }
+      if (!previous) continue;
+      if (previous.pending && owners.includes(source) && order.started >= previous.started) continue;
+      // Saturation denies this pending consumer only. It is not a partial
+      // native inventory that can contradict another read or later reuse.
+      if (previous.overflow && !owners.includes(source)) continue;
       const children = new Set([...previous.launches, ...launches].flatMap(fact => {
         const child = counterproofChild(fact);
         return fact.workerType === "agent" && child !== undefined ? [child] : [];
       }));
       for (const child of children) {
-        if (signature(previous.launches, child) === signature(launches, child)) continue;
+        if (!previous.overflow && signature(previous.launches, child) === signature(launches, child)) continue;
         if (order.started <= previous.completed) conflictingParentOverlap = true;
         // Only a nonoverlapping native read can supersede earlier evidence.
         // An overlapping stale response instead withdraws its own inference.
@@ -1696,7 +1720,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     for (const source of owners) if (!source.historyParentRead || order.completed >= source.historyParentRead.completed) {
       // An abstaining overlapping response must not become later counterproof
       // against reuse of the newer native observation that made it abstain.
-      if (!conflictingParentOverlap) source.historyParentRead = { completed: order.completed, launches };
+      if (!conflictingParentOverlap) source.historyParentRead = { started: order.started, completed: order.completed, launches };
       // Only this consumer installs its native baseline. Visible/full folds and
       // shared transports use that same read-owned inventory, never a peer's.
       source.historyParentLaunches = new Map();
