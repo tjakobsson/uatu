@@ -752,7 +752,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const identity = item as typeof item & ClaudeTextIdentity & OpenCodeExecutionIdentity;
     // Queued Claude frames share a token the provider may already have sealed.
     // Live projection must instead wait for its ordered status/turn boundary;
-    // history/snapshot reads still use the authoritative native token.
+    // history/snapshot reads use the immutable copy captured with native
+    // snapshot text/cursor by the adapter, before the service promise resolves.
     if (identity[CLAUDE_TURN]) return streaming && (orderedTurnState || !identity[CLAUDE_TURN].completed);
     if (identity[OPENCODE_EXECUTION_LIVE] !== undefined) return streaming && identity[OPENCODE_EXECUTION_LIVE] === true;
     const claudeBlock = Boolean(identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:"));
@@ -767,8 +768,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
     const streaming = isVisualTurnLive(snapshot.conversation);
     // Plan every row synchronously before the first await. In particular,
-    // token completion must describe the same boundary as this row's text,
-    // not a later result processed while an earlier file read was blocked.
+    // adapter-captured completion must describe the same boundary as this
+    // row's text. Retain all-row planning as well: no decision may wait for
+    // an earlier row's file capture, including other providers' metadata.
     const liveness = new Map<string, boolean>();
     const planned = snapshot.items.map((item, index) => {
       if (item.type !== "assistant_message") return { item, live: false };

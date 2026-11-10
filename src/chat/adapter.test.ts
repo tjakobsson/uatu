@@ -21,7 +21,7 @@ import type {
   StoredMessageAccounting,
 } from "./provider";
 import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
-import type { ChatCommand, ChatEvent, ChatModel, ConversationItem, MessageDelivery, ToolItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
+import type { ChatCommand, ChatEvent, ChatModel, ConversationItem, ConversationSnapshot, MessageDelivery, ToolItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
 import type { ConversationInventorySubscription } from "./inventory-broadcaster";
@@ -162,6 +162,184 @@ test("covered adapter history folds equal-JSON Claude completion and cannot retu
     expect((original as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
     expect(projection.replay.latestCursor()).toBe(cursor);
   } finally { await adapter.dispose(); }
+});
+
+test.each([
+  { entry: "subscribe", terminal: "completed", outcome: "complete" }, { entry: "history", terminal: "completed", outcome: "complete" },
+  { entry: "subscribe", terminal: "failed", outcome: "complete" }, { entry: "history", terminal: "failed", outcome: "complete" },
+  { entry: "subscribe", terminal: "interrupted", outcome: "complete" }, { entry: "history", terminal: "interrupted", outcome: "complete" },
+  { entry: "subscribe", terminal: "completed", outcome: "abort" }, { entry: "subscribe", terminal: "completed", outcome: "enrichment-failed" },
+] as const)("Claude $entry captures immutable turn evidence before the native promise gap and queued $terminal result ($outcome)", async ({ entry, terminal, outcome }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, "claude-snapshot-boundary-"));
+  const provider = new FakeProvider();
+  provider.agent = { id: "claude", name: "Claude", capabilities: [] };
+  provider.sessions = [fixtureSession("capture")];
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  const projection = adapter.projectionForTests("capture");
+  // A native history contribution containing the live-normalized rows. The
+  // adapter, replay, normalizer, router and persistent visual store are real.
+  provider.listMessages = async () => ({ items: projection.items(), accounting: [] });
+  const memory = createClaudeEventMemory();
+  let frame = 0;
+  const emit = (value: Record<string, unknown>) => {
+    const normalized = normalizeClaudeMessage({ uuid: `frame-${++frame}`, timestamp: frame, ...value }, memory, "live");
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => {
+      const ordered = terminal === "interrupted" && normalized.eventType === "result" && update.kind === "status"
+        ? { ...update, status: "interrupted" as const } : update;
+      const event = projection.apply(ordered);
+      return event ? [event] : [];
+    });
+  };
+  const stream = (event: Record<string, unknown>) => emit({ type: "stream_event", event });
+  const captured = Promise.withResolvers<ConversationSnapshot>(), gap = Promise.withResolvers<void>();
+  let hold: typeof entry | undefined;
+  const service = {
+    history: async (id: string, options?: { cursor?: string; limit?: number }) => {
+      const current = await adapter.history(id, options);
+      if (hold === "history") { hold = undefined; captured.resolve(current); await gap.promise; }
+      return current;
+    },
+    subscribe: async (id: string, options?: { cursor?: string; signal?: AbortSignal }) => {
+      const current = await adapter.subscribe(id, options);
+      if (hold === "subscribe") { hold = undefined; captured.resolve(current.snapshot); await gap.promise; }
+      return current;
+    },
+    dispose: () => adapter.dispose(),
+  } as unknown as WorkspaceChatService;
+  const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  let available = false;
+  const reads: Record<string, number> = {};
+  const store = new VisualStore(process.cwd(), directory);
+  store.setReader(async source => {
+    reads[source] = (reads[source] ?? 0) + 1;
+    if (!available) throw new VisualReadError(true);
+    return png;
+  });
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  const prefix = '![Later](later.png)\r\n\r\n```svg\r\n<svg><rect width="10"';
+  const close = '/></svg>\r\n```\r\n';
+  const svg = '<svg><rect width="10"/></svg>\r\n';
+  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+  const answer = (snapshot: { items: ConversationItem[] }, id: string) => {
+    const item = snapshot.items.find(item => item.id === id);
+    if (item?.type !== "assistant_message") throw new Error(`Missing assistant ${id}`);
+    return item;
+  };
+  let subscription: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
+  let loading: Promise<{ snapshot: ConversationSnapshot; events?: { cancel(): void } }> | undefined;
+  let restarted: MultiAgentChatService | undefined;
+  const abort = new AbortController();
+  let failEnrichment: { mockRestore(): void } | undefined;
+  try {
+    // For a history read, retain an already-attached ordered event consumer.
+    if (entry === "history") subscription = await router.subscribe("claude:capture");
+    projection.statusUpdate("running");
+    emit({ type: "assistant", uuid: "old", message: { id: "old-api", content: [{ type: "text", text: "![Old](old.png)" }] } });
+    emit({ type: "result", subtype: "success" });
+    projection.statusUpdate("running");
+    stream({ type: "message_start", message: { id: "svg-api" } });
+    const opened = stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })[0]!;
+    if (opened.type !== "item.upsert") throw new Error("expected native text opening");
+    const nativeToken = turn(opened.item);
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: prefix } });
+    const boundary = projection.replay.latestCursor();
+    hold = entry;
+    loading = entry === "subscribe"
+      ? router.subscribe("claude:capture", { signal: abort.signal }).then(value => { subscription = value; return value; })
+      : router.history("claude:capture").then(snapshot => ({ snapshot }));
+    void loading.catch(() => undefined); // Observe cancellation/rejection before triggering it.
+    const nativeSnapshot = await captured.promise;
+    const initialNative = answer(nativeSnapshot, opened.item.id);
+    expect(initialNative.markdown).toBe(prefix);
+    expect(nativeSnapshot.cursor).toBe(boundary);
+    expect(reads).toEqual({}); // No enrichment/file capture has started.
+    // Explicit microtask barrier at the real adapter -> service handoff, NOT
+    // inside enrichSnapshot or a visual file read. Close frames and result
+    // overtake the awaiting router before it sees this already-captured text.
+    await Promise.resolve();
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: close } });
+    stream({ type: "content_block_stop", index: 0 });
+    emit({ type: "assistant", uuid: "durable", message: { id: "svg-api", content: [{ type: "text", text: prefix + close }] } });
+    const ended = emit({ type: "result", subtype: "success", is_error: terminal === "failed" })[0]!;
+    expect(nativeToken.completed).toBe(true); // Native normalization still seals its own token.
+    expect(turn(initialNative)).not.toBe(nativeToken);
+    expect(Object.isFrozen(turn(initialNative))).toBe(true);
+    expect(turn(initialNative).completed).toBe(false);
+    expect(turn(answer(nativeSnapshot, "message:old")).completed).toBe(true);
+    if (outcome !== "complete") {
+      const expected = new Error("Enrichment failed after native snapshot capture");
+      if (outcome === "abort") abort.abort();
+      else failEnrichment = spyOn(router as unknown as { enrichSnapshot(snapshot: ConversationSnapshot): Promise<ConversationSnapshot> }, "enrichSnapshot").mockRejectedValueOnce(expected);
+      gap.resolve();
+      if (outcome === "abort") await expect(loading).rejects.toMatchObject({ name: "AbortError" });
+      else await expect(loading).rejects.toBe(expected);
+      // Drain the late native resolution too: neither it nor a rejected
+      // enrichment may resurrect history enrollment or leak a replay reader.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(projection.replay.subscriberCount()).toBe(0);
+      expect((router as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers.size).toBe(0);
+      expect((router as unknown as { visualHistoryReads: Set<unknown> }).visualHistoryReads.size).toBe(0);
+      expect(reads).toEqual({});
+      expect(turn(initialNative).completed).toBe(false);
+      return;
+    }
+    gap.resolve();
+    const loaded = await loading;
+    const initial = answer(loaded.snapshot, opened.item.id);
+    expect(loaded.snapshot.cursor).toBe(boundary);
+    expect(loaded.snapshot.conversation.status).toBe("running");
+    expect(initial.markdown).toBe(prefix);
+    expect(initial.visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
+    expect(answer(loaded.snapshot, "message:old").visuals?.[0]?.status).toBe("unavailable");
+    expect(reads).toEqual({ "old.png": 1, "later.png": 1 });
+
+    available = true;
+    const iterator = subscription!.events[Symbol.asyncIterator]();
+    const marker = projection.replay.publish({ type: "conversation.configuration", configuration: {} });
+    const received: ChatEvent[] = [];
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) throw new Error("stream ended before ordered native barrier");
+      if (next.value.type === marker.type && next.value.sequence === marker.sequence) break;
+      received.push(next.value);
+    }
+    expect(received.find(event => event.type === "conversation.status" && event.sequence === ended.sequence)).toEqual({ ...ended, conversationId: "claude:capture" });
+    const completed = await router.history("claude:capture");
+    const final = answer(completed, "message:durable");
+    expect(final.markdown).toBe(prefix + close);
+    expect(final.visuals?.map(visual => visual.status)).toEqual(["ready", "ready"]);
+    const ready = received.find(event => event.type === "item.upsert" && event.item.id === final.id);
+    expect(ready).toMatchObject({ type: "item.upsert", item: { visuals: [{ status: "pending" }, { status: "ready", id: final.visuals![1]!.id }] } });
+    const closedStream = received.find(event => event.type === "item.upsert" && event.item.id === opened.item.id && event.item.type === "assistant_message" && event.item.markdown === prefix + close);
+    expect(closedStream).toMatchObject({ type: "item.upsert", item: { visuals: [{ status: "pending" }, { status: "ready", id: final.visuals![1]!.id }] } });
+    for (const event of received) if (event.type === "item.upsert" && event.item.type === "assistant_message") {
+      expect(event.item.visuals?.some(visual => visual.message === "Image source changed" || visual.message === "SVG block is unfinished")).not.toBe(true);
+    }
+    expect(reads).toEqual({ "old.png": 1, "later.png": 2 }); // One actual-turn-end missing retry.
+    expect(answer(completed, "message:old").visuals?.[0]?.status).toBe("unavailable");
+    expect(initial.visuals?.map(visual => visual.status)).toEqual(["pending", "pending"]);
+    expect(turn(initialNative).completed).toBe(false); // Old external snapshot reference remains immutable.
+    const capturedSvg = await router.resolveVisual(final.visuals![1]!.id!);
+    expect(capturedSvg?.sourceBytes).toEqual(new TextEncoder().encode(svg));
+    expect((await router.resolveVisual(final.visuals![0]!.id!))?.bytes).toEqual(png);
+    const reloadedStore = new VisualStore(process.cwd(), directory);
+    reloadedStore.setReader(async () => { throw new Error("immutable captures must not reread future-turn bytes"); });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    const reloaded = answer(await restarted.history("claude:capture"), final.id);
+    expect(reloaded.visuals).toEqual(final.visuals);
+    expect(await restarted.resolveVisual(reloaded.visuals![1]!.id!)).toEqual(capturedSvg);
+    expect(reads).toEqual({ "old.png": 1, "later.png": 2 });
+  } finally {
+    gap.resolve();
+    await loading?.then(value => value.events?.cancel(), () => undefined);
+    subscription?.events.cancel();
+    failEnrichment?.mockRestore();
+    await restarted?.dispose(); await router.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test.each([

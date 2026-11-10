@@ -2034,7 +2034,7 @@ export class ChatAdapter {
       // before those publications can force another full read on every event.
       // Legacy reads have no change fence and still need the earlier cursor.
       cursor: coverage ? projection.replay.latestCursor() : replayCursor,
-      items,
+      items: snapshotClaudeTurns(items),
       // A client joining or reloading mid-run gets the same held queue a
       // client that watched it build presents.
       queued: this.queuedMessages(id),
@@ -2059,7 +2059,7 @@ export class ChatAdapter {
         configuration,
         generation: this.generation,
         cursor,
-        items: projection.items(),
+        items: snapshotClaudeTurns(projection.items()),
         queued: this.queuedMessages(id),
         ...(currentReversibleHistory ? { reversibleHistory: currentReversibleHistory } : {}),
       };
@@ -7486,6 +7486,22 @@ function latestModel(byMessage: Map<string, MessageModel> | undefined): string |
     }
   }
   return latest?.value.model;
+}
+
+/** Capture turn evidence with the snapshot's text/cursor, before returning its
+ * promise. Native result normalization may seal a shared token before any
+ * awaiting service/router resumes. Never freeze or mutate that native token:
+ * queued frames still need it, and ordered status sealing replaces retained
+ * rows independently. Copies belong only to this bounded snapshot. */
+function snapshotClaudeTurns(items: ConversationItem[]): ConversationItem[] {
+  const turns = new Map<ClaudeTurn, ClaudeTurn>();
+  return items.map(item => {
+    const turn = (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
+    if (!turn || Object.isFrozen(turn)) return item;
+    let captured = turns.get(turn);
+    if (!captured) { captured = Object.freeze({ completed: turn.completed }); turns.set(turn, captured); }
+    return { ...item, [CLAUDE_TURN]: captured };
+  });
 }
 
 /** Native row ids do not move between turns. Once closed, stale history cannot reopen one. */

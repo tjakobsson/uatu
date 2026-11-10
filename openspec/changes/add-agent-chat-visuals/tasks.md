@@ -118,6 +118,7 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.42 Correct the mixed raw-HTML regression exposed by `29a53e79`: inert script/comment/quoted-attribute text must not become imported image references or steal actual image source identities. Preserve the large-input linear annotation budget and exact real-image attributes.
 - [ ] 6.43 Preserve Source-tab and focused-control state for generating SVGs before a capture ID exists, using logical occurrence identity. Streamed source must keep updating, and pending-to-ready transitions must preserve user choice without reloading retained previews or stealing focus.
 - [ ] 6.44 Seal retained history-owned Claude turn metadata at ordered terminal projection boundaries even without a visual subscriber. Replace retained rows/tokens rather than mutating earlier frames, preventing a later turn's file from being captured into an older answer.
+- [ ] 6.45 Freeze Claude turn liveness with native snapshot text and cursor, before the asynchronous handoff to enrichment. Closing frames queued in that gap must complete an initially pending SVG without poisoning its immutable capture; retain terminal historical rows and cancellation cleanup.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including
