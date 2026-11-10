@@ -56,11 +56,11 @@ type StopValidation = {
 };
 type OwnershipCheck = { child: string; parent: string; changed: boolean; contradicted?: (actualParent?: string) => void };
 type ControlBasis = { basis: WorkerOccurrenceEvidence; revision: number };
-type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis>; activityEnded: ReadonlySet<string>; activityPublished: Set<string>; parentChanges: ReadonlySet<string> };
+type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis>; activityEnded: ReadonlySet<string>; activityPublished: Set<string>; parentChanges: ReadonlySet<string>; childChanges: ReadonlySet<string> };
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
 type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
-type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string> };
+type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { completed: number; launches: readonly LauncherEvidence[] }; historyParentChanges: Set<string>; historyChildChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Set<string>; historyActivityEnded: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { completed: number; signature: string }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string> };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 
 export function createOpenCodeV2Provider(options: {
@@ -541,7 +541,7 @@ export class OpenCodeV2Provider implements ChatProvider {
           for (const source of historySources) {
             const dependencies = source.historyChildren ??= new Map();
             dependencies.set(child, (dependencies.get(child) ?? 0) + 1);
-            (source.historyParentLaunches ??= new Map()).set(child, competitionLaunches.filter(fact => fact.reportedChild === child));
+            (source.historyParentLaunches ??= new Map()).set(child, competitionLaunches.filter(fact => fact.workerType === "agent" && counterproofChild(fact) === child));
             (source.historyActivityChildren ??= new Set()).add(child);
           }
           const complete = await this.allMessages(child, signal);
@@ -562,7 +562,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             && (message.outcome === "succeeded" || message.outcome === "failed" || message.outcome === "interrupted"))) {
             for (const source of historySources) {
               (source.historyPositiveChildren ??= new Set()).add(child);
-              if (source.historyParentChanges?.has(child)) source.revision++;
+              if (source.historyParentChanges.has(child) || source.historyChildChanges.has(child)) source.revision++;
             }
             const lookup = await this.lookupChild(child, signal);
             if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Child history ownership unavailable");
@@ -632,7 +632,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       competitors = completeWorkers.evidenceSnapshot();
     }
     const counterInvocations = competitionLaunches.filter(fact => {
-      const child = fact.reportedChild ?? fact.requestedChild;
+      const child = counterproofChild(fact);
       return fact.workerType === "agent" && fact.background !== true && child !== undefined && verified.has(child);
     });
     for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations)) if (update.kind === "upsert") {
@@ -690,6 +690,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (!live || live.uncertain || !live.executionStart) children.push(task.childConversationId);
       }
       if (children.some(child => snapshot.parentChanges.has(child))) throw new Error("Background launch inventory changed during recovery");
+      if (children.some(child => snapshot.childChanges.has(child))) throw new Error("Background child history changed during recovery");
       for (const child of children) snapshot.activityPublished.add(child);
       return tasks;
     };
@@ -993,7 +994,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.eventMemory?.workers.enforceBudget();
     publishSource();
     if (!source.guard.isCurrent()) throw new Error("Background ownership changed during recovery");
-    return { tasks: projected, occurrences: folded.occurrences, activityEnded: source.activityEnded, activityPublished: source.activityPublished, parentChanges: source.parentChanges, controls: new Map(projected.flatMap(item => {
+    return { tasks: projected, occurrences: folded.occurrences, activityEnded: source.activityEnded, activityPublished: source.activityPublished, parentChanges: source.parentChanges, childChanges: source.childChanges, controls: new Map(projected.flatMap(item => {
       const proof = this.controls.proof(item.taskId);
       return proof ? [[item.taskId, proof] as const] : [];
     })) };
@@ -1043,6 +1044,20 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (item.status === "running" && item.activity?.kind !== "ended" && occurrence) {
       const current = this.currentWorkerActivity(occurrence);
       if (current) item = { ...item, activity: current };
+      else {
+        const retained = this.eventMemory?.workers.occurrence(occurrence.taskId);
+        if (item.activity && retained && !retained.uncertain && retained.parent === occurrence.parent
+          && retained.worker === occurrence.worker && retained.kind === occurrence.kind
+          && retained.launches.length > occurrence.launches.length
+          && occurrence.launches.every(launch => retained.launches.some(candidate =>
+            sameLauncherIdentity(candidate, launch) || sameLauncherIdentity(retainLauncherEvidence(candidate, launch), launch)))) {
+          // A newer native alias cohort cannot lend authority to this older
+          // row. Keep it inspectable, but withdraw activity rather than treating
+          // the lost exact match as newly independent history-only evidence.
+          const { launchRef: _launchRef, request: _request, ...activity } = item.activity;
+          item = { ...item, stateUncertain: true, activity: { ...activity, kind: "unavailable" } };
+        }
+      }
     }
     // Missing Stop proof, partial identity and projection saturation are not
     // activity contradictions. Only native negative provenance withdraws A.
@@ -1367,7 +1382,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private beginWorkerSourceRead(parent: string, caller?: AbortSignal, isCurrent: () => boolean = () => true, pendingText = false) {
-    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityEnded: new Set(), historyPublishedActivity: new Set(), historyParentChanges: new Set(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
+    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityEnded: new Set(), historyPublishedActivity: new Set(), historyParentChanges: new Set(), historyChildChanges: new Set(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
     const deadline = AbortSignal.any([this.readLifetime.signal, AbortSignal.timeout(25_000)]);
     const initialOwner = new AbortController();
     const initialSignal = AbortSignal.any([deadline, initialOwner.signal, ...(caller ? [caller] : [])]);
@@ -1391,6 +1406,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       activityEnded: source.historyActivityEnded as ReadonlySet<string>,
       activityPublished: source.historyPublishedActivity,
       parentChanges: source.historyParentChanges as ReadonlySet<string>,
+      childChanges: source.historyChildChanges as ReadonlySet<string>,
       // A snapshot is a view of the owner's current revision. Only a retained
       // consumer allocates a lease; retries do not accumulate owner leases.
       snapshot: () => ({ workerSource: view(initialSignal, source.revision), contradictedChildren: contradictions() }),
@@ -1567,7 +1583,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     // and reconnect starts cold because V2 offers no provider event replay.
     signal.throwIfAborted();
     const owners = [...this.historyWorkerSources].filter(source => source.parent === sessionId && source.phase === "collecting");
-    const childOwners = [...this.historyWorkerSources].filter(source => source.historyChildren?.has(sessionId) && source.phase === "collecting");
+    const childOwners = [...this.historyWorkerSources].filter(source => (source.historyChildren?.has(sessionId) || source.historyActivityChildren?.has(sessionId)) && source.phase === "collecting");
     const messages = await this.historyReuse.readShared(sessionId, this.streamConnected ? String(this.streamGeneration) : undefined,
       ownerSignal => {
         const sharedSignal = this.readSignal(ownerSignal);
@@ -1577,7 +1593,8 @@ export class OpenCodeV2Provider implements ChatProvider {
     const order = this.historyReadOrders.get(messages)!;
     // Every native transcript consumer can discover outcome counterproof,
     // including direct child history, accounting and inspection reads.
-    const childSources = [...this.historyWorkerSources].filter(source => source.historyChildren?.has(sessionId) || source.historyPublishedActivity.has(sessionId));
+    const childSources = [...this.historyWorkerSources].filter(source => source.historyChildren?.has(sessionId)
+      || source.historyActivityChildren?.has(sessionId) || source.historyPublishedActivity.has(sessionId));
     if (childSources.length || childOwners.length) {
       const observation = { completed: order.completed, signature: historyVersion(messages.filter(message => message.type === "idle")
         .map(message => [messageIdentity(message), asRecord(message.time).created, message.outcome])
@@ -1585,8 +1602,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       for (const source of childSources) {
         const previous = source.historyObservations?.get(sessionId);
         if (!previous || previous.signature === observation.signature) continue;
-        if (order.started > previous.completed) source.revision++;
-        else for (const owner of childOwners) owner.revision++;
+        for (const target of order.started > previous.completed ? [source] : childOwners) {
+          target.historyChildChanges.add(sessionId);
+          if (dependsOnWorkerHistory(target, sessionId)) target.revision++;
+        }
       }
       for (const source of childOwners) if (!source.historyObservations?.has(sessionId)
         || order.completed >= source.historyObservations.get(sessionId)!.completed)
@@ -1596,21 +1615,23 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (!owners.length && !sources.some(source => source.historyParentRead)) return messages;
     const launches = messages.flatMap(message => [...prepareStoredMessage(message).tools.values()].map(tool => tool.fact));
     const signature = (facts: readonly LauncherEvidence[], child: string) => historyVersion([...new Set(facts
-      .filter(fact => fact.workerType === "agent" && (fact.reportedChild === child || fact.requestedChild === child))
+      .filter(fact => fact.workerType === "agent" && counterproofChild(fact) === child)
       .map(fact => JSON.stringify([fact.call, fact.message, fact.child, fact.reportedChild, fact.requestedChild, fact.background,
         fact.created, fact.ran, fact.completed ?? fact.reportedCompletion, fact.inputFingerprint])))].sort());
     for (const source of sources) {
       if (!source.historyParentRead) continue;
       const previous = source.historyParentRead;
-      const children = new Set([...previous.launches, ...launches].flatMap(fact =>
-        fact.workerType === "agent" ? [fact.reportedChild, fact.requestedChild].filter((child): child is string => child !== undefined) : []));
+      const children = new Set([...previous.launches, ...launches].flatMap(fact => {
+        const child = counterproofChild(fact);
+        return fact.workerType === "agent" && child !== undefined ? [child] : [];
+      }));
       for (const child of children) {
         if (signature(previous.launches, child) === signature(launches, child)) continue;
         // Only a nonoverlapping native read can supersede earlier evidence.
         // An overlapping stale response instead withdraws its own inference.
         for (const target of order.started > previous.completed ? [source] : owners) {
           target.historyParentChanges.add(child);
-          if (dependsOnParentLaunches(target, child)) target.revision++;
+          if (dependsOnWorkerHistory(target, child)) target.revision++;
         }
       }
     }
@@ -1765,7 +1786,7 @@ export class OpenCodeV2Provider implements ChatProvider {
                 if (evidence.launchers.some(fact => {
                   if (fact.historical) return false;
                   const previous = launches.find(launch => launch.call === fact.call);
-                  if (!previous) return fact.workerType === "agent" && (fact.reportedChild === child || fact.requestedChild === child);
+                  if (!previous) return fact.workerType === "agent" && counterproofChild(fact) === child;
                   // Sparse progress and exact replays do not alter attribution.
                   // New native identity, classification or admission facts do.
                   return fact.conflicted || (["message", "workerType", "child", "reportedChild", "requestedChild", "background", "created", "ran", "inputFingerprint"] as const)
@@ -1774,7 +1795,7 @@ export class OpenCodeV2Provider implements ChatProvider {
                       && (fact.completed ?? fact.reportedCompletion) !== (previous.completed ?? previous.reportedCompletion);
                 })) {
                   source.historyParentChanges.add(child);
-                  if (dependsOnParentLaunches(source, child)) source.revision++;
+                  if (dependsOnWorkerHistory(source, child)) source.revision++;
                 }
               }
             }
@@ -2904,7 +2925,12 @@ function syntheticNoticeIdentities(messages: StoredMessage[]): Set<string> {
     ? normalizeStoredMessage(message).filter(item => item.type === "notice").map(item => item.id) : []));
 }
 
-function dependsOnParentLaunches(source: HistoryWorkerSource, child: string): boolean {
+/** Veto target only: requested intent never establishes ownership or read scope. */
+function counterproofChild(fact: LauncherEvidence): string | undefined {
+  return fact.reportedChild ?? fact.requestedChild;
+}
+
+function dependsOnWorkerHistory(source: HistoryWorkerSource, child: string): boolean {
   return source.historyPublishedActivity.has(child)
     || source.historyPositiveChildren?.has(child) === true && source.historyChildren?.has(child) === true;
 }

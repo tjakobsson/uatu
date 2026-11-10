@@ -1189,6 +1189,9 @@ same owned child, without becoming worker rows or outcome targets. Pending or
 running calls that only request that independently owned child are veto-only
 evidence too: they establish no ownership, requested-child reads, rows or
 controls, and a reported accepted child takes precedence over requested intent.
+The relevant baseline retains those requested-child facts too, using the same
+veto-target selection as replay and native-read comparison. Identical snapshots
+therefore preserve source authority; changed native facts still revoke it.
 The complete parent history supplies these vetoes even for hidden invocations. Read-owned
 sources retain the consumed parent launch inventory: a processed new or changed
 relevant launcher revokes dependent outcome recovery before publication, while
@@ -1250,9 +1253,17 @@ child-history or parent-launch counterproof revokes the returned guard, includin
 automatic recovery awaits interactions. Before return, deny-only activity
 withdrawal still permits fresh outcome folding; retained live occurrences keep
 their independent current-lifecycle projection and Stop rules.
+If a compatible retained alias cohort grows while an older row is awaiting
+publication, the older row stays inspectable with activity unavailable. Neither
+activity nor Stop projection borrows the newer cohort's valid basis.
 Native-read and SSE parent-launch counterproof use the same dependency predicate
 for outcomes and returned activity. A source with already observed launch
 counterproof cannot acquire new history-only activity publication authority.
+Activity-only child observation also remains continuous before return, including
+the final parent lookup. Ordered idle counterproof is retained during that
+window without blanket invalidation of prepublication Stop reads; acquiring
+outcome or history-only activity authority checks the retained counterproof.
+After return, the same change revokes the retained publication dependency.
 Staged-parent visibility rereads own an additional bounded source lease, since
 their visible/full-history folds can first consume an outcome after the inventory
 source is captured. That lease is published to source observers and checked

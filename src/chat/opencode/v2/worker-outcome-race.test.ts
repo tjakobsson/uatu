@@ -2,6 +2,182 @@ import { expect, test } from "bun:test";
 import { createOpenCodeV2Provider } from "./provider";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 import { ChatAdapter } from "../../adapter";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+test("an overlapping stale child read and transport reuse preserve newer owned working activity", async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reads = 0;
+  let entered!: () => void, release!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${child}/message`) {
+      const first = ++reads === 1;
+      if (first) { entered(); await held; }
+      return Response.json({ data: first ? [{ id: "stale-boundary", type: "idle", time: { created: Date.now() + 1_000 } }] : [], cursor: {} });
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const firstAbort = new AbortController(), abort = new AbortController(), guards: import("../../provider").WorkerSourceGuard[] = [];
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined, stale: ReturnType<typeof provider.listMessages> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Newer working source ordering")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = (async () => { for await (const _event of provider.events(abort.signal)) {} })();
+    await provider.waitForEventStream!(abort.signal);
+    stale = provider.listMessages(child, { limit: 100, signal: abort.signal });
+    await reading;
+    const current = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal,
+      onSource: source => guards.push(source.workerSource.retain(abort.signal)) });
+    expect(current).toContainEqual(expect.objectContaining({ taskId: worker.taskId, activity: expect.objectContaining({ kind: "working", generation: 2 }) }));
+    release(); await stale;
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    const reused = await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal });
+    expect(reused).toContainEqual(expect.objectContaining({ taskId: worker.taskId, activity: expect.objectContaining({ kind: "working", generation: 2 }) }));
+    expect(reads).toBe(2);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+  } finally { release(); firstAbort.abort(); abort.abort(); await firstPump; await pump; await stale?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const read of ["provider", "automatic-recovery"] as const)
+for (const change of ["completed", "bare-boundary", "append"] as const)
+test(`${read} retains activity-only child observation through the final parent lookup (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, changed = false, captured = false, heldOnce = false;
+  let entered!: () => void, release!: () => void;
+  const atPublication = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${child}/message`) return Response.json({ data: !changed ? [] : change === "append"
+      ? [{ id: "later-assistant", type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Still working" }] }]
+      : [{ id: "child-boundary", type: "idle", time: { created: Date.now() + 1_000 }, ...(change === "completed" ? { outcome: "succeeded" } : {}) }], cursor: {} });
+    if (route === `/api/session/${parent}` && captured && !heldOnce) { heldOnce = true; entered(); await held; }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+  provider.reconcileBackgroundTasks = (id, options) => nativeRecovery(id, { ...options, onSource: source => {
+    options?.onSource?.(source); captured = true;
+  } });
+  const adapter = read === "automatic-recovery" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }) : undefined;
+  const firstAbort = new AbortController(), abort = new AbortController();
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined, pending: Promise<unknown> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Prepublication child observation continuity")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    if (adapter) pump = adapter.startEventPump();
+    else {
+      pump = (async () => { for await (const _event of provider.events(abort.signal)) {} })();
+      await provider.waitForEventStream!(abort.signal);
+      pending = provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    }
+    void pending?.catch(() => undefined); await atPublication;
+    if (adapter) {
+      // Subscribe after startup so this case observes the scheduler itself,
+      // without startup's selected-projection history() reconciliation.
+      const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+      pending = (async () => { for await (const event of subscription.events) {
+        if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
+      } throw new Error("No automatic worker publication"); })();
+      void pending.catch(() => undefined);
+    }
+    changed = true;
+    if (change !== "append") fake.workerObservation(child, false);
+    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    expect(current.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe(change === "completed" ? "ended" : change === "bare-boundary" ? "unavailable" : "working");
+    release();
+    const result = await pending!.then(value => ({ value }), error => ({ error }));
+    if (adapter) {
+      expect(result).toMatchObject({ value: expect.objectContaining({ taskId: worker.taskId, activity: expect.objectContaining({ kind: change === "completed" ? "ended" : change === "bare-boundary" ? "unavailable" : "working" }) }) });
+    } else if (change === "append") expect(result).toMatchObject({ value: [expect.objectContaining({ taskId: worker.taskId, activity: expect.objectContaining({ kind: "working", generation: 2 }) })] });
+    else expect(result).toMatchObject({ error: expect.any(Error) });
+  } finally { release(); firstAbort.abort(); abort.abort(); if (adapter) await adapter.dispose(); else await provider.dispose!(); await firstPump; await pump; await pending?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
+for (const read of ["provider-guard", "history", "workerEvidence"] as const)
+for (const mutation of ["replay", "changed-facts"] as const)
+test(`${read} progresses through repeated requested-child snapshots (${mutation})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, consumed = false, streaming = false, changed = false, updates = 0;
+  let requested: any, wire!: ReadableStreamDefaultController<Uint8Array>;
+  const explicitRead = new AsyncLocalStorage<boolean>();
+  const barriers = new Map<string, () => void>();
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 35, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
+      first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      requested = structuredClone(first); requested.id = "requested-message"; requested.time = { created: changed ? 15 : 30 };
+      const tool = requested.content[0]; tool.id = "requested-call"; tool.time = { created: changed ? 15 : 30, ran: changed ? 16 : 31 };
+      tool.state.status = "pending"; tool.state.input.sessionID = child; tool.state.metadata = {};
+      return Response.json({ data: [first, requested], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      consumed = true;
+      return Response.json({ data: [{ id: "child-outcome", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
+    }
+    if (route === `/api/session/${parent}` && consumed && streaming && explicitRead.getStore()) {
+      const diagnostic = `diagnostic.requested-replay-${++updates}`;
+      const observed = new Promise<void>(resolve => { barriers.set(diagnostic, resolve); request.signal.addEventListener("abort", () => resolve(), { once: true }); });
+      const content = structuredClone(requested.content);
+      if (mutation === "changed-facts") { changed = true; content[0].time = { created: 15, ran: 16 }; }
+      // Every attempt overlaps snapshots, so a retry cannot buy quiet output.
+      for (let index = 0; index < 3; index++) frame("session.message.content.updated", { sessionID: parent, messageID: requested.id, content });
+      frame(diagnostic, {}); await observed;
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeEvents = provider.events.bind(provider);
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { barriers.get(event.eventType)?.(); yield event; } };
+  const adapter = read === "provider-guard" ? undefined : new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 1_000 });
+  const abort = new AbortController();
+  let pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Requested-child replay progress")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId; fake.settleWorker(child, "completed", "No parent report");
+    if (adapter) await adapter.history(parent);
+    else { pump = (async () => { for await (const _event of provider.events(abort.signal)) {} })(); await provider.waitForEventStream!(abort.signal); }
+    streaming = true;
+    if (adapter) {
+      const result = await explicitRead.run(true, () => adapter[read === "history" ? "history" : "workerEvidence"](parent!));
+      if ("items" in result) expect(result.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: mutation === "replay" ? "completed" : "running" }));
+      else {
+        expect(result).toMatchObject({ conversationId: parent, complete: true });
+        // Compact evidence also includes the pending tool's own dismissal row.
+        expect(result.entries).toHaveLength(2);
+        expect(result.entries).toContainEqual(expect.objectContaining({ executionId: "worker-dismissal:tool:requested-call", active: false }));
+        expect(result.entries.filter(entry => entry.executionId.startsWith("v1:"))).toHaveLength(1);
+      }
+    } else {
+      const guards: import("../../provider").WorkerSourceGuard[] = [];
+      const result = await explicitRead.run(true, () => provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal, onSource: source => guards.push(source.workerSource.retain(abort.signal)) }))
+        .then(tasks => ({ tasks }), error => ({ error }));
+      if (mutation === "replay") {
+        expect(result).toMatchObject({ tasks: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] });
+        expect(guards.every(guard => guard.isCurrent())).toBe(true);
+      } else { expect(result).toMatchObject({ error: expect.any(Error) }); expect(guards.some(guard => !guard.isCurrent())).toBe(true); }
+    }
+    expect(updates).toBeGreaterThan(0);
+  } finally { streaming = false; abort.abort(); await pump; if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
+}, 10_000);
 
 for (const path of ["native-read", "stream"] as const)
 for (const change of ["competing", "ordinary-output", "other-child"] as const)

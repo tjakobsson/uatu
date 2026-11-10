@@ -43,6 +43,9 @@ act only as vetoes; they cause no requested-child ownership checks or reads, and
 a reported accepted child overrides requested intent. Changes to the consumed parent
 launch inventory revoke dependent outcome sources; ordinary parent output and
 unchanged launcher replays do not require a quiet window.
+Requested-child veto facts remain in that baseline with reported-child
+precedence, so repeating the same pending snapshot does not restart a covered
+history/evidence read. Changed facts still fence the old source.
 Fresh parent-history reads provide the same scoped counterproof before SSE:
 nonoverlapping reads can revoke an older launch inventory, while conflicting
 overlapping responses cannot supersede later consumed evidence. Native read
@@ -64,6 +67,13 @@ Returned history-only activity remains covered through that handoff too: later
 terminal events, ordered child-history reads and relevant parent-launch
 counterproof (native read or SSE) revoke its source rather
 than merely changing an activity value already projected before return.
+Outcome-free child observations remain watched through prepublication awaits
+too. Native idle counterproof is retained for the eventual activity handoff,
+without invalidating unrelated output or prepublication Stop reads merely
+because a dependency is still being collected.
+An older row superseded by a larger compatible retained alias cohort remains
+inspectable but unavailable; it cannot borrow that cohort's activity or Stop
+authority.
 The handoff deadline starts at native source capture, not queue/ownership IO.
 Cancellation releases authority without increasing concurrency over an old
 transport still draining. Identical pending-notice replays preserve authority;

@@ -7525,6 +7525,7 @@ test("post-boundary control projection cannot borrow a newer valid alias basis",
     expect(old?.toolUseIds).toBeUndefined(); expect(old?.control?.available).toBe(false);
     expect(old?.stateUncertain).toBe(true); expect(workerCanStop(old!)).toBe(false);
     expect(old?.control?.reason).toBeString();
+    expect(old?.activity?.kind).toBe("unavailable");
   } finally { release(); await pending?.catch(() => undefined); lifetime.abort(); await pump; await provider.dispose(); }
 });
 
