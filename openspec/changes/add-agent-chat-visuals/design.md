@@ -147,6 +147,13 @@ When recovering an existing shared conversation transport, the Hub forwards
 `reconnect=1` with the last known cursor, including an origin learned before
 the first chat-data frame. Fresh opens remain unflagged, avoiding a resync loop
 after a successful history refresh.
+Browser recovery intent is retained per attachment, including subscriptions
+deferred by the stream URL budget. Such conversation control additions carry
+optional `reconnect: true` with their bounded nonempty cursor; fresh additions
+omit it. Explicit post-history resubscription clears the intent even when its
+cursor is unchanged. The endpoint validates the conversation-only boolean and
+forwards only that attachment's intent. This requires the updated Hub; an older
+Hub may ignore the optional field and cannot guarantee equal-cursor repair.
 
 ### Keep visual interaction within the existing chat surface
 

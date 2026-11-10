@@ -224,6 +224,11 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **THEN** the original terminal status and visual reconciliation are delivered before recovery is considered complete
 - **AND** an absent reconciliation trailer triggers bounded cancellation and fresh-snapshot recovery rather than a successful merge
 
+#### Scenario: Browser recovery subscriptions exceed the stream URL budget
+- **WHEN** a retained conversation subscription must be added through the control route after a browser reconnect
+- **THEN** that addition retains its own validated recovery intent across retries and supersession
+- **AND** explicit post-history resubscription clears that intent even at the same cursor, without affecting fresh additions in the same batch
+
 #### Scenario: Completed and live Claude turns appear in paged history
 - **WHEN** history is loaded while a newer Claude turn is running
 - **THEN** visuals in completed turns are terminal independently of the current conversation status

@@ -300,7 +300,9 @@ export class LiveEndpoint {
     // queue), so `ended` is re-read before each one.
     for (const subscription of query.subs) {
       if (stream.ended) break;
-      this.attach(stream, subscription);
+      // Opening subscriptions use their validated override or the stream's
+      // recovery default. Control adds below use only their own explicit flag.
+      this.attach(stream, subscription, subscription.reconnect ?? query.reconnect);
     }
     if (query.activity && !stream.ended) this.attachActivity(stream);
     return new Response(body, { status: 200, headers: STREAM_HEADERS });
@@ -331,7 +333,7 @@ export class LiveEndpoint {
       // An add replays onto the queue; on a nearly full one that ends the
       // stream, and the later adds must not attach to the corpse.
       if (stream.ended) break;
-      this.attach(stream, subscription);
+      this.attach(stream, subscription, subscription.reconnect === true);
     }
     return json(200, { ok: true });
   }
@@ -376,7 +378,7 @@ export class LiveEndpoint {
   // stream and never detached: its upstream would never linger out and
   // would pin a child fetch for the hub's lifetime. Detach such a handle at
   // once instead.
-  private attach(stream: ClientStream, subscription: LiveSubscription): void {
+  private attach(stream: ClientStream, subscription: LiveSubscription, reconnect = false): void {
     const id = liveSubscriptionId(subscription);
     // `add` of a subscribed key replaces it: re-attach from the new cursor,
     // and nothing queued for the old attachment survives.
@@ -386,8 +388,13 @@ export class LiveEndpoint {
       this.writePersonal(stream);
       return;
     }
-    const attachment = this.deps.broker.subscribe(stream, stream.workspaceId, subscription);
-    if (stream.ended) {
+    // A recovering attachment can synchronously resync and delete its record.
+    // Reserve the slot first so that terminal signal cannot leave a dead
+    // handle in the set (or attach it again as transport recovery after read).
+    const pending: LiveAttachment = { detach() {} };
+    stream.subscriptions.set(id, pending);
+    const attachment = this.deps.broker.subscribe(stream, stream.workspaceId, subscription, { reconnect });
+    if (stream.ended || stream.subscriptions.get(id) !== pending) {
       attachment.detach();
       return;
     }

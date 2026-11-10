@@ -102,6 +102,44 @@ describe("subscription control body", () => {
   });
 });
 
+describe("per-subscription transport recovery", () => {
+  test.each([true, false])("opening and control subscriptions retain validated reconnect=%s", reconnect => {
+    const subscription = { topic: "conversation", key: "opencode:c", cursor: "same-terminal-cursor", reconnect };
+    expect(parseLiveSubscriptionChange({ add: [subscription] })).toEqual({ add: [subscription] });
+    expect(parseLiveStreamQuery(new URLSearchParams({ subs: JSON.stringify([subscription]) }))).toMatchObject({ subs: [subscription] });
+  });
+  test("omission and false remain fresh without adding any default recovery marker", () => {
+    expect(parseLiveSubscriptionChange({ add: [{ topic: "conversation", key: "c" }] })).toEqual({ add: [{ topic: "conversation", key: "c" }] });
+    expect(parseLiveSubscriptionChange({ add: [{ topic: "conversation", key: "c", reconnect: false }] })).toEqual({ add: [{ topic: "conversation", key: "c", reconnect: false }] });
+  });
+  test.each(["true", 1, 0, null, [], {}])("nonboolean reconnect %j is refused on opening and control paths", reconnect => {
+    const subscription = { topic: "conversation", key: "c", cursor: "native", reconnect };
+    expect(parseLiveSubscriptionChange({ add: [subscription] })).toHaveProperty("error");
+    expect(parseLiveStreamQuery(new URLSearchParams({ subs: JSON.stringify([subscription]) }))).toHaveProperty("error");
+  });
+  test("a present undefined recovery marker is not treated as omission", () => {
+    expect(parseLiveSubscriptionChange({ add: [{ topic: "conversation", key: "c", cursor: "native", reconnect: undefined }] })).toHaveProperty("error");
+  });
+  test.each([undefined, null, "", 3, "x".repeat(LIVE_MAX_CURSOR_BYTES + 1)])("true recovery refuses missing, empty, malformed or oversized cursor %j", cursor => {
+    const subscription = { topic: "conversation", key: "c", cursor, reconnect: true };
+    expect(parseLiveSubscriptionChange({ add: [subscription] })).toHaveProperty("error");
+    expect(parseLiveStreamQuery(new URLSearchParams({ subs: JSON.stringify([subscription]) }))).toHaveProperty("error");
+  });
+  test.each(["document", "inventory", "worktrees", "personal"])("%s cannot carry either boolean recovery marker", topic => {
+    for (const reconnect of [false, true]) {
+      const subscription = { topic, cursor: "native", reconnect };
+      expect(parseLiveSubscriptionChange({ add: [subscription] })).toHaveProperty("error");
+      expect(parseLiveStreamQuery(new URLSearchParams({ subs: JSON.stringify([subscription]) }))).toHaveProperty("error");
+    }
+  });
+  test("the cursor bound and last-add-wins semantics also apply to recovery", () => {
+    const subscription = { topic: "conversation", key: "c", cursor: "x".repeat(LIVE_MAX_CURSOR_BYTES), reconnect: true };
+    expect(parseLiveSubscriptionChange({ add: [subscription] })).toEqual({ add: [subscription] });
+    const fresh = { topic: "conversation", key: "c", cursor: subscription.cursor };
+    expect(parseLiveSubscriptionChange({ add: [subscription, fresh] })).toEqual({ add: [fresh] });
+  });
+});
+
 describe("activity summary", () => {
   test("keeps exactly the four facts and drops everything else", () => {
     expect(sanitizeWorkspaceActivity({ running: true, working: true, awaiting: false, finished: false, title: "secret", conversationId: "c1" }))

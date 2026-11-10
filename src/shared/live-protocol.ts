@@ -24,7 +24,9 @@
 //              the control route after `hello` — the same attach, from the
 //              same cursor.
 //   reconnect  "1" when this stream replaces one the client lost
-//              (diagnostics only — never changes behaviour).
+//              (also retained for lifecycle diagnostics). Opening conversation
+//              attachments reconcile possibly lost same-cursor visual resyncs.
+//              Later control adds do not inherit this stream-level intent.
 //
 // Response frames, in order:
 //   `: open`                          written immediately, so headers and
@@ -56,6 +58,13 @@
 //   cursor) — the resync path: snapshot, then `add` with the snapshot
 //   cursor. Removal is prompt: no envelope for a removed key is written
 //   after the POST answers. Within one request removals apply before adds.
+//   A conversation add may carry boolean `reconnect`: true preserves transport
+//   recovery when the opening URL budget deferred that retained subscription.
+//   It requires a nonempty bounded cursor; omitted/false control adds are fresh,
+//   even on a recovering stream. Opening subscriptions may override the GET's
+//   reconnect default with this same validated per-subscription boolean.
+//   An older Hub may ignore this optional field: deferred visual repair needs
+//   an updated Hub; new-client/old-Hub repair is not guaranteed.
 //
 // --- Topics and cursors ----------------------------------------------------
 //
@@ -149,7 +158,7 @@ export const LIVE_MAX_CURSOR_BYTES = 1024;
 export const LIVE_MAX_WORKSPACE_ID_BYTES = 256;
 
 export type LiveSubscriptionKey = { topic: LiveSubscribableTopic; key?: string };
-export type LiveSubscription = LiveSubscriptionKey & { cursor?: string };
+export type LiveSubscription = LiveSubscriptionKey & { cursor?: string; reconnect?: boolean };
 export type LiveSubscriptionChange = { add?: LiveSubscription[]; remove?: LiveSubscriptionKey[] };
 
 // Four facts per workspace. `running` is the hub's own; `working` and
@@ -242,15 +251,22 @@ function parseSubscriptionKey(value: unknown): LiveSubscriptionKey | string {
 function parseSubscription(value: unknown): LiveSubscription | string {
   const key = parseSubscriptionKey(value);
   if (typeof key === "string") return key;
+  const record = value as Record<string, unknown>;
+  const hasReconnect = "reconnect" in record;
+  const reconnect = record.reconnect;
+  if (hasReconnect && (key.topic !== "conversation" || typeof reconnect !== "boolean")) return "reconnect must be a boolean on a conversation subscription";
   // The worktrees topic has no replay cursor. A presented one is dropped
   // rather than refused, so a client that retained one from an older build
   // still attaches — and still receives the fresh invalidation.
   if (key.topic === "worktrees" || key.topic === "personal") return key;
-  const cursor = (value as Record<string, unknown>).cursor;
-  if (cursor === undefined || cursor === null || cursor === "") return key;
+  const cursor = record.cursor;
+  if (cursor === undefined || cursor === null || cursor === "") {
+    if (reconnect === true) return "reconnecting conversation subscription needs a cursor";
+    return hasReconnect ? { ...key, reconnect: false } : key;
+  }
   if (typeof cursor !== "string") return "subscription cursor must be a string";
   if (byteLength(cursor) > LIVE_MAX_CURSOR_BYTES) return "subscription cursor is too large";
-  return { ...key, cursor };
+  return { ...key, cursor, ...(hasReconnect ? { reconnect: reconnect as boolean } : {}) };
 }
 
 function parseList<T>(value: unknown, parse: (entry: unknown) => T | string): T[] | string {

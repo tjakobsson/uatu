@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat, lstat, readdir } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -782,13 +783,59 @@ test("paths inside ignored folders are inspected after ordinary paths queued lat
   observers.push(observer);
   const added: string[] = [];
   await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
-  observer.on("all", (event, file) => { if (event === "add" || event === "change") added.push(path.relative(root, file)); });
-  await writeFile(path.join(root, "notes.md"), "edited during the install");
-  for (const file of installed) control.notify("change", file);
-  control.notify("change", path.join(root, "notes.md"));
-  await until(() => added.length === 201, "every report");
-  // At most the 16 background inspections already running finish first.
-  expect(added.indexOf("notes.md")).toBeLessThanOrEqual(16);
+  const notes = path.join(root, "notes.md");
+  const notesReported = Promise.withResolvers<void>();
+  observer.on("all", (event, file) => {
+    if (event !== "add" && event !== "change") return;
+    added.push(path.relative(root, file));
+    if (file === notes) notesReported.resolve();
+  });
+  await writeFile(notes, "edited during the install");
+  const installedPaths = new Set(installed);
+  const occupied = Promise.withResolvers<void>();
+  const held = new Map<string, () => void>();
+  const started: string[] = [];
+  const readStat = filesystem.lstat;
+  let released = false;
+  // Gate only this fixture's background lstat completions. Real reads still
+  // supply the metadata; unrelated filesystem work passes through unchanged.
+  const inspection = spyOn(filesystem, "lstat").mockImplementation((async (...args: Parameters<typeof lstat>) => {
+    const file = String(args[0]);
+    if (file === notes || installedPaths.has(file)) started.push(file);
+    const stats = await readStat(...args);
+    if (installedPaths.has(file) && !released) {
+      const gate = Promise.withResolvers<void>();
+      held.set(file, gate.resolve);
+      if (held.size === 16) occupied.resolve();
+      await gate.promise;
+      held.delete(file);
+    }
+    return stats;
+  }) as typeof lstat);
+  try {
+    for (const file of installed) control.notify("change", file);
+    await occupied.promise;
+    expect(started).toHaveLength(16);
+    expect(added).toEqual([]);
+    // All remaining background paths are queued. The later ordinary path must
+    // take the first released slot rather than wait behind that backlog.
+    control.notify("change", notes);
+    held.values().next().value!();
+    await notesReported.promise;
+    expect(started).toContain(notes);
+    expect(started.indexOf(notes)).toBeLessThanOrEqual(16);
+    // Completion order otherwise depends on filesystem latency, not priority:
+    // hold the other background reads until the ordinary report is observed.
+    released = true;
+    for (const release of held.values()) release();
+    await until(() => added.length === 201, "every report");
+    expect(added.indexOf("notes.md")).toBeLessThanOrEqual(16);
+  } finally {
+    released = true;
+    for (const release of held.values()) release();
+    await observer.close();
+    inspection.mockRestore();
+  }
 });
 
 test("Git classification of many new directories never holds up an ordinary edit", async () => {

@@ -160,7 +160,7 @@ function trailerClock() {
 const replayFrame = <T extends { generation: string; sequence: number }>(data: T, event = "chat") =>
   `id: ${cursorOf(data.generation, data.sequence)}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
-async function visualCatchUp(hintedCursor: string | null = cursorOf("g1", 5)) {
+async function visualCatchUp(hintedCursor: string | null = cursorOf("g1", 5), reconnect = false) {
   const before = cursorOf("g1", 2), boundary = cursorOf("g1", 5);
   const replayPath = `?cursor=${encodeURIComponent(before)}`;
   const child = fakeSource({ headers: (pathname): Record<string, string> => pathname.includes(replayPath) && hintedCursor !== null
@@ -174,7 +174,7 @@ async function visualCatchUp(hintedCursor: string | null = cursorOf("g1", 5)) {
   shared.push(`event: open\ndata: ${JSON.stringify({ cursor: boundary })}\n\n`);
   await waitFor(() => kinds(opener.envelopes).includes("ready"), "shared origin ready");
   const behind = sink();
-  const attachment = live.subscribe(behind, "ws", { topic: "conversation", key: "c", cursor: before });
+  const attachment = live.subscribe(behind, "ws", { topic: "conversation", key: "c", cursor: before }, { reconnect });
   await waitFor(() => child.byPath(replayPath).length === 1, "private visual replay");
   const replay = child.byPath(replayPath)[0]!;
   const status = { type: "conversation.status", status: "failed", message: "Provider failed after generating the image", generation: "g1", sequence: 5, conversationId: "c" };
@@ -282,6 +282,104 @@ describe("refcounted upstreams (2.1)", () => {
 });
 
 describe("cursors, replay, and topic-scoped resync (2.2)", () => {
+  test("a browser recovery that creates a replacement shared stream flags only that child open", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const s = sink();
+    const cursor = cursorOf("g1", 5);
+    const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 5, conversationId: "c" };
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor }, { reconnect: true });
+    await waitFor(() => child.opened.length === 1, "browser recovery's replacement child stream");
+    const recovery = new URL(child.opened[0]!.path, "http://child");
+    expect(recovery.searchParams.get("cursor")).toBe(cursor);
+    expect(recovery.searchParams.get("reconnect")).toBe("1");
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n${replayFrame(resync, "resync")}`);
+    await waitFor(() => s.envelopes.some(envelope => envelope.event.kind === "resync"), "native same-cursor visual repair");
+    expect(s.envelopes.at(-1)).toMatchObject({ cursor, event: { kind: "resync", data: resync } });
+    expect(live.upstreamCount()).toBe(0);
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor });
+    await waitFor(() => child.opened.length === 2, "post-history fresh attachment");
+    expect(new URL(child.opened[1]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
+    await waitFor(() => s.envelopes.at(-1)?.event.kind === "ready", "fresh attachment ready");
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "resync")).toHaveLength(1);
+    live.dispose();
+    expect(child.opened.every(upstream => upstream.cancelled)).toBe(true);
+  });
+
+  test("a recovering joiner cannot mutate a fresh shared child request that is already opening", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const cursor = cursorOf("g1", 5);
+    const fresh = sink();
+    live.subscribe(fresh, "ws", { topic: "conversation", key: "c", cursor });
+    await waitFor(() => child.opened.length === 1, "fresh child opening");
+    const recovering = sink();
+    live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor }, { reconnect: true });
+    expect(recovering.envelopes).toEqual([]);
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
+    await waitFor(() => fresh.envelopes.length === 1 && recovering.envelopes.length === 1, "independent attach outcomes");
+    expect(kinds(fresh.envelopes)).toEqual(["ready"]);
+    expect(kinds(recovering.envelopes)).toEqual(["resync"]);
+    expect(child.opened).toHaveLength(1);
+    expect(child.opened[0]!.cancelled).toBe(false);
+  });
+
+  test.each([5, 7])("a recovering browser at cursor %i gets scoped snapshot recovery even on an already healthy shared stream", async sequence => {
+    const child = fakeSource();
+    const clock = trailerClock();
+    const live = broker(child.source, { catchUpTrailerClock: clock.clock });
+    const keeper = sink();
+    const head = cursorOf("g1", 5);
+    live.subscribe(keeper, "ws", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 1, "healthy shared child");
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: head })}\n\n`);
+    await waitFor(() => kinds(keeper.envelopes).includes("ready"), "keeper ready");
+    for (let round = 0; round < 2; round++) {
+      const recovering = sink();
+      const cancelled = live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", sequence) }, { reconnect: true });
+      expect(kinds(recovering.envelopes)).toEqual(["resync"]);
+      expect(recovering.envelopes[0]).toMatchObject({ ws: "ws", key: "c", event: { kind: "resync" } });
+      expect(kinds(keeper.envelopes)).toEqual(["ready"]);
+      expect(child.opened).toHaveLength(1);
+      expect(clock.timers.size).toBe(0); // No additional replay lease.
+      const fresh = live.subscribe(recovering, "ws", { topic: "conversation", key: "c", cursor: head });
+      expect(kinds(recovering.envelopes)).toEqual(["resync", "ready"]);
+      cancelled.detach(); fresh.detach();
+    }
+    // Recovery intent must not contaminate another freshly opened topic.
+    live.subscribe(sink(), "ws", { topic: "conversation", key: "other", cursor: head });
+    await waitFor(() => child.opened.length === 2, "unrelated fresh topic");
+    expect(new URL(child.opened[1]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.running.add("other-workspace");
+    live.subscribe(sink(), "other-workspace", { topic: "conversation", key: "c", cursor: head });
+    await waitFor(() => child.opened.length === 3, "unrelated fresh workspace");
+    expect(child.opened[2]!.workspaceId).toBe("other-workspace");
+    expect(new URL(child.opened[2]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    live.dispose();
+    expect(child.opened.every(upstream => upstream.cancelled)).toBe(true);
+    expect(clock.timers.size).toBe(0);
+  });
+
+  test("a browser recovering behind a shared origin retains native replay before its visual resync", async () => {
+    const h = await visualCatchUp(cursorOf("g1", 5), true);
+    expect(new URL(h.shared.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    expect(new URL(h.replay.path, "http://child").searchParams.get("reconnect")).toBe("1");
+    const delta = { type: "item.text_delta", itemId: "answer", delta: "generated", conversationId: "c", generation: "g1", sequence: 3 };
+    const continued = { ...delta, delta: " image", sequence: 4 };
+    h.replay.push(replayFrame(delta) + replayFrame(continued) + replayFrame(h.status) + replayFrame(h.resync, "resync"));
+    await waitFor(() => h.behind.envelopes.some(envelope => envelope.event.kind === "resync"), "replayed visual reconciliation");
+    expect(h.behind.envelopes.map(envelope => envelope.event)).toEqual([
+      { kind: "data", data: delta }, { kind: "data", data: continued }, { kind: "data", data: h.status }, { kind: "resync", data: h.resync },
+    ]);
+    expect(h.behind.envelopes.filter(envelope => envelope.event.kind === "data").map(envelope => envelope.cursor)).toEqual([3, 4, 5].map(sequence => cursorOf("g1", sequence)));
+    expect(kinds(h.opener.envelopes)).toEqual(["ready"]);
+    expect(h.child.opened).toHaveLength(2);
+    expect(h.replay.cancelled).toBe(true);
+    expect(h.clock.timers.size).toBe(0);
+  });
+
   test.each(["same chunk", "separate chunks"] as const)("visual catch-up preserves status then its same-cursor resync across %s before fresh reattachment is ready", async chunks => {
     const h = await visualCatchUp();
     expect(h.clock.timers.size).toBe(0); // No deadline during fetch/early replay.

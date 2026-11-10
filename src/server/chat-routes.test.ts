@@ -17,7 +17,9 @@ import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
 import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, LiveBroker } from "../hub/live-broker";
-import type { LiveEnvelope } from "../shared/live-protocol";
+import { LiveEndpoint } from "../hub/live-endpoint";
+import { SseFrameParser } from "../hub/live-sse";
+import { parseLiveEnvelope, parseLiveHello, type LiveEnvelope } from "../shared/live-protocol";
 import type { ChatActionContext } from "../chat/types";
 import { createWatchedVisualReader, VisualReadError, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
 
@@ -1420,6 +1422,143 @@ describe("workspace chat routes", () => {
       expect(service.replay.subscriberCount()).toBe(1);
     } finally {
       live.dispose();
+      expect(service.replay.subscriberCount()).toBe(0);
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("browser endpoint recovery repairs a lost visual resync after the Hub consumed it, including healthy shared-origin joins", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-browser-hub-recovery-"));
+    const service = new FakeChatService();
+    const store = new VisualStore("/workspace", directory);
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false, reads = 0;
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return png; });
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const paths: string[] = [];
+    const oldChildReleased = Promise.withResolvers<void>();
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        const attempt = paths.push(path);
+        if (attempt === 1) signal.addEventListener("abort", () => oldChildReleased.resolve(), { once: true });
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(
+          new URL(path, "http://child").searchParams.get("reconnect") === "1" ? service.replay.latestCursor() : null,
+        );
+        return response;
+      },
+    });
+    const endpoint = new LiveEndpoint({ broker: live, resolveWorkspace: id => id === "ws" ? id : null });
+    const clients: Array<ReadableStreamDefaultReader<Uint8Array>> = [];
+    const openBrowser = (cursor: string, reconnect: boolean, sessionId = "browser-A", deferred = false) => {
+      const params = new URLSearchParams({ ws: "ws", subs: JSON.stringify(deferred ? [] : [{ topic: "conversation", key: "opencode:local", cursor }]) });
+      if (reconnect) params.set("reconnect", "1");
+      const principal = { user: sessionId, sessionId };
+      const response = endpoint.openStream(new Request(`http://hub.test/api/hub/live?${params}`), principal);
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      clients.push(reader);
+      const parser = new SseFrameParser();
+      const pending: LiveEnvelope[] = [];
+      const received: LiveEnvelope[] = [];
+      let streamId: string | undefined;
+      const readChunk = async () => {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("browser stream ended before expected envelope");
+        for (const frame of parser.push(chunk.value)) {
+          if ("comment" in frame) continue;
+          if (frame.event === "hello") streamId = parseLiveHello(frame.data)?.streamId;
+          if (frame.event === "live") {
+            const envelope = parseLiveEnvelope(frame.data);
+            if (envelope) pending.push(envelope);
+          }
+        }
+      };
+      const next = async (): Promise<LiveEnvelope> => {
+        while (!pending.length) await readChunk();
+        const envelope = pending.shift()!;
+        received.push(envelope);
+        return envelope;
+      };
+      return { reader, received, next,
+        async hello() { while (!streamId) await readChunk(); },
+        async until(kind: LiveEnvelope["event"]["kind"]) { let envelope: LiveEnvelope; do { envelope = await next(); } while (envelope.event.kind !== kind); return envelope; },
+        async attach(cursor: string, reconnect = false) {
+          expect(streamId).toBeDefined();
+          const changed = await endpoint.changeSubscriptions(new Request("http://hub.test/control", { method: "POST",
+            body: JSON.stringify({ add: [{ topic: "conversation", key: "opencode:local", cursor, ...(reconnect ? { reconnect: true } : {}) }] }),
+          }), streamId!, principal);
+          expect(changed.status).toBe(200);
+        },
+      };
+    };
+    try {
+      const cached = await getHistory();
+      expect(cached.items[0].visuals[0].status).toBe("pending");
+      const first = openBrowser(cached.cursor, false);
+      await first.until("ready");
+      available = true;
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after generating the image" });
+      const cursor = service.replay.latestCursor();
+      expect(await first.until("data")).toMatchObject({ cursor, event: { kind: "data", data: { ...terminal, conversationId: "opencode:local" } } });
+      // Keep the browser subscribed until the Hub consumes the trailer and
+      // drops its child, but never pull that resync from the browser body.
+      await oldChildReleased.promise;
+      expect(live.upstreamCount()).toBe(0);
+      expect(first.received.some(envelope => envelope.event.kind === "resync")).toBe(false);
+      await first.reader.cancel();
+      const resumed = openBrowser(cursor, true);
+      expect(await resumed.until("resync")).toMatchObject({ cursor, event: { kind: "resync", data: {
+        type: "resync", reason: "conversation-rewritten", generation: terminal.generation, sequence: terminal.sequence, conversationId: "opencode:local",
+      } } });
+      expect(paths).toHaveLength(2);
+      expect(new URL(paths[0]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      expect(new URL(paths[1]!, "http://child").searchParams.get("reconnect")).toBe("1");
+      expect(resumed.received.filter(envelope => envelope.event.kind === "data")).toEqual([]);
+      const fresh = await getHistory();
+      expect(fresh.cursor).toBe(cursor);
+      expect(fresh.items[0].visuals[0].status).toBe("ready");
+      expect((await store.resolve(fresh.items[0].visuals[0].id))?.bytes).toEqual(png);
+      await resumed.attach(fresh.cursor);
+      await resumed.until("ready");
+      expect(paths).toHaveLength(3);
+      expect(new URL(paths[2]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      // A second browser now recovers at the healthy shared origin. Repair
+      // is scoped to it, with no new child request or future native message.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const deferred = attempt === 1;
+        const joining = openBrowser(cursor, true, "browser-B", deferred);
+        if (deferred) {
+          await joining.hello();
+          await joining.attach(cursor, true); // Retained recovery deferred past the opening URL.
+        }
+        expect((await joining.until("resync")).event).toEqual({ kind: "resync" });
+        expect(paths).toHaveLength(3);
+        const latest = await getHistory();
+        expect(latest.items[0].visuals[0].status).toBe("ready");
+        await joining.attach(latest.cursor);
+        expect((await joining.until("ready")).event.kind).toBe("ready");
+        expect(joining.received.map(envelope => envelope.event.kind)).toEqual(["resync", "ready"]);
+        await joining.reader.cancel();
+      }
+      expect(paths).toHaveLength(3);
+      expect(resumed.received.filter(envelope => envelope.event.kind === "resync")).toHaveLength(1);
+      expect(service.replay.latestCursor()).toBe(cursor);
+      expect(reads).toBe(2);
+      expect(service.replay.subscriberCount()).toBe(1);
+    } finally {
+      endpoint.endAll(); live.dispose();
+      await Promise.all(clients.map(reader => reader.cancel().catch(() => undefined)));
       expect(service.replay.subscriberCount()).toBe(0);
       await service.dispose();
       await fs.rm(directory, { recursive: true, force: true });

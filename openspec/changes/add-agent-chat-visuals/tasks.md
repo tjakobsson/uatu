@@ -110,6 +110,8 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.34 Preserve syntax completion for stored V2 messages whose native API-message completion precedes execution end. Existing files must capture before subsequent tools overwrite them; missing-file retries remain execution-scoped.
 - [ ] 6.35 Forward transport-recovery intent when Hub reopens an existing child stream, so an equal-cursor terminal visual resync missed on disconnect is recovered. Fresh subscriptions after history must remain loop-free.
 - [ ] 6.36 Diagnose `dd857132` CI failures without weakening assertions: repeated cached-cursor recovery after a session restart, and the existing live aggregate integration test's default five-second timeout. Preserve recovery semantics and aggregate bounds.
+- [ ] 6.37 Preserve browser-to-Hub reconnect intent through endpoint attachments, including replacement upstreams and recovery attachments joining an already healthy shared stream at the terminal cursor. Recover missed visual resyncs without flagging fresh post-history subscriptions or changing metrics.
+- [ ] 6.38 Diagnose the existing observer-priority failure on `a82af71e`: an ordinary edit must not wait behind more than 16 already-running background inspections. Preserve the workload and priority assertion; use source-backed synchronization or report an actual production defect.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

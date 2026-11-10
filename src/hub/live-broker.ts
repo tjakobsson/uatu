@@ -111,6 +111,10 @@ export type LiveAttachment = {
   detach(): void;
 };
 
+// Endpoint-validated transport intent for this attachment, separate from the
+// shared upstream's lifecycle and any other subscriber's recovery state.
+export type LiveAttachmentOptions = { reconnect?: boolean };
+
 export type LiveBrokerOptions = {
   // Internal test seam for the trailer-only watchdog, not user configuration.
   catchUpTrailerClock?: { setTimer(run: () => void, ms: number): unknown; clearTimer(timer: unknown): void };
@@ -274,6 +278,7 @@ type UpstreamState = "idle" | "opening" | "live" | "failed" | "unsupported" | "c
 // Personal state never enters shared workspace/topic maps, replay or metrics.
 type BrokerTopic = Exclude<LiveTopic, "personal">;
 type Subscriber = {
+  reconnect: boolean;
   sink: LiveSink;
   workspaceId: string;
   topic: BrokerTopic;
@@ -503,18 +508,19 @@ export class LiveBroker implements PresenceSource {
 
   // Attaches a client sink to one workspace topic. The subscription's
   // cursor is where the sink resumes from (absent: the current position).
-  subscribe(sink: LiveSink, workspaceId: string, subscription: LiveSubscription): LiveAttachment {
+  subscribe(sink: LiveSink, workspaceId: string, subscription: LiveSubscription, options: LiveAttachmentOptions = {}): LiveAttachment {
     if (subscription.topic === "personal") throw new Error("personal topics belong to the authenticated endpoint");
     if (this.disposed) throw new Error("live broker is disposed");
-    return this.attachSink(sink, workspaceId, subscription.topic, subscription.key, subscription.cursor);
+    return this.attachSink(sink, workspaceId, subscription.topic, subscription.key, subscription.cursor, options.reconnect === true);
   }
 
   observeWorkerConversations(observer: LiveBrokerOptions["observeConversation"]): void {
     this.options.observeConversation = observer;
   }
 
-  private attachSink(sink: LiveSink, workspaceId: string, topic: BrokerTopic, key: string | undefined, cursor: string | undefined): LiveAttachment {
+  private attachSink(sink: LiveSink, workspaceId: string, topic: BrokerTopic, key: string | undefined, cursor: string | undefined, reconnect = false): LiveAttachment {
     const subscriber: Subscriber = {
+      reconnect,
       sink,
       workspaceId,
       topic,
@@ -849,6 +855,25 @@ export class LiveBroker implements PresenceSource {
 
   private attachConversation(upstream: Upstream, subscriber: Subscriber): void {
     subscriber.skip = null;
+    if (subscriber.reconnect && subscriber.cursor !== undefined) {
+      const requested = decodeReplayCursor(subscriber.cursor);
+      const head = upstream.head || upstream.originCursor;
+      const at = head ? decodeReplayCursor(head) : null;
+      if (requested && at && requested.generation === at.generation && requested.sequence < at.sequence) {
+        // Preserve missed native status/error payloads before visual recovery.
+        // This explicit recovery rides the existing bounded private replay.
+        this.catchUp(upstream, subscriber);
+        return;
+      }
+      // This browser may have acknowledged status but lost its same-cursor
+      // visual resync. A healthy shared stream cannot replay that trailer.
+      // Invalidate only this recovering attachment, using existing snapshot
+      // recovery instead of reopening the shared child or adding another lease.
+      subscriber.reconnect = false;
+      subscriber.sink.write(this.envelope(subscriber, { kind: "resync" }, upstream.head || subscriber.cursor));
+      this.detach(subscriber);
+      return;
+    }
     if (subscriber.cursor === undefined || subscriber.cursor === upstream.head) {
       subscriber.live = true;
       this.emitSignal(subscriber, { kind: "ready" }, upstream);
@@ -914,6 +939,8 @@ export class LiveBroker implements PresenceSource {
   // shared upstream holds (or is about to), then merged. The child's resync
   // for an unreplayable cursor is forwarded as the topic-scoped `resync`.
   private catchUp(upstream: Upstream, subscriber: Subscriber): void {
+    const reconnect = subscriber.reconnect;
+    subscriber.reconnect = false;
     subscriber.live = false;
     subscriber.catchUp?.abort();
     subscriber.catchUp = null;
@@ -951,7 +978,7 @@ export class LiveBroker implements PresenceSource {
       if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
       void reader?.cancel().catch(() => undefined);
     }, { once: true });
-    const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}`;
+    const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}${reconnect ? "&reconnect=1" : ""}`;
     const release = () => {
       clearTrailerTimer();
       if (subscriber.catchUp === controller) { subscriber.catchUp = null; subscriber.catchUpTrailer = undefined; }
@@ -1156,8 +1183,13 @@ export class LiveBroker implements PresenceSource {
     upstream.state = "opening";
     // Every attempt is an open; only the first moves the active gauge — a
     // retry is the same logical upstream.
-    const reconnect = upstream.counted;
-    this.metrics.opened(childUpstreamTopic(upstream.topic)!, { reopen: reconnect });
+    const first = upstream.subscribers.values().next().value;
+    const reconnect = upstream.counted || (upstream.topic === "conversation" && first?.reconnect === true);
+    // The creating attachment's recovery is handled by the child request.
+    // Later recovering joiners retain their own flag for scoped invalidation;
+    // never OR browser intent into the shared upstream's persistent state.
+    if (upstream.topic === "conversation" && first) first.reconnect = false;
+    this.metrics.opened(childUpstreamTopic(upstream.topic)!, { reopen: upstream.counted });
     upstream.counted = true;
     const path = this.childPath(upstream, reconnect);
     // Presumed live after the grace unless refused first — see

@@ -1014,6 +1014,8 @@ actual execution end consumes that retry. Failure messages still appear normally
 Hub reconnects also reconcile visual updates missed at a terminal cursor. If a
 replay's promised update never arrives, bounded recovery requests a fresh
 snapshot rather than leaving the image pending indefinitely.
+This includes recovered subscriptions deferred by the stream URL limit when
+both the browser and Hub have been updated; older Hubs may ignore that intent.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain
