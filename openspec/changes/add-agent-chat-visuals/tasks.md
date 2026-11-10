@@ -106,6 +106,7 @@ Regressions are authored but unexecuted locally. Classic cold/restarted history
 has neither persisted execution boundaries nor execution IDs; its conservative
 completed-message fallback remains a documented limit, not full cross-generation
 coverage. Latest-head GitHub CI and Codex verification remain pending.
+- [ ] 6.33 Correct the `7ed0f6a2` shared-child attribution regression: preserve complete attribution and immutable execution metadata without an extra child transcript read after post-history input recovery. Retain the original read-count and ordering assertions.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

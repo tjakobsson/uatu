@@ -845,7 +845,7 @@ for (const outcome of [
   "newer-first-input-foreign-parent", "newer-first-occurrence-foreign-workspace", "newer-first-input-current-accounting", "newer-first-input-unrelated", "newer-second-input-recovery",
   "post-history-input", "post-history-occurrence", "post-history-unchanged", "post-history-healthy", "post-history-cold",
   "post-history-unchanged-unrelated", "post-history-input-unrelated",
-  "post-history-input-recovery", "post-history-input-owner-eviction", "post-history-input-projection-eviction",
+  "post-history-input-recovery", "post-history-input-recovery-held-reconnect", "post-history-input-owner-eviction", "post-history-input-projection-eviction",
   "post-history-input-recovery-zero",
   "post-history-input-pending-eviction", "post-history-input-pending-eviction-unpinned",
   "post-history-input-same-generation",
@@ -895,6 +895,10 @@ test(`concurrent foreground output preserves complete shared-child attribution o
   const hidden = outcome.startsWith("hidden-origin");
   let freshAccounting = outcome === "current-accounting" || outcome.endsWith("-current-accounting");
   const recovering = outcome.includes("-recovery");
+  const heldReconnect = outcome === "post-history-input-recovery-held-reconnect";
+  let holdReconnectRecovery = false, reconnectHeld = false, reconnectEntered!: () => void, releaseReconnect!: () => void;
+  const reconnectReady = new Promise<void>(resolve => { reconnectEntered = resolve; });
+  const reconnectGate = new Promise<void>(resolve => { releaseReconnect = resolve; });
   const zero = outcome.endsWith("-zero");
   const unrelated = outcome.endsWith("-unrelated");
   const unrelatedLaunch = structuredClone(second);
@@ -940,6 +944,16 @@ test(`concurrent foreground output preserves complete shared-child attribution o
     "GET /api/session/:id/message": () => ({ data: [], cursor: {} }),
   });
   const provider = server.provider(), list = provider.listMessages.bind(provider), events = provider.events.bind(provider);
+  const reconcileBackgroundTasks = provider.reconcileBackgroundTasks.bind(provider);
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    if (heldReconnect && holdReconnectRecovery && id === "ses_child" && !reconnectHeld && !options?.signal?.aborted) {
+      // Reconnect also recovers the already-projected child, independently of
+      // the awaited parent history. Hold its optional second transcript read
+      // after its initial page, without blocking the parent's reconstruction.
+      reconnectHeld = true; reconnectEntered(); await reconnectGate;
+    }
+    return reconcileBackgroundTasks(id, options);
+  };
   let capturedPage: Awaited<ReturnType<OpenCodeV2Provider["listMessages"]>> | undefined;
   provider.listMessages = async (id, options) => {
     const page = await list(id, options);
@@ -980,8 +994,13 @@ test(`concurrent foreground output preserves complete shared-child attribution o
   const adapter = new ChatAdapter({ provider, workspacePath: WORKSPACE, coalesceWindowMs: 0, ...(projectionEviction || pendingProjection ? { maxProjections: 2 } : {}) });
   const history = adapter.history.bind(adapter);
   const recoveryReads = new Map<string, ReturnType<ChatAdapter["history"]>>();
+  const pendingRecoveryReads = new Set<ReturnType<ChatAdapter["history"]>>();
   adapter.history = (...args) => {
     const reading = history(...args);
+    if (!owner.getStore() && args[1]?.limit === undefined) {
+      pendingRecoveryReads.add(reading);
+      void reading.finally(() => pendingRecoveryReads.delete(reading)).catch(() => undefined);
+    }
     if (unpinned && freshAccounting && !owner.getStore() && args[1]?.limit === undefined) recoveryReads.set(args[0], reading);
     return reading;
   };
@@ -1191,6 +1210,7 @@ test(`concurrent foreground output preserves complete shared-child attribution o
       // Expire the existing reuse window; do not extend any cache or budget.
       second.content = secondContent; freshAccounting = true; elapsed = 31_000;
       await adapter.stopEventPump();
+      holdReconnectRecovery = true;
       const restored = await adapter.history("ses_parent");
       const following = await adapter.subscribe("ses_parent"); following.events.cancel();
       published = following.snapshot;
@@ -1223,6 +1243,18 @@ test(`concurrent foreground output preserves complete shared-child attribution o
         const reset = await adapter.subscribe("ses_parent"); reset.events.cancel();
         expect(reset.snapshot.items).toEqual([]);
       }
+      if (heldReconnect) {
+        await reconnectReady;
+        expect(pendingRecoveryReads.size).toBeGreaterThan(0);
+        releaseReconnect();
+      }
+      // server.connected starts fire-and-forget history reads for every
+      // projected conversation. Neither the parent history nor subscribe's
+      // handoff waits for the child's reconnect recovery. Settle those prior
+      // owners before measuring I/O caused by the accounting restatement:
+      // its unscoped diagnostic marker invalidates provider history reuse, so
+      // an older recovery continuation could otherwise issue a counted read.
+      while (pendingRecoveryReads.size) await Promise.allSettled([...pendingRecoveryReads]);
       const transcriptReads = server.requests("GET", "/api/session/ses_child/message").length;
       admitRestatement = true;
       restate("restated"); await restatementApplied;
@@ -1244,7 +1276,7 @@ test(`concurrent foreground output preserves complete shared-child attribution o
       });
       expect(server.calls.every(call => call.method === "GET")).toBe(true);
     }
-  } finally { release(); releasePublication(); releasePressure(); observer?.events.cancel(); retained?.events.cancel(); publicationView?.events.cancel(); await nativePublication?.catch(() => undefined); await reading?.catch(() => undefined); await Promise.allSettled([...recoveryReads.values()]); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
+  } finally { release(); releasePublication(); releasePressure(); releaseReconnect(); observer?.events.cancel(); retained?.events.cancel(); publicationView?.events.cancel(); await nativePublication?.catch(() => undefined); await reading?.catch(() => undefined); await Promise.allSettled([...recoveryReads.values()]); clock?.mockRestore(); await adapter.dispose(); expect(closed).toBe(opened); }
 });
 
 for (const depth of ["direct", "root"] as const) for (const remaining of [0.5, 0])
