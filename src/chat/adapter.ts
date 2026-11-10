@@ -8,6 +8,7 @@ import { ConversationInventoryBroadcaster, type ConversationInventorySubscriptio
 import type { InboxDelta, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle, StoredMessageAccounting, ProviderHistoryPage, WorkerSourceGuard, WorkerResultFallback, WorkerRecoverySource, WorkerAssociationWatch } from "./provider";
 import { describeToolDetail } from "./tool-detail";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
+import { CLAUDE_TURN, type ClaudeTextIdentity, type ClaudeTurn } from "./claude/normalization-types";
 import { InterruptNotAppliedError, OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
@@ -1967,7 +1968,10 @@ export class ChatAdapter {
           const execution = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
           const executionChanged = execution !== undefined
             && execution !== (current as (ConversationItem & OpenCodeExecutionIdentity) | undefined)?.[OPENCODE_EXECUTION_LIVE];
-          if (!current || !sameConversationItems([current], [item]) || executionChanged || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
+          const turn = (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
+          const turnChanged = turn !== undefined
+            && turn.completed !== (current as (ConversationItem & ClaudeTextIdentity) | undefined)?.[CLAUDE_TURN]?.completed;
+          if (!current || !sameConversationItems([current], [item]) || executionChanged || turnChanged || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
           else if (current.type === "tool" && item.type === "tool" && coverage?.projection === projection && !coverage.changed(item.id)) {
             this.refreshEquivalentDescendantBindings(projection, current, item);
           }
@@ -2005,6 +2009,10 @@ export class ChatAdapter {
       // Another read may have corrected the shared order while this read
       // awaited parentage. Return the same canonical metadata as the guard.
       if (item.type === "permission") items[index] = projection.get(item.id) ?? item;
+      // A separately normalized transcript may still hold a live token for a
+      // row whose ordered result we already saw. Return the same terminal
+      // evidence as the projection, without restoring unrelated sparse fields.
+      else items[index] = preserveClaudeTurn(projection.get(item.id), item);
     }
     if (this.provider.reconcileBackgroundTasks) this.syncBackgroundState(id);
     // A reopened conversation whose agent still holds live work is in the
@@ -6927,7 +6935,7 @@ export class ConversationProjection {
         staged.delete(update.itemId); touched.add(update.itemId); settled.add(update.itemId);
         continue;
       }
-      const incoming = update.item, current = staged.get(incoming.id);
+      const incoming = preserveClaudeTurn(prior.get(update.item.id), update.item), current = staged.get(incoming.id);
       const interaction = mergeInteraction(current, incoming);
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       if ((merged.type === "permission" || merged.type === "question") && merged.status !== "pending") settled.add(merged.id);
@@ -6991,7 +6999,7 @@ export class ConversationProjection {
     const staged = new Map<string, ConversationItem>(), text = new ProviderTextReconciler();
     const notifications: ConversationItem[] = [], prunedFallbacks = new Set<string>();
     for (const item of items) {
-      const current = staged.get(item.id), interaction = mergeInteraction(current, item);
+      const current = staged.get(item.id), interaction = mergeInteraction(current, preserveClaudeTurn(prior.get(item.id), item));
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       const fallback = this.workerFallbacks.get(merged.id);
       if (fallback && !sameConversationItems([merged], [fallback.fallback])) prunedFallbacks.add(merged.id);
@@ -7145,9 +7153,18 @@ export class ConversationProjection {
     // Replace rows, not shared tokens: queued earlier frames/snapshots keep
     // their original text and execution boundary, with no extra wire events.
     if (sourceTransition && (status === "completed" || status === "interrupted" || status === "failed" && !this.stepVisualLive)) {
+      const closedTurns = new Map<ClaudeTurn, ClaudeTurn>();
       for (const [id, item] of this.timeline) {
-        if (item.type !== "assistant_message" || (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] !== true) continue;
-        const sealed = { ...item, [OPENCODE_EXECUTION_LIVE]: false };
+        if (item.type !== "assistant_message") continue;
+        const executionLive = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true;
+        const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
+        if (!executionLive && (!turn || turn.completed)) continue;
+        let closed: ClaudeTurn | undefined;
+        if (turn && !turn.completed) {
+          closed = closedTurns.get(turn);
+          if (!closed) { closed = Object.freeze({ completed: true }); closedTurns.set(turn, closed); }
+        }
+        const sealed = { ...item, ...(executionLive ? { [OPENCODE_EXECUTION_LIVE]: false } : {}), ...(closed ? { [CLAUDE_TURN]: closed } : {}) };
         this.timeline.set(id, sealed);
         this.historyChanged(id);
       }
@@ -7471,6 +7488,14 @@ function latestModel(byMessage: Map<string, MessageModel> | undefined): string |
   return latest?.value.model;
 }
 
+/** Native row ids do not move between turns. Once closed, stale history cannot reopen one. */
+function preserveClaudeTurn(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
+  if (current?.type !== "assistant_message" || incoming.type !== "assistant_message") return incoming;
+  const turn = (current as typeof current & ClaudeTextIdentity)[CLAUDE_TURN];
+  return turn?.completed && !(incoming as typeof incoming & ClaudeTextIdentity)[CLAUDE_TURN]?.completed
+    ? { ...incoming, [CLAUDE_TURN]: turn } : incoming;
+}
+
 function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (!current || current.type !== incoming.type) return incoming;
   if (current.type === "user_message" && incoming.type === "user_message") {
@@ -7487,7 +7512,7 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
     return { ...incoming, ...preserved };
   }
   if (current.type === "assistant_message" && incoming.type === "assistant_message") {
-    return mergeAssistantMessage(current, incoming);
+    return preserveClaudeTurn(current, mergeAssistantMessage(current, incoming));
   }
   // Resolved interactions are terminal. The merged provider streams preserve
   // order only within themselves, so a delayed classic alias of an ask can

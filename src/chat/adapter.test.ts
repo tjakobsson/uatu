@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
-import { createClaudeEventMemory, normalizeClaudeMessage } from "./claude/normalization";
+import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./claude/normalization";
+import { CLAUDE_TURN, type ClaudeTextIdentity } from "./claude/normalization-types";
+import type { TranscriptEntry } from "./claude/transcript";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
 import type { BackgroundTaskItem, ChatAgent, ChatActionContext } from "./types";
 import type {
@@ -41,6 +43,246 @@ import { MultiAgentChatService } from "./agents";
 import { VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import type { AssistantMessageItem } from "./types";
+
+test.each(["completed", "failed", "interrupted"] as const)("ordered Claude %s seals independent retained history without mutating earlier rows or adding frames", terminal => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const entries: TranscriptEntry[] = ["first", "second"].map((id, index) => ({
+    kind: "assistant", uuid: id, timestamp: index + 1, parentUuid: null, isSidechain: false, parentToolUseId: null,
+    message: { id: `api-${id}`, content: [{ type: "text", text: `![${id}](${id}.png)` }] },
+  }));
+  const history = () => normalizeTranscriptEntries(entries).items;
+  projection.seed(history());
+  const originals = projection.items();
+  const turn = (item: ConversationItem) => (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
+  const originalToken = turn(originals[0]!)!;
+  expect(originalToken.completed).toBe(false);
+  expect(turn(originals[1]!)).toBe(originalToken);
+  const earlierFrame = projection.upsert(originals[0]!)!;
+  const earlierFrameJson = JSON.stringify(earlierFrame);
+  const memory = createClaudeEventMemory();
+  let frame = 0;
+  const emit = (record: Record<string, unknown>) => {
+    const normalized = normalizeClaudeMessage({ uuid: `frame-${++frame}`, timestamp: frame, ...record }, memory, "live");
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => {
+      // This is the provider's interruption attribution after native result normalization.
+      const applied = terminal === "interrupted" && normalized.eventType === "result" && update.kind === "status"
+        ? { ...update, status: "interrupted" as const } : update;
+      const event = projection.apply(applied);
+      return event ? [event] : [];
+    });
+  };
+  emit({ type: "stream_event", event: { type: "message_start", message: { id: "api-live" } } });
+  emit({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+  const prefix = emit({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "![Live](live.png)" } } });
+  const prefixJson = JSON.stringify(prefix);
+  emit({ type: "stream_event", event: { type: "content_block_stop", index: 0 } });
+  emit({ type: "user", message: { content: "Steer, not a new execution" } });
+  projection.statusUpdate("failed", "Retryable step", true, { [OPENCODE_STEP_LIVE]: true });
+  projection.statusUpdate("retrying");
+  projection.statusUpdate("completed", undefined, false); // Synthetic status is not a native boundary.
+  expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(false);
+  const before = decodeReplayCursor(projection.replay.latestCursor())!;
+  const ended = emit({ type: "result", subtype: "success", is_error: terminal === "failed" });
+  expect(ended).toHaveLength(1);
+  expect(ended[0]).toMatchObject({ type: "conversation.status", status: terminal, sequence: before.sequence + 1 });
+  expect(decodeReplayCursor(projection.replay.latestCursor())!.sequence).toBe(before.sequence + 1);
+  const sealed = originals.map(item => projection.get(item.id)!);
+  expect(JSON.stringify(sealed)).toBe(JSON.stringify(originals));
+  for (let index = 0; index < originals.length; index++) {
+    expect(sealed[index]).not.toBe(originals[index]);
+    expect(turn(sealed[index]!)?.completed).toBe(true);
+    expect(turn(sealed[index]!)).not.toBe(originalToken);
+    expect(turn(originals[index]!)?.completed).toBe(false);
+  }
+  expect(turn(sealed[0]!)).toBe(turn(sealed[1]!));
+  expect(Object.isFrozen(turn(sealed[0]!))).toBe(true);
+  expect(earlierFrame.type).toBe("item.upsert");
+  if (earlierFrame.type !== "item.upsert") throw new Error("expected retained history upsert");
+  expect(turn(earlierFrame.item)).toBe(originalToken);
+  expect(turn(earlierFrame.item)?.completed).toBe(false);
+  expect(JSON.stringify(earlierFrame)).toBe(earlierFrameJson);
+  expect(JSON.stringify(prefix)).toBe(prefixJson);
+  projection.statusUpdate("running");
+  const closedCursor = projection.replay.latestCursor();
+  projection.seed(history());
+  expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(true);
+  expect(projection.replay.latestCursor()).toBe(closedCursor);
+  expect(projection.recover(history().map(item => ({ kind: "upsert" as const, item })))).toBe(true);
+  expect(projection.replay.latestCursor()).toBe(closedCursor); // Equal public JSON folds symbols only.
+  projection.upsert(history()[0]!);
+  expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(true);
+  const first = projection.get(originals[0]!.id)!;
+  if (first.type !== "assistant_message") throw new Error("expected assistant");
+  projection.upsert({ ...first, model: "live-only-model" });
+  projection.replace(history());
+  expect(turn(projection.get(originals[0]!.id)!)?.completed).toBe(true);
+  expect((projection.get(originals[0]!.id) as AssistantMessageItem).model).toBeUndefined();
+  expect(originalToken.completed).toBe(false);
+});
+
+test("equal-JSON Claude recovery retains authoritative completion without an extra public frame", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const entries: TranscriptEntry[] = [{ kind: "assistant", uuid: "answer", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null,
+    message: { id: "api", content: [{ type: "text", text: "![Later](later.png)" }] } }];
+  const original = normalizeTranscriptEntries(entries).items[0]!;
+  projection.seed([original]);
+  const terminal = normalizeTranscriptEntries([...entries, { kind: "system", subtype: "turn_duration", uuid: "end", timestamp: 2,
+    parentUuid: null, isSidechain: false, parentToolUseId: null, message: {} }]).items[0]!;
+  const cursor = projection.replay.latestCursor();
+  expect(JSON.stringify(terminal)).toBe(JSON.stringify(original));
+  expect(projection.recover([{ kind: "upsert", item: terminal }])).toBe(true);
+  expect(projection.replay.latestCursor()).toBe(cursor);
+  expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+  expect((original as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+});
+
+test("covered adapter history folds equal-JSON Claude completion and cannot return a later stale live token", async () => {
+  const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+  provider.agent = { id: "claude", name: "Claude", capabilities: [] };
+  provider.sessions = [fixtureSession("metadata")];
+  const entries: TranscriptEntry[] = [{ kind: "assistant", uuid: "answer", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null,
+    message: { id: "api", content: [{ type: "text", text: "![Later](later.png)" }] } }];
+  provider.listMessages = async () => normalizeTranscriptEntries(entries);
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  try {
+    const original = (await adapter.history("metadata")).items[0]!;
+    const projection = adapter.projectionForTests("metadata");
+    const cursor = projection.replay.latestCursor();
+    entries.push({ kind: "system", subtype: "turn_duration", uuid: "end", timestamp: 2,
+      parentUuid: null, isSidechain: false, parentToolUseId: null, message: {} });
+    const ended = await adapter.history("metadata");
+    expect(JSON.stringify(ended.items[0])).toBe(JSON.stringify(original));
+    expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect(projection.replay.latestCursor()).toBe(cursor);
+    entries.pop(); // An independently normalized lagging transcript must not reopen the native row.
+    const stale = await adapter.history("metadata");
+    expect((stale.items[0] as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((projection.get(original.id) as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((original as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect(projection.replay.latestCursor()).toBe(cursor);
+  } finally { await adapter.dispose(); }
+});
+
+test.each([
+  { terminal: "completed", entry: "history" }, { terminal: "completed", entry: "subscribe" },
+  { terminal: "failed", entry: "history" }, { terminal: "failed", entry: "subscribe" },
+  { terminal: "interrupted", entry: "history" }, { terminal: "interrupted", entry: "subscribe" },
+] as const)("Claude history seeded without a visual subscriber stays terminal after $terminal on first $entry in a newer execution", async ({ terminal, entry }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, "claude-retained-history-"));
+  const entries: TranscriptEntry[] = [{ kind: "assistant", uuid: "old", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null,
+    message: { id: "old-api", content: [{ type: "text", text: "![Missing](old-missing.png)\n\n![Ready](old-ready.png)" }] } }];
+  const provider = new FakeProvider();
+  provider.agent = { id: "claude", name: "Claude", capabilities: [] };
+  provider.sessions = [fixtureSession("capture")];
+  provider.listMessages = async () => normalizeTranscriptEntries(entries);
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+  const projection = adapter.projectionForTests("capture");
+  const memory = createClaudeEventMemory();
+  let frame = 0;
+  const emit = (value: Record<string, unknown>) => {
+    const normalized = normalizeClaudeMessage({ uuid: `frame-${++frame}`, timestamp: frame, ...value }, memory, "live");
+    expect(normalized.outcome).not.toBe("unparseable");
+    return normalized.updates.flatMap(update => {
+      const applied = terminal === "interrupted" && normalized.eventType === "result" && update.kind === "status"
+        ? { ...update, status: "interrupted" as const } : update;
+      const event = projection.apply(applied);
+      return event ? [event] : [];
+    });
+  };
+  const originalBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const nextBytes = Uint8Array.from([...originalBytes.slice(0, -1), 2]);
+  let filesCreated = false;
+  const reads: Record<string, number> = {};
+  const store = new VisualStore(process.cwd(), directory);
+  store.setReader(async source => {
+    reads[source] = (reads[source] ?? 0) + 1;
+    if (source === "old-ready.png") return filesCreated ? nextBytes : originalBytes;
+    if (source !== "old-missing.png" && source !== "current.png") throw new Error(`Unexpected source: ${source}`);
+    if (!filesCreated) throw new VisualReadError(true);
+    return nextBytes;
+  });
+  const service = {
+    history: (id: string, options?: { cursor?: string; limit?: number }) => adapter.history(id, options),
+    subscribe: (id: string, options?: { cursor?: string; signal?: AbortSignal }) => adapter.subscribe(id, options),
+    dispose: () => adapter.dispose(),
+  } as unknown as WorkspaceChatService;
+  const router = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: store, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+  let subscription: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
+  let restarted: MultiAgentChatService | undefined;
+  const answer = (snapshot: { items: ConversationItem[] }, id: string) => {
+    const item = snapshot.items.find(item => item.id === `message:${id}`);
+    if (item?.type !== "assistant_message") throw new Error(`Missing assistant ${id}`);
+    return item;
+  };
+  try {
+    projection.statusUpdate("running");
+    const seeded = await adapter.history("capture"); // No MultiAgent history/subscribe/capture yet.
+    const old = answer(seeded, "old");
+    const oldToken = (old as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    expect(oldToken.completed).toBe(false);
+    expect(reads).toEqual({});
+    const before = decodeReplayCursor(projection.replay.latestCursor())!;
+    const ended = emit({ type: "result", subtype: "success", is_error: terminal === "failed" });
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toMatchObject({ type: "conversation.status", status: terminal, sequence: before.sequence + 1 });
+    expect(oldToken.completed).toBe(false);
+    expect((projection.get(old.id) as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    // New native input does not retroactively own the previous answer. Keep
+    // history deliberately stale (no persisted turn_duration) on every read.
+    projection.statusUpdate("running");
+    entries.push({ kind: "assistant", uuid: "current", timestamp: 10, parentUuid: null, isSidechain: false, parentToolUseId: null,
+      message: { id: "current-api", content: [{ type: "text", text: "![Current](current.png)" }] } });
+    emit({ type: "assistant", uuid: "current", message: entries[1]!.message });
+    let first: { items: ConversationItem[] };
+    if (entry === "history") first = await router.history("claude:capture");
+    else { subscription = await router.subscribe("claude:capture"); first = subscription.snapshot; }
+    const captured = answer(first, "old");
+    expect(captured.visuals?.map(visual => visual.status)).toEqual(["unavailable", "ready"]);
+    expect((captured as AssistantMessageItem & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect(answer(first, "current").visuals?.map(visual => visual.status)).toEqual(["pending"]);
+    expect((await router.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
+    expect(reads).toEqual({ "old-missing.png": 1, "old-ready.png": 1, "current.png": 1 });
+    subscription ??= await router.subscribe("claude:capture");
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    const drain = async () => {
+      const marker = projection.replay.publish({ type: "conversation.configuration", configuration: {} });
+      const events: ChatEvent[] = [];
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) throw new Error("stream ended before capture barrier");
+        if (next.value.type === marker.type && next.value.sequence === marker.sequence) return events;
+        events.push(next.value);
+      }
+    };
+    filesCreated = true; // Only this execution creates the previously missing file/overwrites the ready one.
+    const during = await router.history("claude:capture");
+    expect(answer(during, "old").visuals).toEqual(captured.visuals);
+    expect(answer(during, "current").visuals?.[0]?.status).toBe("pending");
+    expect(reads).toEqual({ "old-missing.png": 1, "old-ready.png": 1, "current.png": 1 });
+    const end = emit({ type: "result", subtype: "success", is_error: terminal === "failed" })[0]!;
+    expect(await drain()).toEqual([
+      { ...end, conversationId: "claude:capture" },
+      { type: "resync", reason: "conversation-rewritten", generation: end.generation, sequence: end.sequence, conversationId: "claude:capture" },
+    ]);
+    const completed = await router.history("claude:capture");
+    expect(answer(completed, "old").visuals).toEqual(captured.visuals);
+    expect(answer(completed, "current").visuals?.[0]?.status).toBe("ready");
+    expect((await router.resolveVisual(answer(completed, "current").visuals![0]!.id!))?.bytes).toEqual(nextBytes);
+    expect((await router.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
+    const reloadedStore = new VisualStore(process.cwd(), directory);
+    reloadedStore.setReader(async () => { throw new Error("terminal records must not reread current execution files"); });
+    restarted = new MultiAgentChatService({ workspacePath: process.cwd(), visualStore: reloadedStore, agents: [{ descriptor: { id: "claude", name: "Claude" }, service }] });
+    const reloaded = await restarted.history("claude:capture");
+    expect(answer(reloaded, "old").visuals).toEqual(captured.visuals);
+    expect(answer(reloaded, "current").visuals).toEqual(answer(completed, "current").visuals);
+    expect((await restarted.resolveVisual(captured.visuals![1]!.id!))?.bytes).toEqual(originalBytes);
+    expect(reads).toEqual({ "old-missing.png": 1, "old-ready.png": 1, "current.png": 2 });
+    expect(oldToken.completed).toBe(false);
+  } finally { subscription?.events.cancel(); await restarted?.dispose(); await router.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test.each(["succeeded", "failed", "interrupted"] as const)("ordered native execution %s seals retained membership by replacement, with no extra frames", terminal => {
   const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
