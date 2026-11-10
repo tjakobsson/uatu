@@ -985,6 +985,9 @@ links rather than becoming previews. Unsupported image URL schemes remain
 escaped, non-clickable reference text. Invalid or unavailable visuals show an
 explanation and preserve the reference or SVG source. A local file missing
 during streaming is retried once when the reply finishes.
+Raw HTML keeps its container context until sanitization. Script bodies follow
+the sanitizer's strip policy; image-like text inside inert containers or quoted
+attributes is not imported as a separate visual.
 Reference-style image destinations on an unfinished definition line remain
 provisional until the line ends or the reply completes.
 Steering does not finish the current reply or consume its completion retry;

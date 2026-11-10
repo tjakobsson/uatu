@@ -55,9 +55,22 @@ function prepareUncached(source: string, key: string, presentation: boolean): Ca
   // Extract SVG before syntax highlighting: source text is not HTML, and
   // must never be reconstructed by decoding highlighted markup.
   const { html, attribute, origins } = visualSyntax(source);
-  const unsafe = fromHtml(html, { fragment: true });
-  const attributeOrigins = (parent: { children: HtmlNode[] }) => {
+  let unsafe = fromHtml(html, { fragment: true });
+  const inertAnnotation = new RegExp(` ${attribute}="[0-9]+"`, "g");
+  const rawText = new Set(["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "plaintext", "noscript"]);
+  const inertInsertions: { start: number; end: number }[] = [];
+  const attributeOrigins = (parent: { children: HtmlNode[]; tagName?: string }, collectInert = true) => {
     for (const node of parent.children) {
+      // Separate inline HTML tokens can rejoin inside a raw-text container.
+      // Remove markers from their raw source spans, not decoded text: authored
+      // character references may legitimately decode to the same spelling.
+      if (collectInert && node.type === "text" && rawText.has(parent.tagName ?? "")
+        && node.position?.start.offset !== undefined && node.position.end.offset !== undefined) {
+        const start = node.position.start.offset;
+        for (const match of html.slice(start, node.position.end.offset).matchAll(inertAnnotation)) {
+          inertInsertions.push({ start: start + match.index!, end: start + match.index! + match[0].length });
+        }
+      }
       if (node.type !== "element") continue;
       const origin = origins.get(String(node.properties[attribute]));
       if (origin) {
@@ -71,10 +84,24 @@ function prepareUncached(source: string, key: string, presentation: boolean): Ca
         node.data.chatVisualSource = String(node.properties.src ?? "");
       }
       delete node.properties[attribute];
-      attributeOrigins(node);
+      attributeOrigins(node, collectInert);
     }
   };
   attributeOrigins(unsafe);
+  if (inertInsertions.length) {
+    // Raw-text spans do not overlap. One bounded reparse restores their exact
+    // literal/decoded text without private markers, including across tokens.
+    const segments: string[] = [];
+    let previous = 0;
+    for (const insertion of inertInsertions.sort((a, b) => a.start - b.start)) {
+      if (insertion.start < previous) continue;
+      segments.push(html.slice(previous, insertion.start));
+      previous = insertion.end;
+    }
+    segments.push(html.slice(previous));
+    unsafe = fromHtml(segments.join(""), { fragment: true });
+    attributeOrigins(unsafe, false);
+  }
   const tree = sanitize(unsafe, markdownSanitizeSchema);
   if (presentation) markExternalAnchors(tree);
   const visuals: ChatVisualInput[] = [];
@@ -235,7 +262,14 @@ function visualSyntax(source: string): { html: string; attribute: string; origin
         if (["htmlFlow", "codeFenced", "codeIndented"].includes(original.type)) this.lineEndingIfNeeded();
         this.buffer();
       } },
-      exit: { chatVisualOrigin(token) {
+      exit: {
+      // GFM's tagfilter escapes only raw-text container tags, which promotes
+      // their literal <img> content into active elements and shifts origins.
+      // Keep CommonMark's raw HTML emission until the HAST parse/sanitizer:
+      // script is stripped; other disallowed containers retain inert text.
+      htmlFlowData(token) { this.raw(this.encode(this.sliceSerialize(token))); },
+      htmlTextData(token) { this.raw(this.encode(this.sliceSerialize(token))); },
+      chatVisualOrigin(token) {
         const original = originals.get(token)!;
         let html = this.resume();
         if (original.type === "htmlFlow" || original.type === "htmlText") {

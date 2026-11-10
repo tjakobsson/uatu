@@ -281,6 +281,52 @@ describe("agent visual Markdown", () => {
     expect(prepared.html).not.toContain("uatu-origin-");
   });
 
+  test.each(["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes"].flatMap(tag =>
+    ["block", "inline"].map(mode => ({ tag, mode }))))("$mode $tag literals cannot become file imports or shift an identical actual image's origin", ({ tag, mode }) => {
+    // Identical spellings prevent a filename/attribute matching heuristic from
+    // distinguishing the literal from the actual occurrence. HTML context must.
+    const image = '<ImG src="same.png" alt="Example">';
+    const inert = `<${tag}>${image}</${tag.toUpperCase()}>`;
+    const prefix = mode === "block" ? `<div>\n${inert}\n` : `before ${inert} after `;
+    const source = prefix + image + (mode === "block" ? "\n</div>\n" : "\n");
+    const expected = [{ index: 0, key: `offset:${prefix.length}`, kind: "file" as const, source: "same.png", alt: "Example", complete: true }];
+    const prepared = prepareChatVisualMarkdown(source, true);
+    expect(prepared.visuals).toEqual(expected);
+    expect(prepareChatVisualMarkdown(source, false)).toBe(prepared);
+    expect(getChatVisuals(source, true)).toEqual(expected);
+    expect(getChatVisuals(source, false)).toEqual(expected);
+    expect(prepared.html).not.toContain("uatu-origin-");
+    const { document } = parseHTML(prepared.html);
+    expect(document.querySelectorAll("[data-uatu-visual]").length).toBe(1);
+    expect(document.querySelectorAll("img,script,style,textarea,title,xmp,iframe,noembed,noframes").length).toBe(0);
+    if (tag !== "script") expect(Array.from(document.childNodes, node => node.textContent ?? "").join("")).toContain(image);
+  });
+
+  test("an unclosed raw-text container cannot expose later compiled images for import", () => {
+    const source = '<plaintext><IMG src="literal.png">\n\n![Still literal](later.png)\n';
+    for (const streaming of [true, false]) {
+      const prepared = prepareChatVisualMarkdown(source, streaming);
+      expect(prepared.visuals).toEqual([]);
+      expect(getChatVisuals(source, streaming)).toEqual([]);
+      expect(prepared.html).not.toMatch(/<img\b/i);
+      expect(prepared.html).not.toContain("uatu-origin-");
+    }
+  });
+
+  test("inert marker cleanup preserves authored entity-encoded origin-like text", () => {
+    const image = '<img src="actual.png">';
+    const source = `before <textarea>&#32;uatu&#45;origin&#45;000=&quot;0&quot; ${image}</textarea> after ${image}`;
+    expect(String(source.length).length).toBe(3);
+    const prepared = prepareChatVisualMarkdown(source, false);
+    expect(prepared.visuals.map(input => [input.source, input.key])).toEqual([["actual.png", `offset:${source.lastIndexOf(image)}`]]);
+    const { document } = parseHTML(prepared.html);
+    const text = Array.from(document.childNodes, node => node.textContent ?? "").join("");
+    expect(text).toContain(' uatu-origin-000="0"');
+    expect(text).toContain(image);
+    expect(document.querySelectorAll("[data-uatu-visual]").length).toBe(1);
+    expect(document.querySelectorAll("img").length).toBe(0);
+  });
+
   test("SVG source preserves literal entities, quotes, and original line endings", () => {
     const svg = '<svg xmlns="http://www.w3.org/2000/svg">\r\n<text>&amp; &#38; &lt; &quot;</text>\r\n</svg>\r\n';
     expect(getChatVisuals(`\`\`\`svg\r\n${svg}\`\`\``, true)[0]?.source).toBe(svg);
