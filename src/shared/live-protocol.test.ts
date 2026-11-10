@@ -104,7 +104,7 @@ describe("subscription control body", () => {
 
 describe("per-subscription transport recovery", () => {
   test.each([true, false])("opening and control subscriptions retain validated reconnect=%s", reconnect => {
-    const subscription = { topic: "conversation", key: "opencode:c", cursor: "same-terminal-cursor", reconnect };
+    const subscription = { topic: "conversation" as const, key: "opencode:c", cursor: "same-terminal-cursor", reconnect };
     expect(parseLiveSubscriptionChange({ add: [subscription] })).toEqual({ add: [subscription] });
     expect(parseLiveStreamQuery(new URLSearchParams({ subs: JSON.stringify([subscription]) }))).toMatchObject({ subs: [subscription] });
   });
@@ -133,9 +133,9 @@ describe("per-subscription transport recovery", () => {
     }
   });
   test("the cursor bound and last-add-wins semantics also apply to recovery", () => {
-    const subscription = { topic: "conversation", key: "c", cursor: "x".repeat(LIVE_MAX_CURSOR_BYTES), reconnect: true };
+    const subscription = { topic: "conversation" as const, key: "c", cursor: "x".repeat(LIVE_MAX_CURSOR_BYTES), reconnect: true };
     expect(parseLiveSubscriptionChange({ add: [subscription] })).toEqual({ add: [subscription] });
-    const fresh = { topic: "conversation", key: "c", cursor: subscription.cursor };
+    const fresh = { topic: "conversation" as const, key: "c", cursor: subscription.cursor };
     expect(parseLiveSubscriptionChange({ add: [subscription, fresh] })).toEqual({ add: [fresh] });
   });
 });
