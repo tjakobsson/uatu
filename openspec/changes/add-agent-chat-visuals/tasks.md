@@ -109,6 +109,7 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.33 Correct the `7ed0f6a2` shared-child attribution regression: preserve complete attribution and immutable execution metadata without an extra child transcript read after post-history input recovery. Retain the original read-count and ordering assertions.
 - [ ] 6.34 Preserve syntax completion for stored V2 messages whose native API-message completion precedes execution end. Existing files must capture before subsequent tools overwrite them; missing-file retries remain execution-scoped.
 - [ ] 6.35 Forward transport-recovery intent when Hub reopens an existing child stream, so an equal-cursor terminal visual resync missed on disconnect is recovered. Fresh subscriptions after history must remain loop-free.
+- [ ] 6.36 Diagnose `dd857132` CI failures without weakening assertions: repeated cached-cursor recovery after a session restart, and the existing live aggregate integration test's default five-second timeout. Preserve recovery semantics and aggregate bounds.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

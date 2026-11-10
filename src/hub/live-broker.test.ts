@@ -1112,6 +1112,10 @@ describe("failure and child exit (2.3)", () => {
     const clock = trailerClock();
     const live = broker(child.source, { retryMinMs: failure === "session restart" ? 5_000 : 20, retryMaxMs: 5_000, catchUpTrailerClock: clock.clock });
     const s = sink();
+    const interrupt = (upstream: FakeUpstream) => {
+      if (failure === "stream end") upstream.end();
+      else { child.setRunning("ws", false); child.setRunning("ws", true); }
+    };
     const initial = cursorOf("g1", 0), terminalCursor = cursorOf("g1", 1);
     const status = { type: "conversation.status", status: "failed", message: "Provider failed after image generation", generation: "g1", sequence: 1, conversationId: "c" };
     const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 1, conversationId: "c" };
@@ -1123,8 +1127,7 @@ describe("failure and child exit (2.3)", () => {
     child.opened[0]!.push(replayFrame(status));
     await waitFor(() => s.envelopes.some(envelope => envelope.event.kind === "data"), "original native status received");
     expect(s.envelopes.at(-1)).toMatchObject({ cursor: terminalCursor, event: { kind: "data", data: status } });
-    if (failure === "stream end") child.opened[0]!.end();
-    else { child.setRunning("ws", false); child.setRunning("ws", true); }
+    interrupt(child.opened[0]!);
     await waitFor(() => child.opened.length === 2, "transport recovery");
     const recovering = new URL(child.opened[1]!.path, "http://child");
     expect(recovering.searchParams.get("cursor")).toBe(terminalCursor);
@@ -1144,6 +1147,7 @@ describe("failure and child exit (2.3)", () => {
 
     for (let round = 0; round < 2; round++) {
       const freshIndex = child.opened.length;
+      const readyCount = s.envelopes.filter(envelope => envelope.event.kind === "ready").length;
       live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: terminalCursor });
       await waitFor(() => child.opened.length === freshIndex + 1, "fresh post-history attachment");
       const fresh = child.opened[freshIndex]!;
@@ -1151,10 +1155,15 @@ describe("failure and child exit (2.3)", () => {
       expect(path.searchParams.get("cursor")).toBe(terminalCursor);
       expect(path.searchParams.has("reconnect")).toBe(false);
       fresh.push(`event: open\ndata: ${JSON.stringify({ cursor: terminalCursor })}\n\n`);
-      await waitFor(() => s.envelopes.at(-1)?.event.kind === "ready", "fresh ready without another message");
+      await waitFor(() => s.envelopes.filter(envelope => envelope.event.kind === "ready").length === readyCount + 1, "fresh ready without another message");
       expect(s.envelopes.filter(envelope => envelope.event.kind === "resync")).toHaveLength(round + 1);
       if (round === 0) {
-        fresh.end(); // The same cached terminal cursor is recovered again.
+        const unavailableCount = s.envelopes.filter(envelope => envelope.event.kind === "unavailable").length;
+        // Repeat the selected failure mode. A session restart recovers on
+        // its start event; an EOF alone correctly waits the 5-second retry
+        // floor deliberately configured for that variant.
+        interrupt(fresh);
+        await waitFor(() => s.envelopes.filter(envelope => envelope.event.kind === "unavailable").length === unavailableCount + 1, "cached transport observed unavailable");
         await waitFor(() => child.opened.length === freshIndex + 2, "cached-cursor transport recovery");
         const cached = child.opened[freshIndex + 1]!;
         expect(new URL(cached.path, "http://child").searchParams.get("reconnect")).toBe("1");
