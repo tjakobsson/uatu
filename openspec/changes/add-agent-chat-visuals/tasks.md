@@ -113,6 +113,7 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.37 Preserve browser-to-Hub reconnect intent through endpoint attachments, including replacement upstreams and recovery attachments joining an already healthy shared stream at the terminal cursor. Recover missed visual resyncs without flagging fresh post-history subscriptions or changing metrics.
 - [ ] 6.38 Diagnose the existing observer-priority failure on `a82af71e`: an ordinary edit must not wait behind more than 16 already-running background inspections. Preserve the workload and priority assertion; use source-backed synchronization or report an actual production defect.
 - [ ] 6.39 Address Codex on `bdfcd598`: enroll or buffer paged pending visuals before initial subscription snapshot capture awaits I/O. An older-page request finishing during that await must still receive its turn-completion retry and resync, with cancellation and failed-setup cleanup preserved.
+- [ ] 6.40 Correct `c2c3198c` cancellation/setup regressions: one existing abort fixture fails and three new abort/disposal tests time out; the unit process never reports completion before cancellation. Preserve prompt cleanup, late-source cancellation, early paged enrollment and finite event draining without hiding leaked work behind longer budgets.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

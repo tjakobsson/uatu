@@ -847,13 +847,24 @@ test.each(["abort", "dispose"] as const)("%s during initial visual enrichment pr
   const capture = spyOn(h.store, "captureMany").mockImplementation((...args) => { const promise = captureMany(...args); captures.push(promise); return promise; });
   const abort = new AbortController();
   const subscribing = h.service.subscribe("claude:c", { signal: abort.signal });
-  const rejected = expect(subscribing).rejects.toMatchObject({ name: "AbortError" });
+  // Observe immediately with real promise handlers. A rejection matcher is an
+  // assertion, not a deferred observer to construct before triggering abort.
+  let settled = false;
+  const observed = subscribing.then(value => { settled = true; return { type: "resolved" as const, value }; },
+    error => { settled = true; return { type: "rejected" as const, error }; });
   const registrations = () => (h.service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers;
   try {
     await entered.promise;
     expect(h.replay.subscriberCount()).toBe(1);
     if (cancellation === "abort") abort.abort(); else await h.service.dispose();
-    await rejected; // Must settle before releasing the slow capture.
+    // One event-loop checkpoint drains cancellation's microtasks without a
+    // guessed delay. On regression, assert BEFORE awaiting a stuck setup so
+    // finally can release its capture gate and drain owned work.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(settled).toBe(true);
+    const outcome = await observed;
+    expect(outcome.type).toBe("rejected");
+    if (outcome.type === "rejected") expect(outcome.error).toMatchObject({ name: "AbortError" });
     expect(h.replay.subscriberCount()).toBe(0);
     expect(registrations().size).toBe(0);
     gate.resolve();
@@ -861,7 +872,13 @@ test.each(["abort", "dispose"] as const)("%s during initial visual enrichment pr
     expect(captured[0]?.[0]?.status).toBe("ready");
     expect((await h.service.resolveVisual(captured[0]![0]!.id!))?.bytes).toEqual(bytes);
     expect(registrations().size).toBe(0); // A late capture cannot re-register.
-  } finally { gate.resolve(); await Promise.allSettled(captures); capture.mockRestore(); await h.cleanup(); }
+  } finally {
+    gate.resolve();
+    const outcome = await observed;
+    if (outcome.type === "resolved") outcome.value.events.cancel();
+    await Promise.allSettled(captures);
+    capture.mockRestore(); await h.cleanup();
+  }
 });
 
 test.each(["native", "enrichment"] as const)("failed %s subscribe removes early history enrollment and closes any acquired native source", async phase => {
@@ -882,30 +899,47 @@ test("aborting before a delayed native handoff cancels the late source without r
   h.subscription.events.cancel();
   const original = h.provider.subscribe;
   const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
-  const lateCancelled = Promise.withResolvers<void>();
+  let handoffReleased = false, lateCancelled = false, cancellations = 0;
   let cancelSource: { mockRestore(): void } | undefined;
   h.provider.subscribe = async (id, options) => {
     const result = await original(id, options);
     const cancel = result.events.cancel.bind(result.events);
-    let cancellations = 0;
     cancelSource = spyOn(result.events, "cancel").mockImplementation(() => {
       cancel();
-      if (++cancellations === 2) lateCancelled.resolve(); // Signal abort, then late router handoff.
+      cancellations++;
+      if (handoffReleased) lateCancelled = true;
     });
-    entered.resolve(); await gate.promise; return result;
+    entered.resolve(); await gate.promise; handoffReleased = true; return result;
   };
   const abort = new AbortController();
   const subscribing = h.service.subscribe("claude:c", { signal: abort.signal });
-  const rejected = expect(subscribing).rejects.toMatchObject({ name: "AbortError" });
+  let settled = false;
+  const observed = subscribing.then(value => { settled = true; return { type: "resolved" as const, value }; },
+    error => { settled = true; return { type: "rejected" as const, error }; });
   try {
     await entered.promise;
-    abort.abort(); await rejected;
+    abort.abort();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(settled).toBe(true);
+    const outcome = await observed;
+    expect(outcome.type).toBe("rejected");
+    if (outcome.type === "rejected") expect(outcome.error).toMatchObject({ name: "AbortError" });
+    expect(handoffReleased).toBe(false);
     expect(h.replay.subscriberCount()).toBe(0);
+    expect(cancellations).toBe(1); // The source itself observes the abort signal.
     gate.resolve();
-    await lateCancelled.promise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(lateCancelled).toBe(true); // Router cancels the source on late arrival.
+    expect(cancellations).toBe(2);
     expect(h.replay.subscriberCount()).toBe(0);
     expect((h.service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers.size).toBe(0);
-  } finally { gate.resolve(); await subscribing.catch(() => undefined); cancelSource?.mockRestore(); await h.cleanup(); }
+  } finally {
+    gate.resolve();
+    const outcome = await observed;
+    if (outcome.type === "resolved") outcome.value.events.cancel();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    cancelSource?.mockRestore(); await h.cleanup();
+  }
 });
 
 test("completion waits for an in-flight older page and cancellation releases its enrollment", async () => {

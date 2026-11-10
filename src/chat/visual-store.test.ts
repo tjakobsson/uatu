@@ -1522,14 +1522,83 @@ test("subscribe cancels the provider handoff if snapshot enrichment fails or its
   const store = new VisualStore("/workspace", directory);
   const provider = { subscribe: async () => ({ snapshot, events }), dispose: async () => {} } as unknown as WorkspaceChatService;
   const service = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "a", name: "Agent" }, service: provider }] });
-  await expect(service.subscribe("a:c")).rejects.toThrow("broken snapshot");
-  expect(cleanups).toBe(1);
-  events = new ReplaySubscription(() => { cleanups++; });
+  type Setup = Awaited<ReturnType<MultiAgentChatService["subscribe"]>>;
+  type Outcome = { type: "resolved"; value: Setup } | { type: "rejected"; error: unknown };
+  const setups: Array<Promise<Outcome>> = [];
+  const observe = (promise: Promise<Setup>) => {
+    const state = { settled: false };
+    // Attach both handlers immediately, before the capture is allowed to abort.
+    // A rejection matcher must not wait ahead of the action that triggers it.
+    const outcome = promise.then(value => { state.settled = true; return { type: "resolved" as const, value }; },
+      (error: unknown) => { state.settled = true; return { type: "rejected" as const, error }; });
+    setups.push(outcome);
+    return { state, outcome };
+  };
+  const captureMany = store.captureMany.bind(store);
+  const captures: Array<ReturnType<VisualStore["captureMany"]>> = [];
+  const capture = spyOn(store, "captureMany").mockImplementation((...args) => { const pending = captureMany(...args); captures.push(pending); return pending; });
+  const entered = Promise.withResolvers<void>(), triggerAbort = Promise.withResolvers<void>(), finishCapture = Promise.withResolvers<void>();
   const stop = new AbortController();
-  store.setReader(async () => { stop.abort(); return png; });
-  snapshot.items = [{ id: "m", type: "assistant_message", createdAt: 1, markdown: "![image](image.png)" }];
-  const subscription = await service.subscribe("a:c", { signal: stop.signal });
-  expect(cleanups).toBe(2);
-  expect((await subscription.events[Symbol.asyncIterator]().next()).done).toBe(true);
-  await service.dispose();
+  const registrations = () => (service as unknown as { visualHistorySubscribers: Map<string, Set<unknown>> }).visualHistorySubscribers;
+  let currentBytes = png, reads = 0;
+  try {
+    const failed = await observe(service.subscribe("a:c")).outcome;
+    expect(failed.type).toBe("rejected");
+    if (failed.type === "rejected") expect(failed.error).toMatchObject({ message: "broken snapshot" });
+    expect(cleanups).toBe(1);
+    expect(registrations().size).toBe(0);
+    expect((await events[Symbol.asyncIterator]().next()).done).toBe(true);
+    expect(captures).toHaveLength(0);
+
+    // A separate, acquired source is aborted from inside its still-blocked
+    // reader. Setup must reject promptly, not return a closed snapshot after
+    // waiting for this uncancellable capture to finish.
+    events = new ReplaySubscription(() => { cleanups++; });
+    store.setReader(async () => {
+      reads++;
+      const bytes = currentBytes.slice();
+      entered.resolve(); await triggerAbort.promise;
+      stop.abort(); await finishCapture.promise;
+      return bytes;
+    });
+    snapshot.items = [{ id: "m", type: "assistant_message", createdAt: 1, markdown: "![image](image.png)" }];
+    const aborted = observe(service.subscribe("a:c", { signal: stop.signal }));
+    await entered.promise;
+    expect(registrations().get("a:c")?.size).toBe(1);
+    triggerAbort.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // Check settlement before awaiting it, so a regression reaches finally
+    // and releases the reader rather than stranding the process at this await.
+    expect(aborted.state.settled).toBe(true);
+    const outcome = await aborted.outcome;
+    expect(outcome.type).toBe("rejected");
+    if (outcome.type === "rejected") expect(outcome.error).toMatchObject({ name: "AbortError" });
+    expect(cleanups).toBe(2);
+    expect(registrations().size).toBe(0);
+    events.push({ type: "conversation.status", status: "completed", generation: "g", conversationId: "c", sequence: 1 });
+    expect((await events[Symbol.asyncIterator]().next()).done).toBe(true);
+
+    currentBytes = Uint8Array.from([...png, 99]);
+    finishCapture.resolve();
+    const captured = await Promise.all(captures);
+    expect(captured).toHaveLength(1);
+    const visual = captured[0]![0]!;
+    expect(visual.status).toBe("ready");
+    expect((await store.resolve(visual.id!))?.bytes).toEqual(png);
+    const reloaded = new VisualStore("/workspace", directory);
+    reloaded.setReader(async () => { throw new Error("late capture must remain immutable after reload"); });
+    expect((await reloaded.resolve(visual.id!))?.bytes).toEqual(png);
+    expect(reads).toBe(1);
+    expect(cleanups).toBe(2); // Late capture cannot reopen or re-cancel the source.
+    expect(registrations().size).toBe(0);
+  } finally {
+    triggerAbort.resolve(); finishCapture.resolve();
+    try {
+      try { await service.dispose(); }
+      finally {
+        try { for (const outcome of await Promise.all(setups)) if (outcome.type === "resolved") outcome.value.events.cancel(); }
+        finally { await Promise.allSettled(captures); }
+      }
+    } finally { events.cancel(); capture.mockRestore(); }
+  }
 });
