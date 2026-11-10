@@ -368,7 +368,7 @@ describe("OpenCode v2 identity policy", () => {
           all: [
             { id: "unused", name: "Unused", models: { hidden: { id: "hidden", name: "Hidden" } } },
             { id: "openai", name: "OpenAI", models: { sol: { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", variants: { high: {}, xhigh: {} }, limit: { context: 200000 } } } },
-            { id: "opencode", name: "OpenCode", models: { free: { id: "free", name: "Free" } } },
+            { id: "opencode", name: "OpenCode", models: { free: { id: "free", name: "Free" }, terra: { id: "gpt-5.5", name: "GPT-5.5", limit: { context: 400000, input: 272000, output: 128000 } } } },
           ],
         } }),
       },
@@ -378,6 +378,9 @@ describe("OpenCode v2 identity policy", () => {
     expect(await provider.listModels()).toEqual([
       { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol", variants: ["high", "xhigh"], contextLimit: 200000, contextWindow: { source: "catalog", freshness: "current" } },
       { selection: { providerId: "opencode", modelId: "free" }, provider: "OpenCode", name: "Free" },
+      // The prompt limit the server sends (absent from the 1.x SDK type) is
+      // the window; the larger total capacity rides beside it.
+      { selection: { providerId: "opencode", modelId: "gpt-5.5" }, provider: "OpenCode", name: "GPT-5.5", contextLimit: 272000, contextWindow: { source: "catalog", freshness: "current", kind: "effective", capacity: 400000 } },
     ]);
     // The variants capability is declared now that listModels reports variants.
     expect(provider.describe().capabilities).toContain("variants");

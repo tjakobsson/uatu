@@ -8563,13 +8563,16 @@ describe("OpenCode 2.x provider: identity and catalogs", () => {
       "GET /api/model": () => scoped([
         { id: "flash", modelID: "flash", providerID: "opencode", name: "Flash", capabilities: { tools: true, input: ["text", "image"], output: ["text"] }, variants: [], limit: { context: 200000, output: 32000 }, status: "active", enabled: true, cost: [], time: { released: 0 } },
         { id: "think", modelID: "think", providerID: "berget", name: "Thinker", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [{ id: "high" }, { id: "low" }], limit: { context: 128000, output: 8000 }, status: "active", enabled: true, cost: [], time: { released: 0 } },
+        { id: "gpt-5.5", modelID: "gpt-5.5", providerID: "openai", name: "GPT-5.5", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [], limit: { context: 400000, input: 272000, output: 128000 }, status: "active", enabled: true, cost: [], time: { released: 0 } },
         { id: "old", modelID: "old", providerID: "berget", name: "Old", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [], limit: { context: 8000, output: 800 }, status: "deprecated", enabled: true, cost: [], time: { released: 0 } },
         { id: "off", modelID: "off", providerID: "berget", name: "Off", capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [], limit: { context: 8000, output: 800 }, status: "active", enabled: false, cost: [], time: { released: 0 } },
       ]),
-      "GET /api/provider": () => scoped([{ id: "opencode", name: "OpenCode Zen", activation: "auto", package: "x" }, { id: "berget", name: "Berget", activation: "enabled", package: "y" }]),
+      "GET /api/provider": () => scoped([{ id: "opencode", name: "OpenCode Zen", activation: "auto", package: "x" }, { id: "berget", name: "Berget", activation: "enabled", package: "y" }, { id: "openai", name: "OpenAI", activation: "enabled", package: "z" }]),
     });
     expect(await provider().listModels()).toEqual([
       { selection: { providerId: "berget", modelId: "think" }, provider: "Berget", name: "Thinker", variants: ["high", "low"], contextLimit: 128000, contextWindow: { source: "catalog", freshness: "current" } },
+      // A stated prompt limit is the window; the total capacity rides beside it.
+      { selection: { providerId: "openai", modelId: "gpt-5.5" }, provider: "OpenAI", name: "GPT-5.5", contextLimit: 272000, contextWindow: { source: "catalog", freshness: "current", kind: "effective", capacity: 400000 } },
       { selection: { providerId: "opencode", modelId: "flash" }, provider: "OpenCode Zen", name: "Flash", contextLimit: 200000, contextWindow: { source: "catalog", freshness: "current" }, imageInput: true },
     ]);
   });
