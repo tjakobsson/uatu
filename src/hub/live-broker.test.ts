@@ -1093,16 +1093,114 @@ describe("failure and child exit (2.3)", () => {
     const s = sink();
     live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 0) });
     await waitFor(() => child.opened.length === 1, "upstream");
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
     child.opened[0]!.push(": open\n\n");
     child.opened[0]!.push(chatFrame("g1", 1));
     await waitFor(() => s.envelopes.length === 2, "ready + data");
     child.opened[0]!.end();
     await waitFor(() => child.opened.length === 2, "reopen");
     expect(child.opened[1]!.path).toContain(`cursor=${encodeURIComponent(cursorOf("g1", 1))}`);
+    expect(new URL(child.opened[1]!.path, "http://child").searchParams.get("reconnect")).toBe("1");
     child.opened[1]!.push(": open\n\n");
     child.opened[1]!.push(chatFrame("g1", 2));
     await waitFor(() => s.envelopes.length === 5, "unavailable, ready, data");
     expect(kinds(s.envelopes)).toEqual(["ready", "data", "unavailable", "ready", "data"]);
+  });
+
+  test.each(["stream end", "session restart"] as const)("%s after terminal status explicitly repairs the same-cursor visual resync without flagging fresh attachments", async failure => {
+    const child = fakeSource();
+    const clock = trailerClock();
+    const live = broker(child.source, { retryMinMs: failure === "session restart" ? 5_000 : 20, retryMaxMs: 5_000, catchUpTrailerClock: clock.clock });
+    const s = sink();
+    const initial = cursorOf("g1", 0), terminalCursor = cursorOf("g1", 1);
+    const status = { type: "conversation.status", status: "failed", message: "Provider failed after image generation", generation: "g1", sequence: 1, conversationId: "c" };
+    const resync = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 1, conversationId: "c" };
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: initial });
+    await waitFor(() => child.opened.length === 1, "fresh conversation stream");
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: initial })}\n\n`);
+    await waitFor(() => kinds(s.envelopes).includes("ready"), "initial ready");
+    child.opened[0]!.push(replayFrame(status));
+    await waitFor(() => s.envelopes.some(envelope => envelope.event.kind === "data"), "original native status received");
+    expect(s.envelopes.at(-1)).toMatchObject({ cursor: terminalCursor, event: { kind: "data", data: status } });
+    if (failure === "stream end") child.opened[0]!.end();
+    else { child.setRunning("ws", false); child.setRunning("ws", true); }
+    await waitFor(() => child.opened.length === 2, "transport recovery");
+    const recovering = new URL(child.opened[1]!.path, "http://child");
+    expect(recovering.searchParams.get("cursor")).toBe(terminalCursor);
+    expect(recovering.searchParams.get("reconnect")).toBe("1");
+    // The actual child uses this explicit flag to return its cached visual
+    // resync even though no new native event or sequence is available.
+    child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor: terminalCursor })}\n\n${replayFrame(resync, "resync")}`);
+    await waitFor(() => s.envelopes.some(envelope => envelope.event.kind === "resync"), "same-cursor visual repair");
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "data")).toEqual([
+      expect.objectContaining({ cursor: terminalCursor, event: { kind: "data", data: status } }),
+    ]);
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "resync")).toEqual([
+      expect.objectContaining({ cursor: terminalCursor, event: { kind: "resync", data: resync } }),
+    ]);
+    expect(child.opened[1]!.cancelled).toBe(true);
+    expect(live.upstreamCount("conversation")).toBe(0);
+
+    for (let round = 0; round < 2; round++) {
+      const freshIndex = child.opened.length;
+      live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: terminalCursor });
+      await waitFor(() => child.opened.length === freshIndex + 1, "fresh post-history attachment");
+      const fresh = child.opened[freshIndex]!;
+      const path = new URL(fresh.path, "http://child");
+      expect(path.searchParams.get("cursor")).toBe(terminalCursor);
+      expect(path.searchParams.has("reconnect")).toBe(false);
+      fresh.push(`event: open\ndata: ${JSON.stringify({ cursor: terminalCursor })}\n\n`);
+      await waitFor(() => s.envelopes.at(-1)?.event.kind === "ready", "fresh ready without another message");
+      expect(s.envelopes.filter(envelope => envelope.event.kind === "resync")).toHaveLength(round + 1);
+      if (round === 0) {
+        fresh.end(); // The same cached terminal cursor is recovered again.
+        await waitFor(() => child.opened.length === freshIndex + 2, "cached-cursor transport recovery");
+        const cached = child.opened[freshIndex + 1]!;
+        expect(new URL(cached.path, "http://child").searchParams.get("reconnect")).toBe("1");
+        cached.push(`event: open\ndata: ${JSON.stringify({ cursor: terminalCursor })}\n\n${replayFrame(resync, "resync")}`);
+        await waitFor(() => s.envelopes.filter(envelope => envelope.event.kind === "resync").length === 2, "second cached repair");
+      }
+    }
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "data")).toHaveLength(1);
+    expect(clock.timers.size).toBe(0); // Shared recovery is not a private trailer lease.
+    live.dispose();
+    expect(child.opened.every(upstream => upstream.cancelled)).toBe(true);
+    expect(live.upstreamCount()).toBe(0);
+  });
+
+  test("recovery retains the child's learned origin before any chat data has arrived", async () => {
+    const child = fakeSource();
+    const live = broker(child.source, { retryMinMs: 20, retryMaxMs: 40 });
+    const s = sink();
+    live.subscribe(s, "ws", { topic: "conversation", key: "c" });
+    await waitFor(() => child.opened.length === 1, "unpositioned initial stream");
+    expect(child.opened[0]!.path).toBe("/api/chat/conversations/c/events");
+    const origin = cursorOf("g1", 7);
+    child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor: origin })}\n\n`);
+    await waitFor(() => kinds(s.envelopes).includes("ready"), "origin learned");
+    child.opened[0]!.end();
+    await waitFor(() => child.opened.length === 2, "origin-only recovery");
+    const recovered = new URL(child.opened[1]!.path, "http://child");
+    expect(recovered.searchParams.get("cursor")).toBe(origin);
+    expect(recovered.searchParams.get("reconnect")).toBe("1");
+    const snapshotRecovery = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 7, conversationId: "c" };
+    child.opened[1]!.push(replayFrame(snapshotRecovery, "resync"));
+    await waitFor(() => kinds(s.envelopes).includes("resync"), "origin-only visual repair");
+    expect(s.envelopes.filter(envelope => envelope.event.kind === "data")).toEqual([]);
+  });
+
+  test("a conversation's first child open after a stopped workspace starts is not transport recovery", async () => {
+    const child = fakeSource({ running: new Set() });
+    const live = broker(child.source, { retryMinMs: 5_000, retryMaxMs: 5_000 });
+    const s = sink();
+    live.subscribe(s, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 5) });
+    expect(child.opened).toHaveLength(0);
+    child.setRunning("ws", true);
+    await waitFor(() => child.opened.length === 1, "first child transport");
+    expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+    child.opened[0]!.push(": open\n\n");
+    await waitFor(() => kinds(s.envelopes).includes("ready"), "fresh attachment ready");
   });
 
   test("a stopped workspace is unavailable at once and a session start recovers it promptly", async () => {

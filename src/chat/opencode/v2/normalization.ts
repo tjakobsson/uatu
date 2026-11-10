@@ -35,7 +35,7 @@ import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
 import type { InboxDelta, PendingInboxEntry } from "../../provider";
 import { BackgroundWorkers, nativeProof, prepareNotification, prepareTool, shellBirthIdentity, shellCommandFingerprint, type ShellBirthIdentity, type BackgroundControls, type LauncherEvidence, type NativeProof, type PreparedTool, type PreparedNotification } from "./background";
 import { nativeVisualMessageIdentity } from "../../visual-identity";
-import { OPENCODE_EXECUTION_LIVE } from "../normalization-types";
+import { OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END } from "../normalization-types";
 
 export type { NormalizedProviderEvent };
 
@@ -758,9 +758,13 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
     case "assistant": {
       const tools = prepared.tools;
       const completed = completionTime(finishedTime(message.time));
+      // Stored V2 text parts carry no independent completion clock. The API
+      // message's validated completion seals their Markdown syntax, not the
+      // execution: a following tool may still create a missing image file.
+      const textEnd = completed.completedAt === undefined ? {} : { [OPENCODE_TEXT_END]: true as const };
       const items = assistantContentUpdates(id, array(message.content), createdAt, undefined, tools).flatMap(update => {
         const item = update.kind === "upsert" || update.kind === "text" ? update.item : undefined;
-        return item ? [item.type === "assistant_message" ? { ...item, ...completed } : item] : [];
+        return item ? [item.type === "assistant_message" ? { ...item, ...completed, ...textEnd } : item] : [];
       });
       if (background) for (const tool of tools.values()) items.push(...background.workers.launchPrepared(background.parent, tool, createdAt).flatMap(update => update.kind === "upsert" ? [update.item] : []));
       const usage = tokensToUsage(message.tokens, message.cost);

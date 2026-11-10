@@ -1099,7 +1099,7 @@ export class LiveBroker implements PresenceSource {
   // ---------------------------------------------------------------------
   // Upstream lifecycle
 
-  private childPath(upstream: Upstream): string {
+  private childPath(upstream: Upstream, reconnect: boolean): string {
     switch (upstream.topic) {
       case "document":
         return upstream.key ? `${CHILD_DOCUMENT_EVENTS_PATH}?${upstream.key}` : CHILD_DOCUMENT_EVENTS_PATH;
@@ -1108,7 +1108,11 @@ export class LiveBroker implements PresenceSource {
       case "conversation": {
         const base = childConversationEventsPath(upstream.key ?? "");
         const from = upstream.head || upstream.originCursor;
-        return from ? `${base}?cursor=${encodeURIComponent(from)}` : base;
+        // A cursor alone also describes a fresh post-history attachment.
+        // Only recovery of this existing transport may request equal-cursor
+        // visual reconciliation; carrying it onto fresh topics would loop.
+        if (!from) return reconnect ? `${base}?reconnect=1` : base;
+        return `${base}?cursor=${encodeURIComponent(from)}${reconnect ? "&reconnect=1" : ""}`;
       }
       case "activity":
         return CHILD_ACTIVITY_PATH;
@@ -1134,7 +1138,7 @@ export class LiveBroker implements PresenceSource {
     if (upstream.topic === "conversation") {
       // A fresh open resumes from the head the hub last saw, or from the
       // first subscriber's cursor so the child replays what it holds.
-      if (!upstream.head) {
+      if (!upstream.head && !upstream.originCursor) {
         const first = [...upstream.subscribers][0];
         upstream.originCursor = first?.cursor;
       }
@@ -1152,9 +1156,10 @@ export class LiveBroker implements PresenceSource {
     upstream.state = "opening";
     // Every attempt is an open; only the first moves the active gauge — a
     // retry is the same logical upstream.
-    this.metrics.opened(childUpstreamTopic(upstream.topic)!, { reopen: upstream.counted });
+    const reconnect = upstream.counted;
+    this.metrics.opened(childUpstreamTopic(upstream.topic)!, { reopen: reconnect });
     upstream.counted = true;
-    const path = this.childPath(upstream);
+    const path = this.childPath(upstream, reconnect);
     // Presumed live after the grace unless refused first — see
     // LiveBrokerOptions.inventoryOpenGraceMs. Runs until the first chunk or
     // a refusal, whichever comes first, not merely until the fetch settles.

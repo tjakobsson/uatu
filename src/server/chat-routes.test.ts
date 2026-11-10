@@ -1320,6 +1320,112 @@ describe("workspace chat routes", () => {
     }
   });
 
+  test("Hub transport recovery after losing a terminal status trailer repairs cached visuals at the same native cursor", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-hub-equal-cursor-"));
+    const service = new FakeChatService();
+    const store = new VisualStore("/workspace", directory);
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false, reads = 0, droppedStatusTrailer = false, trailerTimers = 0;
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return png; });
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const paths: string[] = [];
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        const attempt = paths.push(path);
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        const recovery = new URL(path, "http://child").searchParams.get("reconnect") === "1";
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(recovery ? service.replay.latestCursor() : null);
+        if (attempt !== 1) return response;
+        const reader = response.body!.getReader();
+        let ended = false;
+        // The route produces one frame per pull. Model a transport that
+        // delivers status, then closes without delivering its visual resync.
+        return new Response(new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            const next = await reader.read();
+            if (ended) return;
+            if (next.done) { ended = true; controller.close(); return; }
+            controller.enqueue(next.value);
+            if (new TextDecoder().decode(next.value).includes('"type":"conversation.status"')) {
+              droppedStatusTrailer = true;
+              ended = true;
+              await reader.cancel();
+              try { controller.close(); } catch { /* Broker already cancelled. */ }
+            }
+          },
+          cancel() { ended = true; return reader.cancel(); },
+        }), { headers: response.headers });
+      },
+    }, { retryMinMs: 10, retryMaxMs: 10, catchUpTrailerClock: {
+      setTimer(run) { trailerTimers++; return run; }, clearTimer() {},
+    } });
+    const received: LiveEnvelope[] = [];
+    const initialReady = Promise.withResolvers<void>();
+    const repaired = Promise.withResolvers<void>();
+    let onReady = () => initialReady.resolve();
+    const sink = { write(envelope: LiveEnvelope) {
+      received.push(envelope);
+      if (envelope.event.kind === "ready") onReady();
+      if (envelope.event.kind === "resync") repaired.resolve();
+    } };
+    try {
+      const cached = await getHistory();
+      expect(cached.items[0].visuals[0].status).toBe("pending");
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: cached.cursor });
+      await initialReady.promise;
+      expect(new URL(paths[0]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      available = true;
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after image generation" });
+      const cursor = service.replay.latestCursor();
+      await repaired.promise; // No later native event is published to wake it.
+      expect(droppedStatusTrailer).toBe(true);
+      expect(paths).toHaveLength(2);
+      const recovery = new URL(paths[1]!, "http://child");
+      expect(recovery.searchParams.get("cursor")).toBe(cursor);
+      expect(recovery.searchParams.get("reconnect")).toBe("1");
+      expect(received.filter(envelope => envelope.event.kind === "data")).toEqual([
+        expect.objectContaining({ cursor, event: { kind: "data", data: { ...terminal, conversationId: "opencode:local" } } }),
+      ]);
+      const resyncs = received.filter(envelope => envelope.event.kind === "resync");
+      expect(resyncs).toHaveLength(1);
+      expect(resyncs[0]).toMatchObject({ cursor, event: { kind: "resync", data: {
+        type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local", generation: terminal.generation, sequence: terminal.sequence,
+      } } });
+      expect(received.findIndex(envelope => envelope.event.kind === "data")).toBeLessThan(received.findIndex(envelope => envelope.event.kind === "resync"));
+      expect(service.replay.subscriberCount()).toBe(0);
+      const fresh = await getHistory();
+      expect(fresh.cursor).toBe(cursor);
+      expect(fresh.items[0].visuals[0].status).toBe("ready");
+      expect((await store.resolve(fresh.items[0].visuals[0].id))?.bytes).toEqual(png);
+      const freshReady = Promise.withResolvers<void>();
+      onReady = () => freshReady.resolve();
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: fresh.cursor });
+      await freshReady.promise;
+      expect(paths).toHaveLength(3);
+      expect(new URL(paths[2]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      expect(received.at(-1)!.event.kind).toBe("ready");
+      expect(received.filter(envelope => envelope.event.kind === "resync")).toHaveLength(1);
+      expect(service.replay.latestCursor()).toBe(cursor);
+      expect(reads).toBe(2);
+      expect(trailerTimers).toBe(0);
+      expect(service.replay.subscriberCount()).toBe(1);
+    } finally {
+      live.dispose();
+      expect(service.replay.subscriberCount()).toBe(0);
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("HTTP cursor-only reconnect finishes terminal visual replay with a boundary resync and no resubscribe loop", async () => {
     const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
     await fs.mkdir(scratch, { recursive: true });

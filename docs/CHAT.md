@@ -994,6 +994,9 @@ tool-call messages pending and older executions terminal, including across pages
 API-message completion alone does not end that execution. Classic OpenCode 1.x
 cold/restarted history lacks those boundaries: completed tool-call messages are
 conservatively finalized and may refuse an image that a later tool creates.
+Completed stored V2 text still finalizes image syntax immediately: existing
+files can be captured before another tool changes them, while missing files
+keep their execution-end retry.
 Claude uses native turn-end records rather than text-block completion: completed
 turns stay terminal, while a live turn retains its pending visuals across history
 pages. Pending visuals loaded after the live subscription starts also receive

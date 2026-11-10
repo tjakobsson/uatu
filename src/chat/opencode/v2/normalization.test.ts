@@ -7,6 +7,7 @@ import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, prepareStoredMessage, storedAccounting, storedExecutionLiveness, type OpenCodeV2Memory } from "./normalization";
 import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
+import type { AssistantMessageItem } from "../../types";
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
 import { visualAdmissionIdentity } from "../../visual-identity";
@@ -112,15 +113,42 @@ test("text phases, content restatement and stored messages supply the same non-w
   }
 });
 
-test("classic part-end handling leaves v2 historical parent-completion semantics unchanged", () => {
+test("stored V2 parent completion seals text syntax independently of execution, not from classic part clocks", () => {
   for (const completed of [undefined, 40]) {
     const [item] = normalizeStoredMessage({ id: "m", type: "assistant", time: { created: 10, ...(completed === undefined ? {} : { completed }) }, content: [{ type: "text", text: "![shot][ref]\n\n[ref]: result.png", time: { start: 11, end: 20 } }] });
     expect(item?.type).toBe("assistant_message");
-    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBeUndefined();
+    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(completed === undefined ? undefined : true);
     if (completed === undefined) expect(item).not.toHaveProperty("completedAt");
     else expect(item).toHaveProperty("completedAt", completed);
     expect(parseConversationItem(JSON.parse(JSON.stringify(item)))).toMatchObject({ id: "part:m:text:0", type: "assistant_message" });
   }
+});
+
+test.each([undefined, null, "40", -1, NaN, Infinity, -Infinity, 0, 40])("stored V2 text end uses the existing finite nonnegative completion semantics (%s)", completed => {
+  const captured = FIXTURES.storedMessages.data.find(message => message.type === "assistant" && message.finish === "tool-calls")!;
+  const native = { ...captured, id: captured.id as string, time: { created: 0, completed }, content: [
+    { type: "text", text: "![shot][ref]\n\n[ref]: result.png" },
+    { type: "reasoning", text: "Still no independent text clock", time: { created: 0 } },
+    { type: "text", text: "Second text part" },
+  ] };
+  const valid = typeof completed === "number" && Number.isFinite(completed) && completed >= 0;
+  const membership = storedExecutionLiveness([native]);
+  const items = normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), membership.get(native.id));
+  const texts = items.filter((item): item is AssistantMessageItem => item.type === "assistant_message" && item.markdown !== "");
+  expect(texts).toHaveLength(2);
+  for (const item of texts) {
+    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(valid ? true : undefined);
+    expect((item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    if (valid) expect(item.completedAt).toBe(completed as number);
+    else expect(item.completedAt).toBeUndefined();
+    const json = JSON.parse(JSON.stringify(item));
+    expect(Object.getOwnPropertySymbols(json)).toEqual([]);
+    expect(parseConversationItem(json)).toEqual(json);
+  }
+  // Message completion is not a synthesized reasoning/tool end, nor does the
+  // usage-only carrier need a text-syntax marker.
+  for (const item of items.filter(item => !texts.some(text => text === item))) expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBeUndefined();
+  expect(items.find(item => item.type === "reasoning")).toMatchObject({ status: "running" });
 });
 
 function run(events: Array<Record<string, unknown>>, memory: OpenCodeV2Memory = createOpenCodeV2Memory()) {

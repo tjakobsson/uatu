@@ -143,6 +143,10 @@ merge early. A non-extendable 10-second trailer watchdog starts only once the
 origin is reached; expiry cancels/releases catch-up before requesting recovery,
 never declaring success from elapsed time. Children without the hint retain
 the existing merge path. Public JSON and native sequence numbers are unchanged.
+When recovering an existing shared conversation transport, the Hub forwards
+`reconnect=1` with the last known cursor, including an origin learned before
+the first chat-data frame. Fresh opens remain unflagged, avoiding a resync loop
+after a successful history refresh.
 
 ### Keep visual interaction within the existing chat surface
 

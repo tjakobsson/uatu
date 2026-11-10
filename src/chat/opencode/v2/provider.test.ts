@@ -21,7 +21,7 @@ import { MultiAgentChatService } from "../../agents";
 import { VisualReadError, VisualStore } from "../../visual-store";
 import type { WorkspaceChatService } from "../../service";
 import type { AssistantMessageItem, ChatEvent, ConversationSnapshot } from "../../types";
-import { OPENCODE_EXECUTION_LIVE, type OpenCodeExecutionIdentity } from "../normalization-types";
+import { OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "../normalization-types";
 
 // The stored records of a real 2.0.13 session: user, assistant (read tool),
 // assistant (text), idle, user — see normalization.test.ts for provenance.
@@ -140,8 +140,9 @@ test("V2 execution membership spans native and local history pages, but not a st
   } finally { await provider.dispose(); }
 });
 
-async function visualExecutionFixture() {
+async function visualExecutionFixture(markdown?: string) {
   const state = visualExecutionRecords();
+  if (markdown !== undefined) state.records.find(message => message.id === "current-tool")!.content = [{ type: "text", text: markdown }];
   let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
   const server = fakeOpenCode({
     "GET /api/event": ({ signal }) => new Response(new ReadableStream<Uint8Array>({ start(controller) {
@@ -268,12 +269,100 @@ test.each([
   }
 });
 
+test.each([
+  { entry: "history", missing: false }, { entry: "history", missing: true },
+  { entry: "subscribe", missing: false }, { entry: "subscribe", missing: true },
+] as const)("completed V2 stored tool-call text seals EOF reference syntax on $entry without sealing execution (missing=$missing)", async ({ entry, missing }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, "native-stored-text-end-"));
+  const markdown = "![shot][ref]\n\n[ref]: later.png"; // Deliberately no final newline.
+  const h = await visualExecutionFixture(markdown);
+  const original = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const overwritten = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 2]);
+  let bytes = original, available = !missing, reads = 0;
+  const routers: MultiAgentChatService[] = [], subscriptions: Array<{ cancel(): void }> = [];
+  const router = () => {
+    const store = new VisualStore(WORKSPACE, directory);
+    store.setReader(async source => {
+      if (source === "old.png") throw new VisualReadError(true);
+      expect(source).toBe("later.png"); reads++;
+      if (!available) throw new VisualReadError(true);
+      return bytes;
+    });
+    const value = new MultiAgentChatService({ workspacePath: WORKSPACE, visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: h.service }] });
+    routers.push(value); return value;
+  };
+  const answer = (snapshot: ConversationSnapshot) => snapshot.items.find(item => item.id === "part:current-tool:text:0") as AssistantMessageItem;
+  try {
+    const first = router();
+    const initial = entry === "history" ? await first.history("opencode:ses_visual") : await (async () => {
+      const attach = await first.subscribe("opencode:ses_visual"); subscriptions.push(attach.events); return attach.snapshot;
+    })();
+    expect(initial.conversation.status).toBe("running");
+    expect(answer(initial)).toMatchObject({ markdown, completedAt: 9 });
+    expect((answer(initial) as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect((answer(initial) as AssistantMessageItem & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    expect(answer(initial).visuals?.[0]?.status).toBe(missing ? "pending" : "ready");
+    expect(reads).toBe(1); // A completed EOF definition must attempt capture now.
+    if (!missing) expect((await first.resolveVisual(answer(initial).visuals![0]!.id!))?.bytes).toEqual(original);
+    const second = router();
+    const attach = await second.subscribe("opencode:ses_visual"); subscriptions.push(attach.events);
+    expect(answer(attach.snapshot).visuals).toEqual(answer(initial).visuals);
+    expect(answer(await second.history("opencode:ses_visual")).visuals).toEqual(answer(initial).visuals);
+    expect(reads).toBe(1);
+    const iterator = attach.events[Symbol.asyncIterator]();
+    const drain = async () => {
+      const marker = h.adapter.projectionForTests("ses_visual").replay.publish({ type: "conversation.configuration", configuration: {} });
+      const received: ChatEvent[] = [];
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) throw new Error("visual stream ended before barrier");
+        if (next.value.type === marker.type && next.value.sequence === marker.sequence) return received;
+        received.push(next.value);
+      }
+    };
+    await h.emit("session.tool.input.started", { assistantMessageID: "later-step", id: "write", name: "Write" });
+    await h.emit("session.tool.called", { assistantMessageID: "later-step", id: "write", input: { file_path: "later.png" } });
+    available = true; bytes = overwritten;
+    await h.emit("session.tool.success", { assistantMessageID: "later-step", id: "write", content: [{ type: "text", text: "Replaced image" }], metadata: {}, executed: true });
+    await drain();
+    expect(answer(await second.history("opencode:ses_visual")).visuals).toEqual(answer(initial).visuals);
+    expect(reads).toBe(1); // Syntax end never spends a missing file's end retry.
+    if (!missing) expect((await second.resolveVisual(answer(initial).visuals![0]!.id!))?.bytes).toEqual(original);
+    h.state.records.push({ id: "actual-end", type: "idle", time: { created: 40 }, outcome: "succeeded" });
+    await h.emit("session.execution.succeeded");
+    const terminal = await drain();
+    expect(terminal.filter(event => event.type === "conversation.status")).toHaveLength(1);
+    expect(terminal.filter(event => event.type === "resync")).toHaveLength(missing ? 1 : 0);
+    expect(reads).toBe(missing ? 2 : 1);
+    const completed = answer(await second.history("opencode:ses_visual"));
+    expect(completed.markdown).toBe(markdown);
+    expect(completed.visuals?.[0]?.status).toBe("ready");
+    const expected = missing ? overwritten : original;
+    expect((await second.resolveVisual(completed.visuals![0]!.id!))?.bytes).toEqual(expected);
+    bytes = Uint8Array.from([...overwritten, 3]);
+    const reloaded = router();
+    const reload = answer(await reloaded.history("opencode:ses_visual"));
+    expect(reload.visuals).toEqual(completed.visuals);
+    expect((await reloaded.resolveVisual(reload.visuals![0]!.id!))?.bytes).toEqual(expected);
+    expect(answer(initial).visuals?.[0]?.status).toBe(missing ? "pending" : "ready");
+    expect(reads).toBe(missing ? 2 : 1);
+  } finally {
+    for (const subscription of subscriptions) subscription.cancel();
+    for (const value of routers) await value.dispose();
+    await h.adapter.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("V2 stored-only execution end refreshes equal-JSON projection rows without a synthetic frame", async () => {
   const h = await visualExecutionFixture();
   const membership = (item: object) => (item as OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
   try {
     const original = (await h.adapter.history("ses_visual")).items.find(item => item.id === "part:current-tool:text:0")!;
     expect(membership(original)).toBe(true);
+    expect((original as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
     // Simulate an end missed by this process, followed by another execution.
     h.state.records.push({ id: "missed-end", type: "idle", time: { created: 20 }, outcome: "succeeded" },
       { id: "new-prompt", type: "user", time: { created: 21 }, text: "New execution" });
@@ -286,6 +375,7 @@ test("V2 stored-only execution end refreshes equal-JSON projection rows without 
     expect(JSON.stringify(current)).toBe(JSON.stringify(original));
     expect(membership(current)).toBe(false);
     expect(membership(projection.get(original.id)!)).toBe(false);
+    expect((projection.get(original.id) as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
     expect(membership(original)).toBe(true);
     // Only the genuinely new user row gets a public frame.
     const iterator = observer.events[Symbol.asyncIterator]();
@@ -300,6 +390,7 @@ test("V2 stored-only execution end refreshes equal-JSON projection rows without 
     expect(before).not.toBe(projection.replay.latestCursor());
     const attach = await h.adapter.subscribe("ses_visual"); attach.events.cancel();
     expect(membership(attach.snapshot.items.find(item => item.id === original.id)!)).toBe(false);
+    expect((attach.snapshot.items.find(item => item.id === original.id) as typeof original & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
   } finally { await h.adapter.dispose(); }
 });
 
