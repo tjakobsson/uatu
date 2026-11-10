@@ -52,5 +52,9 @@ function renderVisual(input: ChatVisualInput, options: ChatMarkdownOptions): str
     : "";
   const original = input.kind === "svg" && !hasId ? escapeHtml(input.source).replaceAll("\r", "&#13;") : "";
   const source = svg ? `<span class="chat-visual-source" hidden><code>${original}</code></span>` : "";
-  return `<span class="chat-visual${svg ? " is-svg" : ""}" data-visual-index="${input.index}"${hasId ? ` data-visual-key="${escapeHtml(snapshot.id!)}"` : ""}${sourceUrl ? ` data-visual-source-url="${escapeHtml(sourceUrl)}"` : ""}${input.kind === "svg" && !hasId ? ' data-visual-source-loaded="true"' : ""}>${controls}<span class="chat-visual-preview">${image}</span>${source}<span class="chat-visual-status" role="status"></span></span>`;
+  // DOM-only identity: document-order indices can shift when a late reference
+  // resolves. The renderer scopes this source offset to its native bubble.
+  const occurrence = input.key ? ` data-visual-occurrence="${escapeHtml(`${input.kind}:${input.key}`)}"` : "";
+  const state = ready && !refusedCount ? "ready" : pending ? "pending" : "unavailable";
+  return `<span class="chat-visual${svg ? " is-svg" : ""}" data-visual-index="${input.index}"${occurrence} data-visual-state="${state}"${hasId ? ` data-visual-key="${escapeHtml(snapshot.id!)}"` : ""}${sourceUrl ? ` data-visual-source-url="${escapeHtml(sourceUrl)}"` : ""}${input.kind === "svg" && !hasId ? ' data-visual-source-loaded="true"' : ""}>${controls}<span class="chat-visual-preview">${image}</span>${source}<span class="chat-visual-status" role="status"></span></span>`;
 }

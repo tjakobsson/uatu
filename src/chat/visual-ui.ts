@@ -2,6 +2,62 @@ import { attachCopyButtons } from "../preview/code-block";
 import { appUrl } from "../shared/app-url";
 import { copyChatText } from "./copy-actions";
 
+/** Reconcile only one native assistant bubble. Return its logical focused
+ * control for restoration after the staging tree is installed, never autofocus.
+ */
+export function reconcileChatVisuals(content: HTMLElement, next: HTMLElement): HTMLElement | null {
+  const selector = ".chat-visual[data-visual-occurrence]";
+  const retained = new Map(Array.from(content.querySelectorAll<HTMLElement>(selector), visual => [visual.dataset.visualOccurrence!, visual]));
+  const active = content.ownerDocument.activeElement as HTMLElement | null;
+  let focus: HTMLElement | null = null;
+  for (const visual of next.querySelectorAll<HTMLElement>(selector)) {
+    const previous = retained.get(visual.dataset.visualOccurrence!);
+    if (!previous) continue;
+    const sameSnapshot = previous.dataset.visualKey !== undefined && previous.dataset.visualKey === visual.dataset.visualKey;
+    if (sameSnapshot && previous.dataset.visualState !== "pending" && previous.dataset.visualState === visual.dataset.visualState) {
+      // Captured bytes are immutable. Preserve the image, loaded source,
+      // decode-failure fallback and controls without requesting them again.
+      previous.dataset.visualIndex = visual.dataset.visualIndex;
+      visual.replaceWith(previous);
+      if (active && previous.contains(active)) focus = active;
+      continue;
+    }
+    // Pending/refused source is live text, not immutable captured bytes. Keep
+    // the new source/status/copy handlers, transferring only the reader's view.
+    if (previous.querySelector('[data-visual-tab="source"]')?.getAttribute("aria-pressed") === "true") {
+      const preview = visual.querySelector<HTMLElement>(".chat-visual-preview");
+      const source = visual.querySelector<HTMLElement>(".chat-visual-source");
+      if (source) {
+        source.hidden = false;
+        if (preview) preview.hidden = true;
+        for (const tab of visual.querySelectorAll<HTMLElement>("[data-visual-tab]")) tab.setAttribute("aria-pressed", String(tab.dataset.visualTab === "source"));
+      }
+    }
+    const copy = visual.querySelector<HTMLButtonElement>("[data-visual-copy]");
+    if (sameSnapshot && previous.dataset.visualSourceLoaded) {
+      const code = visual.querySelector(".chat-visual-source code");
+      if (code) {
+        code.textContent = previous.querySelector(".chat-visual-source code")?.textContent ?? "";
+        visual.dataset.visualSourceLoaded = "true";
+        if (copy) { copy.disabled = false; copy.removeAttribute("title"); }
+      }
+    }
+    if (!active || !previous.contains(active)) continue;
+    const control = active.matches('[data-visual-tab="source"]') ? '[data-visual-tab="source"]'
+      : active.matches('[data-visual-tab="preview"]') ? '[data-visual-tab="preview"]'
+      : active.matches("[data-visual-copy]") ? "[data-visual-copy]" : null;
+    if (control) focus = visual.querySelector<HTMLElement>(control);
+    if (focus === copy && copy?.disabled) {
+      // Capture may issue an id while Copy is focused. Keep this same logical
+      // control focusable, but unavailable until the immutable source loads.
+      // The click path still requires visualSourceLoaded before copying.
+      copy.disabled = false;
+      copy.setAttribute("aria-disabled", "true");
+    }
+  }
+  return focus;
+}
+
 /** Bind only new visual nodes. Retained previews keep source state while text streams. */
 export function decorateChatVisuals(root: HTMLElement): void {
   // These surfaces have no snapshot capture. Their SVG stays ordinary code,
@@ -31,6 +87,7 @@ export function decorateChatVisuals(root: HTMLElement): void {
         if (copyButton) {
           copyButton.disabled = false;
           copyButton.removeAttribute("title");
+          copyButton.removeAttribute("aria-disabled");
         }
         return text;
       })().catch(error => { loading = undefined; throw error; });
@@ -60,6 +117,13 @@ export function decorateChatVisuals(root: HTMLElement): void {
           .catch(error => { if (status) status.textContent = messageOf(error); });
       }
     });
+    // A pending Source view can survive capture without another tab click.
+    // Each new node owns its source cache and handlers; old responses cannot
+    // populate the newly issued snapshot or freeze a later streaming prefix.
+    if (visual.querySelector('[data-visual-tab="source"]')?.getAttribute("aria-pressed") === "true"
+      || copyButton?.getAttribute("aria-disabled") === "true") {
+      void source().catch(error => { if (status) status.textContent = messageOf(error); });
+    }
     const image = visual.querySelector<HTMLImageElement>(".chat-visual-enlarge img");
     if (image) {
       const failed = () => {

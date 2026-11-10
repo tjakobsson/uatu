@@ -8,7 +8,7 @@ import { loginActionMarkup, type LoginAction } from "./login-action";
 import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
-import { decorateChatVisuals } from "./visual-ui";
+import { decorateChatVisuals, reconcileChatVisuals } from "./visual-ui";
 import { retainShellSelection, ShellOutputController, type ShellMutationHooks, type ShellOutputMetadata, type ShellPresentation } from "./shell-output";
 import { measureChatWork } from "./performance";
 import { resolveWorkspaceFileReference } from "./file-references";
@@ -1012,21 +1012,12 @@ function patchInPlace(entry: RenderedEntry, item: ConversationItem, completedAss
     const content = entry.node.querySelector<HTMLElement>(".chat-assistant-content");
     if (!content) return false;
     if (current.markdown !== item.markdown || current.visuals !== item.visuals || entry.node.dataset.complete !== String(completedAssistant)) {
-      const active = content.ownerDocument.activeElement as HTMLElement | null;
-      const focused = active && content.contains(active) ? active : null;
-      const retained = new Map(Array.from(content.querySelectorAll<HTMLElement>("[data-visual-key]"), visual => [visual.dataset.visualKey!, visual]));
       const next = document.createElement("div");
       next.innerHTML = renderChatMarkdown(item.markdown, { streaming: !completedAssistant, visuals: item.visuals });
-      for (const visual of next.querySelectorAll<HTMLElement>("[data-visual-key]")) {
-        const previous = retained.get(visual.dataset.visualKey!);
-        if (previous) {
-          previous.dataset.visualIndex = visual.dataset.visualIndex;
-          visual.replaceWith(previous);
-        }
-      }
+      const focused = reconcileChatVisuals(content, next);
       content.replaceChildren(...Array.from(next.childNodes));
-      // Moving a retained visual through the staging tree blurs its control.
-      // Only restore the same surviving node; never steal focus or scroll.
+      // Moving/replacing a visual through the staging tree blurs its control.
+      // Restore only the matched occurrence/control, never autofocus or scroll.
       if (focused && content.contains(focused)) focused.focus({ preventScroll: true });
     }
     entry.node.dataset.complete = String(completedAssistant);

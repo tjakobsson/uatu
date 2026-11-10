@@ -152,6 +152,28 @@ describe("chat Markdown security", () => {
     expect(document.querySelector(".chat-visual-source code")?.textContent).toBe('<svg onload="bad()"><text>&amp;</text>');
   });
 
+  test("pending, refused and captured visuals expose source occurrence identity independently of index or snapshot id", () => {
+    const prefix = "![Late][ref]\n\n";
+    const source = `${prefix}\`\`\`svg\n<svg/>\n\`\`\`\n`;
+    const render = (markdown: string, index: number, captured = false) => parseHTML(renderChatMarkdown(markdown, {
+      streaming: true,
+      visuals: [{ index, status: captured ? "ready" : "pending", ...(captured ? { id: VISUAL_ID, mimeType: "image/svg+xml" } : {}) }],
+    })).document.querySelector(".chat-visual.is-svg")!;
+    const initial = render(source, 0);
+    const promoted = render(`${source}\n[ref]: ./late.png\n`, 1);
+    const captured = render(`${source}\n[ref]: ./late.png\n`, 1, true);
+    expect(initial.getAttribute("data-visual-occurrence")).toBe(`svg:offset:${prefix.length}`);
+    expect(initial.hasAttribute("data-visual-key")).toBe(false);
+    expect(promoted.getAttribute("data-visual-index")).toBe("1");
+    expect(promoted.getAttribute("data-visual-occurrence")).toBe(initial.getAttribute("data-visual-occurrence"));
+    expect(captured.getAttribute("data-visual-occurrence")).toBe(initial.getAttribute("data-visual-occurrence"));
+    expect(captured.getAttribute("data-visual-key")).toBe(VISUAL_ID);
+    expect(render(`Moved.\n\n${source}`, 0).getAttribute("data-visual-occurrence")).not.toBe(initial.getAttribute("data-visual-occurrence"));
+    const refused = parseHTML(renderChatMarkdown(source, { streaming: true, visuals: [] })).document.querySelector(".chat-visual")!;
+    expect(refused.getAttribute("data-visual-occurrence")).toBe(initial.getAttribute("data-visual-occurrence"));
+    expect(refused.textContent).toContain("At most 8 images");
+  });
+
   test("an unadmitted incomplete SVG cannot bypass the native-message image budget", () => {
     const { document } = parseHTML(renderChatMarkdown("```svg\n<svg/>", { streaming: true, visuals: [] }));
     expect(document.querySelector(".chat-visual-preview")?.textContent).toContain("At most 8 images");

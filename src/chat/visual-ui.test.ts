@@ -1,10 +1,91 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { renderChatMarkdown } from "./markdown";
-import { decorateChatVisuals } from "./visual-ui";
+import { decorateChatVisuals, reconcileChatVisuals } from "./visual-ui";
 const VISUAL_ID = "a".repeat(64);
 
 describe("chat visual controls", () => {
+  test("pending Source and focused Copy survive capture while handlers load only the newly issued immutable source", async () => {
+    const oldFetch = globalThis.fetch;
+    const requests: string[] = [];
+    let finish!: (response: Response) => void;
+    globalThis.fetch = (async input => {
+      requests.push(String(input));
+      return new Promise<Response>(resolve => { finish = resolve; });
+    }) as typeof fetch;
+    try {
+      const { document, window } = parseHTML('<div id="root"></div>');
+      const root = document.querySelector("#root") as unknown as HTMLElement;
+      root.innerHTML = renderChatMarkdown("```svg\r\n<svg>prefix", { streaming: true, visuals: [{ index: 0, status: "pending" }] });
+      decorateChatVisuals(root);
+      root.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const oldCopy = root.querySelector("[data-visual-copy]");
+      // linkedom has no native focus implementation. Test the logical-control
+      // mapping here; Chromium/WebKit tests exercise actual keyboard focus.
+      Object.defineProperty(document, "activeElement", { configurable: true, value: oldCopy });
+      const stage = document.createElement("div") as unknown as HTMLElement;
+      const completed = "```svg\r\n<svg>prefix completed</svg>\r\n```\r\n";
+      stage.innerHTML = renderChatMarkdown(completed, { visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }] });
+      const focus = reconcileChatVisuals(root, stage);
+      const nextCopy = stage.querySelector<HTMLButtonElement>("[data-visual-copy]")!;
+      expect(focus).toBe(nextCopy);
+      expect(nextCopy.disabled).toBe(false);
+      expect(nextCopy.getAttribute("aria-disabled")).toBe("true");
+      root.replaceChildren(...Array.from(stage.childNodes));
+      decorateChatVisuals(root);
+      expect(root.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+      expect(root.querySelector('[data-visual-tab="source"]')!.getAttribute("aria-pressed")).toBe("true");
+      expect(requests).toEqual([`/api/chat/visuals/${VISUAL_ID}/source`]);
+      // No pending-prefix cache is passed off as captured bytes.
+      expect(root.querySelector("code")!.textContent).not.toBe("<svg>prefix");
+      const captured = '<svg>Immutable &amp; bytes</svg>\r\n';
+      finish(new Response(captured));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(root.querySelector("code")!.textContent).toBe(captured);
+      expect(nextCopy.hasAttribute("aria-disabled")).toBe(false);
+      expect(nextCopy.disabled).toBe(false);
+      const retained = root.querySelector(".chat-visual");
+      const image = root.querySelector("img");
+      stage.innerHTML = renderChatMarkdown(completed + "\nMore prose.", { visuals: [{ index: 0, status: "ready", id: VISUAL_ID, mimeType: "image/svg+xml" }] });
+      reconcileChatVisuals(root, stage);
+      root.replaceChildren(...Array.from(stage.childNodes));
+      decorateChatVisuals(root);
+      expect(root.querySelector(".chat-visual")).toBe(retained);
+      expect(root.querySelector("img")).toBe(image);
+      expect(root.querySelector("code")!.textContent).toBe(captured);
+      expect(requests).toHaveLength(1);
+    } finally { globalThis.fetch = oldFetch; }
+  });
+
+  test("a stale source response cannot populate the replacement snapshot at the same occurrence", async () => {
+    const oldFetch = globalThis.fetch;
+    const replies: Array<(response: Response) => void> = [];
+    globalThis.fetch = (async () => new Promise<Response>(resolve => { replies.push(resolve); })) as typeof fetch;
+    try {
+      const { document, window } = parseHTML('<div id="root"></div>');
+      const root = document.querySelector("#root") as unknown as HTMLElement;
+      const markdown = "```svg\n<svg/>\n```\n";
+      const render = (id: string) => renderChatMarkdown(markdown, { visuals: [{ index: 0, status: "ready", id, mimeType: "image/svg+xml" }] });
+      root.innerHTML = render(VISUAL_ID);
+      decorateChatVisuals(root);
+      root.querySelector('[data-visual-tab="source"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const stage = document.createElement("div") as unknown as HTMLElement;
+      stage.innerHTML = render("b".repeat(64));
+      reconcileChatVisuals(root, stage);
+      root.replaceChildren(...Array.from(stage.childNodes));
+      decorateChatVisuals(root);
+      expect(replies).toHaveLength(2);
+      replies[0]!(new Response("old snapshot"));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(root.querySelector("code")!.textContent).toBe("");
+      expect(root.querySelector("[data-visual-copy]")!.hasAttribute("disabled")).toBe(true);
+      replies[1]!(new Response("replacement snapshot"));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(root.querySelector("code")!.textContent).toBe("replacement snapshot");
+      expect(root.querySelector<HTMLElement>(".chat-visual-source")!.hidden).toBe(false);
+    } finally { globalThis.fetch = oldFetch; }
+  });
+
   test("copy waits for source loading, not for network work inside the copy click", async () => {
     const oldFetch = globalThis.fetch;
     let finish!: (response: Response) => void;

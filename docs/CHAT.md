@@ -957,6 +957,8 @@ confirms it. An apparent closing fence at the current streamed text end can
 still become ordinary SVG text in the next update. Images fit the message
 width without cropping; tall diagrams scroll with the conversation. Select
 an image to open the full-size viewer.
+Selecting Source while an SVG is generating keeps that tab and its focused
+control across text updates, while the displayed source continues to grow.
 
 The first successful capture of each image occurrence is stored in Uatu's
 workspace state. Editing or deleting its original file does not change that

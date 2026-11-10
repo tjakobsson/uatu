@@ -370,6 +370,88 @@ test.describe("agent inline visuals", () => {
 });
 
 for (const engine of ["chromium", "webkit"] as const) {
+  for (const mobile of [false, true]) browserTest(`${engine} ${mobile ? "mobile" : "desktop"}: growing SVG retains Source and logical keyboard focus through capture`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL, viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile });
+    let releaseSource!: () => void;
+    const sourceGate = new Promise<void>(resolve => { releaseSource = resolve; });
+    try {
+      // Observe the exact clipboard payload without platform-specific clipboard
+      // permissions. Real controls and their activation path remain unchanged.
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { Reflect.set(window, "__visualCopiedText", text); } } });
+      });
+      const conversationId = await boot(page, request);
+      await control(request, { action: "status", conversationId, status: "running" });
+      const id = "growing-focused-svg";
+      const prefix = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100">\r\n<text x="10" y="40">Exact &amp;';
+      let source = prefix;
+      let markdown = `\`\`\`svg\r\n${source}`;
+      await publish(request, conversationId, id, markdown);
+      const visual = page.locator(`[data-chat-item-id="${id}"] .chat-visual`);
+      const sourceTab = visual.locator('[data-visual-tab="source"]');
+      const copy = visual.locator("[data-visual-copy]");
+      const code = visual.locator(".chat-visual-source code");
+      // Safari may not focus buttons on pointer activation. Use native keyboard
+      // traversal, never locator.focus(), forced clicks or scripted focus.
+      const focusByTab = async (selector: "source" | "copy") => {
+        const button = selector === "source" ? sourceTab : copy;
+        for (let i = 0; i < 40 && !await button.evaluate(element => element === document.activeElement); i++) await page.keyboard.press("Tab");
+        await expect(button).toBeFocused();
+      };
+      await sourceTab.click();
+      await focusByTab("source");
+      await expect(visual.locator(".chat-visual-source")).toBeVisible();
+      expect(await code.textContent()).toBe(source);
+      const append = async (delta: string) => {
+        source += delta; markdown += delta;
+        await control(request, { action: "delta", conversationId, itemId: id, delta });
+        await expect.poll(() => code.textContent()).toBe(source);
+        await expect(visual.locator(".chat-visual-source")).toBeVisible();
+        await expect(sourceTab).toHaveAttribute("aria-pressed", "true");
+      };
+      await append(" growing &lt;source&gt;");
+      await expect(sourceTab).toBeFocused();
+      await copy.click();
+      await expect.poll(() => page.evaluate(() => Reflect.get(window, "__visualCopiedText"))).toBe(source);
+      await focusByTab("copy");
+      await append("</text>\r\n");
+      await expect(copy).toBeFocused();
+      await copy.click();
+      await expect.poll(() => page.evaluate(() => Reflect.get(window, "__visualCopiedText"))).toBe(source);
+      await focusByTab("copy");
+      await expect(visual.locator("img, svg, code.hljs")).toHaveCount(0);
+      await page.route(/\/api\/chat\/visuals\/[0-9a-f]{64}\/source$/, async route => { await sourceGate; await route.continue(); });
+      source += "</svg>\r\n";
+      markdown += "</svg>\r\n```\r\n";
+      await control(request, { action: "delta", conversationId, itemId: id, delta: "</svg>\r\n```\r\n" });
+      await expect(visual).toHaveAttribute("data-visual-key", /^[a-f0-9]{64}$/);
+      await expect(copy).toBeFocused();
+      await expect(visual.locator(".chat-visual-source")).toBeVisible();
+      await expect(copy).toHaveAttribute("aria-disabled", "true");
+      releaseSource();
+      await expect.poll(() => code.textContent()).toBe(source);
+      await expect(copy).not.toHaveAttribute("aria-disabled", "true");
+      await expect(copy).toBeFocused();
+      await copy.click();
+      await expect.poll(() => page.evaluate(() => Reflect.get(window, "__visualCopiedText"))).toBe(source);
+      const image = visual.locator("img");
+      const captured = await visual.getAttribute("data-visual-key");
+      await image.evaluate(element => { element.setAttribute("data-regression-retained", "true"); });
+      // Native text completion must not reopen Preview or autofocus a control
+      // after the reader has deliberately returned to the composer.
+      await page.locator("#chat-input").click();
+      await publish(request, conversationId, id, markdown, true);
+      await expect(page.locator(`[data-chat-item-id="${id}"]`)).toHaveAttribute("data-complete", "true");
+      await expect(visual.locator(".chat-visual-source")).toBeVisible();
+      await expect(page.locator("#chat-input")).toBeFocused();
+      await expect(visual).toHaveAttribute("data-visual-key", captured!);
+      await expect(image).toHaveCount(1);
+      await expect(image).toHaveAttribute("data-regression-retained", "true");
+      expect(await code.textContent()).toBe(source);
+    } finally { releaseSource(); await browser.close(); }
+  });
+
   browserTest(`${engine}: streaming keeps keyboard focus on retained visual controls`, async ({ launchBrowser, request, baseURL }) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL });
