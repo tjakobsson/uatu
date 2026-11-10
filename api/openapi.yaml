@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 14.37.0-experimental
+  version: 15.37.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 14 and workspace revision 37
+  summary: Hub revision 15 and workspace revision 37
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -21,7 +21,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 14
+    hubApiRevision: 15
     workspaceApiRevision: 37
 servers:
   - url: https://{hubHost}
@@ -149,9 +149,9 @@ paths:
                   summary: An ordinary workspace
                   value:
                     version: 0.5.1 (abcdef0)
-                    hubApiRevision: 10
-                    workspaceApiRevision: 20
-                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 20, shells: [{ attached: false, label: zsh }] }]
+                    hubApiRevision: 15
+                    workspaceApiRevision: 37
+                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 37, shells: [{ attached: false, label: zsh }] }]
                     workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
                 worktrees:
                   summary: A main workspace and one linked worktree
@@ -1016,11 +1016,11 @@ paths:
         - name: subs
           in: query
           schema: { type: string, contentMediaType: application/json, contentSchema: { $ref: '#/components/schemas/LiveSubscriptionList' } }
-          description: "Initial subscriptions as a JSON array of LiveSubscription, each with the cursor to resume from. A reconnect presents every retained cursor here. Malformed JSON or an invalid entry answers 400. The set rides the query string, and proxies commonly refuse a request line past about 8 KB. A client whose set would exceed that presents part of it here and adds the rest with hubUpdateLiveSubscriptions after `hello`, from the same cursors."
+          description: "Initial subscriptions as a JSON array of LiveSubscription, each with the cursor to resume from. A reconnect presents every retained cursor here. A conversation subscription's boolean `reconnect` overrides the stream-level reconnect default. Malformed JSON or an invalid entry answers 400. The set rides the query string, and proxies commonly refuse a request line past about 8 KB. A client whose set would exceed that presents part of it here and adds the rest with hubUpdateLiveSubscriptions after `hello`, from the same cursors and with `reconnect: true` on each deferred recovering conversation."
         - name: reconnect
           in: query
           schema: { type: string, enum: ['0', '1'], default: '0' }
-          description: "`1` when this stream replaces one the client lost. The Hub records it in diagnostics and behaves the same either way."
+          description: "`1` when this stream replaces one the client lost. Also recorded in diagnostics. Supplies the recovery-intent default for opening conversation subscriptions in `subs`; each conversation's boolean `reconnect` overrides it. Recovery can reconcile missed same-cursor visual metadata through the existing resync protocol, but does not require a fresh snapshot on every reconnect. A healthy shared subscription at its head sends resync only when the presented cursor matches that conversation's last remembered visual-trailer cursor; otherwise it sends ready. Later POST additions do not inherit this query parameter."
       responses:
         '200':
           description: SSE stream described by streaming.yaml#channels.live
@@ -1048,6 +1048,14 @@ paths:
         snapshot's cursor. Once this operation answers, the stream carries no
         further envelope for a removed subscription.
 
+        A conversation addition may set `reconnect: true` with a nonempty
+        cursor to preserve transport-recovery intent when deferred from the
+        opening URL. This can repair missed same-cursor visual metadata;
+        it does not request a full snapshot on every reconnect. Omitted or
+        false means a fresh attachment, even if the stream opened with
+        `reconnect=1`. Opening `subs` instead use the GET's reconnect default
+        unless the conversation supplies its own boolean override.
+
         A 400, 403, or 404 answer means this stream cannot take the change,
         and repeating the request fails the same way. Reconnect and present
         the whole subscription set in `subs`. Retry a 5xx, or a request that
@@ -1058,7 +1066,15 @@ paths:
       requestBody:
         required: true
         content:
-          application/json: { schema: { $ref: '#/components/schemas/LiveSubscriptionChange' } }
+          application/json:
+            schema: { $ref: '#/components/schemas/LiveSubscriptionChange' }
+            examples:
+              deferredRecovery:
+                summary: Resume a conversation deferred from the opening URL
+                value: { add: [{ topic: conversation, key: 'opencode:conversation-1', cursor: 'eyJ2IjoxfQ', reconnect: true }] }
+              freshConversation:
+                summary: Attach a new conversation without recovery intent
+                value: { add: [{ topic: conversation, key: 'opencode:conversation-2', reconnect: false }] }
       responses:
         '200':
           description: Subscriptions changed
@@ -2820,7 +2836,7 @@ components:
             topic: { type: string, const: personal }
           additionalProperties: false
     LiveSubscription:
-      description: A subscription and the cursor to resume it from.
+      description: A subscription and the cursor to resume it from. Only conversation subscriptions accept the optional boolean reconnect recovery intent.
       oneOf:
         - type: object
           required: [topic]
@@ -2841,6 +2857,17 @@ components:
             topic: { type: string, const: conversation }
             key: { $ref: '#/components/schemas/LiveConversationKey' }
             cursor: { $ref: '#/components/schemas/LiveCursor' }
+            reconnect:
+              type: boolean
+              description: "Transport-recovery intent, not a request to refresh every reconnect. True requires a nonempty cursor bounded to 1024 UTF-8 bytes. Recovery reconciles possibly missed visual metadata only where retained visual evidence requires it. False is a fresh attachment. In opening GET subs, omission inherits the stream's reconnect query parameter; later POST additions use only their own flag, with omitted/false meaning fresh. Older Hubs may ignore this field, so deferred visual repair requires an updated Hub."
+          if:
+            required: [reconnect]
+            properties:
+              reconnect: { const: true }
+          then:
+            required: [cursor]
+            properties:
+              cursor: { minLength: 1 }
           additionalProperties: false
         - type: object
           required: [topic]

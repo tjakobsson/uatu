@@ -16,12 +16,15 @@ import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from ".
 import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
-import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, LiveBroker } from "../hub/live-broker";
+import { LiveBroker } from "../hub/live-broker";
 import { LiveEndpoint } from "../hub/live-endpoint";
 import { SseFrameParser } from "../hub/live-sse";
-import { parseLiveEnvelope, parseLiveHello, type LiveEnvelope } from "../shared/live-protocol";
+import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, parseLiveEnvelope, parseLiveHello, type LiveEnvelope } from "../shared/live-protocol";
 import type { ChatActionContext } from "../chat/types";
 import { createWatchedVisualReader, VisualReadError, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
+import { ChatApiClient } from "../chat/client";
+import { applyChatEvent, projectionFromSnapshot } from "../chat/projection";
+import { createLiveChannel, type LiveChannelSource } from "../shell/live-channel";
 
 const TOKEN = "chat-test-token";
 // The conversation route opens with an `open` event naming the cursor its
@@ -1425,6 +1428,107 @@ describe("workspace chat routes", () => {
       expect(service.replay.subscriberCount()).toBe(0);
       await service.dispose();
       await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("repeated nonvisual browser resumes at head keep the actual client projection without refetching history, even after linger", async () => {
+    const service = new FakeChatService();
+    service.conversation.status = "completed";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "No images here." }];
+    let historyReads = 0;
+    const nativeHistory = service.history.bind(service);
+    service.history = async id => { historyReads++; return nativeHistory(id); };
+    const table = routes(service);
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const paths: string[] = [], releases: Array<Promise<void>> = [];
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        paths.push(path);
+        const released = Promise.withResolvers<void>(); releases.push(released.promise);
+        signal.addEventListener("abort", () => released.resolve(), { once: true });
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+        return response;
+      },
+    }, { lingerMs: 0 });
+    const endpoint = new LiveEndpoint({ broker: live, resolveWorkspace: id => id === "ws" ? id : null });
+    const principal = { user: "browser", sessionId: "browser-session" };
+    const pumps: Array<Promise<void>> = [], errors: unknown[] = [];
+    const channel = createLiveChannel({ ws: "ws", activity: false,
+      fetcher: async (url, init) => {
+        const streamId = new URL(url, "http://hub.test").pathname.split("/").at(-2)!;
+        return endpoint.changeSubscriptions(new Request(new URL(url, "http://hub.test"), init), streamId, principal);
+      },
+      openSource: url => {
+        const response = endpoint.openStream(new Request(new URL(url, "http://hub.test")), principal);
+        expect(response.status).toBe(200);
+        const reader = response.body!.getReader(), parser = new SseFrameParser();
+        const listeners = new Map<string, Array<(event: Event) => void>>();
+        let closed = false;
+        const pump = (async () => {
+          while (!closed) {
+            const chunk = await reader.read();
+            if (chunk.done) return;
+            for (const frame of parser.push(chunk.value)) if (!("comment" in frame)) {
+              for (const listener of listeners.get(frame.event) ?? []) listener(new MessageEvent(frame.event, { data: frame.data }));
+            }
+          }
+        })().catch(error => { if (!closed) errors.push(error); });
+        pumps.push(pump);
+        return { addEventListener(type, listener) { const entries = listeners.get(type) ?? []; entries.push(listener); listeners.set(type, entries); },
+          close() { closed = true; void reader.cancel().catch(() => undefined); } } satisfies LiveChannelSource;
+      },
+    });
+    const api = new ChatApiClient(async (url, init) => history.GET(request(String(url), init, { conversationId: "opencode:local" })), () => channel);
+    let stream: ReturnType<ChatApiClient["stream"]> | undefined;
+    let recovery: Promise<void> | undefined;
+    let keeper: { detach(): void } | undefined;
+    let ready = Promise.withResolvers<void>();
+    const applied = Promise.withResolvers<void>();
+    try {
+      const initial = await api.snapshot("opencode:local");
+      let projection = projectionFromSnapshot(initial);
+      const originalProjection = projection;
+      const handlers: Parameters<ChatApiClient["stream"]>[2] = {
+        event: event => { const result = applyChatEvent(projection, event); projection = result.projection; applied.resolve(); },
+        recovered: () => ready.resolve(),
+        error: error => { errors.push(error); ready.reject(error); },
+        // This is the owner's normal recovery path, not an assertion that a
+        // broker response alone avoided a history read/reprojection.
+        resync: () => { recovery = api.snapshot("opencode:local").then(current => {
+          projection = projectionFromSnapshot(current); stream = api.stream("opencode:local", current.cursor, handlers);
+        }); void recovery.catch(error => ready.reject(error)); },
+      };
+      keeper = live.subscribe({ write() {} }, "ws", { topic: "conversation", key: "opencode:local", cursor: initial.cursor });
+      stream = api.stream("opencode:local", initial.cursor, handlers);
+      channel.connect(); await ready.promise;
+      for (let round = 0; round < 3; round++) {
+        ready = Promise.withResolvers<void>();
+        channel.suspend(); channel.connect({ resumed: true }); await ready.promise;
+        expect(projection).toBe(originalProjection);
+        expect(historyReads).toBe(1);
+        expect(paths).toHaveLength(1);
+      }
+      // Foregrounding after the hidden page released its last interest opens
+      // a new child with reconnect=1. With no visual metadata it is still ready.
+      keeper.detach(); channel.suspend(); await releases[0]!;
+      expect(live.upstreamCount()).toBe(0);
+      ready = Promise.withResolvers<void>(); channel.connect({ resumed: true }); await ready.promise;
+      expect(paths).toHaveLength(2);
+      expect(new URL(paths[1]!, "http://child").searchParams.get("reconnect")).toBe("1");
+      expect(historyReads).toBe(1);
+      expect(projection).toBe(originalProjection);
+      service.replay.publish({ type: "item.text_delta", itemId: "answer", delta: " Still live." });
+      await applied.promise;
+      expect(projection.items[0]).toMatchObject({ id: "answer", markdown: "No images here. Still live." });
+      expect(historyReads).toBe(1);
+      expect(errors).toEqual([]);
+    } finally {
+      stream?.close(); keeper?.detach(); channel.dispose(); endpoint.endAll(); live.dispose();
+      await recovery?.catch(() => undefined); await Promise.all(pumps);
+      await service.dispose();
     }
   });
 

@@ -219,6 +219,11 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **THEN** reconnecting at that exact native cursor still signals reconciliation of terminal visual metadata
 - **AND** no newer native event or manual history refresh is required
 
+#### Scenario: A caught-up reconnect has no visual trailer to recover
+- **WHEN** a recovery attachment presents the healthy shared conversation head and no visual-resync trailer was forwarded at that cursor
+- **THEN** the broker signals ready without a conversation snapshot refetch or reprojection
+- **AND** a remembered visual-trailer cursor survives replacement of that conversation's upstream, without affecting other conversations or workspaces
+
 #### Scenario: Hub replay catch-up reaches a terminal shared-stream origin
 - **WHEN** a catch-up replay reaches the shared origin with a known visual resync still owed
 - **THEN** the original terminal status and visual reconciliation are delivered before recovery is considered complete

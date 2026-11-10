@@ -154,6 +154,13 @@ omit it. Explicit post-history resubscription clears the intent even when its
 cursor is unchanged. The endpoint validates the conversation-only boolean and
 forwards only that attachment's intent. This requires the updated Hub; an older
 Hub may ignore the optional field and cannot guarantee equal-cursor repair.
+This recovery flag is published in Hub revision 15. A caught-up reconnect does
+not itself require a snapshot refetch: the broker remembers the last forwarded
+visual-trailer cursor per conversation beyond the shared upstream's lifetime.
+Recovery at that cursor requests resync; without a matching trailer, attachment
+at the healthy head remains ready without reprojection. A Hub restart loses
+that memory along with its upstreams, so the replacement child stream performs
+its existing visual-metadata-gated recovery.
 
 ### Keep visual interaction within the existing chat surface
 
@@ -203,9 +210,10 @@ Global/repository instruction files and tool permissions are not changed.
 1. Review and approve these retrospective artifacts before resuming code work.
 2. Resolve remaining review findings and verify the integrated fixes against
    pinned upstream, including all new implementation files.
-3. Keep workspace revision 37, web revision 4, API schema/examples, and migration
-   notes aligned. Strict revision-36 validators must be regenerated for the
-   optional assistant `visuals` field; the Hub revision remains 14.
+3. Keep Hub revision 15, workspace revision 37, web revision 4, API schema/examples,
+   and migration notes aligned. Strict revision-36 validators must be regenerated
+   for the optional assistant `visuals` field. Hub clients need the revised
+   conversation-subscription schema to send per-add recovery intent.
 4. Run relevant unit, generated-input, contract, build, and browser checks;
    report full-suite or live-agent limitations separately.
 5. Synchronize the new capability into main specs and archive the completed

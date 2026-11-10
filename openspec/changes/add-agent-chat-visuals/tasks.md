@@ -121,6 +121,14 @@ coverage. Latest-head GitHub CI and Codex verification remain pending.
 - [ ] 6.45 Freeze Claude turn liveness with native snapshot text and cursor, before the asynchronous handoff to enrichment. Closing frames queued in that gap must complete an initially pending SVG without poisoning its immutable capture; retain terminal historical rows and cancellation cleanup.
 - [ ] 6.46 Reject stale OpenCode 1.x completion aliases from a preceding turn before they consume a newer image's missing-file retry. Preserve genuine completion, terminal historical rows, immutable captures and ordered public events.
 - [ ] 6.47 Preserve a captured SVG's leading UTF-8 BOM when decoding its source response, so Source and Copy retain the original text for both file and fenced captures, including CRLF and entity-encoded text.
+- [ ] 6.48 Address the follow-up maintainer review: preserve ready-without-refetch for caught-up reconnects with no visual trailer. Remember the last forwarded visual-trailer cursor per conversation across upstream replacement; require resync only when recovery presents that cursor.
+- [ ] 6.49 Publish the conversation recovery flag in the Hub contract, update query semantics and migration guidance, and raise Hub revision to 15 while retaining Workspace/web revisions 37/4. Include schema/runtime parity coverage.
+- [ ] 6.50 Move the child replay-resync header constant to the shared live protocol and update its imports without changing its wire value.
+
+Follow-up maintainer checkpoint: the optional V1 older-page liveness comment
+remains within the explicitly accepted, documented compatibility limit; no full
+V1 guarantee is claimed. The Hub 15 revision supersedes the earlier decision
+to retain Hub 14. New fixes await GitHub CI and Codex; local checks remain waived.
 
 Implementation checkpoint for 6.46: retain source-local status evidence before
 cross-stream deduplication and carry witnessed idle-alias metadata internally.

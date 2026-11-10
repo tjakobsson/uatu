@@ -139,6 +139,10 @@ export const CHILD_ACTIVITY_EVENT = "activity";
 // stream — learns where the stream begins from it.
 export const CHILD_CONVERSATION_OPEN_EVENT = "open";
 
+// Child-response metadata, never a public event/body field. The native event
+// at this cursor is followed by a separate, same-cursor visual resync.
+export const CHILD_CONVERSATION_REPLAY_RESYNC_HEADER = "x-uatu-chat-replay-resync-cursor";
+
 export function liveSubscriptionsPath(streamId: string): string {
   return `${LIVE_STREAM_PATH}/${encodeURIComponent(streamId)}/subscriptions`;
 }

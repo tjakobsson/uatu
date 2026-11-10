@@ -221,62 +221,80 @@ describe("LiveEndpoint (in-process)", () => {
       who,
     );
 
-  test("browser recovery on a healthy shared conversation resyncs only that attachment; post-history adds are fresh", async () => {
+  const rememberChildTrailer = async () => {
+    const before = child.opened.length;
+    const first = await openStream(`ws=ws&subs=${encodeURIComponent(JSON.stringify([{ topic: "conversation", key: "c", cursor: cursorOf("g1", 4) }]))}`);
+    try {
+      await first.waitFor(() => child.opened.length === before + 1, "original child");
+      const cursor = cursorOf("g1", 5);
+      const status = { type: "conversation.status", status: "completed", generation: "g1", sequence: 5, conversationId: "c" };
+      const trailer = { type: "resync", reason: "conversation-rewritten", generation: "g1", sequence: 5, conversationId: "c" };
+      child.opened[before]!.push(`event: open\ndata: ${JSON.stringify({ cursor: cursorOf("g1", 4) })}\n\nid: ${cursor}\nevent: chat\ndata: ${JSON.stringify(status)}\n\nid: ${cursor}\nevent: resync\ndata: ${JSON.stringify(trailer)}\n\n`);
+      await first.waitFor(r => r.envelopes.some(envelope => envelope.event.kind === "resync"), "forwarded child trailer");
+      expect(broker.upstreamCount()).toBe(0);
+    } finally { await first.cancel(); }
+  };
+
+  test.each([false, true])("browser recovery at a healthy shared head refetches only with a remembered trailer (%s); post-history adds stay fresh", async remembered => {
+    if (remembered) await rememberChildTrailer();
+    const initialOpens = child.opened.length;
     const cursor = cursorOf("g1", 5);
     const subs = encodeURIComponent(JSON.stringify([{ topic: "conversation", key: "c", cursor }]));
     const keeper = await openStream(`ws=ws&subs=${subs}`);
     const recovering: LiveReading[] = [];
     try {
-      await keeper.waitFor(() => child.opened.length === 1, "keeper child stream");
-      expect(new URL(child.opened[0]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
-      child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
+      await keeper.waitFor(() => child.opened.length === initialOpens + 1, "keeper child stream");
+      const shared = child.opened[initialOpens]!;
+      expect(new URL(shared.path, "http://child").searchParams.has("reconnect")).toBe(false);
+      shared.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
       await keeper.waitFor(r => r.envelopes.some(envelope => envelope.event.kind === "ready"), "healthy shared origin");
       for (let round = 0; round < 2; round++) {
         const who = { user: `recovering-${round}`, sessionId: `recovering-session-${round}` };
         const resumed = await openStream(`ws=ws&reconnect=1&subs=${subs}`, who);
         recovering.push(resumed);
         await resumed.waitFor(r => r.hello !== null && r.envelopes.length === 1, "recovery signal without another native event");
-        expect(resumed.envelopes[0]).toMatchObject({ ws: "ws", topic: "conversation", key: "c", cursor, event: { kind: "resync" } });
+        expect(resumed.envelopes[0]).toMatchObject({ ws: "ws", topic: "conversation", key: "c", cursor, event: { kind: remembered ? "resync" : "ready" } });
         expect(keeper.envelopes.map(envelope => envelope.event.kind)).toEqual(["ready"]);
-        expect(child.opened).toHaveLength(1);
+        expect(child.opened).toHaveLength(initialOpens + 1);
         // This same reconnecting browser has now fetched fresh history.
         // Its ordinary control add must not inherit the opening recovery flag.
         expect((await change(resumed.hello!, { add: [{ topic: "conversation", key: "c", cursor }] }, who)).status).toBe(200);
         await resumed.waitFor(r => r.envelopes.length === 2, "fresh ready after history");
-        expect(resumed.envelopes.map(envelope => envelope.event.kind)).toEqual(["resync", "ready"]);
-        expect(child.opened).toHaveLength(1);
+        expect(resumed.envelopes.map(envelope => envelope.event.kind)).toEqual([remembered ? "resync" : "ready", "ready"]);
+        expect(child.opened).toHaveLength(initialOpens + 1);
         await resumed.cancel();
       }
       expect(registry.get("stream.hub-live.reconnected_total")).toBe(2);
       expect(endpoint.streamCount()).toBe(1);
       await keeper.cancel();
-      await keeper.waitFor(() => child.opened[0]!.cancelled && broker.upstreamCount() === 0, "last attachment released");
+      await keeper.waitFor(() => shared.cancelled && broker.upstreamCount() === 0, "last attachment released");
     } finally { await keeper.cancel(); await Promise.all(recovering.map(stream => stream.cancel())); }
   });
 
   test("a mixed deferred-recovery/fresh control batch uses only each add's validated intent", async () => {
+    await rememberChildTrailer();
     const cursor = cursorOf("g1", 5);
     const keeper = await openStream(`ws=ws&subs=${encodeURIComponent(JSON.stringify([{ topic: "conversation", key: "c", cursor }]))}`);
     const deferred = await openStream("ws=ws&reconnect=1");
     try {
-      await keeper.waitFor(() => child.opened.length === 1, "shared child");
-      child.opened[0]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
+      await keeper.waitFor(() => child.opened.length === 2, "shared child");
+      child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
       await keeper.waitFor(r => r.envelopes.length === 1, "keeper ready");
       await deferred.waitFor(r => r.hello !== null, "hello for deferred control additions");
       expect((await change(deferred.hello!, { add: [
         { topic: "conversation", key: "c", cursor, reconnect: true },
         { topic: "conversation", key: "fresh", cursor, reconnect: false },
       ] })).status).toBe(200);
-      await deferred.waitFor(() => child.opened.length === 2, "fresh mixed-batch child");
-      expect(new URL(child.opened[1]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
-      child.opened[1]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
+      await deferred.waitFor(() => child.opened.length === 3, "fresh mixed-batch child");
+      expect(new URL(child.opened[2]!.path, "http://child").searchParams.has("reconnect")).toBe(false);
+      child.opened[2]!.push(`event: open\ndata: ${JSON.stringify({ cursor })}\n\n`);
       await deferred.waitFor(r => r.envelopes.length === 2, "independent mixed attach outcomes");
       expect(deferred.envelopes.map(envelope => [envelope.key, envelope.event.kind])).toEqual([["c", "resync"], ["fresh", "ready"]]);
       expect(keeper.envelopes.map(envelope => envelope.event.kind)).toEqual(["ready"]);
       expect((await change(deferred.hello!, { add: [{ topic: "conversation", key: "c", cursor }] })).status).toBe(200);
       await deferred.waitFor(r => r.envelopes.length === 3, "same-cursor fresh history attachment");
       expect(deferred.envelopes.at(-1)).toMatchObject({ key: "c", event: { kind: "ready" } });
-      expect(child.opened).toHaveLength(2);
+      expect(child.opened).toHaveLength(3);
       expect(registry.get("stream.hub-live.reconnected_total")).toBe(1);
     } finally { await keeper.cancel(); await deferred.cancel(); }
   });

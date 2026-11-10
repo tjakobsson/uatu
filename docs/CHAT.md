@@ -1028,7 +1028,9 @@ Hub reconnects also reconcile visual updates missed at a terminal cursor. If a
 replay's promised update never arrives, bounded recovery requests a fresh
 snapshot rather than leaving the image pending indefinitely.
 This includes recovered subscriptions deferred by the stream URL limit when
-both the browser and Hub have been updated; older Hubs may ignore that intent.
+both the browser and Hub have been updated to the Hub revision 15 contract;
+older Hubs may ignore that intent. A caught-up reconnect without a matching
+visual-resync trailer stays ready without refetching the conversation snapshot.
 
 If a captured image cannot decode or its preview cannot load, chat shows an
 explanation and retains its reference. SVG Source and Copy source remain

@@ -66,6 +66,7 @@ import {
   type LiveTopic,
   type WorkspaceActivity,
   CHILD_CONVERSATION_OPEN_EVENT,
+  CHILD_CONVERSATION_REPLAY_RESYNC_HEADER,
   LIVE_MAX_CURSOR_BYTES,
 } from "../shared/live-protocol";
 import { SseFrameParser, type SseFrame } from "./live-sse";
@@ -73,9 +74,6 @@ import { statusCategoryOf, type ProxyStatusCategory } from "./proxy";
 import { DocumentStateIndex, type DocumentUpdate } from "../shared/document-updates";
 import { PRESENCE_GRACE_MS, type Presence, type PresenceSource } from "./presence";
 
-// Child-response metadata, never a public event/body field. The native event
-// at this cursor is followed by a separate, same-cursor visual resync.
-export const CHILD_CONVERSATION_REPLAY_RESYNC_HEADER = "x-uatu-chat-replay-resync-cursor";
 const CATCH_UP_TRAILER_TIMEOUT_MS = 10_000;
 
 // Where upstream bytes come from. The hub implements it over the session
@@ -313,6 +311,10 @@ class Upstream {
   head = "";
   // Conversation: the cursor the current fetch was opened from.
   originCursor: string | undefined;
+  // Response-owned evidence for an initial/replayed visual trailer, including
+  // an equal-cursor reconnect with no preceding chat frame on this fetch.
+  visualResyncCursor: string | undefined;
+  conversationTrailerOwner: Map<string, string> | undefined;
   buffer: BufferedEvent[] = [];
   bufferBytes = 0;
   // Document / activity snapshots and the latest inventory tick payload.
@@ -388,6 +390,13 @@ class ActivityFeed {
 
 export class LiveBroker implements PresenceSource {
   private readonly upstreams = new Map<string, Upstream>();
+  // One bounded cursor per full conversation key that emitted a cursor-
+  // preserving child rewrite in this workspace's current child lifetime.
+  // This is key-owned recovery state, not an event log/replay cache: replacing
+  // a trailer replaces its cursor. It survives upstream release and linger,
+  // but session stop, registry removal and broker disposal retire its owner.
+  // An LRU/TTL would falsely certify an equal-cursor resume after eviction.
+  private readonly conversationTrailers = new Map<string, Map<string, string>>();
   private readonly feeds = new Map<string, ActivityFeed>();
   // The `finished` fact's ingredients, held at the broker rather than in a
   // feed: a user's feed is discarded when their last page closes, and
@@ -641,6 +650,7 @@ export class LiveBroker implements PresenceSource {
   // either happens, inheriting the old workspace's finish.
   forgetWorkspace(workspaceId: string): void {
     if (this.disposed) return;
+    this.forgetConversationTrailers(workspaceId);
     this.unwatchActivity(workspaceId);
     this.forgetMarks(workspaceId);
     for (const feed of this.feeds.values()) feed.last.delete(workspaceId);
@@ -696,6 +706,8 @@ export class LiveBroker implements PresenceSource {
     // alone: the hub is going down, not the workspaces.
     for (const workspaceId of [...this.activityWatches.keys()]) this.unwatchActivity(workspaceId);
     for (const upstream of [...this.upstreams.values()]) this.drop(upstream, false);
+    for (const owner of this.conversationTrailers.values()) owner.clear();
+    this.conversationTrailers.clear();
     this.feeds.clear();
     for (const timer of this.presenceTimers.values()) clearTimeout(timer);
     this.presenceTimers.clear();
@@ -853,6 +865,31 @@ export class LiveBroker implements PresenceSource {
     }
   }
 
+  private forgetConversationTrailers(workspaceId: string): void {
+    this.conversationTrailers.get(workspaceId)?.clear();
+    this.conversationTrailers.delete(workspaceId);
+  }
+
+  private rememberConversationTrailer(upstream: Upstream, frame: SseFrame, data: unknown, boundary: string | undefined): void {
+    const owner = upstream.conversationTrailerOwner;
+    if (this.disposed || !owner || this.conversationTrailers.get(upstream.workspaceId) !== owner
+      || this.upstreams.get(upstream.id) !== upstream || upstream.state === "closed"
+      || !frame.id || frame.id !== boundary || Buffer.byteLength(frame.id) > LIVE_MAX_CURSOR_BYTES) return;
+    const at = decodeReplayCursor(frame.id);
+    const event = data as { type?: unknown; reason?: unknown; generation?: unknown; sequence?: unknown; conversationId?: unknown } | null;
+    if (!at || !event || typeof upstream.key !== "string" || event.type !== "resync" || event.reason !== "conversation-rewritten"
+      || event.generation !== at.generation || event.sequence !== at.sequence || event.conversationId !== upstream.key) return;
+    // Only a validated child cursor-preserving rewrite: an actual chat frame
+    // at this cursor, or the child's private visual-trailer response hint.
+    // Retention/generation failures, malformed frames and Hub-generated replay
+    // failure/watchdog resyncs never establish this fact. Native cursor-
+    // preserving overflow rewrites need the same missed-signal repair too.
+    const previous = owner.get(upstream.id);
+    const known = previous ? decodeReplayCursor(previous) : null;
+    if (known && known.generation === at.generation && known.sequence > at.sequence) return;
+    owner.set(upstream.id, frame.id);
+  }
+
   private attachConversation(upstream: Upstream, subscriber: Subscriber): void {
     subscriber.skip = null;
     if (subscriber.reconnect && subscriber.cursor !== undefined) {
@@ -865,14 +902,16 @@ export class LiveBroker implements PresenceSource {
         this.catchUp(upstream, subscriber);
         return;
       }
-      // This browser may have acknowledged status but lost its same-cursor
-      // visual resync. A healthy shared stream cannot replay that trailer.
-      // Invalidate only this recovering attachment, using existing snapshot
-      // recovery instead of reopening the shared child or adding another lease.
       subscriber.reconnect = false;
-      subscriber.sink.write(this.envelope(subscriber, { kind: "resync" }, upstream.head || subscriber.cursor));
-      this.detach(subscriber);
-      return;
+      if (subscriber.cursor === head && this.conversationTrailers.get(upstream.workspaceId)?.get(upstream.id) === subscriber.cursor) {
+        // This browser may have acknowledged the native event but lost the
+        // observed same-cursor trailer. A replacement healthy shared stream
+        // cannot replay it. No trailer evidence means ordinary at-head ready,
+        // not a full history read on every foreground/network reconnect.
+        subscriber.sink.write(this.envelope(subscriber, { kind: "resync" }, subscriber.cursor));
+        this.detach(subscriber);
+        return;
+      }
     }
     if (subscriber.cursor === undefined || subscriber.cursor === upstream.head) {
       subscriber.live = true;
@@ -1031,6 +1070,7 @@ export class LiveBroker implements PresenceSource {
       const owed = hint && requested && origin && hint.generation === requested.generation && hint.generation === origin.generation
         && requested.sequence < hint.sequence && origin.sequence <= hint.sequence ? hint : null;
       let awaitingTrailer = false;
+      let lastChatCursor: string | undefined;
       if (owed) subscriber.catchUpTrailer = { generation: owed.generation, recover: finishWithoutMerging };
       const parser = new SseFrameParser();
       const streamReader = response.body.getReader();
@@ -1057,6 +1097,7 @@ export class LiveBroker implements PresenceSource {
                   finishWithoutMerging(); return;
                 }
               }
+              this.rememberConversationTrailer(upstream, frame, data, owed ? hintedCursor ?? undefined : lastChatCursor);
               finishWithResync(data);
               return;
             }
@@ -1069,6 +1110,7 @@ export class LiveBroker implements PresenceSource {
             if (owed && (!at || at.generation !== owed.generation || at.sequence > owed.sequence)) { finishWithoutMerging(); return; }
             this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
             this.emitData(subscriber, data, frame.id);
+            lastChatCursor = frame.id;
             if (controller.signal.aborted || subscriber.detached) return;
             if (owed && at?.sequence === owed.sequence) {
               awaitingTrailer = true;
@@ -1163,6 +1205,12 @@ export class LiveBroker implements PresenceSource {
       return;
     }
     if (upstream.topic === "conversation") {
+      let owner = this.conversationTrailers.get(upstream.workspaceId);
+      if (!owner) this.conversationTrailers.set(upstream.workspaceId, owner = new Map());
+      upstream.conversationTrailerOwner = owner;
+      upstream.visualResyncCursor = undefined;
+    }
+    if (upstream.topic === "conversation") {
       // A fresh open resumes from the head the hub last saw, or from the
       // first subscriber's cursor so the child replays what it holds.
       if (!upstream.head && !upstream.originCursor) {
@@ -1241,6 +1289,9 @@ export class LiveBroker implements PresenceSource {
         this.fail(upstream, statusCategoryOf(status));
         return;
       }
+      const visualCursor = response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER);
+      upstream.visualResyncCursor = upstream.topic === "conversation" && visualCursor
+        && Buffer.byteLength(visualCursor) <= LIVE_MAX_CURSOR_BYTES && decodeReplayCursor(visualCursor) ? visualCursor : undefined;
       const parser = new SseFrameParser();
       const reader = response.body.getReader();
       let sawResync = false;
@@ -1329,6 +1380,8 @@ export class LiveBroker implements PresenceSource {
         const trailer = upstream.catchUpOwner?.catchUpTrailer;
         if (observed && trailer && observed.generation !== trailer.generation) trailer.recover();
         if (frame.event === "resync") {
+          this.rememberConversationTrailer(upstream, frame, data,
+            frame.id === upstream.visualResyncCursor ? upstream.visualResyncCursor : upstream.head || undefined);
           for (const subscriber of [...upstream.subscribers]) {
             subscriber.catchUp?.abort();
             subscriber.catchUp = null;
@@ -1341,6 +1394,9 @@ export class LiveBroker implements PresenceSource {
           return true;
         }
         if (frame.event === CHILD_CONVERSATION_OPEN_EVENT) {
+          // The existing private hint names this fetch's snapshot, never a
+          // different opening boundary (or a later native generation).
+          if (upstream.visualResyncCursor !== (data as { cursor?: unknown } | undefined)?.cursor) upstream.visualResyncCursor = undefined;
           // Where a stream opened without a cursor begins. A stream opened
           // from a cursor already knows, and the child replays from it.
           if (!upstream.head && !upstream.originCursor) {
@@ -1479,6 +1535,7 @@ export class LiveBroker implements PresenceSource {
   }
 
   private onSessionChange(change: LiveSessionChange): void {
+    if (!change.running) this.forgetConversationTrailers(change.workspaceId);
     for (const upstream of [...this.upstreams.values()]) {
       if (upstream.workspaceId !== change.workspaceId) continue;
       // A hub-local topic does not describe the child, so a start or stop

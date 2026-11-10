@@ -112,11 +112,13 @@ channels:
         persistence has recovered; a fresh data invalidation follows. Personal
         attachment itself emits data without a ready signal.
       resync: >-
-        The presented cursor is not replayable, or the workspace said so. The
+        The presented cursor is not replayable, the workspace said so, or
+        conversation recovery must reconcile possibly missed same-cursor
+        visual metadata. The
         subscription stays detached until the client takes a fresh snapshot
         and adds it again with the snapshot's cursor. It says nothing about
-        other subscriptions. For the conversation topic, `data` carries the
-        workspace's resync event.
+        other subscriptions. For the conversation topic, `data` may carry the
+        workspace's resync event; a Hub-requested visual repair may omit it.
       unavailable: >-
         For an upstream-backed subscription, the upstream failed or the workspace
         child exited. The Hub retries while subscribers remain, and on recovery
@@ -140,7 +142,9 @@ channels:
         another connection. `subs` rides the query string, and proxies
         commonly refuse a request line past about 8 KB, so a client whose set
         would exceed that presents part of it in `subs` and adds the rest
-        after `hello`, from the same cursors.
+        after `hello`, from the same cursors. Each deferred recovering
+        conversation addition carries its own boolean `reconnect: true`;
+        later POST additions never inherit the opening GET's recovery intent.
       cursors: >-
         Cursors are opaque and scoped to one subscription. A client advances
         a subscription's cursor only on `data` events. Signals carry the
@@ -157,7 +161,19 @@ channels:
         no envelope and advances no cursor.
       reconnection: >-
         After a transport error the client reconnects the one stream with
-        bounded backoff, presenting every retained cursor.
+        bounded backoff, presenting every retained cursor and setting the GET
+        query `reconnect=1`. This is the recovery-intent default for opening
+        conversation subscriptions; a per-conversation boolean `reconnect`
+        overrides it. True requires a nonempty cursor of at most 1024 UTF-8
+        bytes. Later POST additions use only their own flag, with omitted or
+        false meaning fresh. Recovery may repair missed same-cursor visual
+        metadata, not refresh every conversation. For a healthy shared
+        conversation already at its head, resync is sent only if the
+        presented cursor equals the last remembered visual-trailer cursor
+        for that conversation key; otherwise ready is sent without a full
+        snapshot. The Hub retains that visual-repair cursor beyond the shared
+        upstream's lifetime. Older Hubs may ignore the optional flag, so
+        deferred visual repair requires an updated Hub.
       cancellation: >-
         Client disconnect or stream cancellation releases the stream's
         subscriptions. The Hub releases an upstream within a bounded period
