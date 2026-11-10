@@ -50,7 +50,7 @@ function renderVisual(input: ChatVisualInput, options: ChatMarkdownOptions): str
   const controls = svg
     ? `<span class="chat-visual-controls" role="group" aria-label="SVG view"><button type="button" data-visual-tab="preview" aria-pressed="true">Preview</button><button type="button" data-visual-tab="source" aria-pressed="false">Source</button><button type="button" data-visual-copy${input.kind === "svg" && !hasId ? "" : ' disabled title="Open Source to load SVG before copying"'}>Copy source</button></span>`
     : "";
-  const original = input.kind === "svg" && !hasId ? escapeHtml(input.source) : "";
+  const original = input.kind === "svg" && !hasId ? escapeHtml(input.source).replaceAll("\r", "&#13;") : "";
   const source = svg ? `<span class="chat-visual-source" hidden><code>${original}</code></span>` : "";
   return `<span class="chat-visual${svg ? " is-svg" : ""}" data-visual-index="${input.index}"${hasId ? ` data-visual-key="${escapeHtml(snapshot.id!)}"` : ""}${sourceUrl ? ` data-visual-source-url="${escapeHtml(sourceUrl)}"` : ""}${input.kind === "svg" && !hasId ? ' data-visual-source-loaded="true"' : ""}>${controls}<span class="chat-visual-preview">${image}</span>${source}<span class="chat-visual-status" role="status"></span></span>`;
 }

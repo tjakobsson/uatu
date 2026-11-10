@@ -97,6 +97,7 @@ and ordinary pushes, not rebases or force pushes.
 - [ ] 6.28 Preserve the existing usage-before-first-part ordering while fixing classic text start times: metadata-only usage reported earlier must retain its place when the first text part and later syntax completion arrive. Keep the original ordering assertions and the steer regression.
 - [ ] 6.29 Address the late Codex finding on `1ea1c7b8`: OpenCode retryable step failures must not consume the missing-image turn-completion retry. Preserve the original failure status/error, keep retrying-turn snapshots live, and finalize only at authoritative execution completion or failure.
 - [ ] 6.30 Preserve terminal visual reconciliation when Hub catch-up reaches an existing shared stream's terminal origin: the trailing same-sequence visual resync must reach the client before catch-up merges, for both coalesced and split transport chunks. Keep original statuses, cursor semantics and bounded cleanup.
+- [ ] 6.31 Preserve CRLF exactly in unstored SVG source panels by encoding carriage returns before HTML parsing; cover pending, refused and unadmitted source-copy paths, including escaped entity text, without introducing active SVG markup.
 
 Verification checkpoint: GitHub unit job `129414561829` on `36a0dd81`
 passed **10,300**, skipped **16**, failed **0** across 347 files, including

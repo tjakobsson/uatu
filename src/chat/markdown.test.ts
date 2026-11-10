@@ -67,6 +67,24 @@ describe("chat Markdown security", () => {
     }
   });
 
+  test("unstored SVG source retains exact CRLF through HTML parsing for cached copy controls", () => {
+    const svg = '<svg>\r\n<text>&amp; &#13; &lt;source&gt;</text>\r\n</svg>\r\n';
+    for (const streaming of [false, true]) {
+      for (const complete of [false, true]) {
+        for (const visuals of [[], [{ index: 0, status: "pending" as const }], [{ index: 0, status: "unavailable" as const, message: "Capture refused." }]]) {
+          const html = renderChatMarkdown(`\`\`\`svg\r\n${svg}${complete ? "```" : ""}`, { streaming, visuals });
+          expect(html).not.toContain("\r");
+          expect(html).toContain("&#13;");
+          const { document } = parseHTML(html);
+          expect(document.querySelector(".chat-visual-source code")?.textContent).toBe(svg);
+          expect(document.querySelector(".chat-visual")?.getAttribute("data-visual-source-loaded")).toBe("true");
+          expect(document.querySelector("[data-visual-copy]")?.hasAttribute("disabled")).toBe(false);
+          expect(document.querySelector("svg, img, script")).toBeNull();
+        }
+      }
+    }
+  });
+
   test("only issued snapshots become images; remote embeds remain explicit links", () => {
     const html = renderChatMarkdown('![Local](./shot.png)\n\n![Remote](https://example.com/track.svg)', {
       streaming: true,
