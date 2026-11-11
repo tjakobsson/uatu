@@ -1235,10 +1235,32 @@ fails and they never consumed an inbox baseline. A newer positive report is
 compared with their actual native parent-read order, declared child/admission
 scope and consumed stored-report digests; inbox absence is not invented. Empty,
 ordinary-text, other-child, pre-launch and already-consumed report observations
-do not revoke them. Pending positive facts use the existing bounded source slot;
-streamed deltas coalesce and retain each fact's observation order so an unrelated
-later enqueue cannot erase or renew earlier counterproof. Cancellation and lease
-retirement still govern observation.
+do not revoke them. Before a native baseline is installed, both native snapshots
+and streamed deltas accumulate positive facts in the existing bounded slot;
+delivery/removal from a later snapshot cannot erase an earlier veto. Exact facts
+coalesce and keep their original observation order. Overflow is sticky and keeps
+the latest lost-fact observation order, so filtering an older overflow cannot
+erase newer uncertainty. An actual later owned inbox baseline still supersedes
+older provisional facts; comparisons filter each fact by native request order.
+Cancellation and lease retirement still govern observation.
+
+One `retainPendingCounterproof` watch belongs to the entire covered-history read,
+not each dirty retry. It uses the same 256-fact / 64 KiB slot and the original
+source deadline plus enclosing cancellation signal. Seeded and merged facts are
+filtered against that owner's initial native parent-read boundary; a newer batch
+cannot renew older facts. Guard identity is resolved only within the provider's
+weakly keyed source scopes. Unknown/wrapped identities, another parent cohort,
+expiration, cancellation and reconnect fail closed rather than dropping a veto.
+The watch is deny-only: it retains neither a global report cache nor an empty
+inbox baseline and supplies no row content or Stop evidence.
+Relevant positive observations invalidate parent transport reuse without starting
+IO. An already requested retry can then read actual delivered native reports.
+Only qualified current explicit reports with matching execution anchors and native
+clocks covering the retained facts can discharge them. An unresolved pending-only
+case remains unavailable through the enclosing deadline, not Completed from cached
+history. `canRevalidateInferredOutcomes` permits reading replacement evidence only
+while all non-relinquishable fences remain current; final publication still needs
+the strict source/qualified inventory guards below.
 A successful covered inventory may own the replacement worker outcome while
 the transcript keeps its text authority. The optional source-guard view
 `withoutInferredOutcomes` relinquishes only inferred outcomes covered by current
@@ -1263,7 +1285,14 @@ orders enqueues against in-flight inbox reads, so an older empty response cannot
 restore inferred outcome authority. This fence requires no extra inbox read and
 does not turn a stream report into ownership or Stop proof.
 
-A bare idle boundary alone never completes a worker. Native child idle records
+A bare idle boundary alone never completes a worker.
+Exact terminal-event replay is recognized from its retained native proof even
+without a retained worker occurrence. ID, clock, durable metadata and semantic
+payload must still match. Replay grants no ownership/outcome/Stop authority and
+cannot settle a newly admitted occurrence. Missing proof retention after saturation
+does not suppress a potentially new boundary; recovery remains conservative.
+
+Native child idle records
 with an explicit `succeeded`, `failed` or `interrupted` outcome can recover the
 corresponding terminal status when a parent notification is missing. This requires
 complete scoped child history and exactly one occurrence whose entire admission

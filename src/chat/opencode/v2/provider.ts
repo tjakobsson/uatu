@@ -71,9 +71,10 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyInferredOutcomeBytes?: number;
   historyOutcomeTransferUnavailable?: true;
   historyPendingOutcomeChanges?: Set<string>;
+  historyPendingCounterproofAfter?: number;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
-type PendingOutcomeRead = { started: number; completed: number; reports: readonly { child: string; at?: number; digest: string; observed?: number }[]; overflow?: true; provisional?: true };
+type PendingOutcomeRead = { started: number; completed: number; reports: readonly { child: string; at?: number; digest: string; observed?: number }[]; overflow?: true; overflowObserved?: number; provisional?: true };
 const parentCounterproofMaxFacts = 256;
 const parentCounterproofMaxBytes = 65_536;
 
@@ -114,6 +115,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private sessionRecordClock = 0;
   private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
+  private readonly historyGuardScopes = new WeakMap<WorkerSourceGuard, { source: HistoryWorkerSource; view: (covered: ReadonlySet<string>) => WorkerSourceGuard }>();
   // Read-side observations are not live-event admission or Stop evidence.
   // Fixed-size digests and at most 128 timestamps bound this separate cache;
   // eviction loses only a last-seen caption, never an authorization fence.
@@ -657,6 +659,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       const entry = normalized.get(update.item.id);
       if (entry) {
         normalized.set(update.item.id, { ...entry, item: update.item });
+        if (update.item.type !== "background_task") continue;
         const occurrence = workers.occurrence(update.item.taskId);
         if (owner && occurrence && update.item.status !== "running" && !update.item.resultId && !owner.historyOutcomeTransferUnavailable) {
           const retained = owner.historyInferredOutcomes ??= new Map(), previous = retained.get(update.item.id);
@@ -1446,8 +1449,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       const baseCurrent = () => !signal.aborted && source.revision === revision && isCurrent();
       const current = () => baseCurrent() && ![...source.historyPendingOutcomeChanges ?? []]
         .some(child => dependsOnWorkerHistory(source, child) && !relinquished.has(child));
-      return {
+      const guard: WorkerSourceGuard = {
         isCurrent: current,
+        canRevalidateInferredOutcomes: () => baseCurrent() && !source.historyOutcomeTransferUnavailable
+          && !!source.historyInferredOutcomes?.size && [...source.historyPendingOutcomeChanges ?? []].some(child => dependsOnWorkerHistory(source, child)),
         // Transfer evidence, not transport ownership or a renewed deadline.
         retain: next => lease(!current() ? AbortSignal.abort() : next, revision, relinquished),
         withoutInferredOutcomes: reports => {
@@ -1466,7 +1471,46 @@ export class OpenCodeV2Provider implements ChatProvider {
           if (!covered.size) return;
           return view(signal, revision, covered);
         },
+        retainPendingCounterproof: owner => {
+          // A single observer belongs to the enclosing covered read, not an
+          // individual retry. Its existing source slot/caps retain only facts.
+          const watch = this.beginWorkerSourceRead(parent, AbortSignal.any([deadline, owner]));
+          watch.source.historyPendingCounterproofAfter = source.historyParentRead?.started;
+          if (source.historyPendingRead) watch.source.historyPendingRead = this.pendingFactsAfter(source.historyPendingRead, watch.source.historyPendingCounterproofAfter);
+          return { applyTo: (next, reports) => {
+            const scope = this.historyGuardScopes.get(next);
+            if (owner.aborted || deadline.aborted) throw new Error("Pending worker counterproof expired");
+            if (!scope || scope.source.parent !== parent) throw new Error("Pending worker counterproof source unavailable");
+            const incoming = scope.source.historyPendingRead && this.pendingFactsAfter(scope.source.historyPendingRead, watch.source.historyPendingCounterproofAfter);
+            if (incoming) watch.source.historyPendingRead = watch.source.historyPendingRead
+              ? this.mergePendingOutcome(watch.source.historyPendingRead, incoming, true) : incoming;
+            const facts = watch.source.historyPendingRead;
+            if (!facts) return next;
+            const covered = new Set<string>();
+            for (const [child, launches] of scope.source.historyParentLaunches ?? []) {
+              const relevant = facts.reports.filter(fact => this.pendingOutcomeSignature({ ...facts, reports: [fact] }, child, launches));
+              if (!facts.overflow && !relevant.length) continue;
+              const inferred = [...scope.source.historyInferredOutcomes ?? []].filter(([, occurrence]) => occurrence.worker === child);
+              const candidates = inferred.length ? inferred : reports.filter(report => report.childConversationId === child)
+                .map(report => [report.id, { key: report.taskId, parent, worker: child, kind: "agent" as const, taskId: report.taskId, launches }] as const);
+              const discharges = !facts.overflow && candidates.length > 0 && candidates.every(([id, occurrence]) => {
+                const ids = workerExecutionIds(occurrence);
+                return reports.some(report => report.id === id && report.taskId === occurrence.taskId && report.taskType === "agent"
+                  && launches.some(launch => report.taskId === nativeLauncherTaskId(parent, launch.call))
+                  && report.childConversationId === child && report.status !== "running" && !report.stateUncertain
+                  && !!report.resultId && typeof report.summary === "string" && Number.isFinite(report.terminalReportedAt)
+                  && relevant.every(fact => fact.at !== undefined && report.terminalReportedAt! >= fact.at)
+                  && [...report.activity?.executionAliases ?? [], ...(report.activity?.executionId ? [report.activity.executionId] : [])].some(alias => ids.includes(alias)));
+              });
+              if (discharges) covered.add(child);
+              else (scope.source.historyPendingOutcomeChanges ??= new Set()).add(child);
+            }
+            return covered.size ? scope.view(covered) : next;
+          } };
+        },
       };
+      this.historyGuardScopes.set(guard, { source, view: covered => view(signal, revision, new Set([...relinquished, ...covered])) });
+      return guard;
     };
     const lease = (owner: AbortSignal, revision: number, relinquished?: ReadonlySet<string>): WorkerSourceGuard => {
       const signal = AbortSignal.any([deadline, owner]);
@@ -1746,26 +1790,45 @@ export class OpenCodeV2Provider implements ChatProvider {
       return parts.length ? historyVersion(parts) : undefined;
   }
 
+  private pendingFactsAfter(read: PendingOutcomeRead, started: number | undefined): PendingOutcomeRead {
+    if (started === undefined) return read;
+    const overflowObserved = read.overflowObserved ?? read.started;
+    return { ...read, reports: read.reports.filter(report => (report.observed ?? read.started) > started),
+      overflow: read.overflow && overflowObserved > started ? true : undefined,
+      overflowObserved: read.overflow && overflowObserved > started ? overflowObserved : undefined };
+  }
+
   private mergePendingOutcome(previous: PendingOutcomeRead, observation: PendingOutcomeRead, stamp = false): PendingOutcomeRead {
     const reports: Array<PendingOutcomeRead["reports"][number]> = [], seen = new Set<string>();
     let bytes = 0, overflow = previous.overflow ?? observation.overflow;
+    let overflowObserved = Math.max(previous.overflow ? previous.overflowObserved ?? previous.started : -Infinity,
+      observation.overflow ? observation.overflowObserved ?? observation.started : -Infinity);
     for (const read of [previous, observation]) for (const value of read.reports) if (!seen.has(value.digest)) {
       const report = stamp ? { ...value, observed: value.observed ?? read.started } : value;
       const size = JSON.stringify(report).length * 2;
-      if (reports.length >= parentCounterproofMaxFacts || bytes + size > parentCounterproofMaxBytes) { overflow = true; break; }
+      if (reports.length >= parentCounterproofMaxFacts || bytes + size > parentCounterproofMaxBytes) {
+        overflow = true; overflowObserved = Math.max(overflowObserved, report.observed ?? read.started); break;
+      }
       reports.push(report); seen.add(report.digest); bytes += size;
     }
-    return { ...observation, reports, ...(overflow ? { overflow } : {}) };
+    return { ...observation, reports, ...(overflow ? { overflow, overflowObserved } : {}) };
   }
 
-  private observeTranscriptPendingOutcome(source: HistoryWorkerSource, observation: PendingOutcomeRead, delta = false): void {
+  private observeTranscriptPendingOutcome(source: HistoryWorkerSource, observation: PendingOutcomeRead): void {
+    if (source.historyPendingCounterproofAfter !== undefined && observation.started <= source.historyPendingCounterproofAfter) return;
     const parent = source.historyParentRead;
+    // Positive observations outlive a retry, not the enclosing read. Invalidate
+    // transport reuse so a delivered report can be revalidated from native
+    // storage; no request or report projection is started here.
+    if (observation.reports.length || observation.overflow) {
+      const previous = source.historyPendingRead;
+      source.historyPendingRead = previous ? this.mergePendingOutcome(previous, observation, true) : observation;
+      this.historyReuse.invalidate(source.parent);
+    }
     if (!parent || !source.historyParentLaunches) {
       // No inbox baseline was consumed. Retain only an actual positive
       // observation while native parent scope/order is pending, never absence.
-      if (source.phase === "collecting" && (observation.reports.length || observation.overflow)
-        && (!source.historyPendingRead || observation.started > source.historyPendingRead.started))
-        source.historyPendingRead = { ...(delta && source.historyPendingRead ? this.mergePendingOutcome(source.historyPendingRead, observation, true) : observation), provisional: true };
+      if (source.phase === "collecting" && source.historyPendingRead) source.historyPendingRead = { ...source.historyPendingRead, provisional: true };
       return;
     }
     // A pending read begun before this owned transcript cannot revoke it on
@@ -1783,7 +1846,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     let conflictingOverlap = false;
     for (const source of this.historyWorkerSources) {
       if (source.parent !== parent || source.pendingFingerprint !== undefined) continue;
-      if (!source.historyPendingConsumer) { this.observeTranscriptPendingOutcome(source, observation, delta); continue; }
+      if (!source.historyPendingConsumer) { this.observeTranscriptPendingOutcome(source, observation); continue; }
       const previous = source.historyPendingRead;
       // An enqueue is an addition, not a complete inbox snapshot. Preserve
       // unrelated baseline reports and exact replay identity in the same slot.
@@ -1792,15 +1855,17 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (source.phase === "collecting" && source !== owner && (!previous || previous.provisional)) {
         // One bounded deny-only snapshot for a pending consumer, including an
         // empty inbox. It grants no child read, result admission or Stop proof.
-        if (!previous || incoming.started > previous.started) source.historyPendingRead = { ...incoming, provisional: true };
+        if (!previous || incoming.started > previous.started) source.historyPendingRead = {
+          ...(previous ? this.mergePendingOutcome(previous, incoming, true) : incoming), provisional: true };
         continue;
       }
       if (!previous || previous.provisional && source === owner && observation.started >= previous.started) continue;
       if (previous.overflow && source !== owner) continue;
       const target = observation.started > previous.completed ? source : owner;
       if (!target) continue;
+      const baseline = previous.provisional && source === owner ? this.pendingFactsAfter(previous, observation.started) : previous;
       for (const [child, launches] of target.historyParentLaunches ?? []) {
-        if (!previous.overflow && !incoming.overflow && this.pendingOutcomeSignature(previous, child, launches) === this.pendingOutcomeSignature(incoming, child, launches)) continue;
+        if (!baseline.overflow && !incoming.overflow && this.pendingOutcomeSignature(baseline, child, launches) === this.pendingOutcomeSignature(incoming, child, launches)) continue;
         if (observation.started <= previous.completed) conflictingOverlap = true;
         target.historyParentChanges.add(child);
         if (dependsOnWorkerHistory(target, child)) target.revision++;

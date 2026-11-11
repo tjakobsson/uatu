@@ -1,4 +1,4 @@
-import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, MessageDelivery, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+import type { AgentUsageReport, BackgroundTaskItem, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, MessageDelivery, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
 
 // One user entry pending in the agent's own inbox — a steer the agent holds
 // until its running turn's next step boundary (opencode-v2-steering D3). The
@@ -201,6 +201,15 @@ export type WorkerSourceGuard = {
   // source fences and the original deadline. It grants no report/Stop authority;
   // callers must retain the successful inventory's own current source too.
   withoutInferredOutcomes?: (reports: readonly BackgroundTaskItem[]) => WorkerSourceGuard | undefined;
+  // Deny-only continuity across attempts of one bounded covered read. Actual
+  // current report rows may discharge facts; the watch supplies no row content.
+  retainPendingCounterproof?: (signal: AbortSignal) => WorkerHistoryCounterproof;
+  // Permission to read replacement evidence, never to publish a stale source.
+  // Final admission still requires current source or qualified report transfer.
+  canRevalidateInferredOutcomes?: () => boolean;
+};
+export type WorkerHistoryCounterproof = {
+  applyTo: (source: WorkerSourceGuard, reports: readonly BackgroundTaskItem[]) => WorkerSourceGuard;
 };
 // Invalidation-only watch for retained associations, registered before I/O.
 // A snapshot contains only scoped counterproof, never ownership admission.

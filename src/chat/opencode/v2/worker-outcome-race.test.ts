@@ -1,10 +1,258 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createOpenCodeV2Provider } from "./provider";
 import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 import { ChatAdapter } from "../../adapter";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { workerCanStop, workerExecutionClockRuns } from "../../worker-state";
 import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
+
+for (const mode of ["older-seed", "older-merge", "older-merge-with-newer-unrelated", "older-overflow-seed", "cancelled", "reconnect", "unknown-guard", "original-deadline", "unrelated-cohort", "older-report", "current-report"] as const)
+test(`covered pending watch preserves native order and original ownership (${mode})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, observing = false, storedAt: number | undefined, inboxReads = 0;
+  const olderObservation = mode === "older-seed" || mode === "older-merge" || mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed";
+  let entered!: () => void, release!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) {
+      if (observing && route === `/api/session/${parent}/inbox`) {
+        const index = ++inboxReads;
+        if (olderObservation) { entered(); await held; }
+        if (mode === "older-overflow-seed") return Response.json({ data: Array.from({ length: 257 }, (_, fact) => ({ id: `${index}:${fact}`, type: "synthetic", time: { created: 45 }, payload: {
+          text: "Native failure", metadata: { source: "subagent", childID: index === 1 ? "unrelated-child" : child, state: "error" },
+        } })) });
+        return Response.json({ data: [{ id: "queued-failure", type: "synthetic", time: { created: 45 }, payload: {
+          text: "Native failure", metadata: { source: "subagent", childID: mode === "older-merge-with-newer-unrelated" && index > 1 ? "unrelated-child" : child, state: "error" },
+        } }] });
+      }
+      return Response.json({ data: [] });
+    }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first, ...(storedAt !== undefined ? [{ id: "queued-failure", type: "synthetic", time: { created: storedAt }, text: "Native failure",
+        metadata: { source: "subagent", childID: child, state: "error" } }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const owner = new AbortController(), lifetime = new AbortController(), stream = new AbortController(), secondStream = new AbortController();
+  const realTimeout = AbortSignal.timeout.bind(AbortSignal), deadlines: AbortController[] = [];
+  const timeout = mode === "original-deadline" ? spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+    if (ms !== 25_000) return realTimeout(ms);
+    const deadline = new AbortController(); deadlines.push(deadline); return deadline.signal;
+  }) : undefined;
+  let inbox: ReturnType<NonNullable<typeof provider.listPendingInbox>> | undefined, pump: Promise<void> | undefined, secondPump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Owned retry counterproof order")).id; child = fake.launchRequestWorker(parent).childId;
+    if (mode === "reconnect") { pump = (async () => { for await (const _event of provider.events(stream.signal)) {} })(); await provider.waitForEventStream!(stream.signal); }
+    if (olderObservation) {
+      observing = true; inbox = provider.listPendingInbox!(parent, { signal: owner.signal }); void inbox.catch(() => undefined); await pending;
+    }
+    const page = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
+    const rows = page.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+    expect(page.workerSource?.isCurrent()).toBe(true);
+    const longOwner = AbortSignal.any([lifetime.signal, stream.signal, realTimeout(60_000)]);
+    let watch = mode === "older-seed" || mode === "older-overflow-seed" ? undefined : page.workerSource!.retainPendingCounterproof!(longOwner);
+    if (olderObservation) {
+      release(); await inbox; expect(page.workerSource?.isCurrent()).toBe(true);
+      if (mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed") await provider.listPendingInbox!(parent, { signal: owner.signal });
+      watch ??= page.workerSource!.retainPendingCounterproof!(longOwner);
+      if (mode === "older-overflow-seed") {
+        const retry = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
+        expect(retry.workerSource?.isCurrent()).toBe(true);
+        expect(watch.applyTo(retry.workerSource!, retry.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task")).isCurrent()).toBe(false);
+      } else expect(watch.applyTo(page.workerSource!, rows).isCurrent()).toBe(true);
+    } else {
+      observing = true; await provider.listPendingInbox!(parent, { signal: owner.signal });
+      expect(page.workerSource?.isCurrent()).toBe(false);
+      if (mode === "cancelled") lifetime.abort();
+      if (mode === "original-deadline") { expect(deadlines.length).toBeGreaterThan(1); deadlines[0]!.abort(); expect(longOwner.aborted).toBe(false); }
+      if (mode === "reconnect") {
+        stream.abort(); await pump;
+        secondPump = (async () => { for await (const _event of provider.events(secondStream.signal)) {} })(); await provider.waitForEventStream!(secondStream.signal);
+      }
+      storedAt = mode === "older-report" ? 30 : mode === "current-report" ? 50 : undefined;
+      const next = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
+      const nextRows = next.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+      if (mode === "cancelled" || mode === "original-deadline" || mode === "reconnect") expect(() => watch!.applyTo(next.workerSource!, nextRows)).toThrow("expired");
+      else if (mode === "unknown-guard") expect(() => watch!.applyTo({ isCurrent: next.workerSource!.isCurrent, retain: next.workerSource!.retain }, nextRows)).toThrow("source unavailable");
+      else if (mode === "unrelated-cohort") {
+        const other = (await provider.createSession("Different enclosing cohort")).id; fake.launchRequestWorker(other);
+        const unrelated = await provider.listMessages(other, { limit: 100, signal: owner.signal });
+        expect(() => watch!.applyTo(unrelated.workerSource!, [])).toThrow("source unavailable");
+      } else {
+        expect(watch!.applyTo(next.workerSource!, nextRows).isCurrent()).toBe(mode === "current-report");
+        if (mode === "current-report") expect(nextRows).toContainEqual(expect.objectContaining({ status: "failed", resultId: "queued-failure", terminalReportedAt: 50 }));
+      }
+    }
+  } finally { release(); owner.abort(); lifetime.abort(); stream.abort(); secondStream.abort(); timeout?.mockRestore(); await inbox?.catch(() => undefined); await pump; await secondPump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const carrier of ["transcript", "consumer"] as const)
+for (const mode of ["relevant-then-unrelated", "sticky-overflow", ...(carrier === "consumer" ? ["ordered-baseline" as const] : [])] as const)
+test(`prebaseline native positives retain scope and order (${carrier}/${mode})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, phase: "owned" | "first" | "second" = "owned", heldOnce = false;
+  let entered!: () => void, release!: () => void, inboxEntered!: () => void, releaseInbox!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const inboxPending = new Promise<void>(resolve => { inboxEntered = resolve; }), inboxHeld = new Promise<void>(resolve => { releaseInbox = resolve; });
+  const report = (id: string, worker: string) => ({ id, type: "synthetic", time: { created: 45 }, payload: { text: "Native report",
+    metadata: { source: "subagent", childID: worker, state: "error" } } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === `/api/session/${parent}/inbox`) {
+      const at = phase;
+      if (at === "owned" && mode === "ordered-baseline") { inboxEntered(); await inboxHeld; }
+      return Response.json({ data: at === "owned" ? [] : at === "second" ? mode === "sticky-overflow" ? [] : [report("other", "unrelated-child")]
+        : mode === "sticky-overflow" ? Array.from({ length: 257 }, (_, index) => report(`report-${index}`, "unrelated-child")) : [report("first", child!)] });
+    }
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (!heldOnce && (mode === "ordered-baseline" ? route === `/api/session/${parent}` : route === `/api/session/${parent}/message`)) { heldOnce = true; entered(); await held; }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
+  let reading: Promise<import("../../provider").ProviderHistoryPage | import("../../types").BackgroundTaskItem[]> | undefined;
+  try {
+    parent = (await provider.createSession("Native prebaseline evidence")).id; child = fake.launchRequestWorker(parent).childId;
+    reading = carrier === "transcript" ? provider.listMessages(parent, { limit: 100, signal: abort.signal }) : provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    void reading.catch(() => undefined); await pending;
+    phase = "first"; expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]);
+    if (mode === "ordered-baseline") { phase = "owned"; release(); await inboxPending; }
+    phase = "second"; expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]);
+    release(); releaseInbox();
+    const result = await reading.then(value => ({ value }), error => ({ error }));
+    if (mode === "ordered-baseline") {
+      expect(result).toHaveProperty("value");
+      if ("value" in result && Array.isArray(result.value)) expect(result.value[0]?.status).toBe("completed");
+    } else if (carrier === "consumer") expect(result).toHaveProperty("error");
+    else {
+      expect(result).toHaveProperty("value");
+      if ("value" in result && !Array.isArray(result.value)) expect(result.value.workerSource?.isCurrent()).toBe(false);
+    }
+  } finally { release(); releaseInbox(); abort.abort(); await reading?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const mode of ["pending-only", "delivered", "unrelated", "prelaunch"] as const)
+test(`covered history keeps pending counterproof across failed-inventory retries (${mode})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, captured = false, released = false, delivered = false, observing = false, parentReads = 0, attempts = 0;
+  let entered!: () => void, release!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const report = () => ({ id: "actual-failed-report", type: "synthetic", time: { created: mode === "prelaunch" ? 5 : 45 }, payload: {
+    text: "Actual parent failure", metadata: { source: "subagent", childID: mode === "unrelated" ? "unrelated-child" : child, state: "error" },
+  } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: observing && route === `/api/session/${parent}/inbox` ? [report()] : [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      parentReads++;
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const result = report();
+      return Response.json({ data: [first, ...(delivered ? [{ ...result.payload, id: result.id, type: result.type, time: result.time }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeHistory = provider.listMessages.bind(provider), abort = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  provider.listMessages = async (id, options) => {
+    const page = await nativeHistory(id, options);
+    if (id === parent) { attempts++; captured = true; if (page.workerSource) guards.push(page.workerSource); }
+    return page;
+  };
+  provider.reconcileBackgroundTasks = async () => { if (captured && !released) { entered(); await held; } throw new Error("Inventory remains unavailable"); };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 400 });
+  let history: ReturnType<typeof adapter.history> | undefined;
+  try {
+    parent = (await provider.createSession("One covered read, repeated transcript attempts")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    history = adapter.history(parent); void history.catch(() => undefined); await pending;
+    expect(guards[0]?.isCurrent()).toBe(true);
+    observing = true;
+    await provider.listPendingInbox!(parent, { signal: abort.signal });
+    expect(guards[0]?.isCurrent()).toBe(mode === "unrelated" || mode === "prelaunch");
+    delivered = mode === "delivered"; released = true; release();
+    const result = await history.then(value => ({ value }), error => ({ error }));
+    if (mode === "pending-only") {
+      expect(result).toHaveProperty("error");
+      expect(attempts).toBeGreaterThan(1);
+    } else {
+      expect(result).toHaveProperty("value");
+      if ("value" in result) expect(result.value.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId,
+        status: mode === "delivered" ? "failed" : "completed", ...(mode === "delivered" ? { resultId: "actual-failed-report", summary: "Actual parent failure", terminalReportedAt: 45 } : {}) }));
+      if (mode === "delivered") expect(parentReads).toBeGreaterThan(1);
+    }
+  } finally { released = true; release(); abort.abort(); await history?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
+for (const read of ["provider", "adapter"] as const)
+for (const change of read === "provider" ? ["exact", "changed-id", "changed-clock", "changed-payload", "other-child", "foreign"] as const : ["exact"] as const)
+test(`${read} recognizes a retained history-only terminal replay (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined;
+  const frame = (type: string, data: unknown, id = type, created = 20, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id, type, data, created, location: { directory: location } })}\n\n`));
+  const barrier = () => new Promise<void>(resolve => { acknowledge = resolve; frame("diagnostic.terminal-replay-applied", {}); });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, "connected", 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeEvents = provider.events.bind(provider), nativeHistory = provider.listMessages.bind(provider);
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) {
+    if (event.eventType === "diagnostic.terminal-replay-applied") { acknowledge?.(); acknowledge = undefined; } yield event;
+  } };
+  const firstAbort = new AbortController(), abort = new AbortController();
+  const adapter = read === "adapter" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 500 }) : undefined;
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined, handoffs = 0;
+  try {
+    firstPump = (async () => { for await (const _event of nativeEvents(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("History-only native terminal replay")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = adapter ? adapter.startEventPump() : (async () => { for await (const _event of provider.events(abort.signal)) {} })();
+    await provider.waitForEventStream!(abort.signal);
+    frame("session.execution.succeeded", { sessionID: child }, "terminal-proof"); await barrier();
+    if (adapter) {
+      provider.listMessages = async (id, options) => {
+        const page = await nativeHistory(id, options);
+        if (id === parent) { handoffs++; frame("session.execution.succeeded", { sessionID: child }, "terminal-proof"); await barrier(); }
+        return page;
+      };
+      const snapshot = await adapter.history(parent);
+      expect(snapshot.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+      expect(handoffs).toBeGreaterThan(0);
+    } else {
+      const page = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
+      expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+      expect(page.workerSource?.isCurrent()).toBe(true);
+      frame("session.execution.succeeded", { sessionID: change === "other-child" ? "another-child" : child, ...(change === "changed-payload" ? { reason: "different payload" } : {}) },
+        change === "changed-id" ? "different-proof" : "terminal-proof", change === "changed-clock" ? 25 : 20, change === "foreign" ? `${directory}/foreign` : directory);
+      await barrier();
+      expect(page.workerSource?.isCurrent()).toBe(["exact", "other-child", "foreign"].includes(change));
+      const row = page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+      expect(workerCanStop(row!)).toBe(false); expect(row?.resultId).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();
+    }
+  } finally { firstAbort.abort(); abort.abort(); if (adapter) await adapter.dispose(); else await provider.dispose!(); await firstPump; await pump; await fake.stop(); }
+}, 10_000);
 
 for (const carrier of ["native", "streamed"] as const)
 for (const change of ["failed-report", "ordinary-text", "other-child", "prelaunch", "same-report"] as const)
@@ -67,7 +315,7 @@ test(`transcript fallback fences ${carrier} pending counterproof after inventory
     expect(result).toHaveProperty("value");
     if ("value" in result) {
       expect(result.value.items.some(item => item.type === "assistant_message" && item.markdown.includes("Transcript text keeps its own authority."))).toBe(true);
-      const row = result.value.items.find(item => item.type === "background_task" && item.taskId === worker.taskId);
+      const row = result.value.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
       expect(row?.status).toBe(change === "failed-report" ? "failed" : "completed");
       if (change === "failed-report") expect(row).toMatchObject({ resultId: "pending-result", summary: "Native report", terminalReportedAt: 45 });
     }
@@ -143,10 +391,10 @@ test(`explicit inventory report relinquishes only qualified transcript outcomes 
   } finally { owner.abort(); inventory.abort(); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const order of ["older-inbox", "newer-inbox", "streamed-pending-deltas"] as const)
+for (const order of ["older-inbox", "newer-inbox", "streamed-pending-deltas", "native-pending-delivered"] as const)
 test(`transcript pending counterproof uses owned native request order (${order})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
-  let parent: string | undefined, child: string | undefined, heldOnce = false;
+  let parent: string | undefined, child: string | undefined, heldOnce = false, delivered = false, inboxObservations = 0;
   let entered!: () => void, release!: () => void;
   const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
   let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
@@ -159,18 +407,21 @@ test(`transcript pending counterproof uses owned native request order (${order})
     } }), { headers: { "content-type": "text/event-stream" } });
     if (route.endsWith("/inbox")) {
       if (route === `/api/session/${parent}/inbox`) {
+        inboxObservations++;
         if (order === "older-inbox") { entered(); await held; }
         return Response.json({ data: [{ id: "pending-result", type: "synthetic", time: { created: 45 }, payload: {
-          text: "Native failed report", metadata: { source: "subagent", childID: child, state: "error" },
+          text: "Native failed report", metadata: { source: "subagent", childID: order === "native-pending-delivered" && inboxObservations > 1 ? "unrelated-child" : child, state: "error" },
         } }] });
       }
       return Response.json({ data: [] });
     }
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
+      const includeReport = delivered;
       if (order !== "older-inbox" && !heldOnce) { heldOnce = true; entered(); await held; }
       const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
-      return Response.json({ data: [first], cursor: {} });
+      return Response.json({ data: [first, ...(includeReport ? [{ id: "pending-result", type: "synthetic", time: { created: 45 }, text: "Native failed report",
+        metadata: { source: "subagent", childID: child, state: "error" } }] : [])], cursor: {} });
     }
     if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
     return response;
@@ -197,9 +448,16 @@ test(`transcript pending counterproof uses owned native request order (${order})
             text: "Report", metadata: { source: "subagent", childID: subject, state: "error" },
           } } });
         frame("diagnostic.transcript-deltas-applied", {}); await observed;
-      } else expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]);
+      } else {
+        expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]);
+        if (order === "native-pending-delivered") { delivered = true; expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]); }
+      }
       release(); const page = await history;
       expect(page.workerSource?.isCurrent()).toBe(false);
+      if (order === "native-pending-delivered") {
+        const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+        expect(fresh).toContainEqual(expect.objectContaining({ status: "failed", resultId: "pending-result", summary: "Native failed report" }));
+      }
     }
   } finally { release(); abort.abort(); await inbox?.catch(() => undefined); await history?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);

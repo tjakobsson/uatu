@@ -153,7 +153,7 @@ type InventorySessionMetadata = {
   deleted: boolean;
 };
 type CachedAssociationCounterproof = { parentId: string; childIds: readonly string[]; transcriptKeys: ReadonlySet<string> };
-type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; questionTick: number; replacement?: true };
+type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; carryWorkerHistory: (source: WorkerSourceGuard, reports: readonly BackgroundTaskItem[]) => WorkerSourceGuard; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; questionTick: number; replacement?: true };
 class HistoryReadChangedError extends Error {}
 
 /** Evidence flows from shared accounting owners to each enclosing read before
@@ -966,6 +966,11 @@ export class ChatAdapter {
         // Dirty replacement retries belong to the same read. They must not
         // turn its later accepted announcements into pre-read retirement targets.
         const questionTick = this.interactionClock;
+        let pendingCounterproof: ReturnType<NonNullable<WorkerSourceGuard["retainPendingCounterproof"]>> | undefined;
+        const carryWorkerHistory = (source: WorkerSourceGuard, reports: readonly BackgroundTaskItem[]) => {
+          pendingCounterproof ??= source.retainPendingCounterproof?.(signal);
+          return pendingCounterproof?.applyTo(source, reports) ?? source;
+        };
         while (true) {
           recovery.dirty = false;
           const readProjection = this.projection(id);
@@ -976,7 +981,7 @@ export class ChatAdapter {
           const associations = associationRead?.begin(workerSources);
           const cachedAssociations = associations?.evidence ?? [];
           try {
-            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, questionTick, ...(replacement ? { replacement: true } : {}) });
+            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, carryWorkerHistory, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, questionTick, ...(replacement ? { replacement: true } : {}) });
             inboxReconciled = true;
             assertCurrent();
             if (!recovery.dirty) return snapshot;
@@ -1036,7 +1041,13 @@ export class ChatAdapter {
     const inspectionEpoch = inspectionKey ? this.attributionReadEpoch(inspectionKey) : undefined;
     let page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
     coverage?.assertCurrent();
-    if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
+    if (coverage && page.workerSource) {
+      const guard = coverage.carryWorkerHistory(page.workerSource, (page.completeItems ?? page.items)
+        .filter((item): item is BackgroundTaskItem => item.type === "background_task"));
+      page = { ...page, workerSource: guard, isWorkerSourceCurrent: guard.isCurrent };
+    }
+    if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()
+      && !(coverage && page.workerSource?.canRevalidateInferredOutcomes?.())) throw new HistoryReadChangedError();
     // Capture the requested provider slice, not the later augmented snapshot:
     // accounting, launcher backfills and coverage.merge may add rows from far
     // outside this page. Only an actual page message establishes its frontier.

@@ -8,6 +8,26 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+for (const mode of ["unowned", "new-occurrence", "saturated"] as const)
+test(`retained terminal replay remains negative-only across ledger changes (${mode})`, () => {
+  const workers = new BackgroundWorkers(mode === "saturated" ? { entries: 1 } : {});
+  const proof = nativeProof({ id: "terminal", created: 20 }, { child: "child", phase: "ended" });
+  workers.executionEnded("child", 20, proof);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  expect(workers.terminalReplay("child", proof)).toBe(mode !== "saturated");
+  if (mode === "new-occurrence") {
+    workers.verifyChild("child", "parent");
+    workers.launchPrepared("parent", prepareTool({ id: "later-call", name: "subagent", time: { created: 30, ran: 31, completed: 32 },
+      state: { status: "completed", input: { background: true }, metadata: { sessionID: "child", status: "running" } } }, 32, "snapshot", "later-message"), 32);
+    workers.executionEnded("child", 20, proof);
+    expect(workers.occurrence("v2:parent:later-call")?.executionEnd).toBeUndefined();
+    const different = nativeProof({ id: "later-terminal", created: 40 }, { child: "child", phase: "ended" });
+    expect(workers.terminalReplay("child", different)).toBe(false);
+    workers.executionEnded("child", 40, different); expect(workers.terminalReplay("child", different)).toBe(true);
+  }
+  checkBytes(workers);
+});
+
 for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
 test(`intervening start vetoes share the ledger budget and coalesce replay (${JSON.stringify(budget)})`, () => {
   const workers = new BackgroundWorkers(budget);

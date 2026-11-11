@@ -110,7 +110,22 @@ They compare actual newer positive reports with their native parent-read order,
 declared child/admission scope and consumed report digests; no empty inbox
 baseline is assigned. Empty/text, unrelated, pre-launch and unchanged consumed
 reports leave them current. Positive pending facts share the existing bounded
-slot and source lifetime; streamed deltas preserve per-fact order.
+slot and source lifetime. Before baseline installation, native snapshots and
+streamed deltas both merge positive facts, preserving each fact's observation
+order. Later delivery/absence cannot erase a veto. Sticky overflow retains the
+latest lost-fact order; a later owned baseline filters genuinely older facts.
+Covered history owns one `retainPendingCounterproof` watch across all retries,
+bounded by the existing 256-fact / 64 KiB slot, original source deadline and
+enclosing signal. Seed/merge filtering prevents old facts from being renewed by
+a new attempt or unrelated newer batch. Unknown/wrapped source identity, a
+different parent cohort, cancellation, reconnect or expiration fail closed.
+The watch grants no report content, empty baseline, global cache or Stop proof.
+Positive observations invalidate only transport reuse, without starting IO;
+requested retries can read actually delivered native reports. Qualified current
+explicit rows and their native clocks can discharge matching facts, while genuine
+pending-only disagreement remains bounded-unavailable instead of cached Completed.
+Permission to read replacement inventory is separate from publication authority;
+strict source and current-inventory guards remain required at admission.
 Successful covered inventory can replace an exact inferred worker outcome while
 the transcript keeps text authority. The provider's optional
 `withoutInferredOutcomes` guard view requires actual explicit report content,
@@ -139,6 +154,10 @@ old admission. Matching event/transcript clocks are counted once, but duplicate
 transcript idles remain ambiguous. An undated observed end retains one sticky
 unknown-clock flag under the same ledger budget. Only valid visible transcript
 outcomes can infer terminal status; explicit parent reports still take precedence.
+Retained terminal proofs deduplicate exact event replay even without a live
+worker occurrence. Proof identity, clock and semantic payload still distinguish
+new boundaries. Replaying an old proof cannot settle a newer occurrence or grant
+ownership/Stop authority. Saturation without the proof stays conservative.
 The retained-end overlay and its retention gaps constrain outcome inference
 only. They do not reclassify the shared control/admission fold or suppress
 compatible ended activity and independently covered controls after saturation.

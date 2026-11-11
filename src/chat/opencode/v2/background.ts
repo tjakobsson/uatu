@@ -1243,7 +1243,7 @@ export class BackgroundWorkers {
 
   terminalReplay(child: string, proof?: NativeProof): boolean {
     const previous = this.terminalProofs.get(child);
-    return !!previous?.occurrences.length && sameProof(previous.proof, proof)
+    return sameProof(previous?.proof, proof)
       || [...this.tasks.values()].some(task => task.worker === child && sameProof(task.evidence.executionEnd, proof));
   }
 
