@@ -3900,9 +3900,9 @@ for (const outcome of [
   "renewed-leaf-history", "renewed-leaf-live", "renewed-leaf-amount", "renewed-leaf-zero", "renewed-leaf-unchanged",
   "renewed-leaf-no-rebinding", "renewed-leaf-expired", "renewed-leaf-retired-generation",
   "renewed-leaf-clone",
-  "renewed-leaf-repeat", "renewed-leaf-newer-reference", "renewed-leaf-read-fence",
+  "renewed-leaf-repeat", "renewed-leaf-newer-reference", "renewed-leaf-newer-reference-late-pressure", "renewed-leaf-read-fence",
 ] as const)
-for (const surface of ["reused-parent-occurrence", "retained-leaf-prompt-shift", "retained-leaf-coalesced", "retained-leaf-replacement", "retained-leaf-generation", "reused-leaf-generation", "reused-leaf-eviction", "renewed-leaf-expired", "renewed-leaf-retired-generation", "renewed-leaf-clone", "renewed-leaf-newer-reference", "renewed-leaf-read-fence"].includes(outcome)
+for (const surface of ["reused-parent-occurrence", "retained-leaf-prompt-shift", "retained-leaf-coalesced", "retained-leaf-replacement", "retained-leaf-generation", "reused-leaf-generation", "reused-leaf-eviction", "renewed-leaf-expired", "renewed-leaf-retired-generation", "renewed-leaf-clone", "renewed-leaf-newer-reference", "renewed-leaf-newer-reference-late-pressure", "renewed-leaf-read-fence"].includes(outcome)
   ? ["subscription"] as const : ["live", "subscription", "history"] as const)
 test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async () => {
   const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
@@ -3919,7 +3919,7 @@ test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async ()
   const reusedLeaf = outcome.startsWith("reused-leaf-");
   const renewedProof = outcome.startsWith("renewed-leaf-");
   const expiredRenewal = outcome === "renewed-leaf-expired", retiredGeneration = outcome === "renewed-leaf-retired-generation";
-  const newerReference = outcome === "renewed-leaf-newer-reference";
+  const newerReference = outcome.startsWith("renewed-leaf-newer-reference");
   const clonedRenewal = outcome === "renewed-leaf-clone";
   const noRenewal = outcome === "renewed-leaf-no-rebinding" || expiredRenewal || retiredGeneration || clonedRenewal;
   const initialLeafCost = outcome === "renewed-leaf-zero" ? 0 : 0.07;
@@ -4023,6 +4023,7 @@ test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async ()
   let priorLine: import("../../types").SubagentLine | undefined, projectedLine: import("../../types").SubagentLine | undefined;
   let renewing: ReturnType<ChatAdapter["history"]> | undefined;
   let proofReadFence: ReturnType<ReturnType<ChatAdapter["projectionForTests"]>["beginHistoryRead"]> | undefined;
+  let pressureTail: (() => Promise<void>) | undefined;
   const tools = (items: import("../../types").ConversationItem[]) => items.filter((item): item is import("../../types").ToolItem => item.type === "tool");
   const rootRow = (items: import("../../types").ConversationItem[]) => tools(items).find(row => row.id === "tool:root")!;
   const direct = (items: import("../../types").ConversationItem[]) => ["first", "second"].map(id => tools(items).find(row => row.id === `tool:${id}`)?.usage?.costUsd);
@@ -4035,6 +4036,10 @@ test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async ()
     expect(direct(initialChild.items)).toEqual([0.1, 0.2]);
     if (renewedProof) {
       const beforeChild = await adapter.subscribe("ses_child"), beforeRoot = await adapter.subscribe("ses_root");
+      // Temporary observer retirement must not release the ancestor whose
+      // binding is asserted later. Proof pressure targets attribution reuse,
+      // not eviction of an unowned root projection.
+      if (newerReference) pinnedRoot = await adapter.subscribe("ses_root");
       const firstRow = tools(initialChild.items).find(row => row.id === "tool:first")!;
       priorLine = firstRow.descendants!.find(line => line.id === "tool:leaf")!;
       if (outcome === "renewed-leaf-read-fence") proofReadFence = adapter.projectionForTests("ses_child").beginHistoryRead();
@@ -4146,6 +4151,24 @@ test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async ()
         if (outcome === "renewed-leaf-amount") expect(items.some(event => event.type === "item.upsert")).toBe(true);
         else if (!retiredGeneration && !clonedRenewal) expect(items).toEqual([]);
       }
+      if (outcome === "renewed-leaf-newer-reference-late-pressure") {
+        pressureTail = async () => {
+          // Deliver native pressure after the temporary observers retire.
+          const rootProjection = adapter.projectionForTests("ses_root");
+          expect(rootProjection.replay.subscriberCount()).toBeGreaterThan(0);
+          await emit(Array.from({ length: 64 }, (_, index) => {
+            const sessionID = `ses_proof_pressure_tail_${index}`, inboxID = `proof_tail_${index}`;
+            return [
+              { id: `tail_enqueued_${index}`, type: "session.inbox.enqueued", created: 3000 + index * 2, data: { sessionID, inboxID, item: { id: inboxID, type: "user", payload: { text: "Native proof pressure tail" } } } },
+              { id: `tail_delivered_${index}`, type: "session.inbox.delivered", created: 3001 + index * 2, data: { sessionID, inboxID } },
+            ];
+          }).flat());
+          const tail = await adapter.subscribe("ses_proof_pressure_tail_63"); tail.events.cancel();
+          expect(tail.snapshot.items).toContainEqual(expect.objectContaining({ id: "message:proof_tail_63", type: "user_message" }));
+          expect(adapter.projectionForTests("ses_root")).toBe(rootProjection);
+          expect(rootProjection.replay.subscriberCount()).toBeGreaterThan(0);
+        };
+      }
     }
     if (generation) {
       await adapter.stopEventPump(); void adapter.startEventPump();
@@ -4244,6 +4267,7 @@ test(`deep cohort parent binding stays fenced (${outcome}/${surface})`, async ()
       if (surface === "live") observer = await adapter.subscribe("ses_root");
       await emit([{ type: "session.step.ended", created: 25, data: { sessionID: "ses_grandchild", assistantMessageID: "first_spend", cost: zero ? 0 : 0.4 } }]);
     }
+    await pressureTail?.();
     let ancestorItems: import("../../types").ConversationItem[];
     if (surface === "history") ancestorItems = (!recovery && reusedHistory ? reusedHistory : await adapter.history("ses_root")).items;
     else if (surface === "subscription") { const next = await adapter.subscribe("ses_root"); next.events.cancel(); ancestorItems = next.snapshot.items; }

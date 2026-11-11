@@ -2296,10 +2296,10 @@ test(`warm child transcript observes native visibility before parent recovery ($
 }, 10_000);
 
 for (const read of ["provider", "adapter"] as const)
-for (const change of ["reverse-during-lookup", "reverse", "reverse-prefix", "reverse-unchanged", "reverse-other", "staged-cleared", "unchanged", "append", "other-child"] as const)
+for (const change of ["initial-owned-clear", "initial-fresh", "initial-commit", "initial-prefix", "initial-stage-only", "initial-other", "reverse-during-lookup", "reverse", "reverse-prefix", "reverse-unchanged", "reverse-other", "staged-cleared", "unchanged", "append", "other-child"] as const)
 test(`${read} retains boundary transitions during the first child transcript (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
-  let parent: string | undefined, child: string | undefined, staged = false, removed = false, heldOnce = false;
+  let parent: string | undefined, child: string | undefined, staged = change.startsWith("initial-") && change !== "initial-other", removed = false, heldOnce = false, childReads = 0;
   const olderRead = new AsyncLocalStorage<boolean>();
   let olderEntered!: () => void, releaseOlder!: () => void;
   const olderPending = new Promise<void>(resolve => { olderEntered = resolve; }), olderHeld = new Promise<void>(resolve => { releaseOlder = resolve; });
@@ -2317,15 +2317,16 @@ test(`${read} retains boundary transitions during the first child transcript (${
       return Response.json({ data: [first], cursor: {} });
     }
     if (route === `/api/session/${child}/message`) {
+      childReads++;
       const data = [{ id: "child-prompt", type: "user", text: "Current execution", time: { created: 15 } },
         ...(!removed ? [{ id: "removed-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : []),
-        { id: "retained-suffix", type: "user", text: "Independent suffix", time: { created: 50 } }];
+        ...(change === "initial-prefix" && !staged ? [] : [{ id: "retained-suffix", type: "user", text: "Independent suffix", time: { created: 50 } }])];
       if (!heldOnce) { heldOnce = true; entered(); await held; }
       return Response.json({ data, cursor: {} });
     }
     if (route === `/api/session/${child}` || olderRead.getStore()) {
       const body = await response.json();
-      if (staged || olderRead.getStore() && change !== "reverse-unchanged") body.data.revert = { messageID: change === "reverse-prefix" ? "retained-suffix" : "removed-idle" };
+      if (staged || olderRead.getStore() && change !== "reverse-unchanged") body.data.revert = { messageID: change === "reverse-prefix" || change === "initial-prefix" ? "retained-suffix" : "removed-idle" };
       if (olderRead.getStore()) { olderEntered(); await olderHeld; }
       else if (holdOutcome && route === `/api/session/${child}`) { outcomeEntered(); await outcomeHeld; }
       return Response.json(body);
@@ -2340,8 +2341,12 @@ test(`${read} retains boundary transitions during the first child transcript (${
   try {
     parent = (await provider.createSession("First child transcript boundary window")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
     const other = (await provider.createSession("Unrelated boundary owner")).id;
+    if (change === "initial-fresh") { await provider.getSession(child); staged = false; removed = true; }
     reading = adapter ? adapter.history(parent) : provider.listMessages(parent, { limit: 100, signal: abort.signal }); void reading.catch(() => undefined); await pending;
-    if (change.startsWith("reverse")) {
+    if (change.startsWith("initial-")) {
+      staged = change === "initial-stage-only"; removed = change === "initial-commit" || change === "initial-owned-clear" || change === "initial-fresh";
+      if (change !== "initial-owned-clear") await provider.getSession(change === "initial-other" ? other : child);
+    } else if (change.startsWith("reverse")) {
       const subject = change === "reverse-other" ? other : child;
       older = olderRead.run(true, () => provider.getSession(subject)); void older.catch(() => undefined); await olderPending;
       removed = change === "reverse" || change === "reverse-during-lookup"; await provider.getSession(subject);
@@ -2356,14 +2361,16 @@ test(`${read} retains boundary transitions during the first child transcript (${
     }
     if (change === "append") fake.workerReport(child, "Independent model", "high", 0.001);
     release(); const result = await reading;
-    if (adapter) expect(result.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: removed ? "running" : "completed" }));
-    else expect((result as import("../../provider").ProviderHistoryPage).workerSource?.isCurrent()).toBe(!removed);
+    const hidden = removed || change === "initial-stage-only";
+    if (!adapter && change.startsWith("initial-")) expect(childReads).toBe(change === "initial-commit" || change === "initial-owned-clear" ? 2 : 1);
+    if (adapter) expect(result.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: hidden ? "running" : "completed" }));
+    else expect((result as import("../../provider").ProviderHistoryPage).workerSource?.isCurrent()).toBe(!removed || change === "initial-fresh");
     if (adapter && removed) {
       const row = result.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
       expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
     }
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
-    expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: removed ? "running" : "completed",
+    expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: hidden ? "running" : "completed",
       ...(removed ? { activity: expect.objectContaining({ kind: "working" }) } : {}) });
   } finally { releaseOutcome(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
 }, 10_000);

@@ -1310,6 +1310,14 @@ older than the actual consumed transcript load cannot poison its newer authority
 That load's native-record cutoff survives shared/cache reuse separately from
 the later owned lookup. Candidate verification retains its initial boundary,
 so a compatible older stage is not mistaken for a new transition.
+An initial verified stage that hides idle evidence also qualifies the first raw
+child load. If its later owned record clears/changes, that requested fold
+revalidates child raw history unless the load already followed an observed clear,
+then reads owned visibility again. A clear alone cannot distinguish commit from
+restore. Removed idle content fences the old source; identical current raw
+content preserves compatible authority. Known visible prefixes avoid rereading.
+The initial stage/order remain per-source deny context, not an owned baseline;
+observations start no IO and revalidation keeps the original read deadline.
 Before any dependent parent read exists, transcript cache entries own a
 constant-size native visibility observation from load registration, before a
 value exists. The metadata transfers to retained values and retires with the

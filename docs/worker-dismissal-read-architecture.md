@@ -62,6 +62,13 @@ The consumed transcript's actual load cutoff is retained separately: a stage
 requested during that load can still deny publication after lookup and capture.
 Older-than-load requests and compatible initially staged records do not become
 new transitions merely because their responses arrive late.
+Initial verification stages qualify the consumed raw transcript too. When an
+initial stage hid an idle and later owned visibility clears/changes, the requested
+fold revalidates raw child history and then owned visibility, unless a prior clear
+already preceded that actual raw load. Only actual current raw content can
+discharge commit-versus-restore uncertainty; a new record alone cannot do so.
+Known retained prefixes need no reread. This uses the same deadline and adds no
+IO on observation, owned baseline, result clock or Stop authority.
 Session-record reads carry only their explicit consuming fold as an overlapping
 owner. Ordinary getSession/list/create reads cannot claim all collecting folds
 and revoke a page that consumed a newer boundary. Genuine later nonoverlapping

@@ -77,7 +77,7 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyParentBoundary?: { boundary: string | null; completed: number };
   historyParentVisibilityChanged?: true;
   historyParentRecordsAfter?: number;
-  historyChildVisibility?: Map<string, { registered: number; initialBoundary?: string | null; ownedAfter?: number; transcriptAfter?: number; ownedBaseline?: boolean; pendingBoundary?: string | null; retainedBoundaries?: ReadonlySet<string> }>;
+  historyChildVisibility?: Map<string, { registered: number; initialBoundary?: string | null; initialOrder?: { started: number; completed: number }; ownedAfter?: number; transcriptAfter?: number; ownedBaseline?: boolean; pendingBoundary?: string | null; retainedBoundaries?: ReadonlySet<string> }>;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 type HistoryVisibilityObservation = { recordsAfter: number; pendingAfter: number; visibility?: { boundary: string | null; started: number; completed: number } };
@@ -573,7 +573,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             const activity = source.historyActivityChildren ??= new Map();
             if (!activity.has(child)) activity.set(child, undefined);
           }
-          const complete = await this.allMessages(child, signal, owner);
+          let complete = await this.allMessages(child, signal, owner);
           let provisionalHidden = false;
           for (const source of historySources) {
             const outcomes = (source.historyOutcomeMessages ??= new Map()).get(child) ?? new Set<string>();
@@ -602,8 +602,26 @@ export class OpenCodeV2Provider implements ChatProvider {
               (source.historyPositiveChildren ??= new Set()).add(child);
               if (source.historyParentChanges.has(child) || source.historyChildChanges.has(child)) source.revision++;
             }
-            const lookup = await this.lookupChild(child, signal, owner);
+            const priorVisibility = owner?.historyBoundaries?.get(child);
+            let lookup: SessionLookup = await this.lookupChild(child, signal, owner);
             if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Child history ownership unavailable");
+            const initial: ReturnType<NonNullable<HistoryWorkerSource["historyChildVisibility"]>["get"]> = owner?.historyChildVisibility?.get(child);
+            const initialIndex = initial?.initialBoundary ? complete.findIndex(message => messageIdentity(message) === initial.initialBoundary) : -1;
+            const initialHidesOutcome: boolean = typeof initial?.initialBoundary === "string" && (initialIndex < 0
+              || complete.some((message, position) => message.type === "idle" && position >= initialIndex));
+            if (initial && initialHidesOutcome && initial.initialOrder && lookup.recordRead
+              && stringValue(asRecord(lookup.info?.revert).messageID) !== initial.initialBoundary) {
+              const load = this.historyReadOrders.get(complete)!;
+              // A clear record alone cannot distinguish committing the staged
+              // suffix from restoring it. Revalidate this requested child fold,
+              // unless its actual raw load already followed the observed clear.
+              if (!priorVisibility || priorVisibility.boundary !== null || load.recordsAfter < priorVisibility.completed) {
+                this.historyReuse.invalidate(child);
+                complete = await this.allMessages(child, signal, owner);
+                lookup = await this.lookupChild(child, signal, owner);
+                if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Revalidated child history ownership unavailable");
+              }
+            }
             // A staged reply can arrive during the owned visibility await.
             // Consume its deny-only boundary before replacing the provisional
             // slot; a newer clear cannot authorize the held old transcript.
@@ -632,6 +650,7 @@ export class OpenCodeV2Provider implements ChatProvider {
               const registration: NonNullable<ReturnType<typeof visibility.get>> = {
                 registered: visibility.get(child)?.registered ?? recordRead.started, ownedAfter: recordRead.started,
                 initialBoundary: visibility.get(child)?.initialBoundary,
+                initialOrder: visibility.get(child)?.initialOrder,
                 transcriptAfter: this.historyReadOrders.get(complete)!.recordsAfter, ownedBaseline: true };
               visibility.set(child, registration);
               const lastOutcome = complete.findLastIndex(message => message.type === "idle");
@@ -3273,7 +3292,10 @@ export class OpenCodeV2Provider implements ChatProvider {
             // its boundary only to recognize a compatible older staged reply;
             // this does not register a dependency or install an owned baseline.
             const visibility = source.historyChildVisibility ??= new Map();
-            visibility.set(subject, { registered: completed, initialBoundary: stringValue(asRecord(info.revert).messageID) ?? null });
+            const previous: ReturnType<typeof visibility.get> = visibility.get(subject);
+            if (!previous?.initialOrder || observation.started > previous.initialOrder.completed)
+              visibility.set(subject, { registered: completed, initialBoundary: stringValue(asRecord(info.revert).messageID) ?? null,
+                initialOrder: { started: observation.started, completed } });
           }
           // A native record can reveal a staged/cleared boundary before SSE.
           // Ownership staying confirmed does not preserve an older outcome view.
