@@ -195,10 +195,12 @@ test(`covered history keeps pending counterproof across failed-inventory retries
   } finally { released = true; release(); abort.abort(); await history?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
+for (const boundary of ["terminal", "start"] as const)
 for (const read of ["provider", "adapter"] as const)
 for (const change of read === "provider" ? ["exact", "changed-id", "changed-clock", "changed-payload", "other-child", "foreign"] as const : ["exact"] as const)
-test(`${read} recognizes a retained history-only terminal replay (${change})`, async () => {
+test(`${read} recognizes a retained history-only ${boundary} replay (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const eventType = boundary === "terminal" ? "session.execution.succeeded" : "session.execution.started", proofId = `${boundary}-proof`, nativeAt = boundary === "terminal" ? 20 : 11;
   let parent: string | undefined, child: string | undefined, wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined;
   const frame = (type: string, data: unknown, id = type, created = 20, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id, type, data, created, location: { directory: location } })}\n\n`));
   const barrier = () => new Promise<void>(resolve => { acknowledge = resolve; frame("diagnostic.terminal-replay-applied", {}); });
@@ -230,11 +232,11 @@ test(`${read} recognizes a retained history-only terminal replay (${change})`, a
     parent = (await provider.createSession("History-only native terminal replay")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
     pump = adapter ? adapter.startEventPump() : (async () => { for await (const _event of provider.events(abort.signal)) {} })();
     await provider.waitForEventStream!(abort.signal);
-    frame("session.execution.succeeded", { sessionID: child }, "terminal-proof"); await barrier();
+    frame(eventType, { sessionID: child }, proofId, nativeAt); await barrier();
     if (adapter) {
       provider.listMessages = async (id, options) => {
         const page = await nativeHistory(id, options);
-        if (id === parent) { handoffs++; frame("session.execution.succeeded", { sessionID: child }, "terminal-proof"); await barrier(); }
+        if (id === parent) { handoffs++; frame(eventType, { sessionID: child }, proofId, nativeAt); await barrier(); }
         return page;
       };
       const snapshot = await adapter.history(parent);
@@ -244,8 +246,8 @@ test(`${read} recognizes a retained history-only terminal replay (${change})`, a
       const page = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
       expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
       expect(page.workerSource?.isCurrent()).toBe(true);
-      frame("session.execution.succeeded", { sessionID: change === "other-child" ? "another-child" : child, ...(change === "changed-payload" ? { reason: "different payload" } : {}) },
-        change === "changed-id" ? "different-proof" : "terminal-proof", change === "changed-clock" ? 25 : 20, change === "foreign" ? `${directory}/foreign` : directory);
+      frame(eventType, { sessionID: change === "other-child" ? "another-child" : child, ...(change === "changed-payload" ? { reason: "different payload" } : {}) },
+        change === "changed-id" ? "different-proof" : proofId, change === "changed-clock" ? 25 : nativeAt, change === "foreign" ? `${directory}/foreign` : directory);
       await barrier();
       expect(page.workerSource?.isCurrent()).toBe(["exact", "other-child", "foreign"].includes(change));
       const row = page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
@@ -254,8 +256,8 @@ test(`${read} recognizes a retained history-only terminal replay (${change})`, a
   } finally { firstAbort.abort(); abort.abort(); if (adapter) await adapter.dispose(); else await provider.dispose!(); await firstPump; await pump; await fake.stop(); }
 }, 10_000);
 
-for (const carrier of ["native", "streamed"] as const)
-for (const change of ["failed-report", "ordinary-text", "other-child", "prelaunch", "same-report"] as const)
+for (const carrier of ["native", "streamed", "native-independent-veto"] as const)
+for (const change of carrier === "native-independent-veto" ? ["failed-report"] as const : ["failed-report", "ordinary-text", "other-child", "prelaunch", "same-report"] as const)
 test(`transcript fallback fences ${carrier} pending counterproof after inventory failure (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, other: string | undefined, changed = false, captured = false, failedInventory = false, released = false;
@@ -284,14 +286,21 @@ test(`transcript fallback fences ${carrier} pending counterproof after inventory
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
   const nativeHistory = provider.listMessages.bind(provider), nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), nativeEvents = provider.events.bind(provider);
   const guards: import("../../provider").WorkerSourceGuard[] = [];
+  let pageSignal: AbortSignal | undefined, revokePage: (() => void) | undefined, successfulHistoryInventories = 0;
   provider.listMessages = async (id, options) => {
     const page = await nativeHistory(id, options);
     if (id === parent && !captured) { captured = true; if (page.workerSource) guards.push(page.workerSource); }
+    if (id === parent && carrier === "native-independent-veto") {
+      let current = true; pageSignal = options.signal; revokePage = () => { current = false; };
+      return { ...page, isWorkerSourceCurrent: () => current };
+    }
     return page;
   };
   provider.reconcileBackgroundTasks = async (id, options) => {
     if (!released) { if (captured) { entered(); await held; } failedInventory = true; throw new Error("Inventory intentionally unavailable"); }
-    return nativeRecovery(id, options);
+    const tasks = await nativeRecovery(id, options);
+    if (carrier === "native-independent-veto" && options?.signal === pageSignal && ++successfulHistoryInventories === 1) revokePage?.();
+    return tasks;
   };
   provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { if (event.eventType === "diagnostic.transcript-report-applied") applied(); yield event; } };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
@@ -302,7 +311,7 @@ test(`transcript fallback fences ${carrier} pending counterproof after inventory
     history = adapter.history(parent); void history.catch(() => undefined); await pending;
     expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
     changed = true;
-    if (carrier === "native") {
+    if (carrier !== "streamed") {
       const fresh = await nativeRecovery(parent, { fresh: true });
       expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(change === "failed-report" ? "failed" : "completed");
     } else {
@@ -320,6 +329,7 @@ test(`transcript fallback fences ${carrier} pending counterproof after inventory
       if (change === "failed-report") expect(row).toMatchObject({ resultId: "pending-result", summary: "Native report", terminalReportedAt: 45 });
     }
     expect(current).toBe(change !== "failed-report");
+    if (carrier === "native-independent-veto") expect(successfulHistoryInventories).toBeGreaterThan(1);
   } finally { released = true; release(); await history?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
@@ -543,11 +553,13 @@ test(`cold inventory counterproof respects native ordering and source lifetime (
 }, 10_000);
 
 for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
-for (const scenario of ["later-outcome", "start-only", "third-start", "third-start-older-replay", "third-start-new-admission", "unique-after-start", "unique-late-after-start", "unique-terminal", "duplicate-idles", "earlier-boundary", "new-admission", "missing-clock", "undated-idle", "undated-end", "other-child", "foreign-workspace", "explicit-report", "explicit-after-undated"] as const)
-test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario})`, async () => {
+for (const scenario of ["delayed-new-interval", "delayed-transcript-interval", "delayed-observed-interval", "delayed-third-start", "delayed-reuse", "aligned-new-interval", "later-outcome", "start-only", "third-start", "third-start-older-replay", "third-start-new-admission", "unique-after-start", "unique-late-after-start", "unique-terminal", "duplicate-idles", "earlier-boundary", "new-admission", "missing-clock", "undated-idle", "undated-end", "other-child", "foreign-workspace", "explicit-report", "explicit-after-undated"] as const)
+for (const stage of scenario.startsWith("delayed-") || scenario === "aligned-new-interval" ? ["cold", "outcome"] as const : ["outcome"] as const)
+test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}${stage === "cold" ? "/cold" : ""})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, finished = false;
   const laterAdmission = scenario === "new-admission" || scenario === "third-start-new-admission";
+  const intervalAdmission = scenario.startsWith("delayed-") || scenario === "aligned-new-interval";
   let wire!: ReadableStreamDefaultController<Uint8Array>;
   const barriers = new Map<string, () => void>();
   const frame = (type: string, data: unknown, created: number | undefined, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory: location } })}\n\n`));
@@ -561,13 +573,14 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
     if (route === "/api/session/active") return Response.json({ data: !finished && child ? { [child]: { status: "running" } } : {} });
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
-      const body = await response.json(), first = body.data[0]; first.time = { created: laterAdmission ? 34 : 10 };
-      first.content[0].time = laterAdmission ? { created: 34, ran: 35, completed: 36 }
+      const body = await response.json(), first = body.data[0]; first.time = { created: intervalAdmission ? 30 : laterAdmission ? 34 : 10 };
+      first.content[0].time = intervalAdmission ? { created: 30, ran: 31, completed: 32 } : laterAdmission ? { created: 34, ran: 35, completed: 36 }
         : scenario === "missing-clock" ? { created: 10 } : { created: 10, ran: 11, completed: 12 };
       return Response.json({ data: [first, ...(finished && (scenario === "explicit-report" || scenario === "explicit-after-undated") ? [{ id: "parent-result", type: "synthetic", time: { created: 45 },
         text: "Parent owns result", metadata: { source: "subagent", childID: child, state: "completed" } }] : [])], cursor: {} });
     }
     if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      ...(intervalAdmission && scenario !== "delayed-observed-interval" ? [{ id: "prior-idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : []),
       { id: "new-prompt", type: "user", text: "Current execution", time: { created: 35 } },
       ...(finished ? [{ id: "new-idle", type: "idle", time: scenario === "undated-idle" ? {} : { created: 40 }, outcome: "failed" }] : []),
       ...(finished && scenario === "duplicate-idles" ? [{ id: "duplicate-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : []),
@@ -589,18 +602,24 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
     frame("session.created", { sessionID: subject, parentID: subject === child ? parent : unrelated, location: { directory } }, scenario === "earlier-boundary" ? 3 : 11);
     frame("session.execution.started", { sessionID: child }, scenario === "unique-late-after-start" ? 20 : 11);
     if (scenario !== "unique-terminal" && scenario !== "unique-after-start" && scenario !== "unique-late-after-start" && scenario !== "duplicate-idles") {
-      if (scenario !== "start-only" && !scenario.startsWith("third-start")) frame("session.execution.succeeded", { sessionID: subject }, scenario === "undated-end" || scenario === "explicit-after-undated" ? undefined : scenario === "earlier-boundary" ? 5 : 20, location);
-      frame("session.revert.committed", { sessionID: subject, to: "removed-idle" }, 30, location);
-      if (scenario !== "undated-end") frame("session.execution.started", { sessionID: subject }, scenario === "earlier-boundary" ? 11 : 35, location);
+      if (scenario !== "start-only" && scenario !== "delayed-transcript-interval" && !scenario.startsWith("third-start")) frame("session.execution.succeeded", { sessionID: subject }, scenario === "undated-end" || scenario === "explicit-after-undated" ? undefined : scenario === "earlier-boundary" ? 5 : 20, location);
+      if (!intervalAdmission) frame("session.revert.committed", { sessionID: subject, to: "removed-idle" }, 30, location);
+      if (scenario !== "undated-end") frame("session.execution.started", { sessionID: subject }, scenario === "earlier-boundary" ? 11 : scenario === "aligned-new-interval" ? 31 : 35, location);
+      if (scenario === "delayed-reuse") frame("session.execution.started", { sessionID: subject }, 37, location);
     }
     await barrier("diagnostic.outcome-before-final-idle");
     const before = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(before.find(task => task.taskId === worker.taskId)?.status).toBe("running");
+    if (stage === "cold") {
+      const cold = before.find(task => task.taskId === worker.taskId);
+      expect(cold?.activity?.kind).toBe(scenario === "delayed-reuse" ? "unavailable" : "working");
+      expect(workerCanStop(cold!)).toBe(false); expect(cold?.resultId).toBeUndefined(); expect(cold?.terminalReportedAt).toBeUndefined(); return;
+    }
     if (["later-outcome", "start-only", "missing-clock", "undated-idle", "undated-end", "explicit-report", "explicit-after-undated"].includes(scenario))
       expect(before.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe("unavailable");
     finished = true; frame("session.execution.failed", { sessionID: child, error: { type: "unknown", message: "Later execution failed" } }, 40);
     await barrier("diagnostic.outcome-after-final-idle");
-    if (scenario.startsWith("third-start") || scenario === "unique-after-start" || scenario === "unique-late-after-start") {
+    if (scenario.startsWith("third-start") || scenario === "delayed-third-start" || scenario === "unique-after-start" || scenario === "unique-late-after-start") {
       const initial = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
       expect(initial.find(task => task.taskId === worker.taskId)?.status).toBe(scenario.startsWith("third-start") && !laterAdmission ? "running" : "failed");
       frame("session.execution.started", { sessionID: child }, 55);
@@ -610,7 +629,7 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
     const rows = read === "listMessages" ? (await provider.listMessages(parent, { limit: 100, signal: abort.signal })).items
       : await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     const row = rows.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-    const withheld = ["later-outcome", "start-only", "third-start", "third-start-older-replay", "missing-clock", "undated-idle", "undated-end", "duplicate-idles"].includes(scenario);
+    const withheld = ["later-outcome", "start-only", "third-start", "third-start-older-replay", "delayed-reuse", "missing-clock", "undated-idle", "undated-end", "duplicate-idles"].includes(scenario);
     const reported = scenario === "explicit-report" || scenario === "explicit-after-undated";
     expect(row?.status).toBe(reported ? "completed" : withheld ? "running" : "failed");
     expect(workerCanStop(row!)).toBe(false);
@@ -620,7 +639,7 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
   } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const change of ["inactive", "unchanged-active", "other-inactive", "distinct-start", "distinct-start-replay", "first-late-start", "exact-start-replay", "replay-storm", "text-noise", "other-child", "foreign-workspace"] as const)
+for (const change of ["first-delayed-new-interval", "inactive", "unchanged-active", "other-inactive", "distinct-start", "distinct-start-replay", "first-late-start", "exact-start-replay", "replay-storm", "text-noise", "other-child", "foreign-workspace"] as const)
 test(`returned cold activity remains covered through scheduler admission (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, unrelatedChild: string | undefined, armed = false, parentHeldOnce = false, interrupts = 0, inactive = false, otherInactive = false;
@@ -648,10 +667,12 @@ test(`returned cold activity remains covered through scheduler admission (${chan
     if (route === `/api/session/${parent}/message`) {
       const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
       first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      if (change === "first-delayed-new-interval") { first.time = { created: 30 }; first.content[0].time = { created: 30, ran: 31, completed: 32 }; }
       if (armed && !parentHeldOnce) { parentHeldOnce = true; parentEntered(); await parentHeld; }
       return Response.json({ data: [first], cursor: {} });
     }
-    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-prompt", type: "user", text: "Execution prompt", time: { created: 10 } }], cursor: {} });
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-prompt", type: "user", text: "Execution prompt", time: { created: 10 } },
+      ...(change === "first-delayed-new-interval" ? [{ id: "prior-idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : [])], cursor: {} });
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });

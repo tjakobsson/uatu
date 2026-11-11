@@ -72,6 +72,8 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyOutcomeTransferUnavailable?: true;
   historyPendingOutcomeChanges?: Set<string>;
   historyPendingCounterproofAfter?: number;
+  historyCapturedActivity?: Set<string>;
+  historyActivityIntervals?: Map<string, number>;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 type PendingOutcomeRead = { started: number; completed: number; reports: readonly { child: string; at?: number; digest: string; observed?: number }[]; overflow?: true; overflowObserved?: number; provisional?: true };
@@ -653,7 +655,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       return fact.workerType === "agent" && fact.background !== true && child !== undefined && verified.has(child);
     });
     for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations, {
-      contradicted: (candidate, at) => this.eventMemory?.workers.historyOutcomeContradicted(candidate, at) ?? false,
+      contradicted: (candidate, at) => this.eventMemory?.workers.historyOutcomeContradicted(candidate, at, executionHistory.get(candidate.worker)) ?? false,
       ends: child => this.eventMemory ? this.eventMemory.workers.observedExecutionEnds(child) : [],
     })) if (update.kind === "upsert") {
       const entry = normalized.get(update.item.id);
@@ -942,14 +944,16 @@ export class OpenCodeV2Provider implements ChatProvider {
         && [...folded.occurrences.values()].filter(other => other.worker === occurrence.worker && other.kind === occurrence.kind
           && runningTaskIds.has(other.taskId)).length === 1;
       const liveOccurrence = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
+      const intervalStart = occurrence && folded.workers.historyIntervalStart(occurrence);
       // Enrich an already registered child dependency with the exact cold
       // occurrence, not every launch for that child in the parent transcript.
       // The read's existing lease/deadline owns this immutable reference.
       if (!liveOccurrence && occurrence && item.childConversationId && source.source.historyActivityChildren?.has(item.childConversationId)) {
         source.source.historyActivityChildren.set(item.childConversationId, occurrence);
+        if (intervalStart !== undefined) (source.source.historyActivityIntervals ??= new Map()).set(item.childConversationId, intervalStart);
         this.observeColdInactivity(source.source, item.childConversationId);
       }
-      const coldContradicted = !liveOccurrence && occurrence && (this.eventMemory?.workers.coldActivityContradicted(occurrence)
+      const coldContradicted = !liveOccurrence && occurrence && (this.eventMemory?.workers.coldActivityContradicted(occurrence, intervalStart)
         || source.source.historyActivityContradicted.has(occurrence.worker));
       // A complete owned agent transcript reconstructs execution intervals
       // independently of the event subscription's generation. Reconnect loses
@@ -1042,14 +1046,14 @@ export class OpenCodeV2Provider implements ChatProvider {
       return this.controls.project(item, basis, controlRead, witnesses);
     });
     this.eventMemory?.workers.enforceBudget();
-    // This fold's cold activity is already a publication dependency before
-    // the public caller's final visibility/parent awaits. A newer inactive
-    // answer must not mask a changed child transcript by downgrading the row
-    // before those callers have registered their own publication fence.
+    // Capture the native-read dependency before final parent/visibility awaits.
+    // This is not publication: a pending stream boundary may withdraw Working
+    // while allowing the final visibility fold to consume its actual outcome.
+    // Ordered native child-history counterproof must still fence this capture.
     for (const item of projected) if (item.childConversationId
       && source.source.historyActivityChildren?.get(item.childConversationId)
       && (item.activity?.kind === "working" || item.activity?.kind === "needs-answer"))
-      source.source.historyPublishedActivity.add(item.childConversationId);
+      (source.source.historyCapturedActivity ??= new Set()).add(item.childConversationId);
     publishSource();
     if (!source.guard.isCurrent()) throw new Error("Background ownership changed during recovery");
     return { tasks: projected, occurrences: folded.occurrences, activityContradicted: source.activityContradicted, activityPublished: source.activityPublished, parentChanges: source.parentChanges, childChanges: source.childChanges, controls: new Map(projected.flatMap(item => {
@@ -2205,9 +2209,10 @@ export class OpenCodeV2Provider implements ChatProvider {
               && (!evidence.directory || path.resolve(evidence.directory) === this.workspace)) {
               for (const source of this.historyWorkerSources) if (source.historyActivityChildren?.has(normalized.conversationId)) {
                 const occurrence = source.historyActivityChildren.get(normalized.conversationId);
-                if (evidence.execution.phase !== "ended" && (!occurrence || !memory.workers.coldActivityContradicted(occurrence))) continue;
+                if (evidence.execution.phase !== "ended" && (!occurrence || !memory.workers.coldActivityContradicted(occurrence, source.historyActivityIntervals?.get(normalized.conversationId)))) continue;
                 source.historyActivityContradicted.add(normalized.conversationId);
                 if (source.historyPublishedActivity.has(normalized.conversationId)) source.revision++;
+                else source.historyCapturedActivity?.delete(normalized.conversationId);
               }
             }
             // Ownership alone cannot keep a consumed transcript current. A
@@ -2221,7 +2226,14 @@ export class OpenCodeV2Provider implements ChatProvider {
                 changes.add(messageId);
                 source.historyMessageChanges.set(normalized.conversationId, changes);
               }
-              if (normalized.revertLifecycle || normalized.removedMessageId || evidence.execution && !evidence.execution.historical
+              // Keep in-flight outcome inference fenced before it records its
+              // result. After capture, an old typed idle alone is not an outcome
+              // dependency for a newer admission; cold activity has its own
+              // interval-aware fence above. Transcript/revert vetoes remain.
+              const outcomeExecution = evidence.execution && !evidence.execution.historical
+                && (source.phase === "collecting" || [...source.historyInferredOutcomes?.values() ?? []]
+                  .some(occurrence => occurrence.worker === normalized.conversationId));
+              if (normalized.revertLifecycle || normalized.removedMessageId || outcomeExecution
                 || messageId && source.historyOutcomeMessages?.get(normalized.conversationId)?.has(messageId)) source.revision++;
             }
           }
@@ -3325,6 +3337,7 @@ function counterproofChild(fact: LauncherEvidence): string | undefined {
 
 function dependsOnWorkerHistory(source: HistoryWorkerSource, child: string): boolean {
   return source.historyPublishedActivity.has(child)
+    || source.historyCapturedActivity?.has(child) === true
     || source.historyPositiveChildren?.has(child) === true && source.historyChildren?.has(child) === true;
 }
 

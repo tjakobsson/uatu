@@ -138,6 +138,9 @@ metadata is bounded to 256 entries / 64 KiB serialized evidence and fails closed
 on overflow. Digests supply no report content or Stop authority. Canonical Failed
 therefore publishes after the failed-inventory fallback once successful inventory
 covers it; genuine uncovered disagreement still ends in bounded rejection.
+An independent page-level source-current veto remains required alongside any
+continuity or qualified-inventory guard view. Replacement may substitute a direct
+old-guard delegate, not erase a separate provider veto.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
@@ -211,13 +214,28 @@ ordinary text and unrelated/foreign events leave that lease intact. The old
 execution clock stays stopped and qualified unavailable evidence remains
 dismissible, without an invented result/end time or new Stop proof. The slot's
 existing child scope and deadline bound retention; it stores no event history.
+Start counterproof is scoped to the candidate admission's execution interval,
+using the greatest preceding scoped observed/transcript end. A delayed first
+start after that boundary is not reuse; later distinct starts still veto the
+old admission. Transcript context supplies only a read-owned lower-bound scalar,
+not execution timestamps, outcomes, ownership or Stop proof. Unknown clocks,
+retention caps and intervals without a known prior boundary remain conservative.
+Reading a prior typed idle alone does not revoke a returned new-interval Working
+lease on its first start. Pending inference and actual inferred outcomes retain
+their execution fence; transcript/revert/message counterproof remains required.
+Exact retained unbound start replays preserve source leases just as exact
+terminal replays do. Changed proofs still fence; replay adds no control authority.
 Outcome-free child observations remain watched through prepublication awaits
 too. Native idle counterproof is retained for the eventual activity handoff
 without invalidating unrelated output or prepublication Stop reads merely
 because a dependency is still being collected.
 This includes Working already captured before the final parent lookup.
-Registering its publication dependency at capture prevents a newer inactive
+Registering its native-read dependency at capture prevents a newer inactive
 inventory downgrade from masking a changed child transcript during that await.
+Capture is not publication: a pending stream boundary may withdraw Working and
+retire that capture while the final visibility read obtains an actual outcome
+under its own source. It does not blanket-revoke a pending control read.
+Relevant boundaries still revoke already-published cold activity leases.
 An older row superseded by a larger compatible retained alias cohort remains
 inspectable but unavailable; it cannot borrow that cohort's activity or Stop
 authority.

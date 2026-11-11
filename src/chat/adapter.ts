@@ -1041,11 +1041,16 @@ export class ChatAdapter {
     const inspectionEpoch = inspectionKey ? this.attributionReadEpoch(inspectionKey) : undefined;
     let page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE, ...(coverage ? { signal: coverage.signal } : {}) });
     coverage?.assertCurrent();
+    // A separate provider veto is not the guard's replaceable outcome scope.
+    // Preserve it even when continuity/inventory supplies a qualified view.
+    const independentSourceCurrent = page.isWorkerSourceCurrent && page.isWorkerSourceCurrent !== page.workerSource?.isCurrent
+      ? page.isWorkerSourceCurrent.bind(page) : undefined;
     if (coverage && page.workerSource) {
       const guard = coverage.carryWorkerHistory(page.workerSource, (page.completeItems ?? page.items)
         .filter((item): item is BackgroundTaskItem => item.type === "background_task"));
-      page = { ...page, workerSource: guard, isWorkerSourceCurrent: guard.isCurrent };
+      page = { ...page, workerSource: guard, isWorkerSourceCurrent: () => guard.isCurrent() && (independentSourceCurrent?.() ?? true) };
     }
+    if (independentSourceCurrent && !independentSourceCurrent()) throw new HistoryReadChangedError();
     if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()
       && !(coverage && page.workerSource?.canRevalidateInferredOutcomes?.())) throw new HistoryReadChangedError();
     // Capture the requested provider slice, not the later augmented snapshot:
@@ -1391,7 +1396,7 @@ export class ChatAdapter {
         const textSource = page.workerSource?.withoutInferredOutcomes?.(recovered);
         if (textSource?.isCurrent()) {
           const guard = textSource.retain(coverage.signal);
-          page = { ...page, workerSource: guard, isWorkerSourceCurrent: guard.isCurrent };
+          page = { ...page, workerSource: guard, isWorkerSourceCurrent: () => guard.isCurrent() && (independentSourceCurrent?.() ?? true) };
         }
       }
       if (options.workers) recovered = validatedWorkerDismissalSource(recovered) as BackgroundTaskItem[];

@@ -1199,9 +1199,22 @@ Outcome attribution also retains up to 128 distinct native start clocks per
 child in that same byte-budgeted record. Replays coalesce; exceeding the cap
 leaves a sticky outcome-only unknown rather than discarding an intervening
 start. A later start beyond an outcome cannot erase an earlier start inside
-its interval. The earliest start alone remains compatible with first-execution
-admission, including a first late start. Aggregate ledger saturation still
+its interval. Start comparisons use the candidate admission's preceding scoped
+observed/transcript end, not the globally earliest start. The first start in
+that interval remains compatible with admission, including a delayed first
+start; later distinct starts still veto reuse. Without an enclosing boundary,
+the existing scalar remains conservative. Unknown clocks and caps fail closed.
+Transcript interval context is veto-only: it never enters live execution,
+ownership or Stop ledgers. Cold read leases retain only one interval lower-bound
+scalar per scoped child. A captured source that merely read a prior typed idle
+does not gain a blanket execution-event fence for the new admission; pending
+inference and actually inferred outcomes remain fenced, as do transcript,
+message-removal and revert changes. Aggregate ledger saturation still
 withholds inferred outcomes, not independently covered control/history recovery.
+
+Exact retained start proofs, like terminal proofs, coalesce even without a live
+occurrence or pending binding. Changed identity, clock or payload is not replay;
+deduplication grants no ownership, new occurrence or Stop authority.
 
 Cold activity publication has a separate native active-inventory dependency.
 After parent history declares its bounded child scope, recovery starts the
@@ -1271,6 +1284,10 @@ The adapter retains the actual inventory sources and uses their actual report
 content, ID and clock. The old full transcript guard stays invalid; the new view
 preserves ownership, transcript/revert, generation, unrelated-outcome and lifetime
 fences. Pending-report vetoes are separate from those non-relinquishable revisions.
+The page's separate `isWorkerSourceCurrent` veto remains required alongside its
+guard. Only direct delegation to the old guard is replaced by a qualified view;
+an independent provider veto is composed through continuity and inventory
+replacement, never overwritten by the new guard's currentness.
 Qualification metadata reuses immutable occurrences under a 256-entry / 64 KiB
 serialized source budget; overflow declines transfer. No report text is minted
 from a digest, no deadline is renewed and no Stop basis is granted. Thus the
@@ -1456,9 +1473,14 @@ Activity-only child observation also remains continuous before return, including
 the final parent lookup. Ordered idle counterproof is retained during that
 window without blanket invalidation of prepublication Stop reads; acquiring
 outcome or history-only activity authority checks the retained counterproof.
-The cold publication dependency is registered when the fold captures Working,
-before that final lookup. A newer inactive inventory downgrade cannot hide an
-intervening transcript change by removing the row from the later Working scan.
+The cold native-read dependency is registered when the fold captures Working,
+before that final lookup, but capture is not publication. A newer inactive
+inventory downgrade cannot hide ordered child-history counterproof by removing
+the row from the later Working scan. A stream boundary received before return
+instead withdraws pending Working and retires that pending capture without
+blanket-invalidating the control read. The final visibility fold may consume
+the actual outcome under its own source. Already-published activity still
+revokes on a relevant stream boundary; that publication fence is not relaxed.
 After return, the same change revokes the retained publication dependency.
 Staged-parent visibility rereads own an additional bounded source lease, since
 their visible/full-history folds can first consume an outcome after the inventory

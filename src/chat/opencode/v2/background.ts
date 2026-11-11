@@ -897,7 +897,7 @@ export class BackgroundWorkers {
   /** Read-only negative evidence for history-only activity. A reverted child
    * transcript cannot erase an already observed end across this admission.
    * This neither attributes the end to this task nor supplies an outcome. */
-  coldActivityContradicted(candidate: WorkerOccurrenceEvidence): boolean {
+  coldActivityContradicted(candidate: WorkerOccurrenceEvidence, intervalStart?: number): boolean {
     if (candidate.kind !== "agent") return false;
     const boundary = this.terminalProofs.get(candidate.worker);
     if (boundary?.undatedEnd) return true;
@@ -906,14 +906,35 @@ export class BackgroundWorkers {
       const window = this.admissionWindow(launch);
       return !window || end >= window.start;
     }))) return true;
-    // Another distinct execution before launcher retention is counterproof.
-    // A first start may legitimately follow background admission, but a later
-    // execution beyond it cannot revive it, even after an older start replay.
-    const start = boundary?.startCounterproof;
-    return start !== undefined && candidate.launches.some(launch => {
+    if (this.recoveryOnly || boundary?.startClocks === null) return true;
+    const previous = this.historyIntervalStart(candidate, intervalStart === undefined ? [] : [intervalStart]);
+    return candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
-      return !window || start === null || start > window.end;
+      return !window || this.distinctStartContradicted(candidate.worker, window, Infinity, previous);
     });
+  }
+
+  /** Veto-only lower bound from scoped native/transcript ends, not a start
+   * timestamp, ownership witness or Stop basis. */
+  historyIntervalStart(candidate: WorkerOccurrenceEvidence, transcriptEnds: readonly number[] = []): number | undefined {
+    const windows = candidate.launches.map(launch => this.admissionWindow(launch));
+    if (!windows.length || windows.some(window => !window)) return;
+    const start = Math.min(...windows.map(window => window!.start));
+    let previous: number | undefined;
+    for (const end of [...this.ended.get(candidate.worker) ?? [], ...transcriptEnds])
+      if (end < start && (previous === undefined || end > previous)) previous = end;
+    return previous;
+  }
+
+  private distinctStartContradicted(child: string, window: { start: number; end: number }, at: number, previous?: number): boolean {
+    const boundary = this.terminalProofs.get(child), start = boundary?.startCounterproof;
+    if (start === null || boundary?.startClocks === null) return true;
+    const clocks = (boundary?.startClocks ?? []).filter(clock => (previous === undefined || clock > previous) && clock <= at);
+    const first = clocks.length ? Math.min(...clocks) : undefined;
+    return clocks.some(clock => clock !== first && clock > window.end)
+      // The old scalar remains conservative where no enclosing interval can
+      // exclude a prior execution. It cannot make an interval's first start reuse.
+      || previous === undefined && start !== undefined && start <= at && start > window.end;
   }
 
   /** Scoped observed ends constrain intervals, but never supply outcomes.
@@ -923,19 +944,15 @@ export class BackgroundWorkers {
     return this.ended.get(child) ?? [];
   }
 
-  historyOutcomeContradicted(candidate: WorkerOccurrenceEvidence, at: number): boolean {
+  historyOutcomeContradicted(candidate: WorkerOccurrenceEvidence, at: number, transcriptEnds: readonly number[] = []): boolean {
     if (candidate.kind !== "agent") return false;
     const ends = this.observedExecutionEnds(candidate.worker);
     if (!ends) return true;
-    const boundary = this.terminalProofs.get(candidate.worker), start = boundary?.startCounterproof;
-    if (boundary?.startClocks === null) return true;
-    const clocks = boundary?.startClocks ?? [];
-    const first = clocks.length ? Math.min(...clocks) : undefined;
+    const previous = this.historyIntervalStart(candidate, transcriptEnds);
     return candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
       return !window || ends.some(end => end >= window.start && end < at)
-        || start === null || clocks.some(clock => clock !== first && clock <= at && clock > window.end)
-        || start !== undefined && start <= at && start > window.end;
+        || this.distinctStartContradicted(candidate.worker, window, at, previous);
     });
   }
 
@@ -1249,7 +1266,7 @@ export class BackgroundWorkers {
 
   startReplay(child: string, proof?: NativeProof): boolean {
     const previous = this.terminalProofs.get(child)?.started;
-    return !!(previous?.occurrence || previous?.pending) && sameProof(previous.proof, proof)
+    return sameProof(previous?.proof, proof)
       || [...this.tasks.values()].some(task => task.worker === child && sameProof(task.evidence.executionStart, proof));
   }
 
