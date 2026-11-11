@@ -1254,6 +1254,10 @@ When that envelope began before the owned inbox request, its individual newer
 facts and overflow still veto the owned baseline. A provisional snapshot cannot
 invent absence for a child: genuinely stale/unrelated positives do not veto
 actual owned report content, and matching owned reports remain authoritative.
+A positive inbox request begun after the consumed owned
+request started can deny its empty view even when the requests overlap. Only
+new, relevant positive facts/overflow acquire that veto; older requests, empty
+snapshots and exact digests cannot replace the owned baseline or grant authority.
 Native pending facts that veto a scoped inventory source also invalidate only
 that parent's reusable transcript. Automatic recovery has no covered-history
 retry watch: its already-requested retry must read actual delivered report
@@ -1320,6 +1324,10 @@ revalidates child raw history unless the load already followed an observed clear
 then reads owned visibility again. A clear alone cannot distinguish commit from
 restore. Removed idle content fences the old source; identical current raw
 content preserves compatible authority. Known visible prefixes avoid rereading.
+The immutable loaded array also carries its load-owned visibility observation
+in weak metadata. Cached ownership can skip fresh verification without losing a
+stage already observed while that raw array warmed. Retiring its cache entry does
+not erase this qualification from a consumer already holding the array.
 The initial stage/order remain per-source deny context, not an owned baseline;
 observations start no IO and revalidation keeps the original read deadline.
 Before any dependent parent read exists, transcript cache entries own a

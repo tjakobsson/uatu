@@ -71,6 +71,12 @@ initial stage hid an idle and later owned visibility clears/changes, the request
 fold revalidates raw child history and then owned visibility, unless a prior clear
 already preceded that actual raw load. Only actual current raw content can
 discharge commit-versus-restore uncertainty; a new record alone cannot do so.
+A consumed immutable raw array keeps its existing load-owned
+visibility observation in weak metadata, so a parentage-cache hit and subsequent
+cache invalidation cannot erase a warmed stage's outcome qualification.
+Positive inbox facts requested after an owned request's start can veto the
+consumed empty view despite overlap. Relevant new digests and ordered overflow
+are denial only; empty/older/replayed facts do not replace the owned baseline.
 Known retained prefixes need no reread. This uses the same deadline and adds no
 IO on observation, owned baseline, result clock or Stop authority.
 Session-record reads carry only their explicit consuming fold as an overlapping

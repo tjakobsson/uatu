@@ -121,7 +121,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly backgroundVisibilityReads = new Set<{ sessionId: string; invalidated: boolean }>();
   private parentHistoryReadClock = 0;
   private sessionRecordClock = 0;
-  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number; recordsAfter: number }>();
+  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number; recordsAfter: number; entry?: HistoryVisibilityObservation }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
   private readonly historyGuardScopes = new WeakMap<WorkerSourceGuard, { source: HistoryWorkerSource; view: (covered: ReadonlySet<string>) => WorkerSourceGuard }>();
   // Read-side observations are not live-event admission or Stop evidence.
@@ -606,11 +606,17 @@ export class OpenCodeV2Provider implements ChatProvider {
             let lookup: SessionLookup = await this.lookupChild(child, signal, owner);
             if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Child history ownership unavailable");
             const initial: ReturnType<NonNullable<HistoryWorkerSource["historyChildVisibility"]>["get"]> = owner?.historyChildVisibility?.get(child);
-            const initialIndex = initial?.initialBoundary ? complete.findIndex(message => messageIdentity(message) === initial.initialBoundary) : -1;
-            const initialHidesOutcome: boolean = typeof initial?.initialBoundary === "string" && (initialIndex < 0
-              || complete.some((message, position) => message.type === "idle" && position >= initialIndex));
-            if (initial && initialHidesOutcome && initial.initialOrder && lookup.recordRead
-              && stringValue(asRecord(lookup.info?.revert).messageID) !== initial.initialBoundary) {
+            const loadedVisibility = this.historyReadOrders.get(complete)?.entry?.visibility;
+            const uncertainStage: boolean = [
+              { boundary: initial?.initialBoundary, order: initial?.initialOrder },
+              { boundary: loadedVisibility?.boundary, order: loadedVisibility },
+            ].some(view => {
+              if (typeof view.boundary !== "string" || !view.order || !lookup.recordRead
+                || stringValue(asRecord(lookup.info?.revert).messageID) === view.boundary) return false;
+              const index = complete.findIndex(message => messageIdentity(message) === view.boundary);
+              return index < 0 || complete.some((message, position) => message.type === "idle" && position >= index);
+            });
+            if (uncertainStage) {
               const load = this.historyReadOrders.get(complete)!;
               // A clear record alone cannot distinguish committing the staged
               // suffix from restoring it. Revalidate this requested child fold,
@@ -1992,10 +1998,20 @@ export class OpenCodeV2Provider implements ChatProvider {
       }
       if (!previous) continue;
       if (previous.overflow && source !== owner) continue;
-      const target = observation.started > previous.completed ? source : owner;
+      const positive = this.pendingFactsAfter(incoming, previous.started);
+      const newPositive: PendingOutcomeRead = { ...positive,
+        reports: positive.reports.filter(report => !previous.reports.some(baseline => baseline.digest === report.digest)) };
+      // Overlap can deny an owned empty view, never replace its baseline.
+      // Preserve per-fact request order through merged envelopes; absence and
+      // exact replay cannot acquire this additional counterproof target.
+      const overlappingPositive: boolean = observation.started <= previous.completed
+        && (newPositive.reports.length > 0 || newPositive.overflow === true);
+      const target: HistoryWorkerSource | undefined = observation.started > previous.completed || overlappingPositive ? source : owner;
       if (!target) continue;
       const baseline = previous.provisional && source === owner ? this.pendingFactsAfter(previous, observation.started) : previous;
       for (const [child, launches] of target.historyParentLaunches ?? []) {
+        if (overlappingPositive && target === source && !newPositive.overflow
+          && this.pendingOutcomeSignature(newPositive, child, launches) === undefined) continue;
         const signature = this.pendingOutcomeSignature(baseline, child, launches);
         // Provisional positives are deny-only, not a consumed empty baseline.
         // Only facts/overflow individually newer than this owned request may
@@ -2177,6 +2193,9 @@ export class OpenCodeV2Provider implements ChatProvider {
   private async readAllMessages(sessionId: string, signal: AbortSignal): Promise<StoredMessage[]> {
     const finish = measureChatWork("opencode-read");
     const recordsAfter = this.sessionRecordClock;
+    // Keep the load-owned observation with its immutable value, even if a
+    // later native record retires the cache slot after a consumer obtained it.
+    const entry = this.historyReuse.peekObservation(sessionId, this.streamConnected ? String(this.streamGeneration) : undefined);
     const started = ++this.parentHistoryReadClock;
     try {
       const byId = new Map<string, StoredMessage>();
@@ -2192,7 +2211,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
       } while (cursor);
       const messages = [...byId.values()].sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right));
-      this.historyReadOrders.set(messages, { started, completed: ++this.parentHistoryReadClock, recordsAfter });
+      this.historyReadOrders.set(messages, { started, completed: ++this.parentHistoryReadClock, recordsAfter, entry });
       return messages;
     } finally { finish(); }
   }

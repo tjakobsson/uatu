@@ -1304,7 +1304,7 @@ test(`negative execution evidence survives generation 2 to 3 (${scenario})`, asy
   } finally { owner.abort(); stream.abort(); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const change of ["delivered", "pending-only", "unchanged", "unrelated", "prelaunch"] as const)
+for (const change of ["overlap-delivered", "overlap-unrelated", "overlap-prelaunch", "overlap-empty", "delivered", "pending-only", "unchanged", "unrelated", "prelaunch"] as const)
 test(`automatic retry revalidates parent history after native pending report (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, observing = false, delivered = false, parentReads = 0, attempts = 0;
@@ -1312,12 +1312,24 @@ test(`automatic retry revalidates parent history after native pending report (${
   const interactions = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
   const returned = new Promise<void>(resolve => { folded = resolve; });
   const external = new AsyncLocalStorage<boolean>();
-  const report = () => ({ id: "automatic-native-failure", type: "synthetic", time: { created: change === "prelaunch" ? 5 : 45 }, payload: {
-    text: "Actual automatic retry failure", metadata: { source: "subagent", childID: change === "unrelated" ? "unrelated-child" : child, state: "error" } } });
+  const overlap = change.startsWith("overlap-");
+  let ownEntered!: () => void, releaseOwn!: () => void, externalEntered!: () => void, releaseExternal!: () => void, ownedHeldOnce = false, connectedHandled!: () => void;
+  const ownPending = new Promise<void>(resolve => { ownEntered = resolve; }), ownHeld = new Promise<void>(resolve => { releaseOwn = resolve; });
+  const externalPending = new Promise<void>(resolve => { externalEntered = resolve; }), externalHeld = new Promise<void>(resolve => { releaseExternal = resolve; });
+  const connected = new Promise<void>(resolve => { connectedHandled = resolve; });
+  const report = () => ({ id: "automatic-native-failure", type: "synthetic", time: { created: change === "prelaunch" || change === "overlap-prelaunch" ? 5 : 45 }, payload: {
+    text: "Actual automatic retry failure", metadata: { source: "subagent", childID: change === "unrelated" || change === "overlap-unrelated" ? "unrelated-child" : child, state: "error" } } });
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
     const request = new Request(input, init), route = new URL(request.url).pathname;
-    if (route.endsWith("/inbox")) return Response.json({ data: route === `/api/session/${parent}/inbox` && observing && change !== "unchanged"
-      && (external.getStore() || change === "pending-only") ? [report()] : [] });
+    if (route.endsWith("/inbox")) {
+      const data = route === `/api/session/${parent}/inbox` && observing && change !== "unchanged" && change !== "overlap-empty"
+        && (external.getStore() || change === "pending-only") ? [report()] : [];
+      if (overlap && route === `/api/session/${parent}/inbox`) {
+        if (external.getStore()) { externalEntered(); await externalHeld; }
+        else if (!ownedHeldOnce) { ownedHeldOnce = true; ownEntered(); await ownHeld; }
+      }
+      return Response.json({ data });
+    }
     if (route === "/api/permission/request" || route === "/api/form") { entered(); await held; }
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
@@ -1329,6 +1341,8 @@ test(`automatic retry revalidates parent history after native pending report (${
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
   const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  const nativeEvents = provider.events.bind(provider);
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { yield event; if (event.eventType === "server.connected") connectedHandled(); } };
   const guards: import("../../provider").WorkerSourceGuard[] = [];
   provider.reconcileBackgroundTasks = async (id, options) => {
     const tasks = await nativeRecovery(id, { ...options, onSource: source => {
@@ -1339,25 +1353,34 @@ test(`automatic retry revalidates parent history after native pending report (${
   };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
   let publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  let observed: ReturnType<NonNullable<typeof provider.listPendingInbox>> | undefined;
   try {
     parent = (await provider.createSession("Automatic native report retry")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
-    void adapter.startEventPump().catch(() => undefined); await provider.waitForEventStream!(abort.signal);
+    void adapter.startEventPump().catch(() => undefined); await connected;
     const subscription = await adapter.subscribe(parent, { signal: abort.signal });
     publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
       throw new Error("Scheduler ended without worker publication"); })(); void publication.catch(() => undefined);
+    if (overlap) {
+      await ownPending; observing = true;
+      observed = external.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal })); void observed.catch(() => undefined);
+      await externalPending; releaseOwn();
+    }
     await returned; await interactions;
     expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true); expect(parentReads).toBe(1);
-    observing = true; await external.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal }));
-    const relevant = change === "delivered" || change === "pending-only";
-    expect(guards.every(guard => guard.isCurrent())).toBe(!relevant);
+    if (overlap) { delivered = change === "overlap-delivered"; releaseExternal(); await observed; }
+    else { observing = true; await external.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal })); }
+    const relevant = change === "delivered" || change === "pending-only" || change === "overlap-delivered";
+    const currentBeforePublication = guards.every(guard => guard.isCurrent());
+    if (!overlap) expect(currentBeforePublication).toBe(!relevant);
     expect(parentReads).toBe(1); // Counterproof invalidates reuse without starting IO.
-    delivered = change === "delivered"; release(); const row = await publication;
+    delivered = change === "delivered" || change === "overlap-delivered"; release(); const row = await publication;
     expect(row.status).toBe(relevant ? "failed" : "completed");
+    if (overlap) expect(currentBeforePublication).toBe(!relevant);
     if (relevant) { expect(row).toMatchObject({ resultId: "automatic-native-failure", summary: "Actual automatic retry failure", terminalReportedAt: 45 }); expect(attempts).toBe(2); expect(parentReads).toBeGreaterThan(1); }
     else { expect(attempts).toBe(1); expect(parentReads).toBe(1); expect(row.resultId).toBeUndefined(); }
     const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
     expect(fresh.find(item => item.taskId === worker.taskId)?.status).toBe(relevant ? "failed" : "completed");
-  } finally { release(); abort.abort(); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
+  } finally { releaseOwn(); releaseExternal(); release(); abort.abort(); await observed?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
 for (const scenario of ["captured-reverse", "captured-newer-source", "captured-retained-prefix", "captured-unrelated", "captured-unchanged", "hidden", "unchanged", "other-parent", "retained-prefix", "append", "stale-response", "retained-prefix-earlier-consumer"] as const)
@@ -1652,6 +1675,61 @@ test(`repeated child stage remains distinct during raw revalidation (${change})`
     if (hidden) { expect(fresh?.activity?.kind).toBe("working"); const evidence = await adapter.workerEvidence(parent); expect(evidence.entries.find(entry => entry.executionId === row.activity?.executionId)?.dismissible).toBe(false); }
     if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
   } finally { releaseOld(); releaseRaw(); releaseInteractions(); abort.abort(); await old?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
+for (const change of ["commit", "restore", "prefix", "stage-only"] as const)
+test(`cached ownership preserves staged warm child qualification (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, staged = true, removed = false, armed = false, childReads = 0, lookups = 0, captured = false;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, connectedHandled!: () => void, entered!: () => void, releaseLookup!: () => void, releaseInteractions!: () => void;
+  const connected = new Promise<void>(resolve => { connectedHandled = resolve; }), pending = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { releaseLookup = resolve; }), interactions = new Promise<void>(resolve => { releaseInteractions = resolve; });
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 45, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/permission/request" || route === "/api/form") await interactions;
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 }; return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) { childReads++; return Response.json({ data: [...(!removed ? [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : []), { id: "suffix", type: "user", text: "Suffix", time: { created: 30 } }], cursor: {} }); }
+    if (route === `/api/session/${child}`) {
+      lookups++; if (armed) { armed = false; entered(); await held; }
+      const body = await response.json(); if (staged) body.data.revert = { messageID: change === "prefix" ? "suffix" : "idle" }; return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeEvents = provider.events.bind(provider), nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { yield event; if (event.eventType === "server.connected") connectedHandled(); } };
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  provider.reconcileBackgroundTasks = async (id, options) => { const tasks = await nativeRecovery(id, { ...options, onSource: source => {
+    options?.onSource?.(source); if (!captured) guards.push(source.workerSource.retain(abort.signal));
+  } }); captured = true; return tasks; };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  try {
+    parent = (await provider.createSession("Cached child stage authority")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    void adapter.startEventPump().catch(() => undefined); await connected;
+    await provider.listMessages(parent, { limit: 100, signal: abort.signal }); // Warm verified parentage without retaining an outcome lease.
+    await provider.getReversibleHistoryState!(child); const beforeLookups = lookups, beforeReads = childReads;
+    const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+    publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item; throw new Error("No worker publication"); })(); void publication.catch(() => undefined);
+    armed = true; frame("session.inbox.enqueued", { sessionID: parent, inboxID: "ordinary-trigger", item: { type: "user", payload: { text: "Unrelated native trigger" } } });
+    await pending; expect(lookups).toBe(beforeLookups + 1); expect(childReads).toBe(beforeReads); // Cached ownership: this is the outcome lookup, not verification.
+    staged = change === "stage-only"; removed = change === "commit"; releaseLookup(); releaseInteractions();
+    const row = await publication; const hidden = change === "commit" || change === "stage-only";
+    if (hidden) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
+    expect(row.status).toBe(hidden ? "running" : "completed");
+    if (change === "commit") { expect(guards.some(guard => !guard.isCurrent())).toBe(true); expect(row.activity?.endedAt).toBeUndefined(); expect(row.resultId).toBeUndefined(); }
+    const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(fresh?.status).toBe(hidden ? "running" : "completed"); if (change === "commit") expect(fresh?.activity?.kind).toBe("working");
+  } finally { releaseLookup(); releaseInteractions(); abort.abort(); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
 for (const read of ["history", "automatic-recovery"] as const)
