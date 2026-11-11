@@ -153,10 +153,12 @@ checked against the existing qualified complete-history cache; unknown visibilit
 abstains. Explicit owners install baselines, and stale ownerless responses cannot
 poison newer owned reads. No additional IO, global cache or retained snapshot is
 introduced; raw complete parent-history reuse remains separate from authority.
-For collecting parents, a late intermediate stage is deny-only if its request
-began after registration, even after a newer cleared reply. It cannot replace
-that baseline or revoke a later registered source. Old pending folds revalidate
-current history; retained-prefix and staged-only filtering remain scoped.
+For parents, a late intermediate stage is deny-only through collection and
+captured publication if its request began after registration, even after a newer
+cleared reply. It cannot replace that baseline or revoke a later source. A
+captured inferred outcome uses the stage's known launcher boundary: hidden rows
+lose lease authority, while a qualified retained prefix stays valid. Old pending
+folds revalidate current history; no extra IO or Stop revocation is introduced.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports

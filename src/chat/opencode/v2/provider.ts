@@ -3145,15 +3145,17 @@ export class OpenCodeV2Provider implements ChatProvider {
             || source.phase === "collecting" && source.historyParentRecordsAfter !== undefined && observation.started > source.historyParentRecordsAfter)) {
           const previous = source.historyParentBoundary;
           if (previous && previous.boundary !== boundary) {
-            const lateIntermediateStage = source.phase === "collecting" && source.historyParentRecordsAfter !== undefined
+            const lateIntermediateStage = source.historyParentRecordsAfter !== undefined
               && observation.started > source.historyParentRecordsAfter && boundary !== null && previous.boundary === null;
-            // Retain an intermediate stage as deny-only for this pending read,
+            // Retain an intermediate stage as deny-only through publication,
             // without replacing a newer cleared baseline or claiming a source
             // registered after that stage request began.
             const targets = observation.started > previous.completed || lateIntermediateStage ? [source] : observation.owners;
             for (const target of targets) if (target.parent === subject) {
               target.historyParentVisibilityChanged = true;
-              if (this.parentOutcomeHidden(target, observation.started > previous.completed ? boundary : previous.boundary)) target.revision++;
+              const visibility = observation.started > previous.completed || lateIntermediateStage && target.phase === "captured"
+                ? boundary : previous.boundary;
+              if (this.parentOutcomeHidden(target, visibility)) target.revision++;
             }
           }
           if (!previous || observation.started > previous.completed) source.historyParentBoundary = { boundary, completed };

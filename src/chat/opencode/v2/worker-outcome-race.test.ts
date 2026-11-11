@@ -1244,10 +1244,10 @@ test(`automatic retry revalidates parent history after native pending report (${
   } finally { release(); abort.abort(); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
-for (const change of ["hidden", "unchanged", "other-parent", "retained-prefix", "append", "stale-response"] as const)
+for (const change of ["captured-reverse", "captured-newer-source", "captured-retained-prefix", "captured-unrelated", "captured-unchanged", "hidden", "unchanged", "other-parent", "retained-prefix", "append", "stale-response"] as const)
 test(`scheduler inferred outcome retains native parent visibility through publication (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
-  let parent: string | undefined, child: string | undefined, other: string | undefined, staged = false, appended = false, captured = false;
+  let parent: string | undefined, child: string | undefined, other: string | undefined, staged = false, appended = false, captured = false, removed = false, committed = false;
   let interactionsEntered!: () => void, releaseInteractions!: () => void, folded!: () => void, finished!: () => void, olderEntered!: () => void, releaseOlder!: () => void;
   const interactions = new Promise<void>(resolve => { interactionsEntered = resolve; }), interactionsHeld = new Promise<void>(resolve => { releaseInteractions = resolve; });
   const returned = new Promise<void>(resolve => { folded = resolve; }), admitted = new Promise<void>(resolve => { finished = resolve; });
@@ -1261,13 +1261,13 @@ test(`scheduler inferred outcome retains native parent visibility through public
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
       const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 }; launcher = first;
-      return Response.json({ data: [first, { id: "hidden-parent", type: "user", text: "Retained prefix boundary", time: { created: 30 } },
+      return Response.json({ data: [...(!removed ? [first] : []), ...(!committed ? [{ id: "hidden-parent", type: "user", text: "Retained prefix boundary", time: { created: 30 } }] : []),
         ...(appended ? [{ id: "ordinary-output", type: "assistant", time: { created: 50 }, content: [{ type: "text", text: "Independent output" }] }] : [])], cursor: {} });
     }
     if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
     if (route === `/api/session/${parent}` || route === `/api/session/${other}`) {
       const body = await response.json();
-      if (olderRead.getStore() || staged && (change === "other-parent" ? route.endsWith(other!) : route.endsWith(parent!))) body.data.revert = { messageID: change === "retained-prefix" ? "hidden-parent" : launcher?.id };
+      if (olderRead.getStore() && change !== "captured-unchanged" || staged && (change === "other-parent" ? route.endsWith(other!) : route.endsWith(parent!))) body.data.revert = { messageID: change === "retained-prefix" || change === "captured-retained-prefix" ? "hidden-parent" : launcher?.id };
       if (olderRead.getStore()) { olderEntered(); await olderHeld; }
       return Response.json(body);
     }
@@ -1301,16 +1301,37 @@ test(`scheduler inferred outcome retains native parent visibility through public
     await adapter.subscribe(parent, { signal: abort.signal }); void adapter.startEventPump().catch(() => undefined);
     await returned; await interactions; expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (change === "stale-response") { releaseOlder(); await older; }
-    staged = change === "hidden" || change === "retained-prefix" || change === "other-parent";
-    appended = change === "append";
-    await provider.getReversibleHistoryState!(change === "other-parent" ? other : parent);
-    const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
-    if (change === "hidden") expect(fresh).toEqual([]);
-    else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    const lateCaptured = change.startsWith("captured-"), hidden = change === "hidden" || change === "captured-reverse" || change === "captured-newer-source";
+    const newerGuards: import("../../provider").WorkerSourceGuard[] = [];
+    if (lateCaptured) {
+      const subject = change === "captured-unrelated" ? other : parent;
+      older = olderRead.run(true, () => provider.getSession(subject!)); void older.catch(() => undefined); await olderPending;
+      removed = hidden; committed = hidden || change === "captured-retained-prefix";
+      await provider.getSession(subject!); // Newer cleared response arrives first.
+      if (change === "captured-newer-source") expect(await nativeRecovery(parent, { fresh: true, signal: abort.signal,
+        onSource: source => newerGuards.push(source.workerSource.retain(abort.signal)) })).toEqual([]);
+      releaseOlder(); await older; // Intermediate stage arrives after capture.
+    } else {
+      staged = change === "hidden" || change === "retained-prefix" || change === "other-parent";
+      appended = change === "append";
+      await provider.getReversibleHistoryState!(change === "other-parent" ? other : parent);
+      const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+      if (hidden) expect(fresh).toEqual([]);
+      else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    }
     releaseInteractions(); await admitted;
     const row = adapter.projectionForTests(parent).items().find(item => item.type === "background_task" && item.taskId === worker.taskId);
-    if (change === "hidden") expect(row).toBeUndefined(); else expect(row).toMatchObject({ status: "completed" });
-    expect(guards.every(guard => guard.isCurrent())).toBe(change !== "hidden");
+    if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true); expect(row).toBeUndefined(); }
+    else expect(row).toMatchObject({ status: "completed" });
+    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    if (lateCaptured) {
+      const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+      if (hidden) {
+        expect(fresh).toEqual([]);
+        expect((await adapter.workerEvidence(parent)).entries).toEqual([]);
+      } else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+      if (change === "captured-newer-source") { expect(newerGuards.length).toBeGreaterThan(0); expect(newerGuards.every(guard => guard.isCurrent())).toBe(true); }
+    }
   } finally { releaseOlder(); releaseInteractions(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 

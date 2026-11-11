@@ -1386,10 +1386,13 @@ unknown visibility abstains. Explicit read ownership installs the first baseline
 older overlapping ownerless responses cannot replace it. This source dependency
 adds no IO or retained transcript snapshot and does not evict complete raw parent
 history merely for entering a staged boundary.
-A collecting parent's late intermediate stage is deny-only when its request
-began after source registration, even if a newer cleared reply arrived first.
-It cannot replace that baseline or claim a later registered source. Old pending
-folds revalidate current history; retained prefixes can still progress.
+A parent's late intermediate stage is deny-only through collection and captured
+publication when its request began after source registration, even if a newer
+cleared reply arrived first. It cannot replace that baseline or claim a later
+registered source. Captured inferred outcomes are checked against the stage's
+launcher boundary, so a qualified retained prefix is not revoked merely because
+the latest baseline is cleared. Old pending folds revalidate current history;
+hidden outcomes cannot publish through an already-returned lease.
 Qualification metadata reuses immutable occurrences under a 256-entry / 64 KiB
 serialized source budget; overflow declines transfer. No report text is minted
 from a digest, no deadline is renewed and no Stop basis is granted. Thus the
