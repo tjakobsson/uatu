@@ -153,6 +153,10 @@ checked against the existing qualified complete-history cache; unknown visibilit
 abstains. Explicit owners install baselines, and stale ownerless responses cannot
 poison newer owned reads. No additional IO, global cache or retained snapshot is
 introduced; raw complete parent-history reuse remains separate from authority.
+For collecting parents, a late intermediate stage is deny-only if its request
+began after registration, even after a newer cleared reply. It cannot replace
+that baseline or revoke a later registered source. Old pending folds revalidate
+current history; retained-prefix and staged-only filtering remain scoped.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
@@ -289,6 +293,11 @@ An envelope predating the owned request cannot discard individual newer facts
 or overflow. Conversely, provisional positives never invent an empty baseline
 or veto actual owned report content for unrelated children; matching report
 content, ID and native clock retain authority under existing source guards.
+Relevant native inbox vetoes also invalidate only the affected parent's history
+reuse, without starting IO. The scheduler's requested retry then reads actual
+delivered report content, not cached settlement plus an empty inbox. No global
+report cache, digest-derived result or extra ownership/Stop authority is added.
+Unchanged/unrelated/prelaunch observations preserve normal progress.
 
 Registered pending child-history dependencies retain native staged/cleared
 boundary changes before an idle is classified as a positive outcome. Existing

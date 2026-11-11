@@ -1254,6 +1254,12 @@ When that envelope began before the owned inbox request, its individual newer
 facts and overflow still veto the owned baseline. A provisional snapshot cannot
 invent absence for a child: genuinely stale/unrelated positives do not veto
 actual owned report content, and matching owned reports remain authoritative.
+Native pending facts that veto a scoped inventory source also invalidate only
+that parent's reusable transcript. Automatic recovery has no covered-history
+retry watch: its already-requested retry must read actual delivered report
+content, not cached settlement plus an empty inbox. Invalidation starts no IO
+and grants no report authority. Unchanged, unrelated and prelaunch observations
+do not enter this changed-signature path.
 
 Native child revert-boundary observations begin when the read registers its
 pending child-history dependency, before the response classifies positive
@@ -1380,6 +1386,10 @@ unknown visibility abstains. Explicit read ownership installs the first baseline
 older overlapping ownerless responses cannot replace it. This source dependency
 adds no IO or retained transcript snapshot and does not evict complete raw parent
 history merely for entering a staged boundary.
+A collecting parent's late intermediate stage is deny-only when its request
+began after source registration, even if a newer cleared reply arrived first.
+It cannot replace that baseline or claim a later registered source. Old pending
+folds revalidate current history; retained prefixes can still progress.
 Qualification metadata reuses immutable occurrences under a 256-entry / 64 KiB
 serialized source budget; overflow declines transfer. No report text is minted
 from a digest, no deadline is renewed and no Stop basis is granted. Thus the

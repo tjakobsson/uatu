@@ -1908,6 +1908,10 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (previous.provisional && source === owner && !baseline.overflow && !signature) continue;
         if (!baseline.overflow && !incoming.overflow && signature === this.pendingOutcomeSignature(incoming, child, launches)) continue;
         if (observation.started <= previous.completed) conflictingOverlap = true;
+        // A later automatic attempt has no covered-history retry watch. Retire
+        // only this affected parent's reusable transcript so a requested retry
+        // reads actual delivered report content, not cached inferred settlement.
+        this.historyReuse.invalidate(target.parent);
         target.historyParentChanges.add(child);
         if (dependsOnWorkerHistory(target, child)) target.revision++;
       }
@@ -3141,7 +3145,12 @@ export class OpenCodeV2Provider implements ChatProvider {
             || source.phase === "collecting" && source.historyParentRecordsAfter !== undefined && observation.started > source.historyParentRecordsAfter)) {
           const previous = source.historyParentBoundary;
           if (previous && previous.boundary !== boundary) {
-            const targets = observation.started > previous.completed ? [source] : observation.owners;
+            const lateIntermediateStage = source.phase === "collecting" && source.historyParentRecordsAfter !== undefined
+              && observation.started > source.historyParentRecordsAfter && boundary !== null && previous.boundary === null;
+            // Retain an intermediate stage as deny-only for this pending read,
+            // without replacing a newer cleared baseline or claiming a source
+            // registered after that stage request began.
+            const targets = observation.started > previous.completed || lateIntermediateStage ? [source] : observation.owners;
             for (const target of targets) if (target.parent === subject) {
               target.historyParentVisibilityChanged = true;
               if (this.parentOutcomeHidden(target, observation.started > previous.completed ? boundary : previous.boundary)) target.revision++;
