@@ -6,6 +6,204 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { workerCanStop, workerExecutionClockRuns } from "../../worker-state";
 import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
 
+for (const carrier of ["native", "streamed"] as const)
+for (const change of ["failed-report", "ordinary-text", "other-child", "prelaunch", "same-report"] as const)
+test(`transcript fallback fences ${carrier} pending counterproof after inventory failure (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, changed = false, captured = false, failedInventory = false, released = false;
+  let entered!: () => void, release!: () => void, wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const observed = new Promise<void>(resolve => { applied = resolve; });
+  const frame = (type: string, data: unknown, created = 45) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created, location: { directory } })}\n\n`));
+  const report = () => ({ id: "pending-result", type: "synthetic", time: { created: change === "prelaunch" ? 5 : 45 }, payload: change === "ordinary-text" ? { text: "Ordinary text" }
+    : { text: "Native report", metadata: { source: "subagent", childID: change === "other-child" ? other : child, state: change === "same-report" ? "completed" : "error" } } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: route === `/api/session/${parent}/inbox` && changed ? [report()] : [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      first.content.push({ type: "text", text: "Transcript text keeps its own authority." });
+      const result = report();
+      return Response.json({ data: [first, ...(change === "same-report" ? [{ ...result.payload, id: result.id, type: result.type, time: result.time }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeHistory = provider.listMessages.bind(provider), nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), nativeEvents = provider.events.bind(provider);
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  provider.listMessages = async (id, options) => {
+    const page = await nativeHistory(id, options);
+    if (id === parent && !captured) { captured = true; if (page.workerSource) guards.push(page.workerSource); }
+    return page;
+  };
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    if (!released) { if (captured) { entered(); await held; } failedInventory = true; throw new Error("Inventory intentionally unavailable"); }
+    return nativeRecovery(id, options);
+  };
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { if (event.eventType === "diagnostic.transcript-report-applied") applied(); yield event; } };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let history: ReturnType<typeof adapter.history> | undefined;
+  try {
+    parent = (await provider.createSession("Transcript-only outcome publication")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const peer = (await provider.createSession("Other report owner")).id; other = fake.launchRequestWorker(peer).childId;
+    history = adapter.history(parent); void history.catch(() => undefined); await pending;
+    expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    changed = true;
+    if (carrier === "native") {
+      const fresh = await nativeRecovery(parent, { fresh: true });
+      expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(change === "failed-report" ? "failed" : "completed");
+    } else {
+      const result = report(); frame("session.inbox.enqueued", { sessionID: parent, inboxID: result.id, item: result }, result.time.created);
+      frame("diagnostic.transcript-report-applied", {}); await observed;
+    }
+    const current = guards.every(guard => guard.isCurrent());
+    released = true; release(); const result = await history.then(value => ({ value }), error => ({ error }));
+    expect(failedInventory).toBe(true);
+    expect(result).toHaveProperty("value");
+    if ("value" in result) {
+      expect(result.value.items.some(item => item.type === "assistant_message" && item.markdown.includes("Transcript text keeps its own authority."))).toBe(true);
+      const row = result.value.items.find(item => item.type === "background_task" && item.taskId === worker.taskId);
+      expect(row?.status).toBe(change === "failed-report" ? "failed" : "completed");
+      if (change === "failed-report") expect(row).toMatchObject({ resultId: "pending-result", summary: "Native report", terminalReportedAt: 45 });
+    }
+    expect(current).toBe(change !== "failed-report");
+  } finally { released = true; release(); await history?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
+for (const mode of ["qualified", "changed-execution", "changed-child", "report-free", "released", "ownership", "revert", "independent-outcome", "partial-coverage", "inventory-change", "transfer-budget"] as const)
+test(`explicit inventory report relinquishes only qualified transcript outcomes (${mode})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, changed = false, foreign = false, reverted = false, secondReport = false, reportText = "Real explicit failure";
+  const cohort: string[] = [];
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: changed && mode !== "report-free" && route === `/api/session/${parent}/inbox`
+      ? (mode === "transfer-budget" ? cohort : [child, ...(secondReport ? [other] : [])]).map(subject => ({ id: `result-${subject}`, type: "synthetic", time: { created: 45 }, payload: {
+        text: reportText, metadata: { source: "subagent", childID: mode === "changed-child" ? other : subject, state: "error" },
+      } })) : [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      if (changed && mode === "changed-execution") { first.time = { created: 30 }; first.content[0].time = { created: 30, ran: 31, completed: 32 }; }
+      if (changed && mode === "changed-child") first.content[0].state.metadata.sessionID = other;
+      const second = body.data[1];
+      if (second) { second.time = { created: 10 }; second.content[0].time = { created: 10, ran: 11, completed: 12 }; }
+      if (second && mode === "partial-coverage") { second.content[0].state.metadata.sessionID = child; second.time = { created: 30 }; second.content[0].time = { created: 30, ran: 31, completed: 32 }; }
+      if (mode === "transfer-budget") return Response.json({ data: body.data.map((message: any) => {
+        message.time = { created: 10 }; message.content[0].time = { created: 10, ran: 11, completed: 12 }; return message;
+      }), cursor: {} });
+      return Response.json({ data: [first, ...(mode === "independent-outcome" || mode === "partial-coverage" ? [second] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message` || route === `/api/session/${other}/message` || cohort.some(subject => route === `/api/session/${subject}/message`))
+      return Response.json({ data: [...(mode === "partial-coverage" ? [{ id: "earlier-idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : []),
+        { id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    if (route === `/api/session/${child}` && foreign) { const body = await response.json(); body.data.parentID = "foreign-parent"; return Response.json(body); }
+    if (route === `/api/session/${child}` && reverted) { const body = await response.json(); body.data.revert = { messageID: "hidden-boundary" }; return Response.json(body); }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const owner = new AbortController(), inventory = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  try {
+    parent = (await provider.createSession("Qualified explicit outcome transfer")).id; child = fake.launchRequestWorker(parent).childId; other = fake.launchRequestWorker(parent).childId;
+    if (mode === "transfer-budget") { cohort.push(child, other); while (cohort.length < 80) cohort.push(fake.launchRequestWorker(parent).childId); }
+    const page = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
+    expect(page.items).toContainEqual(expect.objectContaining({ status: "completed", childConversationId: child }));
+    expect(page.workerSource?.isCurrent()).toBe(true);
+    if (mode === "transfer-budget") expect(page.items.filter(item => item.type === "background_task" && item.status === "completed")).toHaveLength(80);
+    if (mode === "released") owner.abort();
+    changed = true;
+    const reports = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: inventory.signal,
+      onSource: source => guards.push(source.workerSource.retain(inventory.signal)) });
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    const narrowed = page.workerSource?.withoutInferredOutcomes?.(reports);
+    const qualifies = !["changed-execution", "changed-child", "report-free", "released", "partial-coverage", "transfer-budget"].includes(mode);
+    if (!qualifies) expect(narrowed).toBeUndefined();
+    else {
+      expect(page.workerSource?.isCurrent()).toBe(false); // The stale whole-source lease is never restored.
+      expect(narrowed?.isCurrent()).toBe(true);
+      if (mode === "ownership") { foreign = true; await provider.getSession(child); expect(narrowed?.isCurrent()).toBe(false); }
+      if (mode === "revert") { reverted = true; await provider.getSession(child); expect(narrowed?.isCurrent()).toBe(false); }
+      if (mode === "independent-outcome") {
+        secondReport = true; await provider.listPendingInbox!(parent, { signal: inventory.signal });
+        expect(narrowed?.isCurrent()).toBe(false); // A covered sibling cannot exempt this other inference.
+      }
+      if (mode === "inventory-change") {
+        reportText = "Newer explicit content"; await provider.listPendingInbox!(parent, { signal: inventory.signal });
+        expect(narrowed?.isCurrent()).toBe(true); // Text authority does not own the replacement report.
+        expect(guards.every(guard => guard.isCurrent())).toBe(false); // Inventory authority must still veto admission.
+      }
+      owner.abort(); expect(narrowed?.isCurrent()).toBe(false);
+    }
+  } finally { owner.abort(); inventory.abort(); await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const order of ["older-inbox", "newer-inbox", "streamed-pending-deltas"] as const)
+test(`transcript pending counterproof uses owned native request order (${order})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, heldOnce = false;
+  let entered!: () => void, release!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
+  const observed = new Promise<void>(resolve => { applied = resolve; });
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 45, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (order === "streamed-pending-deltas" && route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) {
+      if (route === `/api/session/${parent}/inbox`) {
+        if (order === "older-inbox") { entered(); await held; }
+        return Response.json({ data: [{ id: "pending-result", type: "synthetic", time: { created: 45 }, payload: {
+          text: "Native failed report", metadata: { source: "subagent", childID: child, state: "error" },
+        } }] });
+      }
+      return Response.json({ data: [] });
+    }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      if (order !== "older-inbox" && !heldOnce) { heldOnce = true; entered(); await held; }
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
+  let inbox: ReturnType<NonNullable<typeof provider.listPendingInbox>> | undefined, history: ReturnType<typeof provider.listMessages> | undefined;
+  let pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Transcript owned ordering")).id; child = fake.launchRequestWorker(parent).childId;
+    if (order === "streamed-pending-deltas") {
+      pump = (async () => { for await (const event of provider.events(abort.signal)) if (event.eventType === "diagnostic.transcript-deltas-applied") applied(); })();
+      await provider.waitForEventStream!(abort.signal);
+    }
+    if (order === "older-inbox") {
+      inbox = provider.listPendingInbox!(parent, { signal: abort.signal }); void inbox.catch(() => undefined); await pending;
+      const page = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
+      expect(page.workerSource?.isCurrent()).toBe(true); release(); await inbox;
+      expect(page.workerSource?.isCurrent()).toBe(true);
+    } else {
+      history = provider.listMessages(parent, { limit: 100, signal: abort.signal }); void history.catch(() => undefined); await pending;
+      if (order === "streamed-pending-deltas") {
+        for (const [id, subject] of [["pending-result", child], ["unrelated-result", "unrelated-child"]])
+          frame("session.inbox.enqueued", { sessionID: parent, inboxID: id, item: { type: "synthetic", payload: {
+            text: "Report", metadata: { source: "subagent", childID: subject, state: "error" },
+          } } });
+        frame("diagnostic.transcript-deltas-applied", {}); await observed;
+      } else expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]);
+      release(); const page = await history;
+      expect(page.workerSource?.isCurrent()).toBe(false);
+    }
+  } finally { release(); abort.abort(); await inbox?.catch(() => undefined); await history?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
 for (const mode of ["older-inactive", "newer-inactive-pending", "cancelled-inactive", "released-owner", "live-inactive"] as const)
 test(`cold inventory counterproof respects native ordering and source lifetime (${mode})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
@@ -403,10 +601,12 @@ test(`cold generation-2 activity respects processed execution boundaries (${boun
 }, 10_000);
 
 for (const read of ["history", "automatic-recovery"] as const)
-for (const proof of ["same-execution", "parent-report", "changed-identity"] as const)
+for (const proof of ["same-execution", "parent-report", "changed-identity", "smaller-alias", "smaller-alias-unavailable"] as const)
 test(`${read} resumes active work after withdrawing an inferred outcome (${proof})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, resumed = false, armed = false;
+  let aliasAttempt = 0;
+  const aliasChange = proof === "smaller-alias" || proof === "smaller-alias-unavailable";
   let wire!: ReadableStreamDefaultController<Uint8Array>, finished!: () => void;
   const published = new Promise<void>(resolve => { finished = resolve; });
   const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 50, location: { directory } })}\n\n`));
@@ -415,13 +615,15 @@ test(`${read} resumes active work after withdrawing an inferred outcome (${proof
     if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
       wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true });
     } }), { headers: { "content-type": "text/event-stream" } });
-    if (route === "/api/session/active") return Response.json({ data: resumed && child ? { [child]: { status: "running" } } : {} });
+    if (route === "/api/session/active") return Response.json({ data: resumed && proof !== "smaller-alias-unavailable" && child ? { [child]: { status: "running" } } : {} });
     if (route.endsWith("/inbox")) return Response.json({ data: [] });
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
       const body = await response.json(), first = body.data[0], changed = resumed && proof === "changed-identity";
       first.time = { created: changed ? 30 : 10 }; first.content[0].time = changed ? { created: 30, ran: 31, completed: 32 } : { created: 10, ran: 11, completed: 12 };
-      return Response.json({ data: [first, ...(proof === "parent-report" ? [{ id: "parent-result", type: "synthetic", time: { created: 25 }, text: "Explicit parent report", metadata: { source: "subagent", childID: child, state: "completed" } }] : [])], cursor: {} });
+      const alias = structuredClone(first); alias.id = "proven-alias-message"; alias.content[0].id = `proven-alias-call-${aliasAttempt}`;
+      alias.time = { created: 13 }; alias.content[0].time = { created: 13, ran: 14, completed: 15 };
+      return Response.json({ data: [first, ...(resumed && aliasChange ? [alias] : []), ...(proof === "parent-report" ? [{ id: "parent-result", type: "synthetic", time: { created: 25 }, text: "Explicit parent report", metadata: { source: "subagent", childID: child, state: "completed" } }] : [])], cursor: {} });
     }
     if (route === `/api/session/${child}/message`) return Response.json({ data: resumed ? [] : [
       { id: "reverted-child-input", type: "user", text: "Committed reverted suffix", time: { created: 15 } },
@@ -448,9 +650,18 @@ test(`${read} resumes active work after withdrawing an inferred outcome (${proof
     // suffix is gone, no staged boundary remains, and native inventory resumes
     // the same execution. No provider activity or adapter row is fabricated.
     resumed = true;
-    const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
-    expect(fresh[0]).toMatchObject({ status: proof === "parent-report" ? "completed" : "running", activity: { kind: proof === "parent-report" ? "ended" : "working" } });
-    expect(fresh[0]?.activity?.executionId === (warm?.type === "background_task" ? warm.activity?.executionId : undefined)).toBe(proof !== "changed-identity");
+    let fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    const original = warm?.type === "background_task" ? warm.activity?.executionId : undefined;
+    if (aliasChange) {
+      while (aliasAttempt < 64 && fresh[0]?.activity?.executionId === original) {
+        aliasAttempt++;
+        fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+      }
+      expect(fresh[0]?.activity?.executionId! < original!).toBe(true);
+      expect(fresh[0]?.activity?.executionAliases).toContain(original);
+    }
+    expect(fresh[0]).toMatchObject({ status: proof === "parent-report" ? "completed" : "running", activity: { kind: proof === "parent-report" ? "ended" : proof === "smaller-alias-unavailable" ? "unavailable" : "working" } });
+    expect(fresh[0]?.activity?.executionId === original).toBe(proof !== "changed-identity" && !aliasChange);
     if (proof === "same-execution") expect(fresh[0]?.control?.available).toBe(false);
     armed = true;
     let items: import("../../types").ConversationItem[];
@@ -461,8 +672,9 @@ test(`${read} resumes active work after withdrawing an inferred outcome (${proof
       items = (await adapter.subscribe(parent, { signal: abort.signal })).snapshot.items;
     }
     const current = items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-    expect(current?.status).toBe(proof === "same-execution" ? "running" : "completed");
-    expect(workerExecutionClockRuns(current!)).toBe(proof === "same-execution");
+    expect(current?.status).toBe(proof === "same-execution" || aliasChange ? "running" : "completed");
+    expect(workerExecutionClockRuns(current!)).toBe(proof === "same-execution" || proof === "smaller-alias");
+    if (aliasChange) { expect(current?.activity?.executionAliases).toContain(original); expect(workerCanStop(current!)).toBe(false); }
     if (proof === "same-execution") { expect(current?.activity?.kind).toBe("working"); expect(adapter.activity().working).toBe(true); }
     if (proof === "parent-report") expect(current).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
   } finally { armed = false; abort.abort(); await adapter.dispose(); await fake.stop(); }
@@ -643,9 +855,9 @@ test(`older ownerless parent results cannot revoke later consumed results (${arr
   } finally { release(); releaseNewer(); abort.abort(); await older?.catch(() => undefined); await read?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const carrier of ["native", "streamed"] as const)
-for (const mode of ["newer-observation", ...(carrier === "native" ? ["cancelled" as const] : []), "released-owner", "count-at", "count-over", "bytes-over", "duplicates"] as const)
-test(`${carrier === "native" ? "pending" : "streamed pending"} outcome observations retain bounded authority and lifetime (${mode})`, async () => {
+for (const carrier of ["native", "streamed", "transcript"] as const)
+for (const mode of ["newer-observation", ...(carrier !== "streamed" ? ["cancelled" as const] : []), "released-owner", "count-at", "count-over", "bytes-over", "duplicates"] as const)
+test(`${carrier === "native" ? "pending" : carrier === "streamed" ? "streamed pending" : "transcript pending"} outcome observations retain bounded authority and lifetime (${mode})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, phase: "initial" | "observe" | "final" = "initial", foreignReads = 0;
   let entered!: () => void, release!: () => void;
@@ -692,7 +904,9 @@ test(`${carrier === "native" ? "pending" : "streamed pending"} outcome observati
     }
     parent = (await provider.createSession("Pending outcome retention")).id;
     const worker = fake.launchRequestWorker(parent); child = worker.childId;
-    const initial = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: owner.signal,
+    const initial = carrier === "transcript" ? await provider.listMessages(parent, { limit: 100, signal: owner.signal }).then(page => {
+      guards.push(page.workerSource!.retain(owner.signal)); return page.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+    }) : await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: owner.signal,
       onSource: source => guards.push(source.workerSource.retain(owner.signal)) });
     expect(initial[0]?.status).toBe("completed"); expect(initial[0]?.resultId).toBeUndefined();
     expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
@@ -715,7 +929,7 @@ test(`${carrier === "native" ? "pending" : "streamed pending"} outcome observati
     expect(guards.every(guard => guard.isCurrent())).toBe(!denied);
     // SSE already verifies reported children; native inbox observation does
     // not. The counterproof itself must add no inbox or ownership reads.
-    const expectedLookups = carrier === "native" ? 0 : mode === "count-at" ? 256 : mode === "count-over" ? 257 : mode === "duplicates" ? 400 : 0;
+    const expectedLookups = carrier !== "streamed" ? 0 : mode === "count-at" ? 256 : mode === "count-over" ? 257 : mode === "duplicates" ? 400 : 0;
     expect(foreignReads).toBe(expectedLookups);
     phase = "final";
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: lifetime.signal,

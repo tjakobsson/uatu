@@ -1230,6 +1230,31 @@ older responses cannot poison later owned evidence; pending ownerless observatio
 are provisional deny-only facts. Cancellation is checked before observation and
 released leases retire the slot. Overflow withholds dependent history authority,
 never ownership, fabricated results or Stop proof.
+Transcript outcome sources participate even when a separate inventory recovery
+fails and they never consumed an inbox baseline. A newer positive report is
+compared with their actual native parent-read order, declared child/admission
+scope and consumed stored-report digests; inbox absence is not invented. Empty,
+ordinary-text, other-child, pre-launch and already-consumed report observations
+do not revoke them. Pending positive facts use the existing bounded source slot;
+streamed deltas coalesce and retain each fact's observation order so an unrelated
+later enqueue cannot erase or renew earlier counterproof. Cancellation and lease
+retirement still govern observation.
+A successful covered inventory may own the replacement worker outcome while
+the transcript keeps its text authority. The optional source-guard view
+`withoutInferredOutcomes` relinquishes only inferred outcomes covered by current
+explicit reports for the same row/task/type/child and intersecting proven
+execution aliases. Every inferred execution for an exempted child must be
+covered; report-free, uncertain, undated or mismatched rows cannot qualify.
+The adapter retains the actual inventory sources and uses their actual report
+content, ID and clock. The old full transcript guard stays invalid; the new view
+preserves ownership, transcript/revert, generation, unrelated-outcome and lifetime
+fences. Pending-report vetoes are separate from those non-relinquishable revisions.
+Qualification metadata reuses immutable occurrences under a 256-entry / 64 KiB
+serialized source budget; overflow declines transfer. No report text is minted
+from a digest, no deadline is renewed and no Stop basis is granted. Thus the
+failed-inventory fallback can publish canonical Failed once a later successful
+inventory covers it, without rereading forever. Genuine uncovered disagreement
+or budget exhaustion still causes the existing bounded handoff to abstain.
 Streamed `session.inbox.enqueued` subagent reports update that same bounded
 read-owned slot before child ownership enrichment can await. An enqueue adds
 counterproof; it is not a complete inbox snapshot and cannot erase unrelated
@@ -1374,6 +1399,10 @@ after return it revokes the activity lease through scheduler admission. First
 late starts, exact replays, text noise and unrelated/foreign events do not create
 this veto. The slot keeps its existing read lease/deadline and child scope; no
 event log, global cache or new positive/Stop authority is introduced.
+When fresh covered evidence withdraws a published report-free outcome, the
+adapter matches intersecting proven execution alias sets, not just their sorted
+primary IDs. Row/task/type/child checks and explicit-report precedence remain
+required. This identity match cannot supply a Stop basis.
 If a compatible retained alias cohort grows while an older row is awaiting
 publication, the older row stays inspectable with activity unavailable. Neither
 activity nor Stop projection borrows the newer cohort's valid basis.
@@ -1398,6 +1427,9 @@ Activity-only child observation also remains continuous before return, including
 the final parent lookup. Ordered idle counterproof is retained during that
 window without blanket invalidation of prepublication Stop reads; acquiring
 outcome or history-only activity authority checks the retained counterproof.
+The cold publication dependency is registered when the fold captures Working,
+before that final lookup. A newer inactive inventory downgrade cannot hide an
+intervening transcript change by removing the row from the later Working scan.
 After return, the same change revokes the retained publication dependency.
 Staged-parent visibility rereads own an additional bounded source lease, since
 their visible/full-history folds can first consume an outcome after the inventory

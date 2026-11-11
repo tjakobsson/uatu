@@ -4902,6 +4902,14 @@ async function flushRecoveryIo(): Promise<void> {
   for (let turn = 0; turn < 32; turn++) await realpath(process.cwd());
 }
 
+// Wait for the owned recovery boundary, not a fixed number of unrelated IO
+// completions. Fake deadlines stay frozen, so an inherited retry timer cannot
+// satisfy this condition by elapsing while workspace confinement settles.
+async function flushRecoveryIoUntil(predicate: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 1_000 && !predicate(); turn++) await realpath(process.cwd());
+  expect(predicate()).toBe(true);
+}
+
 async function admissionsApplied(adapter: ChatAdapter): Promise<void> {
   const admissions = (adapter as unknown as { promptAdmissions: Map<string, Promise<void>> }).promptAdmissions;
   await Promise.all([...admissions.values()]);
@@ -8224,6 +8232,29 @@ describe("prompt, abort, permission, and question mutations", () => {
     }
   });
 
+  test("connected generation rearms after owned workspace IO without advancing fake deadlines", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let reads = 0, classifications = 0, entered = false, releaseRead!: () => void, releaseScope!: () => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; }), scopeGate = new Promise<void>(resolve => { releaseScope = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      if (++reads === 1) await readGate;
+      return [{ id: "task:unknown", type: "background_task", taskId: "unknown", description: "Unknown", createdAt: 1, status: "running", stateUncertain: true }];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const scope = adapter as unknown as { requireSession(id: string): Promise<unknown> };
+    const requireSession = scope.requireSession.bind(adapter);
+    scope.requireSession = async id => { if (++classifications === 2) { entered = true; await scopeGate; } return requireSession(id); };
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await waitUntil(() => reads === 1);
+      jest.useFakeTimers(); releaseRead(); await flushRecoveryIo();
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIoUntil(() => entered);
+      await flushRecoveryIo(); expect(reads).toBe(1); // Unrelated IO turns cannot authorize this held read.
+      releaseScope(); await flushRecoveryIoUntil(() => reads === 2);
+      expect(reads).toBe(2); // No fake timer was advanced to admit the new generation.
+    } finally { releaseRead(); releaseScope(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
   test("a new connected generation immediately rearms the inconclusive cycle instead of inheriting its old timer", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -8241,7 +8272,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await waitUntil(() => reads === 1);
       jest.useFakeTimers(); release(); await flushRecoveryIo();
       provider.eventQueue.push({ type: "server.connected", data: {} });
-      await flushRecoveryIo();
+      await flushRecoveryIoUntil(() => reads === 2);
       expect(reads).toBe(2);
       for (let retry = 0; retry < 5; retry++) { jest.advanceTimersByTime(30_000); await flushRecoveryIo(); }
       expect(reads).toBe(4);

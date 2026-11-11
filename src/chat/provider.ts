@@ -193,7 +193,15 @@ export type WorkerOrigin = { messageId: string; toolUseId?: string; childConvers
 // Internal evidence lease, independent of the message transport deadline.
 // Retention must happen while the previous owner is current; every successor
 // has its own bounded signal and releases without retiring sibling readers.
-export type WorkerSourceGuard = { isCurrent: () => boolean; retain: (signal: AbortSignal) => WorkerSourceGuard };
+export type WorkerSourceGuard = {
+  isCurrent: () => boolean;
+  retain: (signal: AbortSignal) => WorkerSourceGuard;
+  // A covered explicit inventory report may replace exact inferred outcomes.
+  // The returned view relinquishes only those outcomes, preserving all other
+  // source fences and the original deadline. It grants no report/Stop authority;
+  // callers must retain the successful inventory's own current source too.
+  withoutInferredOutcomes?: (reports: readonly BackgroundTaskItem[]) => WorkerSourceGuard | undefined;
+};
 // Invalidation-only watch for retained associations, registered before I/O.
 // A snapshot contains only scoped counterproof, never ownership admission.
 // Successive snapshots belong to the same bounded owner, so a failed transport

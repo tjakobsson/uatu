@@ -130,6 +130,9 @@ function indexRecoveredBackgroundTasks(tasks: readonly BackgroundTaskItem[]) {
 
 /** Covered native evidence may withdraw an inference, never an explicit report. */
 function replacesHistoryOnlyOutcome(current: ConversationItem | undefined, source: ConversationItem | undefined): boolean {
+  const executionIds = (item: ConversationItem | undefined) => item?.type === "background_task"
+    ? [...(item.activity?.executionAliases ?? []), ...(item.activity?.executionId ? [item.activity.executionId] : [])] : [];
+  const knownExecutions = new Set(executionIds(current));
   // Working evidence is independent of Stop proof: control projection may
   // mark the row uncertain without withdrawing its covered native activity.
   return current?.type === "background_task" && current.status !== "running" && !current.resultId
@@ -139,8 +142,7 @@ function replacesHistoryOnlyOutcome(current: ConversationItem | undefined, sourc
     && source.childConversationId !== undefined && source.childConversationId === current.childConversationId
     && (source.activity?.kind === "unavailable" && source.stateUncertain === true
       || source.activity?.kind === "working" || source.activity?.kind === "needs-answer")
-    && source.activity.executionId !== undefined
-    && source.activity.executionId === current.activity?.executionId;
+    && executionIds(source).some(id => knownExecutions.has(id));
 }
 
 type MessageModel = WorkerMessageModel;
@@ -163,11 +165,12 @@ class WorkerSourceRead {
   private readonly inventories = new Map<string, AccountingInventory>();
   readonly nestedPublications = new Map<string, NestedAllocationPublication>();
   constructor(private readonly signal: AbortSignal) {}
-  observe(source: WorkerSourceGuard, accountingKey?: string): void {
+  observe(source: WorkerSourceGuard, accountingKey?: string): WorkerSourceGuard | undefined {
     if (this.signal.aborted) return;
     const guard = source.retain(this.signal);
     this.guards.push({ guard, accountingKey });
     for (const follower of this.followers) follower.observe(guard, accountingKey);
+    return guard;
   }
   follow(read: WorkerSourceRead): () => void {
     for (const { guard, accountingKey } of this.guards) read.observe(guard, accountingKey);
@@ -1357,8 +1360,8 @@ export class ChatAdapter {
         recovered = await this.provider.reconcileBackgroundTasks(id, coverage ? { signal: coverage.signal, onSource: source => {
           // Capture before the shared recovery transport retires. These leases
           // guard inbox/live associations through this read's final handoff.
-          coverage.workerSources.observe(source.workerSource);
-          recoverySources.push(source);
+          const guard = coverage.workerSources.observe(source.workerSource);
+          recoverySources.push({ ...source, workerSource: guard ?? source.workerSource });
         } } : undefined);
       }
       catch {
@@ -1370,6 +1373,16 @@ export class ChatAdapter {
       }
       coverage?.assertCurrent();
       coverage?.workerSources.assertCurrent();
+      if (coverage && recovered.length && recoverySources.some(source => source.workerResultFallbacks.length === 0 && source.workerSource.isCurrent())) {
+        // Inventory owns actual explicit report content. Relinquish only exact
+        // transcript inferences it replaces; text/ownership/revert/other-worker
+        // fences and every inventory lease remain required through admission.
+        const textSource = page.workerSource?.withoutInferredOutcomes?.(recovered);
+        if (textSource?.isCurrent()) {
+          const guard = textSource.retain(coverage.signal);
+          page = { ...page, workerSource: guard, isWorkerSourceCurrent: guard.isCurrent };
+        }
+      }
       if (options.workers) recovered = validatedWorkerDismissalSource(recovered) as BackgroundTaskItem[];
       for (const source of recoverySources) {
         for (const child of source.workerAssociationContradictions) revokedChildren.add(child);

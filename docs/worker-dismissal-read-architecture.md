@@ -105,6 +105,24 @@ Streamed subagent enqueues feed the same bounded slot before ownership awaits,
 without a native inbox reread. They add facts rather than replacing the inbox
 baseline, and exact replays coalesce. Their shared read-order clock fences older
 in-flight empty responses; an identical pending baseline remains current.
+Transcript-only outcome sources are fenced too when inventory recovery fails.
+They compare actual newer positive reports with their native parent-read order,
+declared child/admission scope and consumed report digests; no empty inbox
+baseline is assigned. Empty/text, unrelated, pre-launch and unchanged consumed
+reports leave them current. Positive pending facts share the existing bounded
+slot and source lifetime; streamed deltas preserve per-fact order.
+Successful covered inventory can replace an exact inferred worker outcome while
+the transcript keeps text authority. The provider's optional
+`withoutInferredOutcomes` guard view requires actual explicit report content,
+native report ID/clock, the same row/task/type/child and proven execution-alias
+overlap. Every inferred execution for an exempted child must be covered. The
+adapter retains the successful inventory's current guards alongside that view.
+The old full guard is not revived; ownership/revert, unrelated outcomes,
+generation, cancellation and the original deadline remain fenced. Qualification
+metadata is bounded to 256 entries / 64 KiB serialized evidence and fails closed
+on overflow. Digests supply no report content or Stop authority. Canonical Failed
+therefore publishes after the failed-inventory fallback once successful inventory
+covers it; genuine uncovered disagreement still ends in bounded rejection.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports
@@ -153,6 +171,10 @@ the inferred end and resumes the running clock and background progress. Its
 activity authority does not require available Stop controls.
 The automatic scheduler uses the same guarded exact-execution replacement rule,
 so its upserts cannot restore a revoked report-free completion either.
+Exact execution matching uses the intersection of proven execution alias sets,
+including each primary ID. A newly learned alias may sort before the old primary
+without changing the execution. Same-row/task/type/child ownership checks and
+explicit-report precedence still apply; alias overlap grants no Stop basis.
 Automatic inventory recovery also holds and validates source leases through
 its pending permission/question reads and final publication. Its bounded cycle
 owner releases them on completion, failure, cancellation or supersession;
@@ -171,9 +193,12 @@ execution clock stays stopped and qualified unavailable evidence remains
 dismissible, without an invented result/end time or new Stop proof. The slot's
 existing child scope and deadline bound retention; it stores no event history.
 Outcome-free child observations remain watched through prepublication awaits
-too. Native idle counterproof is retained for the eventual activity handoff,
+too. Native idle counterproof is retained for the eventual activity handoff
 without invalidating unrelated output or prepublication Stop reads merely
 because a dependency is still being collected.
+This includes Working already captured before the final parent lookup.
+Registering its publication dependency at capture prevents a newer inactive
+inventory downgrade from masking a changed child transcript during that await.
 An older row superseded by a larger compatible retained alias cohort remains
 inspectable but unavailable; it cannot borrow that cohort's activity or Stop
 authority.
