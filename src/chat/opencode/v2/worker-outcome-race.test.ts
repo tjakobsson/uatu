@@ -808,6 +808,48 @@ test(`cold inventory counterproof respects native ordering and source lifetime (
 }, 10_000);
 
 for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+test(`${read} retains intervening start denial after the latest start advances`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined;
+  const frame = (type: string, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data: { sessionID: child }, created, location: { directory } })}\n\n`));
+  const barrier = () => new Promise<void>(resolve => { acknowledge = resolve; frame("diagnostic.intervening-start-applied", 60); });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "unchanged-idle", type: "idle", time: { created: 40 }, outcome: "failed" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const first = new AbortController(), abort = new AbortController();
+  let pump: Promise<void> | undefined;
+  try {
+    pump = (async () => { for await (const _event of provider.events(first.signal)) {} })(); await provider.waitForEventStream!(first.signal); first.abort(); await pump;
+    parent = (await provider.createSession("Intervening history-only start")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = (async () => { for await (const event of provider.events(abort.signal)) if (event.eventType === "diagnostic.intervening-start-applied") { acknowledge?.(); acknowledge = undefined; } })();
+    await provider.waitForEventStream!(abort.signal);
+    frame("session.execution.started", 9); frame("session.execution.started", 35); await barrier();
+    for (const phase of ["before", "after"] as const) {
+      if (phase === "after") { frame("session.execution.started", 55); await barrier(); }
+      const inventory = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      const row = (read === "listMessages" ? (await provider.listMessages(parent, { limit: 100, signal: abort.signal })).items : inventory)
+        .find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      expect(row?.status).toBe("running"); expect(workerCanStop(row!)).toBe(false);
+      expect(row?.activity?.endedAt).toBeUndefined(); expect(row?.resultId).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();
+      expect(inventory.find(item => item.taskId === worker.taskId)).toMatchObject({ status: "running", activity: { kind: "unavailable" } });
+    }
+  } finally { first.abort(); abort.abort(); await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
 for (const stage of ["cold", "outcome"] as const)
 for (const scenario of ["within", "same-clock", "single", "exact-replay", "late-first", "new-interval"] as const)
 test(`${read} rejects multiple start proofs inside admission (${scenario}/${stage})`, async () => {
@@ -1426,7 +1468,7 @@ test(`scheduler inferred outcome retains native parent visibility through public
   } finally { releaseOlder(); releaseInteractions(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await publication; await fake.stop(); }
 }, 10_000);
 
-for (const change of ["owned-overlap-newer-source", "owned-overlap-hidden", "owned-overlap-prefix", "owned-overlap-unchanged", "owned-overlap-other", "collecting-hidden", "collecting-prefix", "hidden", "unchanged", "other-child", "retained-prefix", "newer-source"] as const)
+for (const change of ["load-overlap-hidden", "load-overlap-prefix", "load-overlap-unchanged", "load-overlap-other", "owned-overlap-newer-source", "owned-overlap-hidden", "owned-overlap-prefix", "owned-overlap-unchanged", "owned-overlap-other", "collecting-hidden", "collecting-prefix", "hidden", "unchanged", "other-child", "retained-prefix", "newer-source"] as const)
 test(`scheduler captured child outcome observes late staged native record (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, other: string | undefined, removed = false, captured = false;
@@ -1437,6 +1479,7 @@ test(`scheduler captured child outcome observes late staged native record (${cha
   const olderRead = new AsyncLocalStorage<boolean>();
   const collecting = change.startsWith("collecting-");
   const overlap = change.startsWith("owned-overlap-");
+  const loadOverlap = change.startsWith("load-overlap-");
   let ownEntered!: () => void, releaseOwn!: () => void, holdOwn = false;
   const ownPending = new Promise<void>(resolve => { ownEntered = resolve; }), ownHeld = new Promise<void>(resolve => { releaseOwn = resolve; });
   let childEntered!: () => void, releaseChild!: () => void, childHeldOnce = false;
@@ -1454,14 +1497,14 @@ test(`scheduler captured child outcome observes late staged native record (${cha
       const data = [
       ...(!removed ? [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : []),
       { id: "suffix", type: "user", text: "Independent suffix", time: { created: 30 } }];
-      if (collecting && !childHeldOnce) { childHeldOnce = true; childEntered(); await childHeld; }
+      if ((collecting || loadOverlap) && !childHeldOnce) { childHeldOnce = true; childEntered(); await childHeld; }
       if (overlap && !childHeldOnce) { childHeldOnce = true; holdOwn = true; }
       return Response.json({ data, cursor: {} });
     }
     if (route === `/api/session/${child}` || route === `/api/session/${other}`) {
       const body = await response.json();
       if (olderRead.getStore()) {
-        if (change !== "unchanged" && change !== "owned-overlap-unchanged") body.data.revert = { messageID: change === "retained-prefix" || change === "collecting-prefix" || change === "owned-overlap-prefix" ? "suffix" : "idle" };
+        if (change !== "unchanged" && change !== "owned-overlap-unchanged" && change !== "load-overlap-unchanged") body.data.revert = { messageID: change === "retained-prefix" || change === "collecting-prefix" || change === "owned-overlap-prefix" || change === "load-overlap-prefix" ? "suffix" : "idle" };
         olderEntered(); await olderHeld;
       }
       else if (holdOwn && route === `/api/session/${child}`) { holdOwn = false; ownEntered(); await ownHeld; }
@@ -1494,12 +1537,13 @@ test(`scheduler captured child outcome observes late staged native record (${cha
     other = fake.launchRequestWorker(parent).childId;
     await adapter.subscribe(parent, { signal: abort.signal }); void adapter.startEventPump().catch(() => undefined);
     if (overlap) await ownPending;
-    else if (collecting) await childPending; else { await returned; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true); }
+    else if (collecting || loadOverlap) await childPending; else { await returned; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true); }
     await interactions;
-    const subject = change === "other-child" || change === "owned-overlap-other" ? other : child, hidden = change === "hidden" || change === "newer-source" || change === "collecting-hidden" || change === "owned-overlap-hidden" || change === "owned-overlap-newer-source";
+    const subject = change === "other-child" || change === "owned-overlap-other" || change === "load-overlap-other" ? other : child, hidden = change === "hidden" || change === "newer-source" || change === "collecting-hidden" || change === "owned-overlap-hidden" || change === "owned-overlap-newer-source" || change === "load-overlap-hidden";
     older = olderRead.run(true, () => provider.getSession(subject!)); void older.catch(() => undefined); await olderPending;
     removed = hidden; await provider.getSession(subject);
     if (overlap) { releaseOwn(); await returned; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true); }
+    if (loadOverlap) { releaseChild(); await returned; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true); }
     if (change === "newer-source" || change === "owned-overlap-newer-source") await nativeRecovery(parent, { fresh: true, signal: abort.signal,
       onSource: source => newerGuards.push(source.workerSource.retain(abort.signal)) });
     releaseOlder(); await older;

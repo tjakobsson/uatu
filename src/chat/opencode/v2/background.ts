@@ -942,6 +942,11 @@ export class BackgroundWorkers {
     // acceptance returns. With no enclosing end, prior-admission starts alone
     // do not compete with a later candidate; retain the conservative scalar.
     return clocks.filter(clock => previous !== undefined || clock >= window.start).length > 1
+      // A pre-admission start plus a distinct intervening start is still reuse
+      // after a later event moves the scalar maximum beyond this outcome.
+      // An enclosing end excludes prior executions; one delayed first start
+      // alone remains admissible under the existing interval rules.
+      || previous === undefined && clocks.length > 1 && clocks.some(clock => clock > window.end)
       // The old scalar remains conservative where no enclosing interval can
       // exclude a prior execution. It cannot make an interval's first start reuse.
       || previous === undefined && start !== undefined && start <= at && start > window.end;

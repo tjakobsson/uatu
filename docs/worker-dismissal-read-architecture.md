@@ -51,9 +51,17 @@ the returned transcript before positive outcomes are folded. Prefixes remain
 usable; unknown/conflicting positions abstain without replacing an owned view.
 Provisional denial is rechecked after the owned visibility lookup and before its
 slot is replaced; a stage arriving during that await still fences the old idle.
+Retained start identities, not only the greatest start clock, preserve an
+intervening-execution veto without a qualifying prior end. A later start cannot
+authorize an unchanged earlier idle; qualified new intervals and a single delayed
+first start retain their existing progress rules.
 After capture, overlap ordering uses the actual owned lookup request start,
 carried with its native observation. Sampling the later global clock would lose
 stages requested during that await but delivered only after capture.
+The consumed transcript's actual load cutoff is retained separately: a stage
+requested during that load can still deny publication after lookup and capture.
+Older-than-load requests and compatible initially staged records do not become
+new transitions merely because their responses arrive late.
 Session-record reads carry only their explicit consuming fold as an overlapping
 owner. Ordinary getSession/list/create reads cannot claim all collecting folds
 and revoke a page that consumed a newer boundary. Genuine later nonoverlapping

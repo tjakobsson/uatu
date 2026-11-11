@@ -77,7 +77,7 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyParentBoundary?: { boundary: string | null; completed: number };
   historyParentVisibilityChanged?: true;
   historyParentRecordsAfter?: number;
-  historyChildVisibility?: Map<string, { registered: number; ownedAfter?: number; ownedBaseline?: boolean; pendingBoundary?: string | null; retainedBoundaries?: ReadonlySet<string> }>;
+  historyChildVisibility?: Map<string, { registered: number; initialBoundary?: string | null; ownedAfter?: number; transcriptAfter?: number; ownedBaseline?: boolean; pendingBoundary?: string | null; retainedBoundaries?: ReadonlySet<string> }>;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 type HistoryVisibilityObservation = { recordsAfter: number; pendingAfter: number; visibility?: { boundary: string | null; started: number; completed: number } };
@@ -121,7 +121,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly backgroundVisibilityReads = new Set<{ sessionId: string; invalidated: boolean }>();
   private parentHistoryReadClock = 0;
   private sessionRecordClock = 0;
-  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number }>();
+  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number; recordsAfter: number }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
   private readonly historyGuardScopes = new WeakMap<WorkerSourceGuard, { source: HistoryWorkerSource; view: (covered: ReadonlySet<string>) => WorkerSourceGuard }>();
   // Read-side observations are not live-event admission or Stop evidence.
@@ -569,7 +569,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             const dependencies = source.historyChildren ??= new Map();
             dependencies.set(child, (dependencies.get(child) ?? 0) + 1);
             const visibility = source.historyChildVisibility ??= new Map();
-            if (!visibility.has(child)) visibility.set(child, { registered: this.sessionRecordClock });
+            if ((dependencies.get(child) ?? 0) === 1) visibility.set(child, { ...visibility.get(child), registered: this.sessionRecordClock });
             const activity = source.historyActivityChildren ??= new Map();
             if (!activity.has(child)) activity.set(child, undefined);
           }
@@ -630,7 +630,9 @@ export class OpenCodeV2Provider implements ChatProvider {
               const recordRead = lookup.recordRead;
               if (!recordRead?.owners.includes(source)) throw new Error("Child outcome visibility has no owned native request");
               const registration: NonNullable<ReturnType<typeof visibility.get>> = {
-                registered: visibility.get(child)?.registered ?? recordRead.started, ownedAfter: recordRead.started, ownedBaseline: true };
+                registered: visibility.get(child)?.registered ?? recordRead.started, ownedAfter: recordRead.started,
+                initialBoundary: visibility.get(child)?.initialBoundary,
+                transcriptAfter: this.historyReadOrders.get(complete)!.recordsAfter, ownedBaseline: true };
               visibility.set(child, registration);
               const lastOutcome = complete.findLastIndex(message => message.type === "idle");
               const suffix = complete.slice(lastOutcome + 1).map(messageIdentity);
@@ -2155,6 +2157,7 @@ export class OpenCodeV2Provider implements ChatProvider {
 
   private async readAllMessages(sessionId: string, signal: AbortSignal): Promise<StoredMessage[]> {
     const finish = measureChatWork("opencode-read");
+    const recordsAfter = this.sessionRecordClock;
     const started = ++this.parentHistoryReadClock;
     try {
       const byId = new Map<string, StoredMessage>();
@@ -2170,7 +2173,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
       } while (cursor);
       const messages = [...byId.values()].sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right));
-      this.historyReadOrders.set(messages, { started, completed: ++this.parentHistoryReadClock });
+      this.historyReadOrders.set(messages, { started, completed: ++this.parentHistoryReadClock, recordsAfter });
       return messages;
     } finally { finish(); }
   }
@@ -3265,6 +3268,13 @@ export class OpenCodeV2Provider implements ChatProvider {
         for (const source of this.historyWorkerSources) if (source.states.has(subject)) {
           const ownership = this.agentOwnership(subject, source.parent, lookup);
           this.observeHistoryWorkerSource(source, subject, ownership);
+          if (ownership === "confirmed" && !source.historyChildren?.has(subject)) {
+            // Candidate verification precedes transcript consumption. Remember
+            // its boundary only to recognize a compatible older staged reply;
+            // this does not register a dependency or install an owned baseline.
+            const visibility = source.historyChildVisibility ??= new Map();
+            visibility.set(subject, { registered: completed, initialBoundary: stringValue(asRecord(info.revert).messageID) ?? null });
+          }
           // A native record can reveal a staged/cleared boundary before SSE.
           // Ownership staying confirmed does not preserve an older outcome view.
           if (ownership === "confirmed" && source.historyChildren?.has(subject)) {
@@ -3279,7 +3289,9 @@ export class OpenCodeV2Provider implements ChatProvider {
               const provisionalStage: boolean = childVisibility !== undefined && childVisibility.ownedAfter === undefined
                 && observation.started > childVisibility.registered && !childVisibility.ownedBaseline && boundary !== null && previous.boundary === null;
               const lateIntermediateStage: boolean = childVisibility !== undefined
-                && childVisibility.ownedAfter !== undefined && observation.started > childVisibility.ownedAfter && boundary !== null && previous.boundary === null;
+                && childVisibility.ownedAfter !== undefined && observation.started > (childVisibility.transcriptAfter ?? childVisibility.ownedAfter)
+                && (observation.started > childVisibility.ownedAfter || boundary !== childVisibility.initialBoundary)
+                && boundary !== null && previous.boundary === null;
               if (provisionalStage && childVisibility) {
                 childVisibility.pendingBoundary = childVisibility.pendingBoundary === undefined || childVisibility.pendingBoundary === boundary ? boundary : null;
               }

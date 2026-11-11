@@ -1299,10 +1299,17 @@ the check runs again after the owned visibility await, before provisional eviden
 is replaced, so a clear reply cannot launder a stage observed during that await.
 known retained prefixes survive, unknown or conflicting boundaries abstain.
 An intervening owned visibility read shields its newer authority from old replies.
+Retained start identities, rather than only the greatest start clock, preserve
+an intervening-execution veto without a qualifying prior end. A later start
+cannot authorize an unchanged earlier idle. Qualified new intervals and a single
+delayed first start keep their existing progress rules.
 The captured child cutoff is the actual owned native request's start, carried by
 its lookup observation, not a global clock sampled after awaiting the response.
 A stage requested during that await remains deny-only after capture; a request
-older than the owned lookup cannot poison its newer authority.
+older than the actual consumed transcript load cannot poison its newer authority.
+That load's native-record cutoff survives shared/cache reuse separately from
+the later owned lookup. Candidate verification retains its initial boundary,
+so a compatible older stage is not mistaken for a new transition.
 Before any dependent parent read exists, transcript cache entries own a
 constant-size native visibility observation from load registration, before a
 value exists. The metadata transfers to retained values and retires with the
