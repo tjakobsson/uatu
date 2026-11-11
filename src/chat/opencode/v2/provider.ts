@@ -77,6 +77,7 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyParentBoundary?: { boundary: string | null; completed: number };
   historyParentVisibilityChanged?: true;
   historyParentRecordsAfter?: number;
+  historyChildVisibility?: Map<string, { ownedAfter: number; retainedBoundaries?: ReadonlySet<string> }>;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 type HistoryVisibilityObservation = { recordsAfter: number; visibility?: { boundary: string | null; started: number; completed: number } };
@@ -595,6 +596,19 @@ export class OpenCodeV2Provider implements ChatProvider {
             const { boundaryId, boundaryIndex, visible } = storedHistoryVisibility(complete, lookup.info);
             if (boundaryId && boundaryIndex < 0) throw new Error("Child history visibility unavailable");
             outcomeHistory = visible;
+            for (const source of historySources) {
+              // Older overlapping requests cannot poison this owned view.
+              // Later intermediate stages can veto its captured publication.
+              const visibility = source.historyChildVisibility ??= new Map();
+              const registration: { ownedAfter: number; retainedBoundaries?: ReadonlySet<string> } = { ownedAfter: this.sessionRecordClock };
+              visibility.set(child, registration);
+              const lastOutcome = complete.findLastIndex(message => message.type === "idle");
+              const suffix = complete.slice(lastOutcome + 1).map(messageIdentity);
+              // Retain bounded identity-only prefix precision independently of
+              // cache eviction. Overflow remains unknown, never positive proof.
+              if (suffix.length <= 256 && JSON.stringify(suffix).length <= 16_384)
+                registration.retainedBoundaries = new Set(suffix);
+            }
           } else {
             // Boundary-only history cannot publish a recovered outcome. Its
             // existing occurrence/control fences still apply, while compatible
@@ -3201,8 +3215,17 @@ export class OpenCodeV2Provider implements ChatProvider {
               // transcript request is still in flight. Do not let a retry reuse
               // that obsolete response after fencing this consuming source.
               if (observation.started > previous.completed) this.historyReuse.invalidate(subject);
-              const targets = observation.started > previous.completed ? [source] : observation.owners;
+              const childVisibility = source.historyChildVisibility?.get(subject);
+              const lateIntermediateStage = childVisibility !== undefined
+                && observation.started > childVisibility.ownedAfter && boundary !== null && previous.boundary === null;
+              const targets = observation.started > previous.completed || lateIntermediateStage ? [source] : observation.owners;
               for (const target of targets) if (target.historyChildren?.has(subject)) {
+                if (lateIntermediateStage && target.phase === "captured") {
+                  if (target.historyChildVisibility?.get(subject)?.retainedBoundaries?.has(boundary!)) continue;
+                  // A qualified prefix is still visible. Unknown positions
+                  // abstain; an intermediate stage never replaces the newer
+                  // baseline or authorizes an outcome on its own.
+                }
                 // Retain scoped counterproof before the pending transcript
                 // classifies outcomes. It becomes a fence only if that fold
                 // depends on history; outcome-free/control reads stay separate.

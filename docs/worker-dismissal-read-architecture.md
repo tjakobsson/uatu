@@ -28,6 +28,10 @@ scoped child record that reveals a changed revert boundary revokes the earlier
 outcome source even before the corresponding native event arrives.
 This observation includes a scoped record arriving while the first visibility
 lookup is pending; a late overlapping response cannot overwrite that boundary.
+An intermediate stage requested after the child's consumed owned visibility can also
+veto a captured outcome after a newer clear reply. Bounded consumed suffix IDs
+preserve retained-prefix precision without cache authority, extra IO or Stop
+grants. Later dependencies and the newer native baseline remain separate.
 Session-record reads carry only their explicit consuming fold as an overlapping
 owner. Ordinary getSession/list/create reads cannot claim all collecting folds
 and revoke a page that consumed a newer boundary. Genuine later nonoverlapping

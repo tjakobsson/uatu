@@ -1268,7 +1268,12 @@ counterproof set and fence a later dependent outcome; outcome-free and control
 reads do not acquire an outcome fence merely by collecting that dependency.
 A newer boundary change also invalidates child-history reuse so a retry cannot
 consume the obsolete held response. Overlapping older ownerless lookups cannot
-replace the newer owned boundary baseline or revoke it on late arrival.
+replace the newer owned boundary baseline. A late intermediate stage begun after
+the consumed child's owned visibility read supplies deny-only counterproof through captured
+publication. Bounded suffix identities from the consumed child transcript preserve
+known retained prefixes independently of cache eviction (at most 256 suffix IDs
+and 16,384 serialized UTF-16 units per child); overflow abstains.
+This does not replace the latest baseline or affect a later child dependency.
 Before any dependent parent read exists, transcript cache entries own a
 constant-size native visibility observation from load registration, before a
 value exists. The metadata transfers to retained values and retires with the

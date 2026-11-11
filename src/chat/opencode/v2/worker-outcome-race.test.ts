@@ -1335,6 +1335,84 @@ test(`scheduler inferred outcome retains native parent visibility through public
   } finally { releaseOlder(); releaseInteractions(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
+for (const change of ["hidden", "unchanged", "other-child", "retained-prefix", "newer-source"] as const)
+test(`scheduler captured child outcome observes late staged native record (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, removed = false, captured = false;
+  let entered!: () => void, release!: () => void, folded!: () => void, finished!: () => void, olderEntered!: () => void, releaseOlder!: () => void;
+  const interactions = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const returned = new Promise<void>(resolve => { folded = resolve; }), admitted = new Promise<void>(resolve => { finished = resolve; });
+  const olderPending = new Promise<void>(resolve => { olderEntered = resolve; }), olderHeld = new Promise<void>(resolve => { releaseOlder = resolve; });
+  const olderRead = new AsyncLocalStorage<boolean>();
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/permission/request" || route === "/api/form") { entered(); await held; }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      ...(!removed ? [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : []),
+      { id: "suffix", type: "user", text: "Independent suffix", time: { created: 30 } }], cursor: {} });
+    if (route === `/api/session/${child}` || route === `/api/session/${other}`) {
+      const body = await response.json();
+      if (olderRead.getStore()) {
+        if (change !== "unchanged") body.data.revert = { messageID: change === "retained-prefix" ? "suffix" : "idle" };
+        olderEntered(); await olderHeld;
+      }
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [], newerGuards: import("../../provider").WorkerSourceGuard[] = [];
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => {
+      if (id === parent && !captured) guards.push(source.workerSource.retain(abort.signal));
+      options?.onSource?.({ ...source, workerSource: { ...source.workerSource, retain: signal => {
+        if (id === parent) { if (signal.aborted) finished(); else signal.addEventListener("abort", finished, { once: true }); }
+        return source.workerSource.retain(signal);
+      } } });
+    } });
+    if (id === parent && !captured) { captured = true; expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" })); folded(); }
+    return tasks;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let older: ReturnType<typeof provider.getSession> | undefined;
+  try {
+    parent = (await provider.createSession("Captured child visibility")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    other = fake.launchRequestWorker(parent).childId;
+    await adapter.subscribe(parent, { signal: abort.signal }); void adapter.startEventPump().catch(() => undefined);
+    await returned; await interactions; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    const subject = change === "other-child" ? other : child, hidden = change === "hidden" || change === "newer-source";
+    older = olderRead.run(true, () => provider.getSession(subject!)); void older.catch(() => undefined); await olderPending;
+    removed = hidden; await provider.getSession(subject);
+    if (change === "newer-source") await nativeRecovery(parent, { fresh: true, signal: abort.signal,
+      onSource: source => newerGuards.push(source.workerSource.retain(abort.signal)) });
+    releaseOlder(); await older;
+    release(); await admitted;
+    const row = adapter.projectionForTests(parent).items().find(item => item.type === "background_task" && item.taskId === worker.taskId);
+    if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true); expect(row?.status).not.toBe("completed"); }
+    else expect(row).toMatchObject({ status: "completed" });
+    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(fresh?.status).toBe(hidden ? "running" : "completed");
+    if (hidden) {
+      expect(fresh?.activity?.kind).toBe("working");
+      expect(fresh?.endedAt).toBeUndefined(); expect(fresh?.resultId).toBeUndefined();
+      expect(fresh?.terminalReportedAt).toBeUndefined();
+      const current = (await adapter.history(parent)).items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      expect(current?.activity?.kind).toBe("working");
+      const evidence = await adapter.workerEvidence(parent);
+      expect(evidence.entries.find(entry => entry.executionId === current?.activity?.executionId)?.dismissible).toBe(false);
+    }
+    if (change === "newer-source") { expect(newerGuards.length).toBeGreaterThan(0); expect(newerGuards.every(guard => guard.isCurrent())).toBe(true); }
+  } finally { releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
 for (const read of ["history", "automatic-recovery"] as const)
 for (const proof of ["session-active", "session-active-changed", "session-active-report", "same-execution", "parent-report", "changed-identity", "smaller-alias", "smaller-alias-unavailable"] as const)
 test(`${read} resumes active work after withdrawing an inferred outcome (${proof})`, async () => {
