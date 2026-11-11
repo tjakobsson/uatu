@@ -30,6 +30,10 @@ Warmed parent history has its own scoped native-inbox cutoff even before a
 worker consumer exists. A relevant report not present in that transcript denies
 reuse; actual native report content on the requested reread supplies the result.
 Observation starts no IO, cannot retire newer loads, and grants no Stop proof.
+For an entry still loading, a later parent-scoped positive report retires its
+installation before stale raw history can warm the cache. Existing waiters are
+not cancelled; replacement entries and older-request ordering remain independent.
+Unknown launcher scope is denial only, never a report/result grant.
 Earlier terminal proofs remain exact-replay identities after later terminals,
 within the existing serialized execution-ledger budget. Retirement preserves
 only their negative continuity, not occurrence/ownership/Stop bindings. The
@@ -47,6 +51,9 @@ the returned transcript before positive outcomes are folded. Prefixes remain
 usable; unknown/conflicting positions abstain without replacing an owned view.
 Provisional denial is rechecked after the owned visibility lookup and before its
 slot is replaced; a stage arriving during that await still fences the old idle.
+After capture, overlap ordering uses the actual owned lookup request start,
+carried with its native observation. Sampling the later global clock would lose
+stages requested during that await but delivered only after capture.
 Session-record reads carry only their explicit consuming fold as an overlapping
 owner. Ordinary getSession/list/create reads cannot claim all collecting folds
 and revoke a page that consumed a newer boundary. Genuine later nonoverlapping

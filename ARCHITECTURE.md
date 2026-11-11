@@ -1266,6 +1266,12 @@ actual stored transcript retire only that entry, without IO or report authority.
 Prelaunch/unrelated reports and exact reports already in the transcript do not
 retire it; requests begun before a newer load cannot claim that load. Overflow
 abstains conservatively within the existing native fact budget.
+While the first parent load is pending, launcher scope is unknown. A positive
+native report requested after that entry registered retires only its installation
+slot, preserving existing waiters and newer replacement loads. No report facts
+or payload are retained beyond the bounded native observation; the subsequent
+requested read obtains actual storage. Prelaunch positives can conservatively
+retire such an unknown load, but cannot create a failure outcome.
 Exact terminal replay identities, like starts, remain in the same serialized,
 aggregate-budgeted execution ledger across negative-only retirement. Up to 128
 distinct terminal identities per child are recognized; overflow sets sticky
@@ -1293,6 +1299,10 @@ the check runs again after the owned visibility await, before provisional eviden
 is replaced, so a clear reply cannot launder a stage observed during that await.
 known retained prefixes survive, unknown or conflicting boundaries abstain.
 An intervening owned visibility read shields its newer authority from old replies.
+The captured child cutoff is the actual owned native request's start, carried by
+its lookup observation, not a global clock sampled after awaiting the response.
+A stage requested during that await remains deny-only after capture; a request
+older than the owned lookup cannot poison its newer authority.
 Before any dependent parent read exists, transcript cache entries own a
 constant-size native visibility observation from load registration, before a
 value exists. The metadata transfers to retained values and retires with the

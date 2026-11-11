@@ -59,7 +59,7 @@ type OwnershipCheck = { child: string; parent: string; changed: boolean; contrad
 type ControlBasis = { basis: WorkerOccurrenceEvidence; revision: number };
 type BackgroundSnapshot = { tasks: import("../../types").BackgroundTaskItem[]; occurrences: ReadonlyMap<string, WorkerOccurrenceEvidence>; controls: ReadonlyMap<string, ControlBasis>; activityContradicted: ReadonlySet<string>; activityPublished: Set<string>; parentChanges: ReadonlySet<string>; childChanges: ReadonlySet<string> };
 type BackgroundRead = Promise<BackgroundSnapshot> & { invalidated: boolean; sources: WorkerRecoverySource[]; observers: Set<(source: WorkerRecoverySource) => void> };
-type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean };
+type SessionLookup = { info: SessionRecord | null; foreignWorkspace: boolean; recordRead?: SessionRecordRead };
 type WorkerAssociationState = "pending" | "retained" | "confirmed" | "contradicted" | "foreign-parent" | "unknown";
 type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; revision: number; states: Map<string, WorkerAssociationState>; historyChildren?: Map<string, number>; historyParentLaunches?: Map<string, readonly LauncherEvidence[]>; historyParentRead?: { started: number; completed: number; launches: readonly LauncherEvidence[]; reports: ReadonlyMap<string, string>; pending?: true; overflow?: true }; historyParentChanges: Set<string>; historyChildChanges: Set<string>; historyPositiveChildren?: Set<string>; historyActivityChildren?: Map<string, WorkerOccurrenceEvidence | undefined>; historyActivityContradicted: Set<string>; historyPublishedActivity: Set<string>; historyOutcomeMessages?: Map<string, Set<string>>; historyMessageChanges?: Map<string, Set<string>>; historyBoundaries?: Map<string, { boundary: string | null; completed: number }>; historyObservations?: Map<string, { started: number; completed: number; signature: string; pending?: true }>; associationObservations?: Map<string, { revision: number; generation: number }>; pendingFingerprint?: string; pendingIds?: readonly string[]; pendingContent?: ReadonlyMap<string, string>;
   pendingParentLaunches?: LauncherEvidence[];
@@ -627,8 +627,10 @@ export class OpenCodeV2Provider implements ChatProvider {
               // Older overlapping requests cannot poison this owned view.
               // Later intermediate stages can veto its captured publication.
               const visibility = source.historyChildVisibility ??= new Map();
+              const recordRead = lookup.recordRead;
+              if (!recordRead?.owners.includes(source)) throw new Error("Child outcome visibility has no owned native request");
               const registration: NonNullable<ReturnType<typeof visibility.get>> = {
-                registered: visibility.get(child)?.registered ?? this.sessionRecordClock, ownedAfter: this.sessionRecordClock, ownedBaseline: true };
+                registered: visibility.get(child)?.registered ?? recordRead.started, ownedAfter: recordRead.started, ownedBaseline: true };
               visibility.set(child, registration);
               const lastOutcome = complete.findLastIndex(message => message.type === "idle");
               const suffix = complete.slice(lastOutcome + 1).map(messageIdentity);
@@ -1922,6 +1924,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     const version = this.streamConnected ? String(this.streamGeneration) : undefined;
     const entry = this.historyReuse.peekObservation(parent, version);
     const complete = this.historyReuse.peek(parent, version);
+    if (entry && !complete && observation.started > entry.pendingAfter && (observation.reports.length || observation.overflow)) {
+      // Launcher scope is not available until this load returns. Positive
+      // parent-scoped facts deny installation of its old raw response; they
+      // neither cancel current waiters nor grant a report or start more IO.
+      this.historyReuse.invalidate(parent);
+    }
     if (entry && complete && observation.started > entry.pendingAfter && (observation.reports.length || observation.overflow)) {
       const launches = new Map<string, LauncherEvidence[]>();
       const reports: PendingOutcomeRead["reports"][number][] = [];
@@ -3301,7 +3309,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         }
       }
     }
-    return { info: this.owns(info) ? info : null, foreignWorkspace };
+    return { info: this.owns(info) ? info : null, foreignWorkspace, recordRead: observation };
   }
 
   private owns(info: unknown): boolean {
