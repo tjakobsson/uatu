@@ -3312,7 +3312,12 @@ export class OpenCodeV2Provider implements ChatProvider {
                 && observation.started > childVisibility.registered && !childVisibility.ownedBaseline && boundary !== null && previous.boundary === null;
               const lateIntermediateStage: boolean = childVisibility !== undefined
                 && childVisibility.ownedAfter !== undefined && observation.started > (childVisibility.transcriptAfter ?? childVisibility.ownedAfter)
-                && (observation.started > childVisibility.ownedAfter || boundary !== childVisibility.initialBoundary)
+                // Matching a boundary ID is not replay identity: a distinct
+                // later request can observe a new occurrence of that stage.
+                // Only the known initial observation's order is compatible;
+                // the consumed-load cutoff still excludes genuinely old reads.
+                && (observation.started > childVisibility.ownedAfter || boundary !== childVisibility.initialBoundary
+                  || !childVisibility.initialOrder || observation.started > childVisibility.initialOrder.started)
                 && boundary !== null && previous.boundary === null;
               if (provisionalStage && childVisibility) {
                 childVisibility.pendingBoundary = childVisibility.pendingBoundary === undefined || childVisibility.pendingBoundary === boundary ? boundary : null;

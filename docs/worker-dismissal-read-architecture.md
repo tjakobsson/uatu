@@ -62,6 +62,10 @@ The consumed transcript's actual load cutoff is retained separately: a stage
 requested during that load can still deny publication after lookup and capture.
 Older-than-load requests and compatible initially staged records do not become
 new transitions merely because their responses arrive late.
+The compatible initial-stage exemption includes native request provenance, not
+just a matching boundary ID. Re-staging that ID after a restore is a distinct
+observation when its request is newer than the consumed raw load; it still fences
+captured stale outcomes, without granting authority or initiating IO.
 Initial verification stages qualify the consumed raw transcript too. When an
 initial stage hid an idle and later owned visibility clears/changes, the requested
 fold revalidates raw child history and then owned visibility, unless a prior clear

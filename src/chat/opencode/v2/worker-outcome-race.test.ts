@@ -1392,8 +1392,19 @@ test(`scheduler inferred outcome retains native parent visibility through public
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
   const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  const nativeEvents = provider.events.bind(provider);
+  let connectedHandled!: () => void;
+  const connected = new Promise<void>(resolve => { connectedHandled = resolve; });
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) {
+    yield event;
+    // Resume only after the adapter's handshake/startup history scan. No
+    // subscribed parent may lend a collecting auxiliary read to this test.
+    if (event.eventType === "server.connected") connectedHandled();
+  } };
   const guards: import("../../provider").WorkerSourceGuard[] = [];
+  let parentRead = 0;
   provider.reconcileBackgroundTasks = async (id, options) => {
+    if (id === parent) parentRead++;
     const tasks = await nativeRecovery(id, { ...options, onSource: source => {
       if (id === parent) guards.push(source.workerSource.retain(abort.signal));
       options?.onSource?.({ ...source, workerSource: { ...source.workerSource, retain: signal => {
@@ -1416,11 +1427,11 @@ test(`scheduler inferred outcome retains native parent visibility through public
       await provider.listMessages(parent, { limit: 100, signal: abort.signal });
       older = olderRead.run(true, () => provider.getSession(parent!)); void older.catch(() => undefined); await olderPending;
     }
+    void adapter.startEventPump().catch(() => undefined); await connected;
     const subscription = await adapter.subscribe(parent, { signal: abort.signal });
     publication = (async () => {
       for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return;
     })();
-    void adapter.startEventPump().catch(() => undefined);
     await returned; await interactions; expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (change === "stale-response") { releaseOlder(); await older; }
     const lateCaptured = change.startsWith("captured-"), hidden = change === "hidden" || change === "captured-reverse" || change === "captured-newer-source";
@@ -1457,6 +1468,7 @@ test(`scheduler inferred outcome retains native parent visibility through public
     if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true); expect(row).toBeUndefined(); }
     else expect(row).toMatchObject({ status: "completed" });
     expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    if (change === "captured-retained-prefix") expect(parentRead).toBe(1);
     if (lateCaptured) {
       const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
       if (hidden) {
@@ -1566,6 +1578,80 @@ test(`scheduler captured child outcome observes late staged native record (${cha
     }
     if (change === "newer-source" || change === "owned-overlap-newer-source") { expect(newerGuards.length).toBeGreaterThan(0); expect(newerGuards.every(guard => guard.isCurrent())).toBe(true); }
   } finally { releaseOwn(); releaseChild(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
+for (const change of ["hidden", "prefix", "unchanged", "other-child", "newer-source"] as const)
+test(`repeated child stage remains distinct during raw revalidation (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, initialStage = true, removed = false, childReads = 0, captured = false;
+  let rawEntered!: () => void, releaseRaw!: () => void, oldEntered!: () => void, releaseOld!: () => void, folded!: () => void, releaseInteractions!: () => void, connectedHandled!: () => void;
+  const rawPending = new Promise<void>(resolve => { rawEntered = resolve; }), rawHeld = new Promise<void>(resolve => { releaseRaw = resolve; });
+  const oldPending = new Promise<void>(resolve => { oldEntered = resolve; }), oldHeld = new Promise<void>(resolve => { releaseOld = resolve; });
+  const returned = new Promise<void>(resolve => { folded = resolve; }), interactionsHeld = new Promise<void>(resolve => { releaseInteractions = resolve; });
+  const connected = new Promise<void>(resolve => { connectedHandled = resolve; });
+  const oldRead = new AsyncLocalStorage<boolean>();
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/permission/request" || route === "/api/form") await interactionsHeld;
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      const data = [...(!removed ? [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : []),
+        { id: "suffix", type: "user", text: "Independent suffix", time: { created: 30 } }];
+      childReads++;
+      initialStage = false; // Restore A; this legitimately retains the idle.
+      if (childReads === 2) { rawEntered(); await rawHeld; }
+      return Response.json({ data, cursor: {} });
+    }
+    if (route === `/api/session/${child}` || route === `/api/session/${other}`) {
+      const body = await response.json();
+      if (initialStage || oldRead.getStore() && change !== "unchanged") body.data.revert = { messageID: oldRead.getStore() && change === "prefix" ? "suffix" : "idle" };
+      if (oldRead.getStore()) { oldEntered(); await oldHeld; }
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), nativeEvents = provider.events.bind(provider), abort = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [], newer: import("../../provider").WorkerSourceGuard[] = [];
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { yield event; if (event.eventType === "server.connected") connectedHandled(); } };
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => { options?.onSource?.(source); if (id === parent && !captured) guards.push(source.workerSource.retain(abort.signal)); } });
+    if (id === parent && !captured) { captured = true; expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" })); folded(); }
+    return tasks;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let old: ReturnType<typeof provider.getSession> | undefined, publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  try {
+    parent = (await provider.createSession("Repeated stage during requested raw revalidation")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    other = (await provider.createSession("Unrelated stage owner")).id;
+    void adapter.startEventPump().catch(() => undefined); await connected;
+    const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+    publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
+      throw new Error("No target worker publication"); })(); void publication.catch(() => undefined);
+    await rawPending; expect(childReads).toBe(2);
+    const subject = change === "other-child" ? other : child, hidden = change === "hidden" || change === "newer-source";
+    old = oldRead.run(true, () => provider.getSession(subject!)); void old.catch(() => undefined); await oldPending;
+    removed = hidden; await provider.getSession(subject); // Second stage's committed successor returns first.
+    expect(childReads).toBe(2); releaseRaw(); await returned;
+    expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (change === "newer-source") await nativeRecovery(parent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) });
+    releaseOld(); await old;
+    if (change !== "newer-source") expect(childReads).toBe(2); // Native observation starts no revalidation IO.
+    releaseInteractions(); const row = await publication;
+    if (hidden) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
+    expect(row.status).toBe(hidden ? "running" : "completed");
+    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).toBe(false); expect(workerCanStop(row)).toBe(false); expect(row.activity?.endedAt).toBeUndefined(); expect(row.resultId).toBeUndefined(); expect(row.terminalReportedAt).toBeUndefined(); }
+    const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(fresh?.status).toBe(hidden ? "running" : "completed");
+    if (hidden) { expect(fresh?.activity?.kind).toBe("working"); const evidence = await adapter.workerEvidence(parent); expect(evidence.entries.find(entry => entry.executionId === row.activity?.executionId)?.dismissible).toBe(false); }
+    if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
+  } finally { releaseOld(); releaseRaw(); releaseInteractions(); abort.abort(); await old?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
 for (const read of ["history", "automatic-recovery"] as const)

@@ -1310,6 +1310,10 @@ older than the actual consumed transcript load cannot poison its newer authority
 That load's native-record cutoff survives shared/cache reuse separately from
 the later owned lookup. Candidate verification retains its initial boundary,
 so a compatible older stage is not mistaken for a new transition.
+Compatibility is scoped to the known initial native observation's request order,
+not merely its boundary ID. A later request can observe the same boundary staged
+again after a restore; when newer than the consumed raw load it still supplies
+deny-only counterproof through capture, without replacing the newer clear baseline.
 An initial verified stage that hides idle evidence also qualifies the first raw
 child load. If its later owned record clears/changes, that requested fold
 revalidates child raw history unless the load already followed an observed clear,
