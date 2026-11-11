@@ -262,6 +262,10 @@ is charged against the existing byte cap with sticky deny-only overflow.
 An older snapshot envelope cannot discard newer merged facts: parent/retry
 boundary filtering checks per-fact observation and `overflowObserved` separately.
 This also applies while the first parent transcript and its baseline are pending.
+An inventory consumer's provisional baseline merges older-arriving positive
+observations as well: older than a newer unrelated request does not mean older
+than the owned empty inbox baseline. Per-fact ordering still discards genuinely
+stale facts/overflow, and exact digest coalescing plus the existing caps bound it.
 
 Registered pending child-history dependencies retain native staged/cleared
 boundary changes before an idle is classified as a positive outcome. Existing
@@ -269,6 +273,12 @@ scoped counterproof fences that later outcome without granting ownership or
 Stop authority or invalidating outcome-free/control reads solely for collection.
 A genuinely newer boundary transition invalidates obsolete child-history reuse;
 ordered native reads, not stale ownerless response arrival, govern that decision.
+Warm child transcripts need no parent dependency to observe native visibility.
+Each qualified cache entry carries one weak, constant-size boundary observation
+beside its existing read order. A newer changed boundary invalidates reuse;
+unchanged, unrelated and stale-overlapping records do not discard a newer valid
+entry. No additional retained session map, child read or ownership/Stop proof is
+introduced. Existing cache eviction, generation and disposal limits still apply.
 
 Reconnect does not erase processed execution counterproof. Subscription cleanup
 strips the existing accounted worker ledger to scoped ends, start vetoes,

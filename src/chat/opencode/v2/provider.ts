@@ -115,7 +115,8 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly backgroundVisibilityReads = new Set<{ sessionId: string; invalidated: boolean }>();
   private parentHistoryReadClock = 0;
   private sessionRecordClock = 0;
-  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number }>();
+  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number;
+    visibility?: { boundary: string | null; completed: number } }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
   private readonly historyGuardScopes = new WeakMap<WorkerSourceGuard, { source: HistoryWorkerSource; view: (covered: ReadonlySet<string>) => WorkerSourceGuard }>();
   // Read-side observations are not live-event admission or Stop evidence.
@@ -1881,7 +1882,11 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (source.phase === "collecting" && source !== owner && (!previous || previous.provisional)) {
         // One bounded deny-only snapshot for a pending consumer, including an
         // empty inbox. It grants no child read, result admission or Stop proof.
-        if (!previous || incoming.started > previous.started) source.historyPendingRead = {
+        // Positives can arrive out of request order. Merge their own observed
+        // clocks (and overflow) before comparing against the owned baseline;
+        // an older envelope is not permission to discard a newer-than-baseline
+        // fact. Empty/stale snapshots cannot renew or erase retained facts.
+        source.historyPendingRead = {
           ...(previous ? this.mergePendingOutcome(previous, incoming) : incoming), provisional: true };
         continue;
       }
@@ -3103,6 +3108,18 @@ export class OpenCodeV2Provider implements ChatProvider {
     const id = stringValue(info.id), actualParent = stringValue(info.parentID);
     const subject = requestedId ?? (id !== undefined && id.length <= 512 && !/[\u0000-\u001f\u007f]/.test(id) ? id : undefined);
     if (subject !== undefined) {
+      if (this.owns(info) && id === subject) {
+        // Visibility belongs to the qualified warm transcript entry, even
+        // before any parent recovery has registered a child dependency. This
+        // weak metadata cannot retain an evicted entry or introduce new keys.
+        const cached = this.historyReuse.peek(subject, this.streamConnected ? String(this.streamGeneration) : undefined);
+        const order = cached && this.historyReadOrders.get(cached), previous = order?.visibility;
+        const boundary = stringValue(asRecord(info.revert).messageID) ?? null;
+        if (order && (!previous || observation.started > previous.completed)) {
+          if (previous && previous.boundary !== boundary) this.historyReuse.invalidate(subject);
+          else order.visibility = { boundary, completed };
+        }
+      }
       if (foreignWorkspace || requestedId !== undefined && id !== undefined && id !== requestedId) this.revokeKnownSessionOwnership(subject);
       else if (this.owns(info) && id === subject && actualParent) this.revokeKnownSessionOwnership(subject, actualParent);
       // Every authoritative record path (including ordinary getSession and

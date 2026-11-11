@@ -1237,6 +1237,12 @@ overflow stays deny-only and cannot grant report content or control authority.
 Filtering across a parent-read or retry boundary applies to each fact and the
 overflow observation, not the merged snapshot's envelope start: an older reply
 arriving last cannot discard newer counterproof already retained in that slot.
+Provisional inventory baselines likewise merge positive facts before applying
+owned-baseline ordering, even when an older request arrives after a newer
+unrelated response. Both observations can be newer than the consuming empty
+inbox request. The existing compact fact/byte caps and sticky overflow bound
+this merge; stale facts are filtered by their own native request start, not
+renewed or dropped according to the provisional envelope's arrival order.
 
 Native child revert-boundary observations begin when the read registers its
 pending child-history dependency, before the response classifies positive
@@ -1246,6 +1252,13 @@ reads do not acquire an outcome fence merely by collecting that dependency.
 A newer boundary change also invalidates child-history reuse so a retry cannot
 consume the obsolete held response. Overlapping older ownerless lookups cannot
 replace the newer owned boundary baseline or revoke it on late arrival.
+Before any dependent parent read exists, warm transcript entries also own a
+constant-size native visibility observation in their existing weak read-order
+metadata. A newer staged/cleared boundary transition invalidates that entry;
+unchanged or unrelated observations preserve reuse, and overlapping older
+records cannot replace a newer baseline. The weak metadata adds no retained
+session keys, global visibility map, ownership or read phase. Eviction,
+generation invalidation and disposal release the cache entry as before.
 
 Stream retirement strips the existing worker ledger down to negative execution
 continuity instead of discarding it. Scoped end boundaries, start-clock vetoes,
