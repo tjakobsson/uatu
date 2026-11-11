@@ -50,9 +50,12 @@ The Files pane SHALL provide a filename/path query that works in All, Recent, an
 File additions, writes, renames, and deletions SHALL update Recent from existing indexed state while preserving activation, reading position, and deliberate selection.
 
 #### Scenario: Structural updates respect an activation in progress
-- **WHEN** a structural Recent update arrives during a pointer/touch activation
-- **THEN** the update MUST NOT cause an activation begun on one file to activate another file
-- **AND** structural updates SHALL wait until the activation settles, then preserve the surviving scroll anchor and file-keyed keyboard focus
+- **WHEN** a structural Recent update arrives, with or without an activation in progress
+- **THEN** it SHALL wait for any in-progress activation to settle, then preserve the surviving scroll anchor and file-keyed keyboard focus
+
+#### Scenario: Any Recent update preserves an activation's file identity
+- **WHEN** any Recent update arrives during a pointer/touch activation
+- **THEN** it MUST NOT cause an activation begun on one file to activate another file
 
 #### Scenario: Updates and view switches do not navigate for the reader
 - **WHEN** Recent updates or the user switches Files views

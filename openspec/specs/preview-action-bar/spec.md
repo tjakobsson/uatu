@@ -63,11 +63,14 @@ existing clipboard helper.
 
 Below the narrow-width breakpoint, the preview header SHALL stack its heading above a wrapping toolbar independently of pointer type. Controls MUST stay visible and tappable without crushing the title or overflowing horizontally, while sticky positioning and backdrop treatment remain unchanged.
 
-#### Scenario: Display the preview heading and controls on a portrait phone
-- **WHEN** viewport width falls below the breakpoint chosen to distinguish portrait and landscape phones
-- **THEN** the toolbar occupies its own wrapping row and preserves access to every control
+#### Scenario: Stack at a width-based breakpoint without losing controls
+- **WHEN** the viewport is below the breakpoint chosen so portrait phones stack but landscape phones do not, regardless of pointer type
+- **THEN** the heading appears first in a column, followed by a separate wrapping toolbar row containing view segments, wrap control, and action icons
+- **AND** every control MUST stay visible and tappable, the toolbar MUST NOT crush or clip the title, and the header MUST NOT overflow horizontally
 
-Below a narrow-width breakpoint (chosen so a portrait phone stacks and a landscape phone does not, independent of pointer type), the preview header SHALL lay out as a column — document heading first, then the toolbar (view segments, wrap control, action icons) on its own row — instead of a single flex row. The toolbar SHALL be allowed to wrap. Every control MUST remain visible and tappable, the document title MUST NOT be crushed or clipped by the toolbar, and the header MUST NOT overflow the viewport horizontally. Sticky-header positioning and the existing header backdrop treatment SHALL be unchanged.
+#### Scenario: Preserve header treatment while changing row layout
+- **WHEN** viewport width changes the preview-header layout
+- **THEN** sticky-header positioning and the existing backdrop treatment remain unchanged
 
 #### Scenario: Portrait phone shows title and controls on separate rows
 - **WHEN** the preview header renders at a portrait-phone width with a document active

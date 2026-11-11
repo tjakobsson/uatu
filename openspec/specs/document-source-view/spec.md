@@ -108,7 +108,11 @@ Single Source view and split Source panes SHALL display the active document's ve
 #### Scenario: Wrap on preserves logical line numbering
 - **WHEN** global Wrap is on
 - **THEN** long lines SHALL soft-wrap within available width, with each number aligned to its logical line's start, unnumbered continuation rows, and the next number aligned to the next logical line's start
-- **AND** the gutter MUST NOT renumber continuations or desynchronize from code
+- **AND** the gutter MUST NOT renumber wrapped continuation rows
+
+#### Scenario: Source gutters remain synchronized in either Wrap mode
+- **WHEN** Source is displayed with Wrap on or off
+- **THEN** the gutter MUST NOT desynchronize from the code
 
 #### Scenario: Source text is selected or copied with either Wrap setting
 - **WHEN** the user selects or copies wrapped or unwrapped Source
@@ -243,11 +247,11 @@ Side-by-side and stacked layouts SHALL simultaneously render the active document
 
 #### Scenario: A split is oriented and resized
 - **WHEN** side-by-side is active
-- **THEN** Source SHALL be left and Rendered right, with a vertical resizer adjusting horizontal allocation
+- **THEN** Source is left and Rendered right, with a vertical resizer adjusting horizontal allocation
 
 #### Scenario: A stacked split is oriented and resized
 - **WHEN** stacked is active
-- **THEN** Source SHALL be above Rendered with a horizontal resizer adjusting vertical allocation
+- **THEN** Source is above Rendered with a horizontal resizer adjusting vertical allocation
 
 #### Scenario: Either split orientation enforces a minimum pane size
 - **WHEN** a pane is dragged in either split orientation

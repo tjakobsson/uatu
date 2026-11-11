@@ -86,7 +86,7 @@ For `unsupported-no-git`, `unchanged`, or `binary`, Diff SHALL replace diff cont
 
 ### Requirement: Diff view falls back to a lightweight render for very large diffs
 
-Text patches exceeding `DIFF_MAX_BYTES` (default 256 KB) or `DIFF_MAX_LINES` (default 5 000 added plus deleted lines) SHALL use a lightweight escaped-HTML `<pre>` render instead of syntax highlighting or `@pierre/diffs`.
+Text patches exceeding `DIFF_MAX_BYTES` (default 256 KB) or `DIFF_MAX_LINES` (default 5 000 added plus deleted lines) SHALL use a lightweight escaped-HTML `<pre>` render instead of syntax highlighting or `@pierre/diffs`. Both cutoffs SHALL be exported module-level Diff constants, tunable and overridable from tests.
 
 #### Scenario: Oversized patches retain classified lines and explain reduced rendering
 - **WHEN** a patch with `kind: "text"` exceeds either configured patch cutoff
@@ -118,12 +118,12 @@ Text patches exceeding `DIFF_MAX_BYTES` (default 256 KB) or `DIFF_MAX_LINES` (de
 
 ### Requirement: A single Shiki highlighter is cached and reused across diff renders
 
-Diff SHALL initialize at most one Shiki highlighter per browser session and reuse it for all `@pierre/diffs` renders. Creation SHALL be lazy or explicitly prewarmed, never triggered by fallback render paths.
+Diff SHALL initialize at most one Shiki highlighter per browser session and reuse it for all `@pierre/diffs` renders. Creation SHALL be lazy or explicitly prewarmed when Diff is plausibly imminent, never triggered by fallback render paths.
 
 #### Scenario: Lazy highlighting reuses its instance and loaded grammars
 - **WHEN** the first Pierre render needs highlighting or prewarm finds Diff plausibly imminent
 - **THEN** the highlighter SHALL be created lazily or by that prewarm, never by fallback rendering itself
-- **WHEN** view-mode toggles, file switches, or in-place refreshes render another diff
+- **WHEN** any subsequent diff renders, including through view-mode toggles, file switches, or in-place refreshes
 - **THEN** they MUST NOT recreate the highlighter or reload grammars already cached
 - **AND** the cached instance MAY load additional grammars on demand for a new language
 
@@ -151,8 +151,9 @@ Diff SHALL initialize at most one Shiki highlighter per browser session and reus
 `@pierre/diffs` SHALL load only through dynamic `import()`, not eager initial-bundle imports, and SHALL be cached for the session. Only a Pierre render or explicit imminent-use prewarm SHALL initiate loading.
 
 #### Scenario: Pierre loading follows actual need or explicit prewarm
-- **WHEN** a first Pierre render needs output, a reachable Git-workspace Diff session reaches post-boot browser idle, or Diff is hovered/focused
-- **THEN** the import SHALL be triggered by that first render or explicit plausibly-imminent prewarm, and its resolved module SHALL be reused for the session without re-import
+- **WHEN** a first Pierre render needs output or an explicit prewarm is invoked because Diff rendering is plausibly imminent
+- **THEN** Pierre SHALL load through dynamic `import()` and its resolved module SHALL be reused for the session without re-import
+- **AND** explicit prewarm may occur at post-boot browser idle where Diff is reachable in a Git workspace, or on hover/focus of the Diff segment
 - **WHEN** `unsupported-no-git`, `unchanged`, `binary`, or lightweight large-diff fallback renders
 - **THEN** it MUST NOT itself trigger import, though independent prewarm MAY already have loaded Pierre
 
@@ -295,7 +296,7 @@ An uncached Diff request SHALL immediately mark the Diff segment busy and show d
 
 ### Requirement: Diff view skips grammar highlighting above a size threshold
 
-Diff SHALL export test-overridable `DIFF_MAX_HIGHLIGHT_BYTES` below the existing Pierre cutoffs. Text diffs meeting that threshold but below Pierre cutoffs SHALL use plaintext Pierre rendering with preserved diff interactions and a size explanation.
+Diff SHALL export the test-overridable module-level byte constant `DIFF_MAX_HIGHLIGHT_BYTES` below the existing Pierre cutoffs. Text diffs meeting that threshold but below Pierre cutoffs SHALL use plaintext Pierre rendering with preserved diff interactions and a size explanation.
 
 #### Scenario: Highlight-size calculation preserves Pierre interactions without tokenization
 - **WHEN** patch bytes plus any blob sizes meet or exceed `DIFF_MAX_HIGHLIGHT_BYTES` but remain under `DIFF_MAX_BYTES` / `DIFF_MAX_LINES`

@@ -151,9 +151,9 @@ Claude Code and OpenCode SHALL share responsiveness and loading feedback. Return
 
 Conversation opening, older-history loading, and read retries SHALL acknowledge immediately, expose accessible delayed progress, and provide finite documented deadlines and actionable read recovery. Feedback SHALL preserve retained content, reading position, and unrelated errors; retry MUST NOT repeat mutations.
 
-#### Scenario: Pending reads expose stable accessible progress until interactive completion
-- **WHEN** opening, older-history loading, or read retry remains pending after 200 milliseconds
-- **THEN** an accessible indication SHALL name the operation and remain at least 300 milliseconds once shown unless its surface is dismissed
+#### Scenario: Reads expose progress through interactive completion
+- **WHEN** a conversation opening, older-history loading or read retry starts, remains pending or completes
+- **THEN** the action is acknowledged immediately, and if still pending after 200 milliseconds an accessible indication names the operation and remains at least 300 milliseconds once shown unless its surface is dismissed
 - **AND** feedback MUST NOT shift reading position, erase retained content during refresh, or clear unrelated agent/connection errors
 - **AND** reduced-motion users SHALL get the same state information without continuous animation
 - **AND** completion SHALL mean content is available for interaction, not just received bytes
@@ -316,7 +316,7 @@ A running agent SHALL report usable-login availability independently of startup 
 
 ### Requirement: Internal worker evidence read excludes transcript payloads
 
-The workspace child SHALL expose a compact versioned authoritative worker-evidence read for one agent-qualified conversation through existing authenticated internal routing. It SHALL exclude transcript payloads and account dismissal marks and fail rather than return unsafe evidence; the Hub SHALL validate results before use.
+The workspace child SHALL expose a compact versioned authoritative worker-evidence read for one agent-qualified conversation through existing authenticated internal routing. It SHALL NOT expose ordinary conversation content or account dismissal marks and SHALL fail rather than return unsafe evidence; the Hub SHALL validate results before use.
 
 #### Scenario: Compact worker proof requires complete validated source coverage
 - **WHEN** internal worker evidence is read

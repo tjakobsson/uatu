@@ -44,6 +44,10 @@ The system SHALL implement exactly four behavioral rules linking Follow to selec
 - **AND** opening a folder, collapsing an unrelated folder, moving focus without ancestor collapse, or collapsing without an active document SHALL leave the document and Follow unchanged
 - **AND** both Rule A outcomes MUST fire only for genuine pointer, touch, or supported keyboard activation/collapse; programmatic or library-driven callbacks during mount, refresh, reset, or filter reconciliation MUST NOT trigger them (see "Tree-mount user-click guard" below)
 
+#### Scenario: Programmatic callbacks never impersonate Rule A navigation
+- **WHEN** mount, refresh, reset, or filter reconciliation produces a programmatic or library-driven tree callback without a genuine user activation or collapse
+- **THEN** it MUST NOT trigger either Rule A outcome
+
 #### Scenario: Rule B catches up when the Follow chip enables Follow
 - **WHEN** the user clicks the Follow chip
 - **THEN** `followEnabled` MUST be flipped
@@ -63,6 +67,11 @@ The system SHALL implement exactly four behavioral rules linking Follow to selec
 - **WHEN** the image is embedded by the shown document's rendered content
 - **THEN** its change MUST NOT move selection and the embedded image SHALL refresh in place instead
 - **AND** embedded images SHALL be determined from rendered content, not the current display, so the exception holds in Rendered, Source, Diff, and split layouts
+
+#### Scenario: Embedding decisions use rendered document content in every layout
+- **GIVEN** Follow is on
+- **WHEN** the shown document's embedded images must be determined for a Follow decision
+- **THEN** they SHALL be determined from the document's rendered content, not the current display, whether shown Rendered, Source, Diff, or split
 
 #### Scenario: Rule C defers unresolved image decisions without overriding newer intent
 - **GIVEN** Follow is on and the shown document's current-revision embedded images are not yet known
@@ -328,7 +337,7 @@ With Follow off, a selected file that disappears from the allowed index SHALL re
 
 #### Scenario: Retained unavailable destinations recover only within current selection and exposure rules
 - **GIVEN** Follow is off and the selected destination becomes unavailable
-- **WHEN** the index empties, classification changes, or the path later reappears
+- **WHEN** the unavailable destination is retained, refreshed, reclassified, or becomes available again
 - **THEN** the destination SHALL survive an empty index and classification change
 - **AND** preview SHALL recover automatically on same-path return only while that destination remains selected
 - **AND** removal by ignore or exposure rules MUST NOT be bypassed to read the retained destination
@@ -412,8 +421,16 @@ For each applied live file batch, Follow SHALL select the last observed eligible
 - **WHEN** a batch updates the currently selected destination
 - **THEN** with Follow off the destination SHALL remain unchanged and reload current content even if another path is the Follow candidate
 - **AND** with Follow on and the target already selected its update SHALL still reload current content
+
+#### Scenario: Every applied batch invalidates affected current representations
+- **WHEN** a live file batch is applied, whether or not it updates the selected destination
+- **THEN** Source, Rendered, split, Diff, and image presentations SHALL invalidate affected representations, while historical commit previews SHALL remain historical
 - **AND** no refresh SHALL reuse a preview cache invalidated by the batch
-- **AND** Source, Rendered, split, Diff, and image presentations SHALL invalidate affected representations, while historical commit previews SHALL remain historical
+
+#### Scenario: Follow-off selection survives a batch affecting only other paths
+- **GIVEN** Follow is off
+- **WHEN** any live file batch is applied, including one that does not update the selected destination
+- **THEN** the selected destination SHALL remain unchanged
 
 #### Scenario: A binary event follows a text edit
 - **WHEN** Follow is on and a batch contains a text edit followed by an edit to a binary the preview cannot show

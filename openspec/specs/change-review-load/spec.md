@@ -57,7 +57,8 @@ The system SHALL provide a bounded recent commit log per detected Git repository
 
 #### Scenario: Changed-file categories are assigned and consumed
 - **WHEN** a changed-files list is emitted
-- **THEN** files from `git ls-files --others --exclude-standard` MUST NOT use `"A"`, and tracked-added files MUST NOT use `"M"` or `"?"`
+- **THEN** supported first-character values MUST be `"?"` for untracked, `"A"` for tracked-commit or staged additions, `"M"` for in-place modifications, `"D"` for deletions, and `"R"` for renames
+- **AND** files from `git ls-files --others --exclude-standard` MUST NOT use `"A"`, and tracked-added files MUST NOT use `"M"` or `"?"`
 - **AND** the contributing file set MUST NOT change because of this requirement; only category labels change
 - **AND** downstream consumers MUST be able to identify all five categories by case-matching the first character alone without consulting another field
 
@@ -102,9 +103,9 @@ The system SHALL provide a bounded recent commit log per detected Git repository
 `RepositorySnapshot.gitIgnoredFiles` SHALL be a string array of on-disk watched-root files matched by standard Git ignore rules (`.gitignore`, `core.excludesFile`, `.git/info/exclude`) and present in uatu's tree path set. The server MUST intersect with known tree paths, excluding filtered large hierarchies such as `node_modules`. Changed-file separation and annotation SHALL follow the rules below.
 
 #### Scenario: An ignored known path reaches repository consumers
-- **WHEN** a path qualifies for `RepositorySnapshot.gitIgnoredFiles`
+- **WHEN** a file is Git-ignored, whether or not it appears in the tree's known paths
 - **THEN** it MUST NOT appear in `changedFiles`, which describes Git-detected changes rather than ignored files
-- **AND** consumers MAY annotate it distinctly; browser UIs' canonical mapping SHALL be `git status "!"` to annotation status `"ignored"`
+- **AND** consumers MAY annotate exposed ignored paths distinctly; browser UIs' canonical mapping is `git status "!"` to annotation status `"ignored"`
 
 #### Scenario: A file matched by `.gitignore` is exposed on `gitIgnoredFiles`
 
@@ -122,12 +123,16 @@ The system SHALL provide a bounded recent commit log per detected Git repository
 
 ### Requirement: Select the compare target
 
-Change Overview SHALL expose a user-selectable compare target: `base` or `last-commit` with existing diff meanings. It SHALL apply uniformly to all repositories in that client's view, persist as personal workspace state, and default to `base` without a saved value. The control's accessible name SHALL describe comparison ("Compare against"), not review burden. Changes SHALL follow the isolation rules below.
+Change Overview SHALL expose a user-selectable compare target. Supported targets MUST be `base` and `last-commit` with existing diff meanings. The target SHALL apply uniformly to all repositories in that client's view, persist as personal workspace state, and default to `base` without a saved value. The control's accessible name SHALL describe comparison ("Compare against"), not review burden. Changes SHALL follow the isolation rules below.
 
 #### Scenario: A client changes its compare target
 - **WHEN** a user chooses a target
 - **THEN** only that client's changed-files context and diff requests MUST recompute/refresh without restarting the watch session, changing `.uatu.json`, altering resolved base ref, or forcing another client's target
 - **AND** the watch child SHALL accept target as request/subscription context rather than a mutable session-global selection
+
+#### Scenario: Initial compare context is client-specific before any target change
+- **WHEN** the watch child receives an initial request or subscription with a compare target
+- **THEN** it SHALL accept that target as caller context rather than retaining one mutable session-global selection
 
 #### Scenario: Default compare target is the resolved base
 - **WHEN** a user has no saved compare target
@@ -159,7 +164,7 @@ Change Overview SHALL expose a user-selectable compare target: `base` or `last-c
 
 ### Requirement: Anchor the changed-files context to a precise portable ref
 
-Changed-files context SHALL include a precise comparison anchor naming the actually resolved/computed ref, not the selected control's literal label. For `base` it SHALL name the resolved base (for example `origin/main` or `origin/master`); for `last-commit` it SHALL be `HEAD`, keeping context unambiguous away from the control. Control labels MUST follow the stable-intent rule below.
+Changed-files context SHALL include a precise comparison anchor. The anchor MUST name the actually resolved/computed ref, not the selected control's literal label. For `base` it SHALL name the resolved base (for example `origin/main` or `origin/master`); for `last-commit` it SHALL be `HEAD`, keeping context unambiguous away from the control. Control labels MUST follow the stable-intent rule below.
 
 #### Scenario: Repository configuration changes the resolved comparison ref
 - **WHEN** the compare-target control is displayed

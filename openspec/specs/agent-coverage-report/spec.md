@@ -7,11 +7,14 @@ Keeps a truthful, generated record of which parts of each supported agent's SDK 
 
 The coverage generator SHALL classify each supported agent's installed SDK vocabulary by exercising product normalization and rendering, and SHALL distinguish SDK-declared vocabulary from axes the SDK does not enumerate.
 
-#### Scenario: Generate coverage against the installed agent SDKs
-- **WHEN** the generator reads an agent's installed SDK and exercises its product behavior
-- **THEN** the report reflects the declared vocabulary and observed handling rather than a maintained product list
+#### Scenario: Extract each supported agent's declared axes
+- **WHEN** coverage is generated for any supported agent
+- **THEN** extraction reads message types and subtypes, content-block or part types, and tool names where enumerated by that installed SDK
+- **AND** classification MUST exercise product normalization and rendering rather than consult a maintained handling list
 
-The repository SHALL provide a generator that, for every supported agent, reads the vocabulary its installed SDK declares — message types and subtypes, content-block or part types, and tool names where the SDK enumerates them — and classifies each entry by what the product's own normalization and rendering code does with it. Classification MUST be observed by exercising the product code, not read from a maintained list, so the report cannot disagree with the behavior it describes. Where an SDK does not enumerate a vocabulary axis, the report SHALL say so rather than presenting the product's own list as the SDK's.
+#### Scenario: An SDK does not enumerate an axis
+- **WHEN** the installed SDK supplies no enumeration for a vocabulary axis
+- **THEN** the report states that limitation instead of attributing a product-maintained list to the SDK
 
 #### Scenario: A vocabulary entry is classified by what the code does
 - **WHEN** the generator meets a message type the normalizer produces timeline updates for
@@ -31,13 +34,12 @@ The repository SHALL provide a generator that, for every supported agent, reads 
 
 ### Requirement: Coverage states are exactly five and annotations are constrained
 
-Each coverage entry SHALL use one of dedicated, generic, ignored, unhandled, or behavior-missing. Annotations SHALL reference installed SDK entries and provide the required reasons without adding tracking links to the report.
+Every coverage entry SHALL have exactly one state: dedicated, generic, ignored, unhandled, or behavior-missing. The first four are observed; behavior-missing is declared by a per-agent annotation for a rendered but undelivered effect. Ignored entries SHALL have reasons. Annotations MUST name only installed-SDK entries; other names are errors. The report carries no tracking-artifact links.
 
-#### Scenario: Classify entries and validate their annotations
-- **WHEN** the generator assigns coverage states and reads per-agent annotations
-- **THEN** every entry has exactly one supported state and every annotation satisfies the SDK membership and reason requirements
-
-Every entry SHALL carry exactly one of five states: dedicated, generic, ignored, unhandled, or behavior-missing. The first four are observed; behavior-missing is declared by a per-agent annotation for an entry that renders but whose effect the workspace does not deliver, and MUST carry a reason stating what does not work and, where a change or issue exists to fix it, naming that work. The report carries no links to tracking artifacts, which move or disappear as work is archived. An ignored entry SHALL carry a stated reason. An annotation MUST name only entries the installed SDK declares; an annotation naming anything else is an error.
+#### Scenario: Explain an undelivered effect without unstable links
+- **WHEN** a per-agent annotation declares behavior-missing
+- **THEN** its reason MUST state what does not work and name any existing change or issue intended to fix it
+- **AND** the report identifies that work without links to tracking artifacts that may move or disappear on archival
 
 #### Scenario: A rendered-but-inert tool is reported truthfully
 - **WHEN** an annotation marks a tool as behavior-missing with a reason
@@ -55,13 +57,16 @@ Every entry SHALL carry exactly one of five states: dedicated, generic, ignored,
 
 ### Requirement: New vocabulary is visible per SDK version
 
-Publication SHALL comment on the dashboard issue when vocabulary changes, listing additions, removals, and SDK versions by agent and axis. Unchanged vocabulary and first-baseline publication MUST NOT produce a change comment.
+Publication SHALL comment on the dashboard issue when vocabulary changes, listing additions, removals, and SDK versions by agent and axis. Unchanged vocabulary MUST NOT produce a comment, even for version-only changes. With no prior vocabulary to compare, publication SHALL write a new baseline without a comment.
 
-#### Scenario: Compare the new vocabulary with the published dashboard
-- **WHEN** a dashboard publication compares its extracted vocabulary with the previous publication
-- **THEN** comments record vocabulary changes across all intervening bumps without reporting version-only changes as vocabulary changes
+#### Scenario: Publish vocabulary removals as well as additions
+- **WHEN** extracted vocabulary differs from the last dashboard publication
+- **THEN** one dashboard comment lists added and removed entries by agent and axis, with before-and-after SDK versions
+- **AND** it compares against the last published baseline across all intervening bumps, keeping their combined changes in the comment history
 
-When publication finds that the vocabulary differs from what the dashboard last published, it SHALL post a comment on the dashboard issue listing, per agent and per axis, the entries added and removed, together with the SDK versions before and after. The comment thread is the history of what each bump brought. A publication whose vocabulary is unchanged MUST NOT post a comment, even when versions changed. Several bumps that land before one publication SHALL be reported together, so no change is lost. When there is no previously published vocabulary to compare against, publication SHALL publish the dashboard as the new baseline and post no comment.
+#### Scenario: Establish the first vocabulary baseline
+- **WHEN** no previously published vocabulary is available for comparison
+- **THEN** publication writes the dashboard as the new baseline without a change comment
 
 #### Scenario: A bump shows its additions
 - **WHEN** publication runs after an SDK update that adds a message type and a tool
@@ -84,13 +89,12 @@ When publication finds that the vocabulary differs from what the dashboard last 
 
 ### Requirement: The report is published to a dashboard issue
 
-The coverage report SHALL be regenerated from default-branch SDKs and code and published deterministically to one dashboard issue in the project's own repository. Unchanged output MUST leave the issue unedited, and oversized output MUST fail rather than truncate.
+The report SHALL live in one GitHub dashboard issue body in the project's repository, not a committed report. Every report-affecting default-branch change and manual request SHALL regenerate it from that branch's SDKs and code. Output MUST be deterministic; unchanged output MUST leave the issue unedited. Publication MUST run only in the project's own repository, never a fork. The README SHALL link to the dashboard. Oversized output MUST fail, naming its size, without truncation.
 
-#### Scenario: Publish a complete coverage dashboard from the default branch
-- **WHEN** default-branch changes affecting coverage or a manual request trigger publication
-- **THEN** the dashboard contains the SDK identities and complete coverage matrix, subject to repository ownership and issue-size safeguards
-
-The report SHALL be published as the body of one GitHub issue in the project's repository, the coverage dashboard, and not committed to the repository. After every change on the default branch that can change the report, and on manual request, the dashboard SHALL be regenerated against the SDK versions and code on that branch. For each agent it SHALL show the exact SDK versions it was generated against (and the agent CLI version the SDK bundles, where the SDK declares one), the number of unhandled or behavior-missing entries, and the full matrix of entries with their states and reasons. Output MUST be deterministic for a given set of SDKs and codebase. Publishing an unchanged report MUST leave the issue unedited. The README SHALL link to the dashboard. Publication MUST run only in the project's own repository, never in a fork. If the report outgrows what an issue body can hold, publication MUST fail, naming the size, and MUST NOT publish a truncated report.
+#### Scenario: Inspect an agent's published coverage
+- **WHEN** the dashboard is regenerated
+- **THEN** each agent shows its exact SDK versions and bundled CLI version where the SDK declares one
+- **AND** its full entry matrix includes states and reasons alongside the count of unhandled or behavior-missing entries
 
 #### Scenario: A merge that changes coverage updates the dashboard
 - **WHEN** a change that alters how a normalizer treats a type is merged to the default branch
@@ -120,11 +124,10 @@ The report SHALL be published as the body of one GitHub issue in the project's r
 
 Every pull request's unit suite SHALL validate SDK vocabulary extraction, classification, and annotations. It MUST fail for required code or annotation changes, not merely version changes, incomplete coverage, or vocabulary changes that leave annotations valid.
 
-#### Scenario: Validate coverage after an SDK dependency bump
-- **WHEN** a pull request runs the coverage-related unit checks against its installed SDKs
-- **THEN** failures identify required product or annotation corrections rather than routine vocabulary evolution
-
-The unit suite SHALL, on every pull request, run vocabulary extraction, classification and annotation validation against the installed SDKs. It MUST fail when uatu's code or annotations have to change: an axis can no longer be extracted, an annotation names an entry the installed SDK does not declare, or a deliberately ignored type has no stated reason. It MUST NOT fail because an SDK version changed, because entries were added or removed without making an annotation stale, or because coverage is incomplete.
+#### Scenario: Coverage validation requires a code or annotation correction
+- **WHEN** any pull request runs the unit suite against installed SDKs
+- **THEN** it MUST fail if an axis cannot be extracted, an annotation names an undeclared entry, or a deliberately ignored type has no reason
+- **AND** it MUST NOT fail merely for SDK version changes, additions or removals that leave annotations valid, or incomplete coverage
 
 #### Scenario: A version-only bump passes
 - **WHEN** a pull request changes only an agent SDK version and the SDK's vocabulary is unchanged

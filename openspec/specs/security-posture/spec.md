@@ -7,8 +7,8 @@ Define the repository's OpenSSF-aligned security floor: a published vulnerabilit
 
 The repository SHALL publish root SECURITY.md with supported versions, scope, acknowledgement expectations, and a working GitHub private vulnerability reporting channel.
 
-#### Scenario: A researcher reads the vulnerability policy and uses its private reporting channel
-- **WHEN** a researcher reads the vulnerability policy and uses its private reporting channel
+#### Scenario: The disclosure policy and reporting channel are inspectable
+- **WHEN** the checked-out security policy and repository reporting settings are inspected
 - **THEN** The repository SHALL provide a root `SECURITY.md` that states which versions receive security fixes, directs reporters to GitHub private vulnerability reporting, states an acknowledgement expectation, and describes what is in scope for a local-first tool (terminal authentication, render/sanitization pipeline, file-serving path handling, release-artifact integrity) versus out of scope.
 - **AND** GitHub private vulnerability reporting MUST be enabled on the repository so the documented reporting channel works.
 
@@ -95,7 +95,7 @@ Every GitHub Actions workflow SHALL declare an explicit workflow-level `permissi
 
 ### Requirement: Workflows do not check out event-derived refs under privileged triggers
 
-Privileged workflow_run and pull_request_target workflows MUST NOT check out event-derived refs. Elevated post-validation work SHALL run inside its validating workflow or from a trusted trigger with a fixed checkout ref; repository or branch guards SHALL not substitute for this boundary.
+Privileged workflow_run and pull_request_target workflows MUST NOT check out event-derived refs. Elevated post-validation work MUST run inside its validating workflow or from a trusted trigger with a fixed checkout ref. Repository or branch guards are not a substitute: external supply-chain analysis cannot see them.
 
 #### Scenario: Workflow automation needs elevated permissions after validation and chooses a trigger and checkout ref
 - **WHEN** workflow automation needs elevated permissions after validation and chooses a trigger and checkout ref
@@ -118,13 +118,12 @@ Privileged workflow_run and pull_request_target workflows MUST NOT check out eve
 
 ### Requirement: Input-handling code is property-based tested
 
-The standard unit suite SHALL run bounded fast-check property tests over untrusted-input parsing, transformation, and emission, asserting rendering safety, inert output, and deterministic ignore decisions.
+The standard unit suite SHALL run bounded `fast-check` property tests for HTML escaping, Markdown rendering, Mermaid sanitization and the ignore engine. Generated arbitrary inputs MUST check at least that rendering never throws, escaped/sanitized output cannot carry script elements, event-handler attributes or `javascript:` URLs, and ignore decisions are deterministic.
 
-#### Scenario: Generated arbitrary inputs exercise escaping, Markdown, Mermaid sanitization, and ignore decisions under the standard unit runner
-- **WHEN** generated arbitrary inputs exercise escaping, Markdown, Mermaid sanitization, and ignore decisions under the standard unit runner
-- **THEN** The repository SHALL include property-based tests, using the `fast-check` library under the standard unit-test runner, for units that parse, transform, or emit untrusted input: HTML escaping, Markdown rendering, Mermaid sanitization, and the ignore engine.
-- **AND** These tests MUST assert security invariants over generated arbitrary inputs — at minimum that rendering never throws, that escaped or sanitized output cannot carry script-capable markup (script elements, event-handler attributes, `javascript:` URLs), and that ignore decisions are deterministic.
-- **AND** Property tests MUST run as part of the standard unit suite with bounded run counts so suite runtime stays practical.
+#### Scenario: The standard suite includes bounded arbitrary-input safety tests
+- **WHEN** the standard unit suite runs
+- **THEN** bounded `fast-check` cases exercise HTML escaping, Markdown rendering, Mermaid sanitization and the ignore engine
+- **AND** they assert rendering does not throw, escaped/sanitized output contains no script-capable script elements, event-handler attributes or `javascript:` URLs, and ignore decisions are deterministic
 
 #### Scenario: Arbitrary input cannot smuggle active markup through escaping
 - **WHEN** the property suite feeds arbitrary strings through HTML escaping

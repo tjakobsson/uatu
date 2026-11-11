@@ -8,13 +8,7 @@ breakpoint. iPads in landscape and narrow desktop windows are not phone-class.
 ## Requirements
 ### Requirement: Fresh terminal clients receive coherent reconstructed state
 
-The server SHALL reconstruct coherent visible contents and control state for fresh clients from maintained emulator state, beginning at a control-sequence boundary rather than replaying an arbitrary byte tail. Reconstruction MUST NOT change PTY termios on the foreground process's behalf.
-
-#### Scenario: Attach a fresh emulator after detachment or takeover
-- **WHEN** a fresh terminal client reconstructs a live PTY
-- **THEN** ordinary shells and supported alternate-screen TUIs retain their contents and control state without changing the foreground process's terminal mode
-
-The terminal server SHALL maintain sufficient emulator state for each live PTY to reconstruct a fresh client coherently after detachment or takeover. Reconstruction MUST preserve the visible terminal contents and the control state needed by ordinary shells and supported alternate-screen TUIs, MUST begin at a control-sequence boundary, and MUST replace arbitrary bounded byte-tail replay as the correctness mechanism. Detaching and reconstructing MUST NOT modify the PTY's termios mode on behalf of the foreground process.
+The server SHALL maintain emulator state for each live PTY sufficient for coherent fresh-client reconstruction after detachment or takeover. Reconstruction MUST preserve visible contents and control state for ordinary shells and supported alternate-screen TUIs, begin at a control-sequence boundary, and replace arbitrary bounded byte-tail replay as the correctness mechanism. Detaching and reconstructing MUST NOT modify PTY termios on the foreground process's behalf.
 
 #### Scenario: Raw-mode TUI resumes on a fresh client
 - **WHEN** a TUI is running in raw mode and alternate-screen mode and its client disconnects
@@ -55,13 +49,20 @@ The UI SHALL provide a panel that, when visible, hosts one or more `xterm.js`-re
 
 ### Requirement: Terminal works in the watched repository directory
 
-New PTYs SHALL start in the first resolved watch root and select the explicit shell override, inherited `SHELL`, or `/bin/sh` in that order. The terminal SHALL preserve inherited `SHELL`, avoid user-database reconstruction, and disclose fallback through the specified startup warning and per-session notice.
+PTY shells SHALL start in the first CLI-resolved watch root, preferring a valid explicit terminal-server shell override, then non-empty `SHELL`, falling back to `/bin/sh` only when those are unset or empty. The terminal SHALL NOT reconstruct login shells from the user database or synthesize or modify inherited `SHELL`. Missing `SHELL` SHALL produce a once-at-startup stdout warning when the backend is available; every fallback session SHALL receive a notice before its first prompt.
 
-#### Scenario: Start a shell with an override, inherited shell, or fallback
-- **WHEN** a terminal panel attaches a new PTY
-- **THEN** working-directory and shell selection follow the CLI roots and inherited environment, with fallback notices before the first prompt
+#### Scenario: An explicit override wins without rewriting the inherited environment
+- **WHEN** a valid explicit terminal-server shell override is set
+- **THEN** the PTY runs that shell ahead of a non-empty inherited `SHELL`
+- **AND** `SHELL` remains exactly as uatu received it, even when it names another shell
 
-When the panel attaches a PTY, the shell SHALL start with its working directory set to the first watch root resolved by the CLI. The shell selection SHALL prefer a valid explicit terminal-server shell override, then the `SHELL` environment variable when it is non-empty, and SHALL fall back to `/bin/sh` only when those are unset or empty. The terminal SHALL NOT reconstruct the user's login shell from the user database. When `SHELL` is unset or empty and the terminal backend is available, uatu SHALL print a warning to stdout once at startup explaining that terminals will run `/bin/sh` instead of the user's login shell. When a terminal subsequently falls back to `/bin/sh`, uatu SHALL write a notice into each newly opened terminal session before the shell's first prompt. uatu SHALL NOT synthesize or modify the `SHELL` variable in the spawned PTY environment; the child inherits `SHELL` exactly as uatu received it.
+#### Scenario: Every fallback session explains the shell before its first prompt
+- **WHEN** a newly opened terminal falls back to `/bin/sh`
+- **THEN** a notice names `$SHELL` and `/bin/sh` before the shell's first prompt
+
+#### Scenario: Missing SHELL explains the fallback at startup
+- **WHEN** uatu starts with `SHELL` unset or empty and the terminal backend is available
+- **THEN** stdout receives one warning explaining that terminals will use `/bin/sh` instead of the user's login shell
 
 #### Scenario: PTY inherits watch root as cwd
 - **WHEN** a session child is started with `./some/dir` and the user opens the terminal panel
@@ -104,13 +105,7 @@ The terminal SHALL render text using a dark ANSI 16-color palette that matches t
 
 ### Requirement: Terminal panel is resizable and persistent
 
-Terminal geometry and presentation SHALL remain resizable, responsive, and client-owned, namespaced by workspace/base path or owned natively. Physical values MUST NOT become personal Hub state or propagate to another client, and legacy persistence keys SHALL NOT be migrated.
-
-#### Scenario: Resize and restore terminal presentation on one client
-- **WHEN** a client changes or restores its panel layout
-- **THEN** its dock, dimensions, display mode, visibility, split geometry, and panes remain local presentation state
-
-The panel SHALL remain resizable and retain its existing bottom/right clamps, display modes, and responsive fallback. Dock, dimensions, display mode, visibility, split geometry, and pane arrangement SHALL be client presentation state, namespaced by workspace/base path in browser storage or owned by the native client where applicable. These physical values MUST NOT be stored as personal Hub workspace state or applied to another client. Legacy terminal persistence keys SHALL not be migrated when this model is enabled.
+The panel SHALL remain resizable with existing bottom/right clamps, display modes, and responsive fallback. Dock, dimensions, display mode, visibility, split geometry, and pane arrangement SHALL be client state, namespaced by workspace/base path in browser storage or owned by the native client where applicable. These values MUST NOT become personal Hub workspace state or apply to another client. Legacy terminal persistence keys SHALL not be migrated when this model is enabled.
 
 #### Scenario: Drag resizes only the current client
 - **WHEN** a user resizes a terminal panel on one client
@@ -200,13 +195,7 @@ The control that toggles the terminal panel's visibility SHALL be located in the
 
 ### Requirement: Closing the terminal pane confirms loss of session
 
-Closing a pane with an attached PTY SHALL require an explicit, cancellable loss-of-session confirmation. Confirmed teardown SHALL terminate on the server before closing the WebSocket; display-mode changes and already-exited shells SHALL NOT trigger that confirmation.
-
-#### Scenario: Close a live terminal pane or cancel its confirmation
-- **WHEN** the user activates the close control on a pane with an attached PTY
-- **THEN** the modal protects the shell until explicit confirmation and retains the specified focus, dismissal, and teardown ordering
-
-When the user clicks the close (×) control on a pane that has at least one attached PTY, the UI SHALL display a confirmation modal warning that the shell session will be lost. The modal SHALL default focus to the cancel action and SHALL dismiss on `Esc`. The PTY SHALL only be torn down after the user explicitly confirms, and teardown SHALL be effected by sending the explicit terminate signal to the server before closing the pane's WebSocket. Confirmation SHALL NOT be shown for the keyboard panel toggle, minimize, fullscreen toggle, or for closing a pane whose shell has already exited.
+Closing (×) a pane with at least one attached PTY SHALL show a shell-session-loss confirmation modal, focus Cancel by default, and dismiss on `Esc`. Teardown SHALL require explicit confirmation and send the explicit terminate signal to the server before closing the WebSocket. Confirmation SHALL NOT appear for keyboard panel toggle, minimize, fullscreen toggle, or closing an already-exited shell.
 
 #### Scenario: Close button on attached pane prompts confirmation
 - **WHEN** a pane has an attached PTY
@@ -240,13 +229,12 @@ When the user clicks the close (×) control on a pane that has at least one atta
 
 ### Requirement: Panel supports minimize and fullscreen display modes
 
-The panel SHALL expose reversible minimize and fullscreen modes that preserve PTY state and persist across reloads. Fullscreen SHALL respect desktop chrome or the touch visual viewport and navigation chrome as appropriate.
+The panel header SHALL provide minimize, fullscreen, and Close controls. Minimize SHALL collapse to a header bar while keeping every PTY attached. Desktop fullscreen SHALL fill main content, retaining sidebar and topbar; touch fullscreen SHALL fill the visual viewport with the bottom tab bar as navigation chrome. Both changes SHALL be reversible without PTY-state loss, and active display mode SHALL persist across reloads.
 
-#### Scenario: Minimize or expand a panel on desktop or touch
-- **WHEN** the user changes the panel's display mode
-- **THEN** the panel adapts its visible area without detaching its PTYs and can return to its previous mode
-
-The panel header SHALL provide minimize and fullscreen controls in addition to the close control. Minimize SHALL collapse the panel body to a header bar while keeping every PTY attached. In desktop mode, fullscreen SHALL expand the panel to fill the main content area (preserving the sidebar and topbar). In touch mode, fullscreen SHALL instead pin the panel to the entire visual viewport — no sidebar, no preview, no page scroll behind it — using dynamic-viewport units so the browser's collapsing URL bar cannot leave a gap, with the bottom tab bar remaining as navigation chrome. Both display-mode changes SHALL be reversible without losing PTY state, and the active display mode SHALL persist across reloads.
+#### Scenario: Touch fullscreen follows collapsing browser chrome
+- **WHEN** touch fullscreen is active, including while the browser URL bar collapses or expands
+- **THEN** dynamic-viewport units keep the panel pinned to the entire visual viewport without a gap
+- **AND** no sidebar or preview is visible, the page behind cannot scroll, and the bottom tab bar remains navigation chrome
 
 #### Scenario: Minimize collapses without losing the session
 - **WHEN** a pane is running an active process (e.g., `tail -f` is producing output)
@@ -297,13 +285,12 @@ The panel SHALL support two dock positions, `bottom` and `right`. The user SHALL
 
 ### Requirement: Panel supports splitting into multiple terminal panes
 
-The panel SHALL split into independently focused and resizable PTY panes within its soft cap and minimum usable sizes. Orientation SHALL follow the dock axis; cap exhaustion SHALL disable splitting, and closing the last pane SHALL hide the panel.
+The panel SHALL provide a split control creating concurrent panes within it, each with its own PTY, `sessionId`, focus, Close (×), and resizer between siblings. Panes SHALL be side-by-side when bottom-docked and stacked when right-docked. Pane count is bounded by the soft cap (8) and per-pane minimum drag size, preventing unusable widths; splitting SHALL be disabled at the cap. Closing the last pane SHALL hide the panel.
 
-#### Scenario: Split and close panes in either panel dock
-- **WHEN** the user creates or closes a terminal pane
-- **THEN** each remaining pane retains its own PTY identity, controls, and usable geometry within the panel limits
-
-The panel SHALL provide a split control that creates an additional concurrent terminal pane within the same panel, each backed by its own PTY and `sessionId`. The number of panes is bounded by a soft cap (8) and by the per-pane minimum drag size (so panes never collapse below a usable width); the split control SHALL be disabled when the cap is reached. Split orientation SHALL be perpendicular to the dock axis: panes are side-by-side when bottom-docked, stacked when right-docked. Each pane SHALL have its own focus, its own close (×) control, and its own resizer between it and each sibling pane. Closing the last remaining pane SHALL also hide the panel.
+#### Scenario: Split dragging cannot collapse a pane below usable size
+- **WHEN** the user drags a resizer between sibling panes
+- **THEN** the per-pane minimum drag size bounds the layout so no pane collapses below usable width
+- **AND** each pane retains independent focus, a close control, and a resizer between it and its sibling
 
 #### Scenario: Split spawns a second pane with a fresh PTY
 - **WHEN** a single-pane panel is open and the user activates split
@@ -342,13 +329,7 @@ The panel SHALL provide a split control that creates an additional concurrent te
 
 ### Requirement: Terminal protocol carries input, output, resize, and attach readiness
 
-The terminal WebSocket SHALL carry binary I/O and JSON controls without server UTF-8 transcoding. Fresh attachment MUST fit xterm and send valid dimensions before ownership, input, and reconstruction; reconstruction MUST precede live output, with later resizes updating the PTY and model.
-
-#### Scenario: Establish a fresh terminal attachment before accepting input
-- **WHEN** a new emulator connects and reports attach readiness
-- **THEN** validated dimensions and attachment ownership are established before reconstruction and subsequent live output
-
-The terminal WebSocket SHALL carry binary shell input/output and JSON control frames without server UTF-8 transcoding. On every fresh-emulator attach, the client MUST open and fit xterm before sending an attach-ready frame containing positive integer columns and rows. The server MUST ignore input until readiness, MUST establish attachment ownership only after a valid ready frame, MUST apply those dimensions before reconstruction, and MUST send reconstruction before subsequent live output. Later resize frames SHALL continue to resize the active PTY and terminal model.
+The WebSocket SHALL carry binary shell I/O and JSON control frames without server UTF-8 transcoding. Every fresh-emulator attach MUST open and fit xterm before sending positive integer columns and rows in attach-ready. The server MUST ignore input until readiness, establish ownership only after valid readiness, apply dimensions before reconstruction, and send reconstruction before live output. Later resize frames SHALL resize the active PTY and terminal model.
 
 #### Scenario: New client dimensions precede reconstruction
 - **WHEN** a 160×50 client detaches and a fresh 90×28 client begins attachment
@@ -489,13 +470,7 @@ Each server-created PTY SHALL remain registered when its WebSocket detaches, wit
 
 ### Requirement: Terminal grid fits within the visible pane
 
-Terminal rows and columns SHALL fit the pane's content box, accounting for cell size, padding, and scrollbar allowance. No row or column SHALL be clipped at arbitrary resized pane dimensions, in either dock or split layout.
-
-#### Scenario: Fit the grid after an arbitrary pane resize
-- **WHEN** panel or inter-pane dragging changes a terminal host's pixel dimensions
-- **THEN** measured rows and columns remain wholly inside the available content area
-
-The terminal character grid SHALL always fit entirely within its pane host's content box: `rows × cellHeight` SHALL NOT exceed the vertical space available inside the pane's padding, and `cols × cellWidth` (plus the scrollbar allowance) SHALL NOT exceed the horizontal space. Grid-size measurements SHALL account for any padding applied around the terminal element so that no character row or column is ever clipped by the pane's overflow bounds. This SHALL hold at any pane size, including sizes produced by dragging the panel or inter-pane resizers to arbitrary pixel positions, in both docks, for single panes and splits.
+At every pane size, in both docks, single panes and splits, the grid SHALL fit wholly within the host content box. `rows × cellHeight` SHALL NOT exceed vertical space inside padding; `cols × cellWidth` plus scrollbar allowance SHALL NOT exceed horizontal space. Fit measurements SHALL account for all terminal padding so no row or column is clipped, including at arbitrary pixel dimensions from panel or inter-pane dragging.
 
 #### Scenario: Bottom row is fully visible at arbitrary pane heights
 - **WHEN** the terminal panel or an inter-pane resizer is dragged so a pane lands on an arbitrary pixel height
@@ -557,13 +532,12 @@ A PTY SHALL have at most one interactive client. A detached resource accepts nor
 
 ### Requirement: New panes offer existing sessions instead of silently spawning
 
-Without a restorable per-window attachment, the panel SHALL attach available detached PTYs before spawning shells, never automatically taking ownership from another client. Inventory, pane caps, explicit choices, and the saved active reference SHALL govern attachment and focus without granting takeover authority.
+With no per-window attachment to restore, the panel SHALL auto-attach all detached inventory PTYs not already shown, oldest first up to the pane cap, without a chooser. PTYs held elsewhere SHALL NOT auto-attach; takeover SHALL require explicit action. New shell SHALL create a server resource before attaching. The active pane SHALL be the saved last-active PTY if auto-attached, otherwise the newest auto-attached pane; the saved reference SHALL NOT change attachments or cause takeover.
 
-#### Scenario: Open the panel without a restorable window attachment
-- **WHEN** terminal inventory contains detached sessions, sessions attached elsewhere, or no available sessions
-- **THEN** the panel restores permitted shells or offers the required explicit choice rather than silently replacing or taking over work
-
-When a client has no per-window attachment to restore, the panel SHALL attach automatically to every detached PTY in terminal inventory that the window is not already showing — oldest first, bounded by the panel's pane cap — without presenting a chooser. A PTY held by another client SHALL NOT be attached automatically; ownership transfers only through an explicit takeover. When inventory holds no detached PTY but at least one attached-elsewhere PTY, the panel SHALL list them and require an explicit takeover, terminate, or New shell choice. When inventory holds nothing to attach, the panel SHALL create a fresh shell directly. New shell SHALL create a server resource before attaching. The user's saved last-active PTY, when among the auto-attached set, SHALL become the active pane; otherwise the newest auto-attached pane SHALL be active. The saved reference SHALL NOT otherwise change which PTYs are attached, and SHALL never cause a takeover.
+#### Scenario: Non-detached inventory requires a decision or a fresh shell
+- **WHEN** a client without a per-window attachment to restore finds no detached PTY
+- **THEN** if any PTYs are attached elsewhere, the panel lists them and requires an explicit takeover, terminate, or New shell choice
+- **AND** when inventory holds nothing to attach, the panel creates a fresh shell directly
 
 #### Scenario: A detached orphan attaches without a chooser
 - **WHEN** one detached PTY exists and a browser opens the terminal panel with nothing to restore
@@ -614,15 +588,12 @@ When a client has no per-window attachment to restore, the panel SHALL attach au
 
 ### Requirement: Terminal auth cookie is scoped to the request's Host port
 
-Terminal authentication SHALL derive its cookie name consistently from the request Host port and scope promotion cookies to the configured base path. Legacy fixed-name cookies SHALL NOT authenticate requests; affected clients SHALL use the paste-token flow once.
+Terminal auth cookies SHALL use the request `Host` port, default-port normalized, consistently at token promotion, WebSocket upgrade, auth probe, and sessions REST reads. Promotion `Set-Cookie` SHALL set `Path` to the configured base path, keeping cookies within each session subtree; the default `/` remains `Path=/`. The legacy `uatu_term` cookie SHALL NOT be read; clients holding only it reauthenticate once through paste-token.
 
-#### Scenario: Promote and read a token behind a port or path-scoped session
-- **WHEN** terminal authentication sets a cookie or authenticates a probe, REST request, or WebSocket upgrade
-- **THEN** matching port-derived names and base-path scoping prevent session cookies from colliding
-
-The terminal auth cookie name SHALL be derived from the port of the request's `Host` header (default-port normalized), e.g. `uatu_term_4712` for a request reaching the server at `localhost:4712`. The server SHALL use this derivation consistently at set time (the `Set-Cookie` issued when a token is promoted to a cookie) and at read time (the WebSocket upgrade gate, the auth probe, and the terminal sessions REST endpoints). The legacy fixed-name `uatu_term` cookie SHALL NOT be read; a client holding only the legacy cookie re-authenticates via the paste-token flow once.
-
-The `Set-Cookie` issued at promotion SHALL additionally carry a `Path` attribute equal to the server's configured base path, so that when multiple sessions are proxied under one origin at distinct path prefixes, the browser presents each session's cookie only to that session's subtree and same-named cookies cannot collide across sessions. At the default base path `/` the attribute is `Path=/` and behavior is unchanged.
+#### Scenario: Port-derived names normalize the default port consistently
+- **WHEN** a token is promoted or a WebSocket upgrade, auth probe, or terminal sessions REST request reads authentication
+- **THEN** the same default-port-normalized request Host port determines the cookie name, such as `uatu_term_4712` for `localhost:4712`
+- **AND** the server's internal listening port does not replace the request's Host port
 
 #### Scenario: Instances on different host ports keep independent credentials
 - **WHEN** two uatu instances are reached at `localhost:4712` and `localhost:4713` and the user authenticates the terminal in both
@@ -646,13 +617,17 @@ The `Set-Cookie` issued at promotion SHALL additionally carry a `Path` attribute
 
 ### Requirement: Terminal bridges OSC 52 copy sequences to the host clipboard
 
-Each pane SHALL bridge supported OSC 52 writes to the system clipboard while refusing clipboard reads, invalid selections, malformed base64, and oversized payloads. The bridge SHALL use stable parser APIs; proposed API enablement SHALL remain solely for terminal-find decorations.
+Each `xterm.js` pane SHALL register `term.parser.registerOscHandler(52, …)` to decode PTY OSC 52 copies and write text via `navigator.clipboard.writeText`. The bridge SHALL NOT read the clipboard or answer `?` queries. It SHALL accept `c`, `p`, and `s` for the single browser clipboard, ignoring other selections, invalid base64, and decoded payloads over 100 KB. `allowProposedApi` SHALL be `true` solely for terminal-find decorations; the OSC 52 bridge SHALL NOT depend on proposed APIs.
 
-#### Scenario: A terminal application sends a clipboard sequence
-- **WHEN** xterm receives an OSC 52 copy or read request from the PTY
-- **THEN** only valid, bounded writes reach the host clipboard, and read queries receive no response
+#### Scenario: Supported OSC 52 selection parameters share the browser clipboard
+- **WHEN** the PTY sends `ESC ] 52 ; <selection> ; <base64-data> BEL/ST`
+- **THEN** selections `c`, `p`, and `s` decode to the same browser clipboard when valid and at most 100 KB
+- **AND** other selections are ignored, as are invalid base64 and decoded payloads larger than 100 KB
 
-Each terminal pane SHALL register an OSC 52 handler on its `xterm.js` parser (`term.parser.registerOscHandler(52, …)`) that decodes application-initiated copy sequences (`ESC ] 52 ; <selection> ; <base64-data> BEL/ST`) arriving from the PTY and writes the decoded text to the system clipboard via `navigator.clipboard.writeText`. The bridge SHALL be write-only: when the data field is `?` (a clipboard read query), the handler SHALL NOT emit any response sequence and SHALL NOT read the clipboard. The handler SHALL honor the selection parameters `c`, `p`, and `s` (all targeting the single browser clipboard) and SHALL ignore sequences with other selection parameters, invalid base64 data, or a decoded payload larger than 100 KB. `allowProposedApi` SHALL be `true`, enabled solely because search decorations (`registerDecoration`), which terminal find uses to mark every match, are proposed API in xterm 6 and throw without it. The OSC 52 bridge itself SHALL NOT depend on any proposed API.
+#### Scenario: Proposed API enablement belongs to terminal find, not clipboard bridging
+- **WHEN** each xterm 6 pane is configured
+- **THEN** `allowProposedApi` is `true` for terminal find's `registerDecoration` match markers
+- **AND** OSC 52 registration and handling use no proposed API
 
 #### Scenario: TUI select-to-copy reaches the host clipboard
 - **WHEN** a program in the terminal (e.g. a mouse-mode TUI reacting to a selection) emits `ESC ] 52 ; c ; <base64 of "hello"> BEL`
@@ -715,13 +690,23 @@ NOT write to the PTY or disturb the running program.
 
 ### Requirement: Touch devices get a terminal keybar
 
-Coarse-pointer terminals SHALL expose the specified control keys, Paste, sticky Ctrl, and terminal switching with accessible state and deliberate focus behavior. Paste SHALL preserve native user activation and xterm paste semantics, remain keyboard-operable, and fail inertly; fine-pointer devices SHALL NOT show the row.
+Coarse-pointer terminals SHALL show a keybar with at least Escape, Tab, Control-C/D/Z, arrows, Page Up/Down, Home, End, Paste, sticky Ctrl, and terminal switching. Keys SHALL use the focused PTY's typed-input path. Keybar actions MUST preserve terminal focus except the switcher, which takes focus while open and returns it on dismissal. The row SHALL NOT appear on fine-pointer devices, SHALL sit above a home-indicator inset, and SHALL disable switching with other non-selection keys during Select.
 
-#### Scenario: Send terminal input from the touch keybar
-- **WHEN** a user activates a keybar key, modifier, Paste action, or terminal switcher
-- **THEN** input targets the focused PTY once, with the specified accessibility, focus, safe-area, and selection-transcript behavior
+#### Scenario: Sticky Ctrl exposes and consumes its single-shot latch
+- **WHEN** Ctrl is tapped on the keybar
+- **THEN** its armed state is visually indicated and MUST be exposed through `aria-pressed`
+- **AND** the next printable character is composed to its control character before PTY delivery and releases the latch; tapping Ctrl again while armed cancels it
 
-On coarse-pointer devices the terminal panel SHALL show a key row for input a software keyboard cannot produce — at minimum Escape, Tab, Control-C, Control-D, Control-Z, the arrow keys, Page Up, Page Down, Home, and End — sending each key's control sequence down the focused pane's PTY exactly as typed input travels. The row SHALL additionally provide a Paste action, a single-shot sticky Ctrl modifier, and a terminal switch action that opens the terminal switcher. Sticky Ctrl works as follows: tapping Ctrl arms a latch, the next printable character typed is composed to its control character before reaching the PTY, and the latch releases; tapping Ctrl while armed cancels the latch. The armed state MUST be visually indicated and exposed via `aria-pressed`. The switch action MUST carry an accessible name naming the terminal switcher, MUST expose the sheet's open state via `aria-expanded`, and MUST toggle the sheet rather than opening a second one. Pressing any keybar affordance MUST NOT move focus out of the terminal, which would dismiss the software keyboard; the switcher is the one exception — it takes focus deliberately while open and returns it to the visible pane on dismissal. Paste MUST request the system clipboard from a release-time or equivalent semantic button activation carrying transient user activation, MUST invoke at most one clipboard read and one terminal paste per activation, and MUST forward non-empty text through xterm's paste path so newline normalization and bracketed-paste mode are honored. Paste MUST remain keyboard-operable. An unavailable Clipboard API, a synchronous failure, a rejected read, or an empty clipboard MUST leave the action inert without PTY input or an uncaught error. The row SHALL NOT appear on fine-pointer devices. On devices with a bottom home-indicator inset, the row SHALL sit above the safe-area inset so taps do not trigger the system home gesture. While the selection transcript is open, the switch action SHALL be unavailable alongside the other non-selection keys.
+#### Scenario: Terminal switching has an accessible name and state
+- **WHEN** the coarse-pointer keybar is shown
+- **THEN** its switch action MUST name the terminal switcher accessibly and expose sheet state with `aria-expanded`
+- **AND** activation toggles that sheet rather than opening another
+
+#### Scenario: Every Paste activation retains gesture, cardinality, and paste semantics
+- **WHEN** the coarse-pointer keybar provides Paste or a user activates it
+- **THEN** Paste MUST remain keyboard-operable and request the clipboard from release-time or equivalent semantic button activation carrying transient user activation
+- **AND** each activation MUST read the clipboard at most once and paste at most once, sending non-empty text through xterm's paste path with newline normalization and bracketed-paste handling
+- **AND** unavailable Clipboard API, synchronous failure, rejected read, or empty text MUST be inert without PTY input or an uncaught error
 
 #### Scenario: Interrupting a process from an iPad
 - **WHEN** a user on a coarse-pointer device runs a foreground process and taps the keybar's Control-C
@@ -784,13 +769,16 @@ On coarse-pointer devices the terminal panel SHALL show a key row for input a so
 
 ### Requirement: Terminal output supports touch selection and Copy
 
-Touch Select SHALL present a static, bounded terminal transcript in document-level selectable DOM while parking the mounted shell. Done SHALL restore scroll position, focus, and live output. Transcript Copy SHALL remain independent of OSC 52 policy without changing existing terminal input or scrolling behavior.
+Coarse-pointer keybars SHALL offer Select to snapshot the active pane's bounded xterm scrollback and visible rows into a document transcript outside panel overflow and gestures. The transcript SHALL support native long-press selection and Copy independently of OSC 52 policy. The app shell SHALL stay mounted, visually parked and inert; PTY output MAY continue but MUST NOT mutate the snapshot. Done SHALL remove it, restore prior document position and terminal focus, and reveal accumulated output.
 
-#### Scenario: Select terminal output and return to the live pane
-- **WHEN** a coarse-pointer user opens and dismisses the selection transcript
-- **THEN** native selection and Copy operate on a stable snapshot while the PTY remains live and the original shell state can be restored
+#### Scenario: Selection uses ordinary document presentation and persistent Done
+- **WHEN** the user enters Select on a coarse-pointer client
+- **THEN** ordinary non-editable line DOM uses terminal colors and typography with document scrolling equivalent to Preview selection, initially at the live end near the prompt
+- **AND** a fixed bottom action bar replaces the touch tab bar with an always-reachable Done action
 
-On coarse-pointer clients, the terminal keybar SHALL provide a Select action that snapshots the active pane's bounded xterm buffer, including available scrollback and visible rows, into a document-level transcript outside the terminal panel's overflow and gesture hierarchy. The transcript SHALL use ordinary non-editable line DOM and document scrolling equivalent to Preview's selection model, SHALL initially position the document at the live end near the current prompt, and SHALL permit the platform's native long-press selection and Copy interaction. While transcript content uses terminal colors and typography, a fixed bottom action bar SHALL temporarily replace the touch tab bar and provide an always-reachable Done action that returns to the live terminal. While the transcript is open, the app shell SHALL remain mounted but visually parked and inert; PTY output MAY continue but MUST NOT mutate the static transcript. Done SHALL remove the transcript, restore the prior document position and terminal focus, and reveal output accumulated while it was open. Transcript Copy SHALL remain independent of terminal OSC 52 clipboard policy. Existing normal-mode TUI mouse reporting, keyboard clipboard shortcuts, touch Paste, and touch scrolling SHALL remain unchanged.
+#### Scenario: Select preserves existing terminal interaction paths
+- **WHEN** the terminal handles normal-mode TUI mouse reporting, keyboard clipboard shortcuts, touch Paste, or touch scrolling
+- **THEN** the Select capability leaves each existing behavior unchanged
 
 #### Scenario: Native Copy works in the document transcript
 - **WHEN** an iPhone user activates Select and long-presses transcript text
@@ -834,13 +822,7 @@ On coarse-pointer clients, the terminal keybar SHALL provide a Select action tha
 
 ### Requirement: Bare Ctrl+letter chords are synthesized from the key value
 
-Bare Ctrl+letter chords SHALL be synthesized from the event's key value and consumed by the client, producing the same bytes as desktop xterm. Clipboard handling SHALL take precedence; composition, non-letter keys, and additional modifiers SHALL retain normal xterm handling.
-
-#### Scenario: Type a bare Ctrl chord on a hardware keyboard
-- **WHEN** a keydown carries a bare Ctrl+letter chord, including unusable iPadOS key codes
-- **THEN** the PTY receives the correct control byte without overriding clipboard shortcuts or other input paths
-
-The client SHALL derive bare Ctrl+letter control bytes (^A = 0x01 … ^Z = 0x1a) from the keydown's key value and send them down the PTY itself, consuming the event, instead of relying on xterm's key-code-driven evaluation — which drops the hardware-keyboard Ctrl chords iPadOS Safari delivers with unusable key codes. The synthesized bytes MUST equal what xterm's own evaluation produces on desktop platforms, so behavior there is unchanged. Clipboard shortcut handling (Ctrl+C-with-selection copy on non-Mac platforms) SHALL take precedence, and composition events, non-letter keys, and chords with additional modifiers SHALL take xterm's normal path.
+The client SHALL synthesize bare Ctrl+letter bytes (^A = 0x01 … ^Z = 0x1a) from keydown's key value, send them to the PTY itself, and consume the event rather than rely on xterm's key-code evaluation. Bytes MUST match desktop xterm. Clipboard handling, including non-Mac Ctrl+C-with-selection copy, SHALL take precedence; composition events, non-letter keys, and extra-modifier chords SHALL take xterm's normal path.
 
 #### Scenario: Ctrl-C from an iPad hardware keyboard
 - **WHEN** a keydown arrives with ctrlKey set and key "c", in whatever key-code shape the platform delivers
@@ -904,13 +886,12 @@ The document viewport SHALL be configured with `viewport-fit=cover`, and the pho
 
 ### Requirement: Touch devices can adjust the terminal font size at runtime
 
-Touch font-size controls SHALL update and refit all panes without reconnecting PTYs. Device-local sizes SHALL persist within configuration-loader bounds, override the configured default, and clear when restored to it. Fine-pointer devices SHALL NOT show these controls.
+Coarse-pointer panel headers SHALL offer decrease/increase font-size controls that immediately update and refit every xterm pane without PTY reconnection. Adjustments SHALL persist per device and override `.uatu.json` terminal font size, which remains the default without an override. The range SHALL match configuration-loader bounds; stepping back to the configured value SHALL clear the override. Controls SHALL NOT appear on fine-pointer devices.
 
-#### Scenario: Adjust terminal text size on a coarse-pointer device
-- **WHEN** the user decreases or increases terminal font size or returns to the configured value
-- **THEN** every pane updates immediately and the device override is retained or cleared accordingly
-
-On coarse-pointer devices the terminal panel header SHALL provide decrease/increase font-size controls that apply immediately to every pane (xterm font size updated and panes refit) without reconnecting any PTY. The adjusted size SHALL persist per device and SHALL take precedence over the `.uatu.json` terminal font-size configuration, which remains the default when no per-device adjustment exists. The adjustable range SHALL be clamped to the same bounds the configuration loader accepts. Stepping back to the configured value SHALL clear the per-device override. The controls SHALL NOT appear on fine-pointer devices.
+#### Scenario: Font adjustments clamp and return to the configured default
+- **WHEN** a coarse-pointer user steps font size beyond configuration-loader bounds or back to the configured value
+- **THEN** the accepted range stays clamped to those same bounds
+- **AND** reaching the configured value clears the per-device override, so configuration is again the default
 
 #### Scenario: Growing the font on an iPad
 - **WHEN** a user on a coarse-pointer device taps the increase-font-size control
@@ -927,13 +908,12 @@ On coarse-pointer devices the terminal panel header SHALL provide decrease/incre
 
 ### Requirement: Touch and wheel scrolling work in both terminal buffers
 
-Terminal scrolling SHALL target normal-buffer scrollback or the alternate-screen application's input protocol as appropriate. Touch swipes and untracked wheel input SHALL produce cell-quantized cursor keys; mouse-tracked wheel input MUST NOT also emit arrows, and text selection and normal scrolling SHALL remain intact.
+Normal-buffer wheel and touch SHALL retain scrollback scrolling. Only in the alternate screen, coarse-pointer vertical swipes and untracked wheel input on any pointer SHALL send repeated up/down keys, cell-height quantized and honoring application cursor-key mode. Mouse-tracked alternate-screen wheel input SHALL use protocol mouse reports and MUST NOT also emit arrows. Horizontal swipe components SHALL be ignored; translation MUST NOT interfere with normal scrolling or touch text selection.
 
-#### Scenario: Scroll normal or alternate-screen terminal content
-- **WHEN** a user scrolls vertically by touch or wheel with application mouse tracking enabled or disabled
-- **THEN** the active buffer and protocol determine the consumer without duplicate input or horizontal-swipe interference
-
-Vertical scrolling over a terminal pane SHALL reach the right consumer in every buffer. In the normal buffer, the existing scrollback scrolling stands for both wheel and touch. In the alternate-screen buffer (full-screen TUIs): on coarse-pointer devices, vertical swipe distance SHALL be translated into repeated arrow-up/arrow-down key sequences sent to the PTY — quantized by cell height and honoring application cursor-key mode; and for wheel input on any pointer type, when the application has NOT enabled mouse tracking, wheel deltas SHALL be translated the same way (the conventional terminal-emulator alternate-scroll default) instead of scrolling scrollback underneath the TUI. When the application HAS enabled mouse tracking, wheel events SHALL be forwarded as mouse reports per the terminal's protocol handling and MUST NOT additionally produce arrow sequences. Horizontal swipe components SHALL be ignored, and the translation MUST NOT interfere with normal-buffer scrolling or with touch text selection.
+#### Scenario: Alternate-screen translation honors direction, quantization, and cursor mode
+- **WHEN** a coarse-pointer vertical swipe or an untracked wheel delta on any pointer occurs in the alternate screen
+- **THEN** its vertical distance produces repeated arrow-up or arrow-down sequences quantized by cell height in the current application cursor-key mode, rather than moving underlying scrollback
+- **AND** horizontal swipe components produce no input, and touch text selection is not disturbed
 
 #### Scenario: Swiping through a pager on a phone
 - **WHEN** a TUI on the alternate buffer is active and the user swipes up one cell-height over the pane
@@ -966,13 +946,7 @@ In touch mode the panel header SHALL hide the split and dock-toggle controls and
 
 ### Requirement: Touch mode renders one terminal pane at a time
 
-Touch mode SHALL show only the active pane without detaching hidden panes or losing their output, records, or desktop split geometry. Active-pane affordances SHALL target the visible pane, while the output badge SHALL account for every attached pane.
-
-#### Scenario: Switch between touch and desktop pane presentation
-- **WHEN** touch mode displays one active pane among multiple attached terminals
-- **THEN** hidden panes remain live and retain their layout for desktop mode while visible-pane actions target only the displayed pane
-
-In touch mode the terminal panel SHALL render exactly one pane — the active pane — filling the terminal surface, and SHALL hide every other pane without detaching it. Hiding SHALL be presentation-only: hidden panes keep their PTY attachment, keep receiving output into scrollback, and keep their persisted pane records and split geometry, all of which reappear unchanged in desktop mode. Input affordances that address "the active pane" — keybar sequences, sticky Ctrl, Paste, the selection transcript, and terminal find — SHALL address the visible pane. The Terminal tab's output badge SHALL reflect output from any attached pane, not only the visible one.
+Touch mode SHALL show exactly the active pane, filling the terminal surface, hiding other panes without detaching them. Hidden panes SHALL retain attachment, incoming scrollback, persisted pane records, and split geometry, restored unchanged on desktop. Active-pane keybar sequences, sticky Ctrl, Paste, selection transcript, and terminal find SHALL target the visible pane. The Terminal tab's output badge SHALL reflect any attached pane's output, not just the visible pane's.
 
 #### Scenario: Several attached panes show one
 - **WHEN** three panes are attached and the panel renders in touch mode
@@ -994,13 +968,21 @@ In touch mode the terminal panel SHALL render exactly one pane — the active pa
 
 ### Requirement: Touch devices switch terminals from a switcher sheet
 
-The touch switcher SHALL list attached and other server sessions with identity and state, offering switching, permitted attachment, explicit takeover, termination, and New terminal. Pane limits SHALL disable new attachments without blocking switching; dismissal SHALL restore focus, and the desktop chooser SHALL stay hidden.
+Coarse-pointer terminals SHALL provide a keybar-opened switcher sheet listing this window's attached terminals and every server session not shown, offering New terminal and per-session termination. Rows SHALL switch or attach by session state, never take over without explicit Take over. Pane-cap exhaustion SHALL disable New terminal and attach with a reason, not switching. Dismissal SHALL require no choice and restore visible-pane focus; the desktop chooser SHALL NOT render in touch mode.
 
-#### Scenario: Choose, create, take over, or terminate a terminal on touch
-- **WHEN** the user opens the keybar's terminal switcher sheet and acts on its session inventory
-- **THEN** state-specific actions respect ownership and pane limits and return focus to the visible terminal on dismissal
+#### Scenario: Every switcher row identifies its resource and attachment state
+- **WHEN** the coarse-pointer switcher lists sessions
+- **THEN** each row carries the session label, coarse age, and visible, attached-in-this-window, detached, or attached-elsewhere state
+- **AND** selecting a visible or attached row makes that pane visible; selecting a detached row attaches a new pane and makes it visible
 
-On coarse-pointer devices the terminal SHALL provide a switcher sheet, opened from the keybar, that lists this window's attached terminals and every server session the window is not showing, and SHALL offer a New terminal action. Each row SHALL carry the session's label, its state — visible, attached in this window, detached, or attached elsewhere — and a coarse age. Selecting a visible-or-attached row SHALL make that pane the visible pane. Selecting a detached session SHALL attach it as a new pane and make it visible. A session attached by another client SHALL require an explicit Take over activation, and SHALL never transfer from a plain row selection. Each listed session SHALL offer termination, which SHALL remove the resource; terminating the visible terminal SHALL fall back to another attached pane, or close the panel when none remains. New terminal SHALL create a server resource and attach a pane to it. When the pane cap is reached, New terminal and attach SHALL be disabled with a stated reason while switching between attached panes stays available. The sheet SHALL be dismissible without choosing, SHALL return focus to the visible pane on dismissal, and SHALL be the touch-mode replacement for the desktop session chooser — that chooser SHALL NOT render in touch mode.
+#### Scenario: Termination applies to every listed resource
+- **WHEN** a user terminates any listed session, including one not shown in this window
+- **THEN** its server resource is removed
+- **AND** terminating the visible pane selects another attached pane, or closes the panel if none remains
+
+#### Scenario: New terminal creates before it attaches
+- **WHEN** the user activates New terminal
+- **THEN** the server creates a terminal resource before attaching a pane to it
 
 #### Scenario: Switching between two attached terminals
 - **WHEN** two panes are attached in touch mode and the user opens the switcher and selects the hidden terminal
@@ -1043,13 +1025,7 @@ On coarse-pointer devices the terminal SHALL provide a switcher sheet, opened fr
 
 ### Requirement: Terminal renders the bundled default font
 
-Terminal fonts SHALL resolve through the terminal and monospace CSS variables to bundled Hack Nerd Font Mono. Repository configuration SHALL NOT override terminal font or size, and the removed terminal configuration fields SHALL remain absent.
-
-#### Scenario: Render terminal text and icon glyphs with the bundled face
-- **WHEN** a browser creates the terminal font stack without access to user-installed fonts
-- **THEN** the bundled default supplies both ASCII and Nerd Font glyphs without a repository terminal-font override
-
-The terminal's font SHALL be `var(--terminal-font-family)`, which falls through to `var(--mono-font-family)` and ultimately to the bundled Hack Nerd Font Mono face — so that both ASCII and Nerd Font icon glyphs render correctly out of the box in every browser (including Safari, which does not expose user-installed system fonts to web pages). No repository configuration SHALL override the terminal font or size; `.uatu.json` carries no `terminal` block and `/api/state` carries no `terminalConfig` field.
+The terminal font SHALL be `var(--terminal-font-family)`, falling through `var(--mono-font-family)` to bundled Hack Nerd Font Mono for out-of-box ASCII and Nerd Font glyphs in every browser. Repository configuration SHALL NOT override terminal font or size: `.uatu.json` has no `terminal` block and `/api/state` has no `terminalConfig` field.
 
 #### Scenario: Terminal renders the bundled default
 
@@ -1093,13 +1069,7 @@ Accepted OSC 52 writes SHALL always be visible: each write SHALL show a transien
 
 ### Requirement: Same-tab navigation preserves workspace terminal state
 
-Same-tab reload, workspace navigation, and history restoration SHALL preserve each workspace's terminal visibility and pane references. Leaving SHALL release connections without terminating shells or hiding the panel; returning SHALL restore eligible shells without takeover, replacement, or stolen keyboard focus.
-
-#### Scenario: Leave and return to a workspace in the same tab or installed PWA
-- **WHEN** navigation disconnects and later restores a workspace's terminal surface
-- **THEN** its saved visibility and surviving unclaimed PTYs return independently of other workspaces
-
-The terminal SHALL preserve each workspace's per-tab visibility and pane references across page reload, navigation to another workspace and back, and browser history restoration. Leaving a page SHALL release its terminal connections without terminating its shells or recording the panel as user-hidden. When the same tab returns to a workspace with previously visible terminals and those PTYs are still alive and unclaimed, it SHALL restore the panel and reattach the same shells automatically without a takeover action or replacement shell. A hidden terminal SHALL remain hidden. Each workspace SHALL retain its own visibility independently. Browser-tab and installed-PWA navigation SHALL follow the same contract. Restoration SHALL NOT steal keyboard focus.
+Same-tab reload, workspace round trips, and history restoration SHALL preserve each workspace's visibility and pane references independently, in browser tabs and installed PWAs. Leaving SHALL release connections without terminating shells or recording user-hidden state. Returning to previously visible, live, unclaimed PTYs SHALL restore the panel and same shells automatically, without takeover or replacement. Hidden terminals SHALL stay hidden. Restoration SHALL NOT steal keyboard focus.
 
 #### Scenario: Reload restores a running terminal
 - **WHEN** a user reloads a workspace with a visible terminal and a live shell that no other client claims
@@ -1124,13 +1094,12 @@ The terminal SHALL preserve each workspace's per-tab visibility and pane referen
 
 ### Requirement: Attachment recovery preserves presentation and explicit ownership
 
-Connection failure SHALL preserve visible terminal presentation while bounded recovery reconciles authenticated inventory. Recovery SHALL distinguish detached, occupied, missing, and unavailable states without authorizing takeover or replacement shells; confirmed endings and explicit takeovers SHALL retain their respective outcomes.
+Connection failure alone SHALL NOT mean shell exit, pane closure, or hiding. Visible saved-PTY panes SHALL stay visible during authenticated-inventory reconciliation, distinguishing detached, occupied, missing, and unavailable inventory/authentication. Transient failures SHALL get bounded automatic recovery then an actionable result, not endless retries. Neither recovery nor saved references SHALL authorize takeover or automatic replacement shells.
 
-#### Scenario: Reconcile a failed terminal connection with authenticated inventory
-- **WHEN** a visible pane restores a saved PTY after an attachment failure
-- **THEN** recovery produces a bounded, actionable result that preserves presentation and explicit ownership
-
-A terminal connection failure SHALL NOT by itself be treated as shell exit, pane closure, or a request to hide the terminal. A visible pane restoring a saved PTY SHALL remain visible while its attachment is reconciled with authenticated inventory. Recovery SHALL distinguish a detached PTY, an occupied PTY, a missing PTY, and unavailable inventory or authentication. Transient restore failures SHALL receive bounded automatic recovery, after which the panel SHALL present an actionable result rather than retry indefinitely. Neither recovery nor a saved pane reference SHALL authorize takeover or automatic replacement-shell creation. A confirmed missing or exited PTY SHALL be reported as ended or unavailable rather than offered for takeover. A confirmed explicit takeover by another client SHALL retain the existing Take back behavior without automatic reclamation.
+#### Scenario: Confirmed resource state determines the parked pane's action
+- **WHEN** recovery confirms a missing or exited PTY or an explicit takeover by another client
+- **THEN** missing or exited PTYs are reported ended or unavailable, not offered for takeover
+- **AND** explicit takeover retains the existing Take back behavior without automatic reclamation
 
 #### Scenario: Previous connection is released after restore begins
 - **WHEN** a saved-pane restoration encounters its previous connection still attached

@@ -143,13 +143,15 @@ Edge builds SHALL publish to a single GitHub prerelease with the fixed tag `edge
 - **THEN** the stable version compares higher and the upgrade proceeds
 
 ### Requirement: The tap offers an opt-in uatu-desktop@edge cask
-The tap automation SHALL generate `Casks/uatu-desktop@edge.rb` in `tjakobsson/homebrew-tap` from the edge release's SHA256SUMS, pointing at the `edge` tag's assets with the edge version string.
+The tap automation SHALL generate `Casks/uatu-desktop@edge.rb` in `tjakobsson/homebrew-tap` from the edge release's SHA256SUMS, pointing at the `edge` tag's assets with the edge version string. The edge cask SHALL conflict with stable `uatu-desktop`; edge publishing MUST leave the stable cask unaffected. Every successful workflow run, including a skipped build, SHALL reconcile the edge cask with the published release.
 
 #### Scenario: Every successful edge run reconciles the opt-in cask
 - **WHEN** a workflow run succeeds, including when its build was skipped
 - **THEN** tap automation SHALL run and reconcile the cask with the currently published release so a transient tap-update failure self-heals without a rebuild
-- **AND** the edge cask SHALL declare a conflict with the stable `uatu-desktop` cask
-- **AND** the stable cask MUST remain unaffected by edge publishing
+
+#### Scenario: The generated cask declares its install conflict
+- **WHEN** the published `Casks/uatu-desktop@edge.rb` is inspected independently of a workflow run
+- **THEN** it declares a conflict with the stable `uatu-desktop` cask
 
 #### Scenario: Opting into edge
 

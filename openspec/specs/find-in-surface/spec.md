@@ -57,20 +57,15 @@ an act about the document. The initial value SHALL be `preview`.
 
 Find and match-navigation shortcuts SHALL target the active supported surface or fall back to Preview. The target SHALL become visible before mounting its find bar; suppressing native find MUST NOT leave the user with a hidden find surface.
 
-#### Scenario: Invoke find from a visible surface or the touch Files tab
-- **WHEN** a find shortcut targets a surface that is not currently visible or lacks its own find implementation
-- **THEN** the supported target is brought forward before its find UI replaces native browser find
+#### Scenario: Invoke surface find and match navigation
+- **WHEN** the user presses `⌘F` (`Ctrl+F` on non-Apple platforms)
+- **THEN** find opens on the active surface, falling back to Preview if that surface has no implementation, and prevents host-native find
+- **AND** `⌘G` and `⇧⌘G` advance to the next and previous match on that same surface
 
-
-`⌘F` (`Ctrl+F` on non-Apple platforms) SHALL open find on the active surface and
-SHALL prevent the host's native find from acting. `⌘G` and `⇧⌘G` SHALL advance to
-the next and previous match on the same surface. When the active surface has no
-find implementation, the shortcut SHALL fall through to the preview. Before the
-bar is mounted, the shortcut SHALL bring the target surface forward when that
-surface is not currently visible — in touch mode, where only the active tab's
-surface renders, invoking preview find from the Files tab SHALL activate the
-Preview tab first. The bar MUST NOT be mounted into a hidden surface while the
-host's native find stays suppressed, because that leaves the user with neither.
+#### Scenario: Reveal a hidden target before mounting find
+- **WHEN** a find target is not visible, including Preview while the touch Files tab is active
+- **THEN** the target is brought forward first, activating the Preview tab in that touch case
+- **AND** the bar MUST NOT mount in a hidden surface while native find remains suppressed
 
 #### Scenario: Find with the preview active
 

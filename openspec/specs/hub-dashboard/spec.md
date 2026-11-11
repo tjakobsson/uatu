@@ -17,7 +17,7 @@ The authenticated `/settings` page SHALL manage credential identity, readiness, 
 - **THEN** it SHALL provide generate, import, unlock, lock, disable, test, and delete actions as applicable to its type, mask every submitted secret, and never redisplay stored private keys or tokens
 
 #### Scenario: Workspace assignments and tools are configured
-- **WHEN** the assignment area is opened
+- **WHEN** `/settings` displays assignment management
 - **THEN** it SHALL be workspace-oriented and collapsed by default, with assigned workspaces listing authentication and signing credentials, role icons, and removal controls
 - **AND** one stable-layout form SHALL let any registered workspace receive separate authentication and signing credentials together, state default-replacement behavior, and keep the authentication-host control visible but disabled until authentication is selected
 - **WHEN** tooling is missing or incompatible
@@ -25,7 +25,7 @@ The authenticated `/settings` page SHALL manage credential identity, readiness, 
 
 #### Scenario: Shared navigation and UID advice remain consistent
 - **WHEN** `/settings` or `/clone` is shown
-- **THEN** the shared-UID advisory SHALL use one per-user browser dismissal key across both pages and SHALL NOT require repeated confirmation during assignment
+- **THEN** the shared-UID advisory SHALL appear, use one per-user browser dismissal key across both pages, and SHALL NOT require repeated confirmation during assignment
 
 #### Scenario: Shared navigation and dashboard contents are rendered
 - **WHEN** a Hub page displays shared navigation
@@ -125,8 +125,9 @@ The dashboard SHALL offer a forget action on stopped workspaces that removes the
 The authenticated `/clone` page SHALL register workspaces through server-side directory browsing or explicit cloning, with separate checkout and workspace naming, compatible credentials, and opt-in startup. Non-Git registration SHALL require Git initialization confirmation.
 
 #### Scenario: Directory browsing exposes registration-aware choices
-- **WHEN** the user browses the hub host's filesystem on `/clone` rather than typing source paths
-- **THEN** the directory-listing API SHALL start at the available configured default workspace parent, otherwise the daemon user's home, and return parent and child directories with name, Git status, registration identity, and running state
+- **WHEN** an authenticated user opens `/clone`
+- **THEN** the page SHALL offer registration by browsing the hub host's filesystem, not typing source paths, and the hub SHALL expose a directory-listing API
+- **AND** that API SHALL start at the available configured default workspace parent, otherwise the daemon user's home, and return parent and child directories with name, Git status, registration identity, and running state
 - **AND** it SHALL list directories only, hiding dot-directories
 - **AND** an unregistered repository SHALL open Add workspace, a registered stopped workspace SHALL offer Start, and a running one SHALL offer Open
 - **AND** adding a non-Git folder SHALL require explicit Git initialization confirmation before registration
@@ -177,7 +178,14 @@ The authenticated `/clone` page SHALL stream clone output and phase, support mas
 - **WHEN** a clone is in progress
 - **THEN** live terminal output and current phase SHALL be shown with an always-available masked input that writes one response without displaying or retaining it
 - **AND** recognized credential, trust, or verification prompts MAY focus or label that input, but unrecognized prompts MUST remain answerable
-- **AND** unlocking a selected stored credential SHALL use its masked secret path; PTY responses SHALL be one-operation inputs and MUST NOT silently create or update stored credentials
+
+#### Scenario: Stored clone credentials unlock through their masked secret path
+- **WHEN** a selected stored credential is unlocked for cloning, including before the clone starts
+- **THEN** unlocking SHALL use the credential operation's masked secret path
+
+#### Scenario: Every clone PTY response remains a one-operation input
+- **WHEN** a response is entered into the clone PTY
+- **THEN** it SHALL remain a one-operation input and MUST NOT silently create or update a stored credential
 
 #### Scenario: Clone terminal outcomes settle controls and navigation
 - **WHEN** a clone is active or reaches a terminal outcome
@@ -222,13 +230,12 @@ The authenticated `/clone` page SHALL stream clone output and phase, support mas
 - **THEN** the clone page reports completion and navigates to the workspace's stable session URL
 
 ### Requirement: Hub-served sessions expose hub navigation
-Hub-served sessions SHALL expose a sidebar workspace switcher for dashboard, workspace, and sign-out navigation. Current-workspace activation SHALL preserve the page and terminal connections; outside a hub the switcher MUST stay hidden.
+Hub-served sessions SHALL expose a sidebar workspace switcher for dashboard, workspace, and sign-out navigation. Ordinary same-tab activation of the current running workspace SHALL preserve the page and terminal connections; outside a hub the switcher MUST stay hidden. The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
 
 #### Scenario: Hub context exposes named navigation
 - **WHEN** a hub-session-shaped base path and answering hub API at the origin root establish hub serving
 - **THEN** the sidebar header SHALL name the current workspace by display name and link the dashboard and every registered workspace by display name and running/stopped state, with sign out
 - **AND** duplicate names SHALL be disambiguated by path or stable-id detail
-- **AND** the hub brand header SHALL center the logo above the wordmark with no tagline
 
 #### Scenario: Current workspace navigation respects browser intent
 - **WHEN** the current running workspace is activated for ordinary same-tab navigation
@@ -273,11 +280,11 @@ Hub-served sessions SHALL expose a sidebar workspace switcher for dashboard, wor
 - **THEN** the workspace switcher is not shown
 
 ### Requirement: The workspace switcher chip reflects real session state
-The workspace switcher chip, menu, and shell connection indicator SHALL consistently reflect authoritative hub session state. Starting the current stopped workspace SHALL recover in place without navigation.
+The workspace switcher chip, open menu, and shell connection indicator SHALL consistently reflect authoritative hub session state. Starting the current stopped workspace SHALL recover in place without navigation.
 
 #### Scenario: Hub updates and cached-page restores refresh all session indicators
 - **WHEN** workspace state changes, a page-cache restore occurs, or a menu state refresh completes
-- **THEN** chip and menu SHALL update from the brokered activity topic and fresh hub state on restores and completed menu refreshes so they cannot disagree
+- **THEN** the chip and open menu SHALL update from the brokered activity topic as workspace state changes and from fresh hub state on restores and completed menu refreshes so they cannot disagree
 - **AND** the chip SHALL use hub-reported state, never assume a viewed session is running even after dashboard stop or back/forward-cache restore
 - **AND** the shell connection indicator SHALL derive stopped state from that same hub report
 - **WHEN** the current workspace is stopped
@@ -361,7 +368,7 @@ The hub SHALL provide an anonymously accessible, origin-scoped web-app manifest 
 #### Scenario: Installation metadata spans the entire hub origin
 - **WHEN** a browser fetches `/manifest.webmanifest` at the hub origin
 - **THEN** it SHALL declare hub `name`/`short_name`, `display: "standalone"`, `start_url: "/"`, `scope: "/"`, and 192x192 and 512x512 PNG icons
-- **AND** login and dashboard SHALL link it from `<head>`; manifest and icons SHALL need no authentication for anonymous install-time fetches and contain only branding
+- **AND** login and dashboard SHALL link it from `<head>`; manifest and icons SHALL need no authentication, since install-time fetches may be anonymous and the manifest carries only branding
 - **AND** an installed hub app SHALL keep login, dashboard, and every `/s/<id>/` session in scope without in-app browser chrome
 
 #### Scenario: Hub manifest is reachable without a session
@@ -394,10 +401,10 @@ The dashboard SHALL show the signed-in user's active sessions — device label, 
 - **THEN** the response clears the cookie and lands on the login page
 
 ### Requirement: Directory browser manages folders
-The authenticated Hub directory browser SHALL create empty child folders, rename listed children, and remove only empty listed children for registered and unregistered folders, using validated names and contextual results.
+The authenticated Hub directory browser SHALL let users create empty child folders in the currently browsed directory, rename listed children, and remove only empty listed children for registered and unregistered folders, using validated names and contextual results.
 
 #### Scenario: Folder mutation validates names and refreshes in place
-- **WHEN** a user creates an empty child in the current directory, renames a listed child, or removes an empty listed child, whether registered or not
+- **WHEN** a user requests creation of an empty child in the current directory, rename of a listed child, or removal of a listed child, whether registered or not
 - **THEN** names MUST be non-empty visible single segments and MUST reject separators, dot segments, NUL, and leading `.`
 - **AND** successful mutation SHALL refresh the affected listing; failure SHALL show an actionable error without navigating away
 
@@ -426,7 +433,7 @@ The authenticated Hub directory browser SHALL create empty child folders, rename
 - **AND** the browser reports that only empty folders can be removed
 
 ### Requirement: Registered folder mutations offer coordinated session stopping
-Registered-folder rename and removal SHALL coordinate all affected workspace sessions and preserve registration semantics. Folder mutation MUST wait for confirmed stops, including in-flight starts.
+Registered-folder rename and removal SHALL coordinate all affected workspace sessions and preserve registration semantics. When affected workspaces are running or starting, mutation MUST wait for confirmed stops, including in-flight starts; all-stopped workspaces SHALL proceed without another stop prompt.
 
 #### Scenario: Registered-folder mutation stops only with informed confirmation
 - **WHEN** rename or removal affects registered workspaces
@@ -486,7 +493,7 @@ Selecting an unregistered Git repository SHALL open a configuration form before 
 The dashboard SHALL create new stopped Git workspaces with explicit display/folder names, parent directory, and optional credentials. Failures SHALL be actionable without starting sessions or silently adopting existing folders.
 
 #### Scenario: Create workspace initializes and registers only a new destination
-- **WHEN** the Create workspace flow is submitted
+- **WHEN** the dashboard presents its Create workspace flow
 - **THEN** it SHALL offer a display name, visible single-segment folder name, absolute parent defaulted from Hub Settings, and optional authentication/signing credentials
 - **AND** success SHALL create the child folder, initialize an empty Git repository, register the chosen display name and assignments, and leave it stopped
 - **AND** existing destinations, invalid names, unavailable parents, Git initialization failures, and configuration persistence failures SHALL yield actionable errors without session start or silent adoption
@@ -509,11 +516,15 @@ The dashboard SHALL create new stopped Git workspaces with explicit display/fold
 Hub Settings SHALL let an authenticated user configure or clear one validated absolute default workspace parent. It SHALL guide onboarding without restricting where folders can be browsed or registered.
 
 #### Scenario: Default parent directs onboarding with a safe fallback
-- **WHEN** a default workspace parent is saved
+- **WHEN** a default workspace parent is submitted for saving
 - **THEN** it SHALL be validated as an existing direct directory before saving
 - **WHEN** Create, clone, or directory browsing opens
 - **THEN** it SHALL start at that directory if configured and readable, otherwise the daemon user's home with an explanation
-- **AND** users MAY browse/register elsewhere, and clearing the setting SHALL restore the home-directory default
+- **AND** users MAY browse/register elsewhere
+
+#### Scenario: Clearing the default parent restores the home-directory default
+- **WHEN** the default workspace parent setting is cleared
+- **THEN** the home-directory default SHALL be restored
 
 #### Scenario: Default parent is used by onboarding
 - **WHEN** `/srv/workspaces` is configured and a user opens Create workspace or Clone
@@ -535,7 +546,7 @@ Workspace and directory rows SHALL distinguish display-name editing, filesystem 
 #### Scenario: Workspace naming is separate from folder movement
 - **WHEN** workspace or directory row actions are shown
 - **THEN** they SHALL distinguish Rename workspace, Rename folder, Remove from Hub, Remove folder, and Delete worktree
-- **AND** Rename workspace SHALL change only ordinary/main display names while stopped or running; linked child names SHALL reflect exact local branches, with independent child and branch renaming out of scope
+- **AND** Rename workspace SHALL remain available for ordinary/main workspaces while stopped or running and SHALL change only the display name; linked child names SHALL reflect exact local branches, with independent child and branch renaming out of scope
 - **WHEN** Rename folder would break linked-checkout, main/common-directory, or ancestor dependencies, including outside the Hub registry
 - **THEN** it SHALL be refused with an explanation that stopping cannot make it safe and display-name editing offered only where applicable, without a separate folder-policy dialog
 - **WHEN** a folder move is permitted by those guards
@@ -561,13 +572,13 @@ Workspace and directory rows SHALL distinguish display-name editing, filesystem 
 - **THEN** the browser reports the refusal without stop as a bypass; ordinary/main display-name editing remains available, while a child's name continues to follow its branch
 
 ### Requirement: The switcher surfaces other workspaces' activity
-The in-session switcher SHALL report other accessible workspaces' live activity without revealing conversation content or titles. Badges SHALL prioritize awaiting input over finished unviewed work over working, and viewing finished Chat SHALL clear its state across devices.
+The in-session switcher SHALL report other accessible workspaces' live activity, with the badge and menu-state rules below. Viewing finished Chat SHALL clear its state across devices. Activity presentation MUST NOT reveal conversation content or titles, and MUST NOT vary by mode beyond the switcher's existing placement rules.
 
 #### Scenario: Other-workspace activity is presented privately and consistently
 - **WHEN** the brokered activity topic reports other accessible workspaces
 - **THEN** the switcher SHALL show session running state, agent work, awaiting interaction, and finished work since last viewing Chat
 - **AND** menu running states SHALL read awaiting the user, working, finished, or idle by absence of a word
-- **AND** the collapsed chip SHALL distinguish awaiting, finished-unviewed, and mere-working badges with priority awaiting, finished, working
+- **AND** the collapsed chip SHALL carry a badge while any other workspace awaits the user, a distinct badge while any other workspace has finished unviewed work, and SHALL distinguish both from mere agent activity; when several apply the chip shows the most urgent in the order awaiting, finished, working
 - **AND** presentation MUST NOT reveal conversation content/titles or vary by mode beyond existing placement rules
 - **WHEN** a finished workspace's Chat is opened
 - **THEN** its entry and badge SHALL clear on every device without reload
@@ -597,7 +608,7 @@ The in-session switcher SHALL report other accessible workspaces' live activity 
 - **AND** each menu entry still names its own state
 
 ### Requirement: Worktree-capable dashboard uses selected Active groups layout
-Active groups SHALL be the sole worktree-capable dashboard layout, preserving original presentation, lifecycle actions, exact branches, provenance, and safety. Repository headings SHALL own parent Rename and fork; main checkouts SHALL have independent rows and lifecycle.
+Active groups SHALL be the sole worktree-capable dashboard layout, preserving original presentation, lifecycle actions, exact branches, provenance, and safety. Repository headings SHALL own parent Rename and fork; main checkouts SHALL have independent rows and lifecycle. No-capability product behavior SHALL remain unchanged.
 
 #### Scenario: Active groups remain stable across dashboard operations
 - **WHEN** the dashboard loads, reloads, creates, deletes, starts, or stops a checkout
@@ -608,7 +619,10 @@ Active groups SHALL be the sole worktree-capable dashboard layout, preserving or
 #### Scenario: Repository actions align and share the fork glyph
 - **WHEN** a repository heading renders at desktop or narrow width
 - **THEN** parent Rename and fork SHALL be grouped at the trailing edge aligned with subordinate rows' Open/Stop edge, with fork last, wrapping beneath the name without horizontal overflow
-- **AND** every dashboard-heading and picker-group-header fork SHALL draw one shared glyph defined in a single place
+
+#### Scenario: Every fork control uses the same single-definition glyph
+- **WHEN** a fork control renders on a dashboard heading or a picker group header
+- **THEN** it SHALL draw one shared glyph defined in a single place
 
 #### Scenario: Main stops while a child runs
 - **WHEN** main Stop is activated
@@ -625,7 +639,7 @@ The workspace picker SHALL focus on switching and parent-only creation forks, wi
 
 #### Scenario: Picker repository identity and grouping are unambiguous
 - **WHEN** the picker shows workspaces with or without repository-family membership
-- **THEN** each repository-family checkout's selector SHALL name the repository (child's parent or main checkout's own name) followed by branch, identically for main and child, with no separate repository title above it
+- **THEN** each repository-family checkout's selector SHALL name the repository (child's parent or main checkout's own name) followed by branch, identically for main and child, and SHALL be the only place the picker names that current checkout's repository, with no separate title above it
 - **AND** rows SHALL group under a non-interactive repository header with trailing fork, then main then children on one left edge without indentation, with consecutive groups visually separated
 - **AND** workspaces without a repository family SHALL keep only their display name without branch and remain ungrouped; grouping MUST NOT be inferred from names
 
@@ -637,8 +651,8 @@ The workspace picker SHALL focus on switching and parent-only creation forks, wi
 - **AND** Open/Start/Stop and Remove from Uatu (unregister) remain distinct from guarded owned-only Delete worktree, using existing secondary affordances when available
 
 #### Scenario: Worktree recovery and opening preserve context on real surfaces
-- **WHEN** creation, registration, opening, or recovery is performed
-- **THEN** errors SHALL provide relevant inline retry/actions, and inventory/discovery/recovery/missing-path states SHALL be reviewable on real surfaces
+- **WHEN** the real picker or dashboard surfaces are displayed
+- **THEN** inventory, discovery, recovery, and missing-path states SHALL be reviewable, and errors SHALL provide relevant inline retry/actions
 - **AND** compact creation omits policy/path/base readouts and defaults stopped without switching; explicit Open SHALL use separate stable `/s/<workspace-id>/` context and restore its own files/preview/terminal/chat without conversation migration
 - **AND** external registration preserves path/ownership; missing/uncertain trees remain unavailable without silent recreation
 - **AND** keyboard, touch, themes, and titlebar inset SHALL be supported, with no-capability dashboard behavior unchanged
@@ -734,7 +748,9 @@ One unchanged client dialog module SHALL render every worktree view from publish
 - **THEN** its dialog SHALL close, source lists refresh, and a small success-coloured `Created <branch>` confirmation with explicit Open SHALL appear at viewport top without automatic switching
 - **WHEN** an operation is refused or registration fails after checkout retention
 - **THEN** a short actionable reason SHALL replace normal consequences in the originating flow, with retry only where meaningful and registration retry on that same retained checkout
-- **AND** missing/replaced paths SHALL offer inline Retry refresh on picker/dashboard rows and MUST NOT recreate checkouts
+#### Scenario: Every missing or replaced path offers refresh without recreation
+- **WHEN** a picker or dashboard row shows a missing or replaced path
+- **THEN** it SHALL offer inline Retry refresh and MUST NOT recreate a checkout
 
 #### Scenario: Live inventory and branch selection preserve the active workspace
 - **WHEN** `worktrees` invalidation reaches an open register list
@@ -761,7 +777,10 @@ A hub-served session page SHALL privately announce newly awaiting interactions i
 - **WHEN** another accessible workspace changes from not awaiting to awaiting in the activity topic
 - **THEN** the page SHALL compare with its last known state, using the first activity report after load as baseline and retaining comparison state across background return/reconnect
 - **AND** it SHALL name the workspace, say an agent needs an answer, and offer Open/Dismiss without revealing conversation content, titles, questions, or tool details
-- **AND** it SHALL NOT notify for its own workspace, already-awaiting load state, or completion without a question
+
+#### Scenario: Own workspace and non-new questions do not raise notices
+- **WHEN** activity is for the page's own workspace, a workspace already awaiting when the page loaded, or an agent that finished without asking
+- **THEN** the page SHALL NOT show a notice for it
 
 #### Scenario: Notices stack safely and clear independently of push enrollment
 - **WHEN** notices for one or more workspaces are present
@@ -860,7 +879,7 @@ Authenticated Hub Settings SHALL offer an explicitly saved, account-scoped autom
 
 #### Scenario: Personal preference controls disclose scope and effects
 - **WHEN** Personal chat preferences is displayed
-- **THEN** a compact **Keep workers running when I steer** switch SHALL default ON without a saved value, show **Applies to your account on this Hub.**, and use compact explicit **Save**, not autosave, with at least 44px switch/Save targets
+- **THEN** a compact **Keep workers running when I steer** switch SHALL default ON without a saved value, show a one-line helper **Applies to your account on this Hub.**, and use compact explicit **Save**, not autosave, with at least 44px switch/Save targets
 - **AND** the setting SHALL apply only to the initiating account on this Hub across devices/workspaces, persist through restart, and never change another account's value
 - **AND** collapsed **Learn more** SHALL distinguish machine-wide logins and workspace defaults, describe accepted-steer rather than job-start backgrounding, disclose all eligible blocking jobs including shells/shared-workspace effects, and retain non-atomic/native-resume caveats
 - **AND** existing pending/conflict/unavailable handling SHALL remain unchanged
@@ -868,9 +887,12 @@ Authenticated Hub Settings SHALL offer an explicitly saved, account-scoped autom
 #### Scenario: Refresh and concurrent saves retain authoritative policy snapshots
 - **WHEN** Settings is entered, returns to visibility/focus, or reconnects
 - **THEN** it SHALL load the current value and show saved confirmation only after persistence succeeds
-- **WHEN** an eligible action or preference save occurs
-- **THEN** policy SHALL resolve from authoritative Hub state, not cached display; a completed change affects subsequent actions and SHALL NOT retroactively add/cancel follow-ups accepted under prior snapshots
-- **AND** stale concurrent updates SHALL report conflicts with current own-account state rather than silently overwrite newer saves
+- **WHEN** an eligible action occurs
+- **THEN** policy SHALL resolve from authoritative Hub state, not a device's cached display
+- **WHEN** a setting change completes
+- **THEN** it affects subsequent actions and SHALL NOT retroactively add or cancel follow-ups for an action already accepted under a prior policy snapshot
+- **WHEN** a stale concurrent update is submitted
+- **THEN** it SHALL report a conflict with current own-account state rather than silently overwrite a newer save
 
 #### Scenario: New and existing accounts have the requested default
 - **WHEN** an account with no personal chat preference opens Settings, including after upgrading an existing Hub
@@ -898,34 +920,49 @@ Authenticated Hub Settings SHALL offer an explicitly saved, account-scoped autom
 - **AND** menu refresh and dismissal retain existing focus and outside-tap safety
 
 ### Requirement: Personal chat preference persistence and access preserve account boundaries
-Personal chat preferences and policy dispatch SHALL preserve authenticated account boundaries, private fresh-child authority, and atomic owner-only persistence. Unavailable trust or state SHALL fail explicitly without granting automatic-backgrounding authority or weakening receipt isolation.
+Personal chat preferences and dispatch SHALL preserve authenticated account boundaries, private fresh-child authority, and atomic owner-only storage. Unavailable trust/state SHALL fail explicitly without automatic-backgrounding authority or weakened receipt isolation. Policy secrets SHALL NOT be exposed through public credentials, URLs, configuration, diagnostics, or tool subprocess inheritance.
 
 #### Scenario: Preference reads and dispatch authenticate account and workspace scope
 - **WHEN** the preference API is called
 - **THEN** identity SHALL come only from authenticated cookie/bearer session, only its preference SHALL return with no-store semantics, and a closed versioned contract and cross-origin cookie-mutation protection SHALL apply
 - **AND** clients SHALL NOT select another account through body/query/header/workspace path
-- **WHEN** Hub chat dispatch resolves policy
+- **WHEN** Hub chat dispatch handles a request
 - **THEN** it SHALL use authenticated workspace-bound context and SHALL NOT trust caller policy metadata or store initiating-user policy as shared conversation/adapter state
-- **AND** policy metadata SHALL NOT appear in shared replay, diagnostics, or another viewer's responses
+
+#### Scenario: Policy metadata never leaks through shared read surfaces
+- **WHEN** shared conversation replay, diagnostics, or another viewer's responses are produced
+- **THEN** account policy metadata SHALL NOT be exposed through them
 
 #### Scenario: Child policy trust is private and invalidated by replacement
 - **WHEN** a child is spawned or replaced
 - **THEN** policy authority SHALL be privately established independently of workspace/terminal credentials and bound to a required fresh child-instance identity
-- **AND** a workspace credential SHALL NOT permit asserting a Hub principal or signing policy; replacement SHALL invalidate prior authority/envelopes despite reused workspace identity, endpoint, or credential
-- **AND** null/absent terminal credentials SHALL NOT select fallback policy keys; private bootstrap may independently establish trust under unchanged primary access gates
-- **AND** policy secrets SHALL NOT enter public credentials, URLs, configuration, diagnostics, or tool subprocess inheritance
+- **AND** replacement SHALL invalidate prior authority/envelopes despite reused workspace identity, endpoint, or credential
+
+#### Scenario: Workspace credentials cannot authorize Hub policy assertions
+- **WHEN** a caller presents a valid workspace credential
+- **THEN** that credential SHALL NOT authorize asserting a Hub principal or signing policy
+
+#### Scenario: Missing terminal credentials never select fallback policy keys
+- **WHEN** terminal credentials are nullable or absent
+- **THEN** they SHALL NOT select a fallback policy key; private bootstrap can establish policy trust independently, subject to unchanged primary access gates
 
 #### Scenario: Missing policy proof degrades without granting authority
 - **WHEN** private trust or instance proof cannot be established
 - **THEN** automatic backgrounding SHALL be explicitly unavailable without unsigned/default-ON fallback, while ordinary steering/background API retain existing access checks
 - **AND** unavailable trust SHALL NOT merge authenticated accounts' mutation receipts or disable unknown-outcome retention
-- **AND** degraded operation ids SHALL preserve original client correlation without unsigned principal claims or automatic-backgrounding authority
-- **AND** first feedback decisions SHALL stay scoped to the authenticated initiating account while bounded in-memory receipt/snapshot protection remains
+
+#### Scenario: Degraded operation identifiers preserve correlation without authority
+- **WHEN** a degraded operation identifier is used
+- **THEN** it SHALL preserve original client correlation without asserting an unsigned principal or authorizing automatic backgrounding
+
+#### Scenario: First feedback decisions remain scoped to their authenticated initiator
+- **WHEN** a first feedback decision is made while bounded in-memory receipt/snapshot protection is retained
+- **THEN** it SHALL remain scoped to the authenticated initiating account
 
 #### Scenario: Preference storage preserves OFF values and fails safely
 - **WHEN** preferences are read or updated
 - **THEN** persistence SHALL use owner-only storage, atomic serialized updates, rollback on an uncommitted failure, preservation of other users' records and explicit OFF, and rejection of unsupported wire versions
-- **AND** only a missing initial file/record SHALL resolve ON; corrupt/unreadable/unsupported-version state SHALL report unavailable without overwrite or OFF-to-ON reset
+- **AND** a missing initial file/record SHALL resolve ON; corrupt/unreadable/unsupported-version state SHALL report unavailable without overwrite or OFF-to-ON reset
 - **WHEN** preference resolution is unavailable
 - **THEN** steering SHALL remain usable, skipping automatic backgrounding with explanatory feedback
 

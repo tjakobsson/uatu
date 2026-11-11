@@ -66,7 +66,7 @@ Personal workspace-state updates SHALL affect future boot/resume decisions and S
 - **THEN** both fields retain their latest independently written values
 
 ### Requirement: Browsing scope is per client request context
-The watch child SHALL retain launched roots as shared configuration but MUST NOT retain one client's mutable browsing scope globally. Pinning/unpinning, widened search, compare target, snapshots, SSE subscriptions, diff requests, and search requests SHALL carry explicit caller context sufficient for that client's view. Scope persistence and launch constraints SHALL follow the rules below.
+The watch child SHALL retain launched roots as shared configuration but MUST NOT retain one client's mutable browsing scope globally. Pinning/unpinning, widened search, compare target, snapshots, SSE subscriptions, diff and search requests SHALL carry sufficient caller context. Browsing scope SHALL remain runtime client state and SHALL NOT enter the initial durable personal-state schema. The shared CLI single-file launch constraint cannot be widened by a client.
 
 #### Scenario: A client narrows or widens runtime scope
 - **WHEN** browsing scope changes in a client
@@ -259,6 +259,10 @@ The Hub SHALL accept a bounded explicit set of exact execution identities with i
 - **WHEN** a batch contains duplicate targets, stale revisions, unverified identities, or positive active evidence
 - **THEN** it SHALL NOT produce a partially dismissed batch, and trusted positive activity SHALL continue retiring old marks even if dismissal is refused
 
+#### Scenario: Trusted positive activity retires old marks regardless of save outcome
+- **WHEN** trusted positive activity is received, whether a dismissal succeeds, is refused, or is not being saved
+- **THEN** it SHALL continue retiring old marks
+
 #### Scenario: A valid or invalid dismissal batch encounters storage failure
 - **WHEN** storage fails while saving a dismissal batch, including an otherwise valid batch
 - **THEN** prior durable dismissals SHALL be retained and uncertainty reported without claiming success
@@ -297,6 +301,10 @@ The Hub SHALL accept a bounded explicit set of exact execution identities with i
 
 Dismissal SHALL use a complete current authoritative worker projection without transporting ordinary transcript text, prompts, or tool output. Compact evidence SHALL preserve exact occurrence identities, aliases, launcher reconciliation, and positive-activity semantics across all source pages. Unsafe evidence SHALL fail closed under the rules below.
 
+#### Scenario: Transcript volume grows without making evidence invalid
+- **WHEN** dismissal evidence is constructed or checked at any transcript volume, including valid evidence
+- **THEN** existing evidence-count, identifier, and storage safety bounds SHALL NOT be relaxed to accommodate transcript volume
+
 #### Scenario: Evidence is incomplete or exceeds safety bounds
 - **WHEN** dismissal evidence is incomplete, contradictory, changed, malformed, or over-capacity
 - **THEN** it SHALL fail closed rather than authorize dismissal
@@ -319,6 +327,14 @@ The versioned personal worker dismissal resource SHALL support a closed bulk req
 - **WHEN** the resource receives a bulk-dismissal request
 - **THEN** documented count/byte bounds SHALL apply, and malformed, oversized, stale, foreign, unavailable, or over-capacity requests SHALL be rejected without partial dismissal
 - **AND** responses and private invalidations SHALL retain existing account isolation and no-store semantics
+
+#### Scenario: Singleton and bulk resource deliveries preserve account isolation
+- **WHEN** the worker-dismissal resource emits a response or private invalidation, for singleton, retirement, or bulk requests
+- **THEN** it SHALL retain existing account isolation and no-store semantics
+
+#### Scenario: The bulk-dismissal contract is read before any request
+- **WHEN** the bulk-dismissal resource contract is consulted
+- **THEN** it SHALL document count and byte bounds for bulk writes
 
 #### Scenario: One bulk response
 - **WHEN** an authorized caller submits a valid eligible group

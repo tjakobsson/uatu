@@ -7,11 +7,15 @@ The hub-brokered live stream is the one long-lived connection a hub-served sessi
 ## Requirements
 
 ### Requirement: A hub-served page holds exactly one live connection
-A hub-served page SHALL receive all pushed document state, conversation inventory/events, subagent transcripts, and cross-workspace activity over one authenticated SSE connection. Conversation/transcript selection, opening/collapsing Chat, and preview changes MUST NOT add pushed-update connections. Streams SHALL carry only authorized workspaces; hidden-page and media/terminal exceptions SHALL follow the rules below.
+A hub-served page SHALL receive every pushed update, including document state, conversation inventory/events, subagent transcripts, and cross-workspace activity, over one authenticated SSE connection. Conversation/transcript selection, opening/collapsing Chat, and preview changes MUST NOT add pushed-update connections. Streams SHALL carry only authorized workspaces; hidden-page and media/terminal exceptions follow below.
 
 #### Scenario: A page is hidden or uses independent terminal/media transport
 - **WHEN** a page becomes hidden
-- **THEN** it SHALL release its live connection, retain subscriptions/cursors, and resume topics from them when visible; a page initially hidden SHALL wait for visibility before connecting
+- **THEN** it SHALL release its live connection, retain subscriptions/cursors, and resume topics from them when visible
+
+#### Scenario: A page is initially opened out of view
+- **WHEN** a page is initially opened hidden
+- **THEN** it SHALL wait until visible before connecting
 
 #### Scenario: Terminal and media transport remain independent while visible or hidden
 - **WHEN** a page uses terminal or media transport, regardless of its visibility
@@ -45,7 +49,7 @@ A hub-served page SHALL receive all pushed document state, conversation inventor
 - **AND** cancelling a media request does not close the live stream
 
 ### Requirement: Events are enveloped by workspace and topic with independent cursors
-Every `live` event SHALL carry its workspace, topic, and topic-scoped cursor. Other frames SHALL be only opening `hello` (naming stream id) and transport keepalives. The fixed topics SHALL be `document`, `inventory`, `conversation`, `activity`, `worktrees`, and `personal`, with the payload, replay, isolation, and invalidation contracts below.
+Every `live` event SHALL carry its workspace, topic, and topic-scoped cursor. Other frames SHALL be only opening `hello` (naming stream id) and transport keepalives. Keepalives SHALL be unenveloped comment frames and MUST NOT advance cursors. The fixed topics SHALL be `document`, `inventory`, `conversation`, `activity`, `worktrees`, and `personal`, with the payload, replay, isolation, and invalidation contracts below.
 
 #### Scenario: A live frame selects a topic contract
 - **WHEN** a `live` event is emitted
@@ -58,6 +62,11 @@ Every `live` event SHALL carry its workspace, topic, and topic-scoped cursor. Ot
 - **THEN** it SHALL present each subscription's last applied cursor, and the hub SHALL replay each in order before live events or signal topic-scoped resync if unreplayable
 - **AND** cursors SHALL be independent: replay MUST NOT depend on, reorder, or duplicate another topic's events, and one topic falling behind SHALL never resync the entire stream
 
+#### Scenario: Any topic replay stays independent of every other topic
+- **WHEN** a topic is replayed, whether on reconnect or after a subscription change
+- **THEN** its cursor SHALL be independent and replay MUST NOT depend on, reorder, or duplicate another topic's events
+- **AND** one topic falling behind SHALL never cause whole-stream resync
+
 #### Scenario: Every stream open supplies fresh cursor-free activity
 - **WHEN** a live stream opens, including an initial open or activity-only reconnect
 - **THEN** `activity` SHALL take no cursor and SHALL send a fresh summary for every accessible workspace rather than replay
@@ -65,16 +74,26 @@ Every `live` event SHALL carry its workspace, topic, and topic-scoped cursor. Ot
 #### Scenario: Worktree inventory invalidates or reconnects
 - **WHEN** `worktrees` is subscribed or reconnects
 - **THEN** it SHALL require no replay cursor and send fresh invalidation for an authoritative inventory fetch
-- **AND** committed Uatu worktree operations and reconciliation inventory changes SHALL invalidate immediately, without adding paths/content to `activity` or another long-lived connection
+
+#### Scenario: A worktree operation commits or reconciliation changes inventory
+- **WHEN** a Uatu worktree operation commits or reconciliation changes inventory
+- **THEN** `worktrees` SHALL invalidate immediately, without adding paths/content to `activity` or opening another long-lived connection
+
+#### Scenario: Every worktree invalidation and inventory refresh preserves context
+- **WHEN** any worktree invalidation, event, or inventory response arrives, including reconnect refresh
+- **THEN** invalidation/reconnect refresh SHALL update the existing in-workspace picker while preserving active workspace, selected document/preview, terminal context, and selected conversation
 - **AND** invalidations MUST reveal no inaccessible workspace, path, credential, or conversation content
-- **AND** invalidation/reconnect refresh SHALL update the existing in-workspace picker without changing active workspace, selected document/preview, terminal context, or selected conversation; delayed other-workspace events/responses MUST NOT overwrite active context
+- **AND** delayed events or responses scoped to another workspace MUST NOT overwrite active context
 
 #### Scenario: A private personal-state category changes or attaches
 - **WHEN** `personal` attaches/reconnects or a personal dismissal change commits
 - **THEN** it SHALL invalidate without replay cursor and require an authenticated personal-state fetch
-- **AND** its payload SHALL be only a bounded changed-category invalidation, not account identity, dismissal marks, conversation content, or credentials
+
+#### Scenario: Every personal-topic delivery stays private and presentation-only
+- **WHEN** the `personal` topic is delivered for any invalidation
+- **THEN** its payload SHALL be only a bounded changed-category invalidation, not account identity, dismissal marks, conversation content, or credentials
 - **AND** routing SHALL use stream-authenticated account and authorized workspace, never shared workspace fanout or caller-selected username
-- **AND** it SHALL NOT open another long-lived connection, command another client's navigation, or change shared workspace activity
+- **AND** it SHALL use no replay cursor and SHALL NOT open another long-lived connection, command another client's navigation, or change shared workspace activity
 
 #### Scenario: One topic resyncs, the others resume
 - **WHEN** a client reconnects with a conversation cursor that is no longer replayable and a document cursor that is
@@ -160,24 +179,32 @@ The hub SHALL hold at most one upstream subscription per child/topic (per conver
 - **AND** the client stream stays open and continues delivering other workspaces' activity
 
 ### Requirement: The stream carries a bounded activity summary of the user's other workspaces
-The stream SHALL deliver `activity` for every workspace accessible to the authenticated user: running and, when running, working, awaiting interaction, and finished-but-unviewed facts. Changes SHALL update the summary, bounded to those facts without conversation content, titles, paths, or per-conversation detail. Working and per-user finished state SHALL follow the rules below.
+The stream SHALL deliver `activity` for every workspace accessible to the authenticated user: running and, when running, working, awaiting interaction, and finished-but-unviewed facts. Changes SHALL update the summary, which MUST be bounded to those facts and MUST NOT carry conversation content, titles, paths, or per-conversation detail. Working and per-user finished state SHALL follow the rules below.
 
 #### Scenario: Workspace activity determines working and awaiting state
 - **WHEN** a workspace's activity is summarized
 - **THEN** a conversation SHALL count as working during an in-flight turn or live background work (backgrounded command, subagent, or monitor), but not ambient housekeeping
 - **AND** permission requests and questions SHALL count as interactions awaiting the user
 - **AND** an unreachable child SHALL be reported as not running, not withheld; a non-running workspace SHALL never be finished
+- **AND** a workspace never yet observed working, such as a newly started session, SHALL NOT be finished
 
 #### Scenario: Work finishes while no page is watching
 - **WHEN** a running workspace the hub has observed working becomes quiet, with no conversation working or interaction awaiting
-- **THEN** its finished fact SHALL become true per user, with the hub observing every running workspace throughout its running lifetime whether or not any page is open
+- **THEN** its finished fact SHALL become true per user
 - **AND** it SHALL remain true until that user views the workspace chat, the session is stopped while the hub watches it, or work starts again
-- **AND** a workspace never yet observed working, such as a newly started session, SHALL NOT be finished
+
+#### Scenario: Every running workspace is observed even without viewers
+- **WHEN** a workspace is running, whether or not any page is open
+- **THEN** the hub SHALL observe its activity throughout its running lifetime so work finishing while nobody watches is recorded
 
 #### Scenario: Chat is viewed or the hub restarts after a finish
 - **WHEN** a user's session page reports its workspace's chat surface in view
 - **THEN** the acknowledgement SHALL clear finished for that user on every device and MUST NOT affect other users
-- **AND** recorded finish and view facts SHALL survive hub restart; restarting the hub stops sessions but SHALL NOT count as the workspace being stopped for this purpose
+
+#### Scenario: Hub restart preserves previously recorded finish and view facts
+- **WHEN** the hub restarts, whether or not a chat view acknowledgement accompanies the restart
+- **THEN** recorded finish and view facts SHALL remain in force
+- **AND** restarting the hub stops sessions but does not count as the workspace being stopped for this purpose
 
 #### Scenario: Another workspace's agent finishes
 - **WHEN** an agent conversation in a workspace the user is not viewing transitions from working to idle
@@ -225,8 +252,15 @@ The stream SHALL send first bytes immediately on open, before application events
 #### Scenario: Lifecycle signals recover a suspended or disconnected page
 - **WHEN** a suspended page resumes, a hidden page becomes visible, or connectivity is restored
 - **THEN** it SHALL reconcile authoritative state and re-establish one stream, with overlapping signals converging to one current connection
-- **AND** hide-triggered release SHALL be reversible: a hidden page MAY drop its connection and cancel pending reconnect but MUST retain every subscription/cursor and the ability to reconnect, resuming each topic from where it stopped on wake-up
-- **AND** only a document that actually stops running SHALL end the cycle; no lifecycle event SHALL be read as a promise it will never run again
+
+#### Scenario: Hiding a page never makes stream release permanent
+- **WHEN** a page is hidden
+- **THEN** it MAY drop its connection and cancel pending reconnect but MUST retain every subscription/cursor and the ability to reconnect, resuming each topic from where it stopped on wake-up
+- **AND** release SHALL be reversible; only a document that actually stops running ends the cycle
+
+#### Scenario: Any lifecycle event preserves the possibility of a later wake-up
+- **WHEN** a page lifecycle event occurs, including one other than hiding or waking
+- **THEN** no such event SHALL be read as a promise that the document will never run again
 
 #### Scenario: An idle stream is open immediately
 - **WHEN** a client opens the stream for a workspace where nothing is happening
@@ -256,9 +290,15 @@ The document topic SHALL support full snapshots, ordered incremental file batche
 #### Scenario: A subscriber joins, falls behind, or has an incompatible predecessor
 - **WHEN** a joining or behind subscriber needs document state
 - **THEN** it SHALL receive the current snapshot at its corresponding cursor before subsequent updates
-- **AND** invalid, missing, or incompatible predecessors SHALL cause document-topic resync without disrupting other topics
-- **AND** file revisions and discovery state SHALL survive Hub snapshot materialization so reconnects invalidate stale previews
-- **AND** snapshot delivery SHALL NOT reinterpret initial discovery or repository completion as a new Follow event
+
+#### Scenario: Any document patch has an unusable predecessor
+- **WHEN** a document patch predecessor is invalid, missing, or incompatible, including for a previously synchronized subscriber
+- **THEN** it SHALL cause document-topic resync without disrupting other topics
+
+#### Scenario: Every materialized snapshot preserves discovery and revision meaning
+- **WHEN** the Hub materializes or delivers a document snapshot
+- **THEN** file revisions and discovery state SHALL survive materialization so reconnects can invalidate stale previews
+- **AND** delivery SHALL NOT reinterpret initial discovery or repository completion as a new Follow event
 
 #### Scenario: A subscriber already holds the current cursor
 - **WHEN** a document subscriber is already at the current cursor

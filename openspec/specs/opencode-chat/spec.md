@@ -7,7 +7,7 @@ Define workspace-scoped OpenCode conversations and the responsive web chat surfa
 
 ### Requirement: Chat uses the workspace's OpenCode installation and identity
 
-UatuCode SHALL start a workspace-owned, loopback-only OpenCode service only when an OpenCode conversation needs it, reuse its installation and identity, and determine readiness through bounded protocol probes rather than emitted text. OpenCode failure MUST NOT disable the workspace or other agents.
+UatuCode SHALL start a workspace-owned loopback OpenCode service only for an OpenCode conversation, reusing workspace installation/configuration/authentication. Chat MUST NOT request provider credentials; UatuCode SHALL accept them only through Hub Agent accounts to OpenCode login and MUST NOT copy, persist, log or return them. Readiness SHALL use bounded protocol probes, not emitted text. OpenCode failure MUST NOT disable the workspace or other agents and SHALL yield actionable guidance.
 
 #### Scenario: The workspace first needs an OpenCode conversation, or OpenCode is unavailable or unauthenticated
 - **WHEN** the workspace first needs an OpenCode conversation, or OpenCode is unavailable or unauthenticated
@@ -180,7 +180,7 @@ A Chat startup failure SHALL NOT be permanent for the life of the workspace proc
 
 ### Requirement: Every conversation is confined to the server-selected workspace directory
 
-Every OpenCode operation SHALL use the server-selected canonical first watch root. Browser requests MUST NOT override it, and sessions from another canonical directory MUST NOT be exposed, resumed, or mutated.
+The chat backend SHALL select the workspace's canonical first watch root for OpenCode discovery, creation, history, prompts and tools. Browser requests MUST NOT provide or override a filesystem working directory. Before exposing or resuming a session, UatuCode SHALL verify its canonical directory matches; foreign-directory sessions MUST NOT be exposed, resumed or mutated through that workspace.
 
 #### Scenario: A browser requests conversation discovery, creation, history, prompts, tools, or resumption
 - **WHEN** a browser requests conversation discovery, creation, history, prompts, tools, or resumption
@@ -227,21 +227,21 @@ The authenticated workspace API SHALL discover, create, and paginate resumable w
 
 ### Requirement: Conversation configuration follows the conversation
 
-Known effective model, mode, and reasoning configuration SHALL follow the conversation across clients and restarts. Unknown values MUST NOT become implicit selections; staged choices SHALL remain local until the agent accepts the prompt.
+The Chat API SHALL expose effective model, mode and reasoning variant when determinable by the agent. Known configuration SHALL follow the conversation across clients/restarts without browser-storage authority. Absent fields mean unknown/not explicitly selected; the surface MUST NOT invent first-option/default selections. Unstaged prompts SHALL preserve effective configuration. Clients MAY stage offered choices locally; acceptance SHALL publish shared effective state and update unstaged clients.
 
-#### Scenario: A conversation is opened on another authenticated client or after a workspace restart
-- **WHEN** a conversation is opened on another authenticated client or after a workspace restart
+#### Scenario: Known configuration is exposed on any conversation read
+- **WHEN** an authenticated client reads a conversation, including after a workspace restart or on another client
 - **THEN** The normalized Chat API SHALL expose the effective model, mode, and reasoning variant of a conversation when the agent can determine them.
 - **AND** This configuration SHALL be conversation state rather than physical client presentation state: opening the conversation from another authenticated client or after a workspace restart SHALL restore the same known configuration without relying on that client's browser storage.
 
-#### Scenario: A configuration field is absent and the user sends a prompt without a staged selection
-- **WHEN** a configuration field is absent and the user sends a prompt without a staged selection
-- **THEN** An absent configuration field SHALL mean that the agent's effective value is unknown or has not been explicitly selected.
-- **AND** The surface MUST NOT replace an absent field with the first available option or claim that a default is the conversation's current value.
-- **AND** Sending a prompt without a staged selection SHALL preserve the agent's effective configuration rather than silently switching it.
+#### Scenario: Absent configuration is displayed without inventing a selection
+- **WHEN** the agent cannot report a conversation's effective model, mode or reasoning variant
+- **THEN** that absent field is displayed as unknown or not explicitly selected, not replaced with the first option or a claimed default
+- **WHEN** the user sends a prompt without staging that field
+- **THEN** the prompt preserves the agent's effective configuration rather than switching it
 
 #### Scenario: A client stages an offered configuration and the agent accepts its next prompt
-- **WHEN** a client stages an offered configuration and the agent accepts its next prompt
+- **WHEN** a client stages an offered configuration, submits it or receives agent acceptance
 - **THEN** A client MAY stage a different offered model, mode, or variant for its next prompt without changing another client.
 - **AND** Once the agent accepts that prompt, the accepted configuration SHALL become the conversation's shared effective state and SHALL be published to subscribed clients.
 - **AND** A client with no unsubmitted local selection SHALL update its controls from that publication; an explicitly staged selection remains local until submitted or discarded.
@@ -502,7 +502,7 @@ Chat SHALL keep safe user and assistant content primary and tool activity inspec
 - **AND** Untrusted Markdown, tool output, filenames, and errors MUST NOT create active markup or script execution.
 
 #### Scenario: A running turn accumulates activity, the reader opens its working line or output, and the turn settles
-- **WHEN** a running turn accumulates activity, the reader opens its working line or output, and the turn settles
+- **WHEN** a running turn awaits its first step or accumulates activity, the reader opens its working line or output, or the turn settles
 - **THEN** While a turn is running, the trailing run of activity SHALL be collapsed behind a single working line rather than rendered as flat rows.
 - **AND** Activity, for the working line and for finished groups, SHALL include file-change rows: a file change reported between two steps SHALL join the run around it rather than end it, and a file-change row SHALL count as a finished, clean member, never as the step in flight and never as a failed step.
 - **AND** A group summary SHALL name a file-change row by its operation and path, after the steps the summary names, and the row itself SHALL state its operation in that same word — Created, Updated, Deleted — wherever it is shown.
@@ -629,6 +629,8 @@ Chat SHALL keep safe user and assistant content primary and tool activity inspec
 
 Chat SHALL render terminal escapes safely using the embedded terminal palette and font. Shell tools and command items SHALL retain all available provider output as rendered scrollback, without wrapping tokens or discarding earlier output through a client preview limit.
 
+Recovery of output truncated upstream by the provider is not required. Non-shell output SHALL retain its existing preview behavior.
+
 #### Scenario: Tool output contains terminal styling, carriage-return overwrites, erase-line sequences, or other controls
 - **WHEN** tool output contains terminal styling, carriage-return overwrites, erase-line sequences, or other controls
 - **THEN** Where a tool's output carries terminal escape sequences, Chat SHALL interpret them rather than show them.
@@ -637,19 +639,25 @@ Chat SHALL render terminal escapes safely using the embedded terminal palette an
 - **AND** Interpreting escapes MUST NOT create active markup or script execution, whatever the sequences or the text around them contain.
 
 #### Scenario: A shell output block displays styled text and lines wider than its viewport
-- **WHEN** a shell output block displays styled text and lines wider than its viewport
+- **WHEN** a shell output block is displayed, with or without styling or lines wider than its viewport
 - **THEN** A shell command's output block SHALL be presented with the embedded terminal's background, foreground, 16-colour palette, and font, so the same bytes read the same in Chat and in the terminal pane.
 - **AND** The palette SHALL be the one central set of terminal colour variables, not a second copy.
 - **AND** Lines in a shell output block SHALL NOT be broken mid-token.
 - **AND** A line longer than the block SHALL scroll horizontally, as it would in the terminal.
 
-#### Scenario: A parent or subagent shell tool or command item accumulates output during its retained view lifetime
-- **WHEN** a parent or subagent shell tool or command item accumulates output during its retained view lifetime
-- **THEN** Shell scrollback SHALL operate on the lines as rendered after overwrites are applied, so a progress bar that rewrote one line many times counts as one line, not as many.
-- **AND** The viewport SHALL retain all available provider-supplied output for the item during its retained view lifetime, without a client-side preview or tail limit discarding earlier output.
-- **AND** This contract SHALL apply to shell tools and normalized command items in both parent and subagent conversations, while running and after completion or failure.
-- **AND** It SHALL NOT require recovery of output truncated upstream by the provider.
-- **AND** Non-shell output SHALL retain its existing preview behavior.
+#### Scenario: Parent and child shell output remains inspectable during and after execution
+- **WHEN** a shell tool or normalized command item in a parent or subagent conversation supplies output during its retained view lifetime, while running or after completion or failure
+- **THEN** all available provider-supplied output remains reachable in its viewport without a client-side preview or tail limit discarding earlier output
+- **AND** repeated progress-bar overwrites of one line count as one rendered scrollback line, not one line per overwrite
+
+#### Scenario: Provider truncation does not discard the shell output that arrived
+- **GIVEN** the provider truncated earlier output before supplying the remaining output to UatuCode
+- **WHEN** that parent or subagent shell tool or normalized command item is inspected while running or after completion or failure within its retained view lifetime
+- **THEN** all available provider-supplied output remains reachable by scrolling, without a further client preview or tail limit discarding it
+
+#### Scenario: Non-shell output keeps its existing preview
+- **WHEN** a non-shell tool supplies output, whether it fits or exceeds its existing preview
+- **THEN** its existing preview behavior remains in use rather than being replaced by the shell scrollback presentation
 
 #### Scenario: Coloured test output renders in colour
 - **WHEN** a shell command's output contains `\x1b[32mpass\x1b[0m` and `\x1b[31mfail\x1b[0m`
@@ -703,7 +711,7 @@ Shell output SHALL offer bounded, accessible inline sizing and one in-app popped
 - **AND** The reader's chosen inline height SHALL be retained while output is popped out and restored on return inline, subject to those bounds.
 
 #### Scenario: A desktop reader pops out shell output and moves or resizes its window
-- **WHEN** a desktop reader pops out shell output and moves or resizes its window
+- **WHEN** a desktop reader pops out shell output, moves it or resizes it
 - **THEN** On desktop, an accessible Pop out control SHALL move the same output into one nonmodal in-app floating window.
 - **AND** The reader SHALL be able to drag the window and resize its width and height, with keyboard equivalents for movement and both resize dimensions.
 - **AND** Its bounds SHALL be the UatuCode work area, not the Chat column, panel, or transcript area.
@@ -825,6 +833,8 @@ Popped-out output SHALL stay bound to its immutable conversation and command ite
 
 Shell reading state SHALL remain client-local and scoped to its immutable conversation and item during the retained view lifetime. Presentation changes SHALL preserve it within bounds; navigation or disposal SHALL release output interactions, and hidden Chat SHALL hide and defer its output window.
 
+Persistence across reloads is not required.
+
 #### Scenario: An output item updates or changes presentation while its local view is retained
 - **WHEN** an output item updates or changes presentation while its local view is retained
 - **THEN** Shell reading state SHALL belong to the local client's immutable conversation and item identity during the retained view lifetime.
@@ -832,7 +842,6 @@ Shell reading state SHALL remain client-local and scoped to its immutable conver
 - **AND** These values SHALL survive output updates, moves between inline and popped-out views, Maximize, Restore size, desktop/touch presentation changes, and command lifecycle changes, subject to available content and layout bounds.
 - **AND** Temporary maximized or touch full-area geometry MUST NOT overwrite the retained floating bounds.
 - **AND** Updates to other items or conversations MUST NOT overwrite this state.
-- **AND** This contract SHALL NOT require persistence across reloads.
 
 #### Scenario: The reader switches conversations, leaves a child transcript, removes an item, or disposes and recreates a view
 - **WHEN** the reader switches conversations, leaves a child transcript, removes an item, or disposes and recreates a view
@@ -908,10 +917,10 @@ Activity chrome SHALL remain legible but quieter than assistant prose in light a
 
 ### Requirement: Users can resolve agent interaction requests in context
 
-Agent requests SHALL be answerable in context with truthful provenance, FIFO permission ownership, safe single replies, and recoverable pending state. Persistent authority SHALL require explicit scope and confirmation; request presentation SHALL remain accessible and keep answer controls reachable.
+Agent requests SHALL be answerable/recoverable with truthful provenance, per-owner permission FIFO, single replies and reachable controls. Every MCP permission SHALL identify the registered server/tool, distinct from built-ins, or show the sent action if unresolved; persistent confirmation SHALL name that action. Wildcard-only permissions SHALL show unchanged call arguments, or unchanged provider input if the call is missing. Persistent authority SHALL disclose scope and require confirmation.
 
-#### Scenario: OpenCode raises a permission or structured question, and the user answers or resolves it
-- **WHEN** OpenCode raises a permission or structured question, and the user answers or resolves it
+#### Scenario: OpenCode raises or resolves a permission or structured question
+- **WHEN** OpenCode raises or resolves a permission or structured question
 - **THEN** An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the approval and rejection choices OpenCode supports for it: approving the single occurrence, approving persistently, and rejecting.
 - **AND** Where a permission would change a file, the request SHALL show what it would change — the pending diff — where the choice is made, so the user sees the change before allowing it.
 - **AND** A permission with nothing to show a diff for is unaffected.
@@ -925,14 +934,19 @@ Agent requests SHALL be answerable in context with truthful provenance, FIFO per
 - **THEN** A permission that names no specific resource, whose request carries only a wildcard as OpenCode's request to call an MCP tool does, SHALL show the arguments of the tool call it would allow, where the choice is made, so the user sees what the call does before allowing it.
 - **AND** The arguments SHALL be those of the tool call the permission belongs to, as the conversation already shows them; the surface MUST NOT invent, summarize, or reorder them.
 - **AND** When that call cannot be found in the conversation, the request SHALL show what OpenCode sent, unchanged.
-- **AND** A permission for an MCP tool SHALL name the MCP server and the tool as the user registered them with OpenCode, distinguished from the built-in tools, so the user can tell which server is being granted what; the action name OpenCode sent SHALL remain what the persistent-approval confirmation names, since it is the rule OpenCode installs.
-- **AND** When the server cannot be identified among the servers OpenCode reports, the request SHALL show the action as sent.
 - **AND** A permission naming a specific resource, carrying a diff, or carrying a plan is unaffected.
 - **AND** Like the diff, the arguments are shown while the request is open; the resolved request recedes to its outcome and the resources OpenCode named, as any other permission does.
 - **AND** The arguments SHALL be shown for a request recovered from OpenCode's pending set as for one announced live.
 
-#### Scenario: A subagent raises a request while its launching conversation is being viewed
-- **WHEN** a subagent raises a request while its launching conversation is being viewed
+#### Scenario: MCP identity is shown regardless of resource specificity
+- **WHEN** a live or recovered MCP permission names a wildcard, a specific resource, a diff or a plan
+- **THEN** if the server can be identified among those OpenCode reports, the permission names the MCP server and tool as registered and distinguishes them from built-in tools
+- **AND** its persistent-approval confirmation names the action OpenCode sent, not the display identity
+- **WHEN** its server cannot be identified among the servers OpenCode reports
+- **THEN** the permission shows the action as sent
+
+#### Scenario: A subagent request is mirrored to its launching conversation
+- **WHEN** a subagent raises a request
 - **THEN** A request raised by a subagent SHALL additionally appear in the conversation that launched that subagent, and SHALL be answerable there.
 - **AND** The subagent's own conversation remains the single owner of the request: an answer given from the launching conversation SHALL be directed to the owning conversation, so exactly one response reaches OpenCode however many places the request was shown.
 - **AND** Resolving it SHALL resolve it everywhere it appears.
@@ -949,8 +963,8 @@ Agent requests SHALL be answerable in context with truthful provenance, FIFO per
 - **THEN** Only the active unresolved request of a given conversation MAY accept a response.
 - **AND** Where requests from more than one conversation are shown together, they SHALL each be governed by the conversation that owns them, so a request awaiting a user in one conversation does not block answering a request owned by another.
 
-#### Scenario: Permissions and structured questions are pending or recovered for the same owning conversation
-- **WHEN** permissions and structured questions are pending or recovered for the same owning conversation
+#### Scenario: Pending permissions retain the owning queue order
+- **WHEN** permissions are pending or recovered for a conversation, with or without structured questions
 - **THEN** Pending permissions of the same owning conversation SHALL be answered in FIFO order, matching OpenCode's pending queue.
 - **AND** A new permission SHALL NOT displace the permission already awaiting an answer.
 - **AND** Recovery SHALL preserve OpenCode's pending-list order, including when timestamps are equal or a missed request precedes an already observed one.
@@ -958,14 +972,14 @@ Agent requests SHALL be answerable in context with truthful provenance, FIFO per
 - **AND** The surface, request shortcut, and server response validation SHALL agree on the answerable permission.
 - **AND** Pending permissions SHALL take precedence over structured questions of the same owner, as in OpenCode; questions retain their existing ordering when no permission is pending.
 
-#### Scenario: The conversation contains active, waiting, and resolved requests
-- **WHEN** the conversation contains active, waiting, and resolved requests
+#### Scenario: Each request exposes its own state
+- **WHEN** a conversation displays an active, waiting or resolved request
 - **THEN** A request's state SHALL be distinguishable without reading its body — whether it awaits the user now, awaits its turn behind another request of the same conversation, or is resolved.
 - **AND** That distinction MUST NOT rely on colour alone.
 - **AND** A request awaiting its turn MUST NOT be presented as obsolete, superseded, or otherwise not needing an answer, because it will require one.
 
-#### Scenario: Outstanding requests coexist with transcript overlays or a request at the end of the transcript
-- **WHEN** outstanding requests coexist with transcript overlays or a request at the end of the transcript
+#### Scenario: Outstanding request counts do not obscure answer controls
+- **WHEN** the surface displays outstanding requests, including with overlays or at the transcript end
 - **THEN** The surface SHALL report how many requests are outstanding across everything it is showing, and SHALL offer a way to reach an outstanding request without hunting for it.
 - **AND** That report, and any other control the surface floats over the conversation, MUST NOT cover a request's own answer field or its submit and cancel controls; the conversation SHALL reserve room for them so an outstanding request shown at the end of the transcript stays fully operable.
 - **AND** The report SHALL NOT be shown while a request it would lead to is already on screen; when it is shown, its count remains that of every outstanding request.
@@ -1165,7 +1179,7 @@ Agent requests SHALL be answerable in context with truthful provenance, FIFO per
 
 ### Requirement: Chat supports reversible conversation undo and redo
 
-On agents supporting reversible history, Chat SHALL offer local Undo, Redo, Revert message, and Restore actions that reconcile history and files across clients. Revert SHALL preserve private drafts and pending input, pause delivery safely, and admit replacement prompts before older queued work.
+On agents declaring reversible history, Chat SHALL offer local `/undo`, `/redo`, Revert message and Restore actions, reconciling history/files across clients. Only the invoking client's draft SHALL receive boundary text/attachments or clear on full restoration; other clients' private drafts MUST NOT be overwritten by any boundary change. Revert SHALL preserve pending input, pause delivery safely and admit replacement prompts before older queued work.
 
 #### Scenario: A reversible-history agent receives local Undo, Redo, or direct Revert message
 - **WHEN** a reversible-history agent receives local Undo, Redo, or direct Revert message
@@ -1193,6 +1207,7 @@ On agents supporting reversible history, Chat SHALL offer local Undo, Redo, Reve
 - **AND** Redo SHALL move forward one hidden user turn at a time.
 - **AND** Restoring a selected hidden turn SHALL make history current through that turn in one mutation by staging the following hidden user turn, or SHALL clear the boundary when the selected turn is newest.
 - **AND** The invoking client's composer SHALL receive the next boundary turn when one remains and SHALL clear when the original transcript is fully restored.
+- **AND** other clients' private drafts remain unchanged during Redo and Restore as during Undo and Revert
 - **AND** Submitting a replacement prompt while a revert is staged SHALL commit the reverted history before starting the replacement turn, after which the hidden turns can no longer be restored by Redo or Restore.
 
 #### Scenario: A boundary mutation succeeds, is retried, or fails during interruption or revert
@@ -1345,7 +1360,7 @@ Structured questions SHALL enable custom answers unless OpenCode explicitly disa
 - **AND** An explicit false value MUST suppress the custom-answer choice.
 
 #### Scenario: The user selects Type your own answer and enters a custom response
-- **WHEN** the user selects Type your own answer and enters a custom response
+- **WHEN** the user selects Type your own answer or enters a custom response
 - **THEN** Where custom answers are supported, Chat SHALL append a UI-only choice labelled "Type your own answer" to the provider's options.
 - **AND** Selecting that choice SHALL reveal and focus a text input.
 - **AND** The synthetic label MUST NOT be submitted to OpenCode.
@@ -1393,13 +1408,12 @@ Structured questions SHALL enable custom answers unless OpenCode explicitly disa
 
 ### Requirement: Single-question choices require explicit confirmation
 
-Question choices SHALL remain staged until explicit confirmation. Single-question forms SHALL expose Answer; existing multi-question stepping and multi-select confirmation SHALL remain intact.
+A form containing one single-select question SHALL stage a clicked choice and expose Answer, submitting only on that action or equivalent explicit submission whether custom answers are enabled or disabled. Existing multi-question stepping and multi-select confirmation SHALL remain unchanged.
 
 #### Scenario: The user clicks a choice or explicitly submits a one-question single-select form
-- **WHEN** the user clicks a choice or explicitly submits a one-question single-select form
+- **WHEN** the user clicks a choice or explicitly submits a one-question single-select form with custom answers enabled or disabled
 - **THEN** A question form containing one single-select question SHALL retain the selected option without submitting it when the option is clicked.
 - **AND** Chat SHALL expose an explicit Answer action and SHALL submit only when the user activates that action or performs the form's equivalent explicit submission.
-- **AND** This rule SHALL apply whether custom answers are enabled or disabled.
 
 #### Scenario: The user confirms intermediate, final, or multi-select answers
 - **WHEN** the user confirms intermediate, final, or multi-select answers
@@ -1778,10 +1792,10 @@ Preview and Chat SHALL remain co-visible and stateful on desktop; touch SHALL us
 
 ### Requirement: Conversation file references navigate through UatuCode safely
 
-Watched workspace file references SHALL navigate safely to Preview and supplied lines. Desktop navigation MUST NOT alter Chat geometry; touch SHALL switch tabs. Outside, traversing, and unresolved paths MUST NOT become navigable links.
+Workspace-relative file references in assistant content or normalized file-change activity SHALL offer Preview navigation for targets within watched roots and reveal supplied lines on activation. Desktop navigation MUST NOT hide, collapse or resize Chat; touch SHALL switch to Preview. Outside-root absolute paths, traversal attempts and unresolved targets MUST NOT become navigable workspace links.
 
 #### Scenario: A user activates a file reference in assistant content or normalized file-change activity
-- **WHEN** a user activates a file reference in assistant content or normalized file-change activity
+- **WHEN** assistant content or normalized file-change activity displays a file reference, or the user activates it
 - **THEN** Workspace-relative file references in assistant content or normalized file-change activity SHALL offer navigation to the corresponding UatuCode document preview when the target is within the watched roots.
 - **AND** Activating such a reference SHALL open the document in Preview and reveal the referenced line when supplied; in desktop mode this MUST NOT hide, collapse, or resize the Chat panel, and in touch mode it SHALL switch to the Preview tab.
 - **AND** Absolute paths outside the watched roots, traversal attempts, and unresolved targets MUST NOT be exposed as navigable workspace links.
@@ -1800,7 +1814,7 @@ Watched workspace file references SHALL navigate safely to Preview and supplied 
 Chat SHALL use its own consistent reading density without changing Preview scale. Pinned progress tracks SHALL form a distinct present-state tier in both themes without relying on colour alone.
 
 #### Scenario: A narrow Chat surface renders transcript, Markdown, requests, tracks, and composer beside Preview
-- **WHEN** a narrow Chat surface renders transcript, Markdown, requests, tracks, and composer beside Preview
+- **WHEN** Chat renders its transcript, Markdown, requests, tracks and composer at any panel width or UI mode
 - **THEN** The Chat surface SHALL set a reading density of its own rather than inheriting the document preview's prose scale, so that a conversation read in a narrow side panel shows several turns at once.
 - **AND** That density MUST apply to the whole surface — transcript, rendered assistant Markdown, requests, pinned tracks, and composer — so that no region is left at a scale that disagrees with the rest.
 - **AND** The document preview's own reading scale SHALL be unaffected.
@@ -1834,7 +1848,7 @@ Chat SHALL use its own consistent reading density without changing Preview scale
 Where supported, Chat SHALL offer the selected model's advertised reasoning variants as a remembered per-conversation prompt configuration. Models without variants and agents without the capability SHALL expose no control.
 
 #### Scenario: A user selects reasoning for the next prompt on a model with or without advertised variants
-- **WHEN** a user selects reasoning for the next prompt on a model with or without advertised variants
+- **WHEN** Chat displays reasoning configuration for an agent and a model, with or without advertised variants, or the user selects a variant
 - **THEN** Where the agent declares the reasoning-variant capability, Chat SHALL let the user choose how hard the selected model reasons, from the named ways of thinking that model advertises — such as thinking harder or faster.
 - **AND** The choice SHALL be scoped to how a prompt runs, sent with the prompt rather than changing the model, and SHALL be remembered per conversation as the model choice is.
 - **AND** A model that advertises no such ways offers no choice, and where the capability is undeclared the control is absent rather than shown empty.
@@ -1910,7 +1924,7 @@ Subagent transcripts SHALL open from their parent as drill-downs, not picker con
 Where the context capability is declared, Chat SHALL show live context fill against the model limit and attribute each subagent's own-task model and tokens. Missing capability or usage SHALL not produce invented values or degrade other functionality.
 
 #### Scenario: An agent declares or omits context reporting and a subagent has model or usage metadata
-- **WHEN** an agent declares or omits context reporting and a subagent has model or usage metadata
+- **WHEN** an agent declares or omits context reporting, with or without available subagent model or usage metadata
 - **THEN** Where the agent declares the context capability, Chat SHALL report how full the conversation's context window is, against the selected model's limit, and SHALL attribute each subagent with the model it ran and the tokens it consumed.
 - **AND** Each SHALL be gated on that declared capability: undeclared, the readout or figure is absent rather than empty, and its absence SHALL NOT degrade the rest.
 
@@ -1970,7 +1984,7 @@ Where the context capability is declared, Chat SHALL show live context fill agai
 Chat SHALL report provider-priced conversation cost from history and live updates, counting each assistant message once across all descendant sessions. A consistent receipt SHALL offer remembered agent, type, and model itemizations; own-task attribution and unknown or zero pricing SHALL remain truthful.
 
 #### Scenario: OpenCode reports assistant-message cost while a conversation and its descendant sessions execute
-- **WHEN** OpenCode reports assistant-message cost while a conversation and its descendant sessions execute
+- **WHEN** OpenCode reports assistant-message cost in a conversation or any descendant session
 - **THEN** Where OpenCode reports a cost for an assistant message, Chat SHALL present the conversation's accumulated cost in the same place a Claude Code conversation's session totals appear: the composer's usage chip reads the conversation's cost when the agent reports no plan windows, and the usage readout's conversation block states the total.
 - **AND** The figure SHALL be the sum of the cost OpenCode reported per assistant message, in the currency OpenCode reports it, across the conversation and every subagent session beneath it at any depth.
 - **AND** Each message SHALL be counted once — however many times it was restated while it streamed, and however many tasks the subagent that produced it was given.
@@ -2117,7 +2131,7 @@ Desktop subagent summaries SHALL count distinct subagents separately from tasks.
 
 ### Requirement: Chat composer actions keep a stable responsive layout
 
-The composer SHALL keep responsive configuration, status, Send, and separate Stop controls stable and accessible across lifecycle changes. Desktop rails and compact touch keyboard layouts SHALL retain their specified target, spacing, viewport, and safe-area behavior, subject to the stated superseding density rules.
+The composer SHALL keep responsive configuration, status, Send, and separate Stop controls stable and accessible across lifecycle changes. Desktop rails and compact touch keyboard layouts SHALL retain their specified target, spacing, viewport, and safe-area behavior. Later fixed-delivery and fine-pointer desktop-density rules supersede earlier delivery-selector and comfortable desktop target geometry.
 
 #### Scenario: Composer lifecycle or delivery-menu state changes at unchanged panel dimensions and editing state
 - **WHEN** composer lifecycle or delivery-menu state changes at unchanged panel dimensions and editing state
@@ -2135,8 +2149,7 @@ The composer SHALL keep responsive configuration, status, Send, and separate Sto
 - **AND** Desktop composers without a delivery selector SHALL keep one compact rail without reserving an empty delivery row.
 - **AND** The configuration label SHALL truncate as needed, without shrinking submission targets or causing horizontal overflow.
 - **AND** Resizing MAY switch the entire rail arrangement; individual desktop controls MUST NOT wrap independently.
-- **AND** Touch uses the compact composition contract below, including reachable primary controls at enlarged text sizes.
-- **AND** The fixed-delivery and fine-pointer desktop-density requirements below supersede earlier delivery-selector and comfortable desktop target geometry.
+- **AND** touch primary controls remain reachable at enlarged text sizes in the compact composition layout
 - **AND** Actionable failures SHALL remain explanatory text outside the routine status footprint, without horizontally reordering the controls.
 - **AND** Textarea autosizing remains independent of rail stability.
 
@@ -2333,7 +2346,7 @@ Completed assistant code blocks SHALL offer safe, accessible, code-only copying 
 Users SHALL be able to submit content, queue follow-ups, edit or remove pending messages, and cancel active work without losing history or drafts. Pending input SHALL remain ordered beside the composer with frozen queued configuration; cancellation SHALL pause it, and fixed Send/Stop semantics SHALL prevent accidental delivery.
 
 #### Scenario: A user submits text or attachments while a conversation is running or its pending bound is reached
-- **WHEN** a user submits text or attachments while a conversation is running or its pending bound is reached
+- **WHEN** a user submits text or attachments to an idle or running conversation, including at its pending-message bound
 - **THEN** The Chat composer SHALL submit a message with content — non-empty text, at least one image attachment, or both — to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states.
 - **AND** A prompt submitted while the conversation is running SHALL be held in a workspace-owned queue rather than delivered to the agent mid-turn.
 - **AND** The exception is a prompt the user explicitly submits as a steer to an agent that declares `steering`, which "OpenCode 2.x conversations can steer the running turn" governs.
@@ -2366,7 +2379,7 @@ Users SHALL be able to submit content, queue follow-ups, edit or remove pending 
 - **WHEN** the reader uses Send, explicit Queue, Stop, or keyboard submission during cancellation
 - **THEN** Send SHALL remain visible while work runs and SHALL steer ordinary text on a steering agent, or queue when steering is unsupported.
 - **AND** Explicit Queue submission SHALL remain available through the existing hold and Alt/Option+Enter paths; commands and attachments SHALL retain mandatory queue semantics.
-- **AND** No configurable per-device default or delivery selector SHALL be required.
+- **AND** Send and explicit Queue remain usable without configuring a per-device default or using a delivery selector
 - **AND** A separate Stop button SHALL cancel active work without submitting or discarding an unsent draft.
 - **AND** Send SHALL be unavailable for an empty draft, during submission, or while a cancellation request is pending.
 - **AND** The shared submit path SHALL also refuse keyboard submission during cancellation, preserving the draft and discarding any one-shot delivery override from the refused attempt.
@@ -2483,7 +2496,7 @@ A control the surface offers the user to start an operation — a picker such as
 Where image attachments are supported, the composer SHALL accept paste, drop, and visible file-picker intake, display removable thumbnails, and submit them with or without text. Unsupported files and bound violations SHALL preserve the draft; model limitations SHALL remain discoverable.
 
 #### Scenario: A user pastes, drops, or selects a supported image and submits with or without text
-- **WHEN** a user pastes, drops, or selects a supported image and submits with or without text
+- **WHEN** the user pastes, drops or selects a supported image, or submits pending images with or without text
 - **THEN** The Chat composer SHALL accept image attachments in the image formats the agent supports (PNG, JPEG, GIF, WebP) through three intakes: pasting from the clipboard, dragging onto the composer, and an explicit attach control backed by a file picker.
 - **AND** The attach control SHALL be visible without hover or keyboard affordances, so touch-only devices can attach images.
 - **AND** Pending attachments SHALL be presented at the composer as thumbnails, each removable before send, and SHALL be submitted with the composer text as one message.
@@ -2543,7 +2556,7 @@ Where image attachments are supported, the composer SHALL accept paste, drop, an
 Attachments SHALL upload once at attach time and travel thereafter as opaque references, never bytes in conversation transport. Storage SHALL remain outside watched roots, and serving SHALL enforce conversation authorization without interpreting identifiers as paths.
 
 #### Scenario: A client attaches an image and later submits, queues, projects, or streams its message
-- **WHEN** a client attaches an image and later submits, queues, projects, or streams its message
+- **WHEN** a client attaches an image, submits its message, queues it, or receives its projection or events
 - **THEN** An attached image SHALL be transferred from the client to the workspace once, at attach time, and referenced by an opaque identifier thereafter.
 - **AND** Prompt submissions, queued messages, conversation projections, and the event stream SHALL carry attachment references, never image bytes.
 - **AND** Stored attachments SHALL live outside every watched root, so the file watcher, the repository change sweep, and the ignore engine never observe them.
@@ -2632,7 +2645,7 @@ Attached images SHALL appear as workspace-served thumbnails in timeline, optimis
 Pending messages SHALL retain their attachment references and thumbnails across holding, steering, delivery changes, editing, and delivery. Removal SHALL discard their references; later model changes MUST NOT alter frozen attachments.
 
 #### Scenario: A message with attachments is held, steered, removed, edited, switched, or delivered after a model change
-- **WHEN** a message with attachments is held, steered, removed, edited, switched, or delivered after a model change
+- **WHEN** a message with attachments is held, steered, removed, edited, switched or delivered, whether or not the composer's model has since changed
 - **THEN** A message submitted with attachments while the conversation is running SHALL keep its attachments while it is pending, whether it is held or steered.
 - **AND** The dock SHALL show the message's thumbnails.
 - **AND** Removal of a pending message SHALL discard the message together with its attachment references.
@@ -2668,7 +2681,7 @@ Pending messages SHALL retain their attachment references and thumbnails across 
 Timeline messages SHALL follow provider-assigned order regardless of update arrival, and parts SHALL follow provider delivery order until a fresh snapshot supplies positions. Late updates MUST NOT move an earlier message behind later messages.
 
 #### Scenario: Updates arrive out of order and clients compare live event application with fresh snapshots
-- **WHEN** updates arrive out of order and clients compare live event application with fresh snapshots
+- **WHEN** updates arrive in or out of order, or a client loads a fresh snapshot of the same conversation
 - **THEN** The Chat timeline SHALL present items in the conversation's own order — parent messages in their provider-assigned order, and within a message, parts in the order the provider delivers them — regardless of the order in which updates arrived.
 - **AND** An update belonging to an earlier message MUST NOT render after items of a later message.
 - **AND** A client that applied a conversation's events live SHALL present the same cross-message order as a client that loaded the same conversation from a fresh snapshot.
@@ -2940,7 +2953,7 @@ Where an agent reports that it compacted the conversation's context, Chat SHALL 
 
 ### Requirement: Chat transport recovery is observable and self-correcting
 
-Chat streams SHALL maintain idle liveness and bounded reconnection, recognizing a successful replacement open without waiting for application events. Resume and user-triggered recovery SHALL preserve drafts, reading position, content, and the ability to resubscribe after hiding.
+Chat streams SHALL maintain idle liveness and bounded reconnection, recognizing a replacement open without application events. Page/network resume SHALL reconcile inventory and the selected stream without losing drafts, position or content. Hidden Chat SHALL save drafts and remain able to resubscribe. While interrupted, Chat SHALL offer recovery; when it succeeds in place, that action MUST NOT discard drafts, timeline position or received content.
 
 #### Scenario: An idle conversation or inventory stream emits keepalives or opens after an interruption
 - **WHEN** an idle conversation or inventory stream emits keepalives or opens after an interruption
@@ -2960,8 +2973,8 @@ Chat streams SHALL maintain idle liveness and bounded reconnection, recognizing 
 - **AND** Chat MAY release its streams whenever the page is hidden, however the browser announces it, and MUST continue to save drafts on that signal, but it MUST remain able to resubscribe so that returning to a still-running page restores conversation and inventory delivery.
 - **AND** Chat MUST NOT stay closed for the life of a document that is still running.
 
-#### Scenario: Chat reports a connection interruption to a user without browser reload controls
-- **WHEN** Chat reports a connection interruption to a user without browser reload controls
+#### Scenario: Chat reports a connection interruption
+- **WHEN** Chat reports a connection interruption on any device
 - **THEN** While Chat reports a connection interruption, it SHALL offer the user an action that attempts recovery, so a stalled surface is never a dead end on a device with no browser reload control.
 - **AND** That action MUST NOT discard drafts, timeline position, or content already received when recovery succeeds in place.
 
@@ -3024,7 +3037,7 @@ Hub-served conversation and subagent subscriptions SHALL share the brokered live
 Verified unchanged OpenCode history SHALL be reused within bounded, workspace-isolated limits without repeated full traversal. Native history SHALL remain authoritative, and invalidation, reconciliation, ordering, accounting, attribution, and snapshot-to-stream boundaries SHALL remain correct.
 
 #### Scenario: A client repeatedly pages verified unchanged history or native history changes beyond reuse limits
-- **WHEN** a client repeatedly pages verified unchanged history or native history changes beyond reuse limits
+- **WHEN** a client pages verified unchanged history, reuse limits are exceeded, or native history changes within or beyond those limits
 - **THEN** Repeated paging through a verified unchanged OpenCode conversation within the documented reuse limits SHALL avoid a complete provider-history traversal for each page.
 - **AND** Reusable history SHALL be bounded in memory and isolated by workspace and conversation.
 - **AND** Eviction or a history larger than those limits SHALL fall back to authoritative reads without losing content.
@@ -3077,7 +3090,7 @@ After empty startup inventory, Chat SHALL retain an unsuperseded remembered sele
 #### Scenario: The remembered conversation stays absent, no selection was remembered, or Chat is hidden
 - **WHEN** the remembered conversation stays absent, no selection was remembered, or Chat is hidden
 - **THEN** While restoration is pending, repeated inventories that omit the remembered conversation SHALL NOT turn that pending intent into a deletion-recovery attempt or select an unrelated conversation.
-- **AND** Without a remembered selection, this rule SHALL NOT automatically open newly discovered conversations.
+- **AND** without a remembered selection, a later inventory discovery does not automatically open the newly discovered conversation
 - **AND** This behavior SHALL NOT change existing bootstrap selection from a nonempty inventory, force Chat open, move keyboard focus, or alter inventory-awareness acknowledgement.
 
 #### Scenario: A saved OpenCode conversation arrives after cold startup
@@ -3163,7 +3176,7 @@ Chat SHALL support installed OpenCode 1.x and 2.x through the same identities, r
 - **AND** Conversation identifiers, capability declarations, and the chat routes SHALL NOT change form between generations; a capability the running generation cannot back SHALL be left undeclared rather than declared and broken.
 
 #### Scenario: Either generation announces activity or a 2.x form, permission, or MCP request is loaded or recovered
-- **WHEN** either generation announces activity or a 2.x form, permission, or MCP request is loaded or recovered
+- **WHEN** either generation announces activity or has a live or recovered permission/MCP request, or a 2.x structured form is loaded or recovered
 - **THEN** Normalization SHALL recognize each generation's event vocabulary — 1.x's cumulative and incremental announcements and 2.x's typed session events — and produce the same ordered conversation events for the same activity: text and reasoning, tool lifecycle, shell commands, permission requests and replies, structured questions and their answers, compaction, staged and committed reverts, usage, turn status, cancellation, completion, and errors.
 - **AND** A 2.x structured form SHALL be presented as a structured question: each field becomes one question, a field with options offers those options, a field allowing custom input offers a free-form answer, and answering or rejecting it sends exactly one reply to the form OpenCode is waiting on.
 - **AND** Loading a conversation SHALL reconcile pending requests against the running generation's own pending sets — permission requests and forms on 2.x — so a request announced while the stream was interrupted is still answerable.
@@ -3232,7 +3245,7 @@ Skills SHALL appear as labeled commands on both OpenCode generations. The 2.x in
 - **AND** The slash palette SHALL mark a skill entry with a visible "skill" label so a skill and a command with similar names are told apart.
 
 #### Scenario: A 2.x skill is submitted with or without arguments and catalog membership changes before dispatch
-- **WHEN** a 2.x skill is submitted with or without arguments and catalog membership changes before dispatch
+- **WHEN** a 2.x skill is submitted with or without arguments, whether or not catalog membership changes before dispatch
 - **THEN** Submitting `/<skill> <arguments>` on 2.x SHALL invoke the skill the way OpenCode's own 2.x clients do: as a prompt that carries the skill as an attachment identified by the skill's id, whose text is the skill mention followed by the arguments (`@<skill-id> <arguments>`, or `@<skill-id>` alone when there are none).
 - **AND** The resulting user turn SHALL read as that invocation in the live timeline and after the conversation's history is reloaded.
 - **AND** Whether a `/<name>` is a command or a skill SHALL be decided when the message is sent, against the agent's current commands and skills: a name that is no longer either is sent as ordinary text, as any unknown `/<name>` is.
@@ -3388,7 +3401,7 @@ Parent and subagent timelines SHALL show sticky reader-local day separators from
 Slash suggestions SHALL show complete wrapped names, descriptions, and argument hints for every agent without horizontal scrolling. Highlighted entries SHALL stay visible, and argument tokens SHALL remain whole unless wider than the entire list.
 
 #### Scenario: Desktop or touch slash suggestions contain long names, descriptions, or argument hints and the highlight moves
-- **WHEN** desktop or touch slash suggestions contain long names, descriptions, or argument hints and the highlight moves
+- **WHEN** desktop or touch slash suggestions are displayed with long names, descriptions or argument hints, or the highlight moves
 - **THEN** Slash-command suggestions, for every agent, SHALL wrap a command's name, description, and argument hint onto further lines rather than truncating them, and every suggestion SHALL show its complete description whether or not it is highlighted.
 - **AND** The suggestion list SHALL remain scrollable, SHALL NOT scroll horizontally in desktop or touch layouts, and SHALL keep the highlighted suggestion in view as the highlight moves.
 - **AND** When a long command name leaves too little room beside it, the argument hint SHALL move onto its own line rather than wrapping into a narrow column.
@@ -3456,7 +3469,7 @@ OpenCode 2.x SHALL declare steering and support fixed steer/queue actions, safe 
   - edit or remove a steer, which withdraws it from the agent.
 
 #### Scenario: Withdrawal races native delivery and the agent confirms or refuses cancellation
-- **WHEN** withdrawal races native delivery and the agent confirms or refuses cancellation
+- **WHEN** a steer withdrawal is requested and the agent confirms or refuses it, including a race with native delivery
 - **THEN** Withdrawing a steer SHALL complete only when the agent confirms the withdrawal.
 - **AND** If the agent delivers the steer first, the withdrawal SHALL fail, the message SHALL stay delivered, and the user SHALL be told it was already delivered.
 - **AND** A message SHALL never be delivered twice.
@@ -3486,7 +3499,7 @@ OpenCode 2.x SHALL declare steering and support fixed steer/queue actions, safe 
 - **THEN** The pending card SHALL have an always-visible count header outside its own contained content scrollport.
 - **AND** Worker and pending cards SHALL share only a height budget, never an aggregate scroller, as specified by Desktop work shares measured panel space.
 - **AND** With both cards collapsed, desktop normally uses 40% of measured panel height capped at 25rem; touch normally uses 35% of visual height, 25% at tablet widths from 48rem, or 24% during hardware editing.
-- **AND** With either expanded, the measured expanded-card policy in Desktop work shares measured panel space SHALL supersede these caps and the earlier 40% phone/35% tablet transcript reserves.
+- **AND** with either card expanded, the dock uses measured remaining panel space and the small transcript reserve from Desktop work shares measured panel space instead of those collapsed caps and the earlier 40% phone/35% tablet transcript reserves
 - **AND** The pending list SHALL show a bottom fade only while content remains below.
 - **AND** Entries SHALL retain distinct Steer/Queue badges, Paused chips and existing timing labels.
 - **AND** Pending actions SHALL retain the approved compact 32px touch / 36px desktop targets, independent 8px gaps, visible focus outlines and contextual accessible names.
@@ -3687,7 +3700,7 @@ Where send-now is declared, held messages SHALL be deliverable ahead of the queu
 Native V2 background workers SHALL have independent, occurrence-specific lifecycles rather than inherit launcher success. Counts and outcomes SHALL converge across surfaces without stale evidence settling another task or changing configured agent/model defaults.
 
 #### Scenario: A native V2 launcher reports a running worker and that worker later settles
-- **WHEN** a native V2 launcher reports a running worker and that worker later settles
+- **WHEN** a native V2 launcher reports a running worker, or that worker later completes, fails or is cancelled
 - **THEN** For native V2 background subagents, Uatu SHALL track the worker independently of the launching tool call.
 - **AND** A successful launcher that reports a running worker SHALL NOT make the subagent appear finished.
 - **AND** Confirmed worker completion, error, and cancellation SHALL appear as completed, failed, and stopped respectively, consistently across the launch card, subagent track, background list, and open child view.
@@ -3769,7 +3782,7 @@ Structured provider-authored V2 worker notifications SHALL produce one correlate
 
 ### Requirement: OpenCode V2 worker state recovers without relying on provider event replay
 
-V2 background work SHALL recover read-only from authoritative history, pending notifications, and current execution evidence without provider replay. Recovery SHALL preserve snapshot/stream agreement and inspectable history without inferring terminal state or durable execution from missing or pre-restart evidence.
+V2 work SHALL recover read-only from history, pending notifications and current execution evidence, preserving snapshot/stream agreement without inferring terminal state or durable execution from missing/pre-restart evidence. Note: [#608](https://github.com/tjakobsson/uatu/issues/608) defers the later root-only positive-to-zero descendant refresh after a changed launcher recovers a current positive receipt; zero accounting remains intended, not claimed implemented for that second rewrite.
 
 #### Scenario: A conversation opens, returns, reconnects after missed provider events, or replaces an expired Uatu cursor
 - **WHEN** a conversation opens, returns, reconnects after missed provider events, or replaces an expired Uatu cursor
@@ -3778,15 +3791,10 @@ V2 background work SHALL recover read-only from authoritative history, pending n
 - **AND** Recovery SHALL include launches and results outside the initially visible history page and work launched from another client.
 - **AND** Parent idleness, an absent child from an active-only listing, or a failed read SHALL NOT alone establish a worker's terminal state.
 
-#### Scenario: Background work is recovered after service or workspace restart
-- **WHEN** background work is recovered after service or workspace restart
-- **THEN** Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, interrupt, relaunch, or background work.
-- **AND** After a service/workspace restart, completed provider history SHALL remain inspectable and unresolved work SHALL be revalidated; Uatu MUST NOT promise continued execution solely because a pre-restart launch exists.
-
-#### Scenario: A changed launcher has recovered to a current positive receipt and a later root-only descendant rewrite becomes zero
-- **WHEN** a changed launcher has recovered to a current positive receipt and a later root-only descendant rewrite becomes zero
-- **THEN** Known implementation exception, explicitly deferred from this change: [#608](https://github.com/tjakobsson/uatu/issues/608) tracks a later root-only positive-to-zero descendant refresh after a changed launcher has recovered to a current positive receipt.
-- **AND** The zero-accounting requirement remains intended behavior, not a claim that this second-rewrite sequence is implemented here.
+#### Scenario: Recovery never changes execution
+- **WHEN** background work is reconciled on opening, return, reconnect, cursor replacement or restart
+- **THEN** recovery sends no prompt, interruption, relaunch or background operation
+- **AND** after a service/workspace restart, completed provider history remains inspectable and unresolved work is revalidated without promising execution from a pre-restart launch alone
 
 #### Scenario: Completion is missed while disconnected
 - **WHEN** a worker completes while the V2 event connection is absent and the provider offers no replay
@@ -3963,10 +3971,10 @@ V2 background work SHALL recover read-only from authoritative history, pending n
 
 ### Requirement: Users explicitly continue the parent while all eligible blocking jobs run
 
-Supported V2 conversations SHALL offer Continue while workers run only for verified eligible blockers and request one parent-wide native background operation. Protected bounded receipts SHALL preserve unknown outcomes without replay, and the action MUST NOT mutate drafts, queues, preferences, or unsupported agents.
+Supported V2 SHALL offer Continue while workers run only for verified eligible blockers, using native parent-wide backgrounding and protected bounded unknown-preserving receipts, no replay. It MUST NOT cancel work, send/clear drafts, change preferences, flush queues or manufacture steers. Sending or delivery selection SHALL NOT implicitly background work except under the verified personal Hub accepted-steer exception. Unsupported agents SHALL lack Continue. Receipt persistence is not required.
 
 #### Scenario: A V2 parent with backgrounding support has eligible running blockers and the user invokes Continue while workers run
-- **WHEN** a V2 parent with backgrounding support has eligible running blockers and the user invokes Continue while workers run
+- **WHEN** a V2 parent with backgrounding support has pending, generating, blocking, detached, settled or uncertain work, or the user invokes Continue while workers run
 - **THEN** For OpenCode V2 that declares backgrounding support, Chat SHALL offer a distinct action labelled `Continue while workers run` only while an active parent has running blocking tool/command or confirmed foreground-task evidence.
 - **AND** Pending tools, a merely generating parent, and launchers already correlated to detached, settled or uncertain workers SHALL NOT expose it.
 - **AND** A tooltip and collapsed explanation SHALL state that it backgrounds all eligible blocking jobs in that parent, including shell commands, without stopping them.
@@ -3986,16 +3994,18 @@ Supported V2 conversations SHALL offer Continue while workers run only for verif
 #### Scenario: A background receipt expires, is evicted, or is lost on adapter or process recreation
 - **WHEN** a background receipt expires, is evicted, or is lost on adapter or process recreation
 - **THEN** Receipt retention SHALL be bounded: the default settled lifetime is up to 15 minutes, capacity eviction can end it sooner, and adapter recreation or process restart ends it entirely.
-- **AND** No persistent receipt storage is required.
-- **AND** The contract SHALL NOT promise deduplication after any of those boundaries; an old identifier with no retained receipt can be treated as a new request.
+- **AND** after any of those retention boundaries, an old identifier with no retained receipt may be handled as a new request rather than deduplicated
 - **AND** The client SHALL NOT automatically replay an uncertain mutation on reconnect or reload, including with the same identifier.
 - **AND** It SHALL recover state read-only and require a fresh explicit action before making another attempt.
 
 #### Scenario: Continue is invoked with drafts, pending input, or delivery preferences present
 - **WHEN** Continue is invoked with drafts, pending input, or delivery preferences present
 - **THEN** The action MUST NOT cancel a parent or worker, send or clear a draft, change model/mode/delivery preferences, flush a held queue, or manufacture steers.
-- **AND** Sending or selecting a delivery mode SHALL NOT implicitly background work outside the verified personal Hub accepted-steer exception below.
-- **AND** Unsupported agents SHALL have no such action.
+
+#### Scenario: Sending and delivery selection do not invoke Continue
+- **WHEN** a user sends input or selects a delivery mode outside the verified personal Hub accepted-steer exception
+- **THEN** no implicit native background operation is requested
+- **AND** unsupported agents expose no Continue action
 
 #### Scenario: Mixed blocking jobs become background work
 - **WHEN** the parent is blocked by two eligible subagents and a native shell job and the user activates Continue while workers run
@@ -4038,8 +4048,10 @@ Supported V2 conversations SHALL offer Continue while workers run only for verif
 
 Parent Stop and worker Stop SHALL have separate verified scopes and truthful outcomes. Touch parent-stop and native shell removal SHALL require the specified confirmations; bounded stop receipts, race handling, and unavailable output SHALL never fabricate cancellation or retarget a newer occurrence.
 
+Worker-stop receipts share backgrounding's retention bounds; expiry, eviction, adapter recreation or restart ends deduplication guarantees.
+
 #### Scenario: Parent Stop is offered or invoked while V2 foreground and detached background work coexist
-- **WHEN** parent Stop is offered or invoked while V2 foreground and detached background work coexist
+- **WHEN** parent Stop is displayed or invoked for V2 work, with or without current foreground execution or detached workers
 - **THEN** For V2 background work, Chat SHALL distinguish parent interruption from stopping one verified worker.
 - **AND** Parent Stop SHALL interrupt the current parent execution without explicitly waking pending input, leave held queue/steer behavior governed by the existing cancellation contract, and not stop detached workers.
 - **AND** The UI SHALL explain that still-blocking foreground work can be cancelled by parent interruption and that future provider-owned worker notifications can wake the parent again.
@@ -4055,15 +4067,17 @@ Parent Stop and worker Stop SHALL have separate verified scopes and truthful out
 - **WHEN** Worker Stop targets a verified task or races settlement, target reuse, or an ambiguous transport outcome
 - **THEN** Worker Stop SHALL resolve the selected task under its verified parent/workspace and target only that worker's native execution.
 - **AND** A known stale, settled, uncertain, foreign, or unrelated task target SHALL be refused without redirecting the request to a newer child occurrence.
-- **AND** Worker-stop receipts SHALL use the same bounded retention, preservation of transport-ambiguous outcomes, and no-automatic-replay behavior specified for backgrounding; deduplication SHALL NOT be promised after expiry, eviction, adapter recreation, or process restart.
+- **AND** while a worker-stop receipt is retained, retries return its retained outcome without redispatch; a transport-ambiguous dispatched outcome remains explicitly unknown and reconnect/reload does not replay it
+- **AND** its default settled retention ends by 15 minutes, capacity eviction can end it sooner, and adapter recreation or process restart ends it entirely
+- **AND** after receipt expiry, capacity eviction, adapter recreation or process restart, an identifier with no retained receipt may be handled as a new request
 - **AND** An accepted interruption SHALL show pending stopping feedback until authoritative settlement; it SHALL NOT overwrite a confirmed completed result with stopped.
 - **AND** Native effects on a worker's own blocking descendants remain provider semantics, not a new stop-all operation.
 
-#### Scenario: Native shell Stop removes a shell record and output while final capture or completion races it
-- **WHEN** native shell Stop removes a shell record and output while final capture or completion races it
-- **THEN** Native shell Stop removes the provider's shell record and output.
-- **AND** The UI SHALL explain before activation that output can become unavailable and the provider may report a failed result rather than cancellation.
-- **AND** Removal acknowledgement or a missing output record SHALL NOT alone establish a cancelled job.
+#### Scenario: Native shell Stop explains removal before activation and reports capture races truthfully
+- **WHEN** native shell Stop is offered
+- **THEN** the UI explains before activation that Stop removes the provider's shell record and output, output can become unavailable and the provider may report a failed result rather than cancellation
+- **WHEN** the confirmed Stop removes the shell record, including a race with final capture or completion
+- **THEN** removal acknowledgement or a missing output record alone does not establish a cancelled job
 - **AND** Uatu SHALL preserve a confirmed completed result if capture and completion already won the race; if removal prevents the final capture and the provider reports error, it SHALL present failed with output-unavailable context rather than force completed or stopped.
 
 #### Scenario: The reader opens, confirms, cancels, or presses Escape in shell-stop confirmation
@@ -4123,19 +4137,20 @@ Parent Stop and worker Stop SHALL have separate verified scopes and truthful out
 
 Background inspection and controls SHALL preserve parent state, child ownership, safe output, and accessible independent actions. Responsive worker/pending docks SHALL retain bounded space, focus, and pending safety information; unavailable child reads or removed output SHALL be explained without foreign access or false recovery promises.
 
+No persistent output archive is required.
+
 #### Scenario: A verified V2 background child is opened while running or settled and its read succeeds or fails
 - **WHEN** a verified V2 background child is opened while running or settled and its read succeeds or fails
 - **THEN** V2 background children SHALL open through the existing parent drill-down while running and after settlement, by their verified child identity rather than top-level picker membership.
 - **AND** The parent selection, draft, attachments, reading state, and return path SHALL be preserved.
 - **AND** A failed child read SHALL retain the parent and provide actionable Retry feedback rather than navigate to a different conversation or leave a dead control.
 - **AND** Child permissions/questions SHALL remain reachable through existing interaction handling.
-- **AND** No direct child messaging control is introduced.
+- **AND** the child view offers no direct child messaging control
 
 #### Scenario: Native shell work is inspected or stopped after backgrounding or provider output removal
 - **WHEN** native shell work is inspected or stopped after backgrounding or provider output removal
 - **THEN** Native shell work affected by backgrounding SHALL retain inspectable already-received output and outcome through the task inspection surface within their existing retained view/history lifetime; reads and stops SHALL verify its workspace and parent ownership and SHALL NOT accept arbitrary output paths.
 - **AND** When provider removal deletes output, the surface SHALL explain that further output is unavailable, preserve what is still locally available, and not promise that lost bytes can be recovered after reload.
-- **AND** No persistent output archive is required.
 - **AND** Both task inspection and result rendering SHALL preserve existing output safety and distinguish upstream truncation from output removal.
 
 #### Scenario: Pointer, keyboard, or touch users inspect, background, stop, open, or return from worker views
@@ -4148,7 +4163,7 @@ Background inspection and controls SHALL preserve parent state, child ownership,
 - **AND** Layered output Escape SHALL NOT also dismiss its owning child view.
 
 #### Scenario: The touch composer enters software-keyboard mode or short landscape while workers and pending input exist
-- **WHEN** the touch composer enters software-keyboard mode or short landscape while workers and pending input exist
+- **WHEN** the touch composer has workers or pending input, including software-keyboard mode or short landscape
 - **THEN** The live worker list SHALL remain reachable through the bounded scrollable work dock while composing without a software keyboard, except in short touch landscape.
 - **AND** With the software keyboard open, or in a visual band at most 390px high and at least 600px wide, worker/subagent tracks and Continue SHALL be hidden to preserve conversation and composer space; dismissing the keyboard or leaving short landscape SHALL restore access.
 - **AND** Compact pending counts, any paused-batch Send action and replacement warnings follow the steering dock's safety rules and SHALL remain available while typing.
@@ -4157,10 +4172,10 @@ Background inspection and controls SHALL preserve parent state, child ownership,
 - **AND** Expanded touch work tracks SHALL keep the prompt rail from covering worker actions.
 
 #### Scenario: The shared touch work dock allocates space during hardware editing or expanded-card presentation
-- **WHEN** the shared touch work dock allocates space during hardware editing or expanded-card presentation
-- **THEN** The shared touch work dock SHALL observe the visual-height budgets and final-height reservation specified by the steering composer/dock contract, rather than separately budgeting each track.
-- **AND** This includes the 24% cap during hardware-keyboard editing when both cards are collapsed, the measured small-strip policy when either is expanded, and reduced-motion handling.
-- **AND** These compact-layout rules do not change worker execution, ownership, stop targets or the existing interaction-request answering flow.
+- **WHEN** the shared touch work dock allocates space with collapsed or expanded cards, including hardware-keyboard editing
+- **THEN** the tracks share one visual-height budget, reserve their final bounded layout height before visual reveal and honor reduced motion rather than each taking a separate budget
+- **AND** both collapsed cards during hardware-keyboard editing use the 24% cap, while either expanded card uses the measured small-strip allocation
+- **AND** layout changes leave worker execution, ownership, stop targets and the existing interaction-request answering flow unchanged
 
 #### Scenario: A child excluded from the picker opens reliably
 - **WHEN** a user opens a verified background child from its running task or historical result on desktop or touch
@@ -4234,8 +4249,10 @@ Confirmed live V2 background work SHALL keep workspace activity working independ
 
 Pending messages and workers SHALL use canonical, bounded disclosures with truthful visible-row counts and retained per-conversation choices. Touch SHALL default collapsed; desktop SHALL auto-open new active batches subject to deliberate collapse. Accessible row density, safe actions, dismissal, and independent reading ownership SHALL remain intact.
 
+The collapsed touch defaults are an explicit exception to desktop automatic expansion.
+
 #### Scenario: Touch Chat shows pending messages and working, unresolved, or finished worker occurrences across updates and reselection
-- **WHEN** touch Chat shows pending messages and working, unresolved, or finished worker occurrences across updates and reselection
+- **WHEN** touch Chat renders empty or nonempty pending-message and worker sets, including updates or reselection
 - **THEN** Touch chat SHALL show at most one initially collapsed pending-message summary and one initially collapsed worker summary, omitting an empty summary.
 - **AND** Pending text SHALL identify only nonzero steer/queued categories without repeating the total, such as `1 queued` or `2 steers · 1 queued`.
 - **AND** Its header and inline pending actions SHALL use the approved 32px minimum density exception with independent 8px gaps including before Remove, preserving existing confirmations.
@@ -4268,11 +4285,10 @@ Pending messages and workers SHALL use canonical, bounded disclosures with truth
 - **AND** Existing confirmation wording, cancellation without mutation and confirmed paused-batch delivery semantics SHALL remain unchanged.
 
 #### Scenario: The reader expands pending or worker details while replacement, batch, or operation warnings exist
-- **WHEN** the reader expands pending or worker details while replacement, batch, or operation warnings exist
+- **WHEN** pending or worker details are expanded or collapsed, with or without replacement, batch or operation warnings
 - **THEN** Expanded pending details SHALL retain delivery order and existing edit/remove/convert/Send now actions.
 - **AND** Expanded worker details SHALL retain inspection, truthful terminal outcomes, available shell output and existing parent/worker-stop safeguards.
 - **AND** Replacement consequences, paused-batch warnings and applicable batch Send, and actionable operation failure/uncertainty SHALL remain visible outside collapsed details.
-- **AND** The collapsed touch defaults are an explicit exception to desktop automatic expansion.
 
 #### Scenario: Desktop UI mode receives a new active batch, a deliberate collapse, repaint, mode switch, or temporary null selection
 - **WHEN** desktop UI mode receives a new active batch, a deliberate collapse, repaint, mode switch, or temporary null selection
@@ -4291,7 +4307,7 @@ Pending messages and workers SHALL use canonical, bounded disclosures with truth
 - **AND** Canonical rows, independent pane offsets, focus and reading-anchor ownership SHALL remain unchanged.
 
 #### Scenario: Expanded worker details render active, unresolved, settled, and stoppable occurrences
-- **WHEN** expanded worker details render active, unresolved, settled, and stoppable occurrences
+- **WHEN** expanded worker details render any active, unresolved, settled or stoppable occurrences
 - **THEN** Expanded worker details SHALL show one flat list: Working and Unresolved workers first, then Finished history ordered newest first from available execution timestamps, without a separate Finished disclosure.
 - **AND** Each occurrence SHALL have one whole-row inspection target.
 - **AND** Names SHALL remain readable at at least 14px and metadata at at least 13px, subject to the documented compact-density exceptions.
@@ -4380,7 +4396,7 @@ Pending messages and workers SHALL use canonical, bounded disclosures with truth
 
 ### Requirement: Compact touch composition preserves safe targets and conversation space
 
-Compact touch Chat SHALL retain inline primary actions, one configuration/context pill, safe targets, and bounded independent work cards without manual Continue UI. Viewport allocation, safe areas, first-tap menus, reading anchors, and request answering SHALL preserve reachable controls and drafts.
+Compact touch Chat SHALL retain inline primary actions, one configuration/context pill, safe targets and bounded independent work cards without manual Continue UI. Viewport layout, safe areas, menus, reading anchors and request answering SHALL preserve reachable controls/drafts. Visible controls SHALL activate on the first tap during composition, with or without live updates. No manual Continue supersedes earlier availability/suppression rules without changing delivery/background API semantics.
 
 #### Scenario: Touch Chat presents composer actions and configuration, with or without Hub automatic-steer policy
 - **WHEN** touch Chat presents composer actions and configuration, with or without Hub automatic-steer policy
@@ -4407,15 +4423,18 @@ Compact touch Chat SHALL retain inline primary actions, one configuration/contex
 - **AND** Safe-area handling, measured desktop geometry, explicit bottom pinning, remote reading anchors and interaction-request answering SHALL be preserved.
 - **AND** Larger text SHALL retain readable warnings and reachable primary controls using scrolling/reduced secondary content rather than shrunken targets.
 
-#### Scenario: A composing reader opens or dismisses a menu or activates a visible control during live updates
-- **WHEN** a composing reader opens or dismisses a menu or activates a visible control during live updates
-- **THEN** Menus SHALL fit the visual viewport, support keyboard navigation and one-layer Escape with invoker restoration, and consume outside touch dismissal without activating underlying actions.
-- **AND** Visible controls SHALL activate reliably on the first tap during composition without discarding drafts or attachment/configuration state.
-- **AND** Live updates and reduced-motion presentation SHALL NOT steal focus or fabricate completion announcements.
+#### Scenario: Menus fit and dismiss without activating underlying controls
+- **WHEN** a reader opens, navigates or dismisses a menu
+- **THEN** the menu fits the visual viewport and supports keyboard navigation and one-layer Escape with invoker restoration
+- **AND** outside touch dismissal is consumed without activating the underlying action
 
-#### Scenario: Earlier Continue availability or constrained-state suppression rules would otherwise expose manual backgrounding UI
-- **WHEN** earlier Continue availability or constrained-state suppression rules would otherwise expose manual backgrounding UI
-- **THEN** The absence of manual Continue supersedes earlier UI availability and constrained-state suppression requirements without changing delivery or background API semantics.
+#### Scenario: Visible controls activate on the first tap throughout composition
+- **WHEN** a reader first taps any visible control during composition, whether incoming live updates are arriving or not
+- **THEN** the control activates on that first tap without discarding the draft or attachment/configuration state
+
+#### Scenario: Live and reduced-motion presentation preserve focus and truthful announcements
+- **WHEN** Chat presents live updates or reduced-motion presentation
+- **THEN** it does not steal focus or fabricate completion announcements
 
 #### Scenario: Keyboard and landscape keep conversation space
 - **WHEN** loaded touch chat uses 390px width with a 380px or 450px visual band, or 844px landscape width with a 230px visual band and the existing safe-area fixtures
@@ -4510,7 +4529,7 @@ Physically insufficient space SHALL prioritize a whole actionable row in the exp
 
 ### Requirement: Accepted Hub steer actions can automatically background eligible work
 
-Confirmed Hub steer actions with authoritative ON preference and current-instance policy trust SHALL permit at most one automatic native background-all follow-up for verified eligible blockers. Primary admission SHALL precede follow-up, and other sends, standalone contexts, and unsupported agents SHALL not acquire implicit backgrounding.
+Confirmed Hub steer actions with authoritative ON preference and current-instance policy trust SHALL permit at most one automatic native background-all follow-up for verified eligible blockers. Primary admission SHALL precede follow-up, and other sends, standalone contexts, and unsupported agents SHALL not acquire implicit backgrounding. Its UI SHALL NOT promise immediate delivery, atomic admit-and-background or preservation of every foreground worker across native resume.
 
 #### Scenario: An initiating Hub account with authoritative ON preference confirms an eligible steer action or paused-batch resume
 - **WHEN** an initiating Hub account with authoritative ON preference confirms an eligible steer action or paused-batch resume
@@ -4535,10 +4554,14 @@ Confirmed Hub steer actions with authoritative ON preference and current-instanc
 
 #### Scenario: Sending, menu selection, replacement staging, job events, or unsupported contexts do not meet the Hub accepted-steer exception
 - **WHEN** sending, menu selection, replacement staging, job events, or unsupported contexts do not meet the Hub accepted-steer exception
-- **THEN** This is the scoped exception to the earlier rule forbidding implicit backgrounding on sending: outside confirmed Hub steer actions with ON policy and both capabilities, that rule remains in force.
+- **THEN** no automatic native background follow-up is triggered outside confirmed Hub steer actions with ON policy and both capabilities
 - **AND** Ordinary queued/idle sends, job starts, preference/menu selection, Undo/revert staging alone, repeated no-op conversion, standalone and unsupported agents SHALL retain existing behavior.
-- **AND** Automatic backgrounding SHALL NOT create a steer, launch a new agent, flush the Uatu queue or change staged configuration/delivery preferences.
-- **AND** Native steer next-step delivery, paused batch behavior and resume/interruption semantics remain authoritative; the UI SHALL NOT promise immediate delivery, atomic admit-and-background, or preservation of every foreground worker across native resume.
+
+#### Scenario: Automatic follow-ups preserve input and native delivery semantics
+- **WHEN** an accepted Hub steer action qualifies for automatic backgrounding with authoritative ON policy, verified current-instance trust and both required agent capabilities
+- **THEN** the automatic follow-up creates no steer or new agent, does not flush the Uatu queue, and leaves staged configuration and delivery preferences unchanged
+- **AND** native steer next-step delivery, paused-batch behavior and resume/interruption semantics remain authoritative
+- **AND** the UI promises neither immediate delivery nor atomic admission-and-backgrounding nor preservation of every foreground worker across native resume
 
 #### Scenario: Each accepted steer action qualifies once
 - **WHEN** an ON Hub account confirms a new composer steer, Queue → Steer, held-message Send now or submitted replacement steer while verified eligible blocking evidence remains
@@ -4978,7 +5001,7 @@ through the cell's title.
 Touch conversation titles SHALL truncate within the picker row without displacing Rename or New conversation or reducing their touch targets. Native selection, focus, desktop behavior, and transcript-edge paint/hit containment SHALL remain intact.
 
 #### Scenario: Long or enlarged touch conversation titles and short transcript navigation coexist with picker-row actions
-- **WHEN** long or enlarged touch conversation titles and short transcript navigation coexist with picker-row actions
+- **WHEN** touch picker-row actions are displayed, including long or enlarged titles or a transcript strip shorter than its floating navigation
 - **THEN** Touch selected conversation titles SHALL truncate inside the paint-contained picker wrapper and SHALL NOT push Rename or New conversation onto another row.
 - **AND** Both actions SHALL retain at least 44×44px touch targets and their existing accessible names.
 - **AND** New conversation MAY use an SVG-only presentation.
@@ -5000,8 +5023,10 @@ Touch conversation titles SHALL truncate within the picker row without displacin
 
 Compact desktop density SHALL follow selected UI mode, primary fine-pointer hover capability, and actual pane width. Composer, worker, and pending controls SHALL retain the specified compact target exceptions, metadata, fixed delivery guidance, and safe wrapping without altering comfortable/touch behavior.
 
+These desktop target exceptions supersede the comfortable 44px target rules above.
+
 #### Scenario: A fine-pointer desktop pane changes width while composer, worker, and pending controls are present
-- **WHEN** a fine-pointer desktop pane changes width while composer, worker, and pending controls are present
+- **WHEN** composer, worker or pending controls are displayed in desktop or comfortable/touch mode, including at changing pane widths or input capabilities
 - **THEN** Compact desktop density SHALL require selected desktop UI mode and a primary fine pointer with hover.
 - **AND** Explicit touch/comfortable mode and touch-first hybrid devices SHALL retain existing comfortable targets.
 - **AND** Composer actions SHALL use consistent 32px controls, one row where the actual pane fits and a deliberate two-row layout below 34rem, retaining Attach, model/mode/effort, context, Send and Stop.
@@ -5009,7 +5034,6 @@ Compact desktop density SHALL follow selected UI mode, primary fine-pointer hove
 - **AND** Pending actions SHALL be 32px with 4px/8px padding and independent 8px gaps, inline when they fit and wrapped otherwise.
 - **AND** Delivery and Paused labels, edit/replacement safeguards and unknown receipts SHALL remain available.
 - **AND** No hidden counts, success notices or replacement action menu SHALL be introduced.
-- **AND** These desktop target exceptions supersede the comfortable 44px target rules above.
 
 #### Scenario: Resizing the pane on a desktop does not turn it into touch UI
 - **WHEN** a fine-pointer desktop chat pane narrows inside a wide viewport
@@ -5033,6 +5057,8 @@ Compact desktop expanded cards SHALL prefer 35% of measured remaining layout hei
 
 Desktop side answers SHALL use bounded nonmodal readers with Minimise and retained page-local answers and reading offsets. Other controls SHALL remain usable, Escape and focus restoration SHALL respect ownership, and conversation switches SHALL hide the reader without changing content safety policies.
 
+These window/minimisation rules supersede earlier modal-only Escape wording; sanitization and file/external-link policies remain unchanged.
+
 #### Scenario: A desktop or mobile side answer opens, minimizes, reopens, receives Escape, or loses its selected conversation
 - **WHEN** a desktop or mobile side answer opens, minimizes, reopens, receives Escape, or loses its selected conversation
 - **THEN** Desktop side answers SHALL open a larger nonmodal native dialog without a blocker or focus trap; other app controls SHALL remain interactive.
@@ -5043,7 +5069,6 @@ Desktop side answers SHALL use bounded nonmodal readers with Minimise and retain
 - **AND** Desktop Escape SHALL minimise only from inside the reader; unrelated composing keys SHALL remain owned by the composer.
 - **AND** Focus restoration SHALL not override unrelated current interaction.
 - **AND** Switching conversation SHALL hide the reader, retain its reading offset, and preserve the existing conversation/file-action ownership guards.
-- **AND** These window/minimisation rules supersede modal-only Escape wording in Side answers use a compact notice and safe Markdown reader; sanitization and file/external-link policies remain unchanged.
 
 #### Scenario: Reading continues while the main app remains usable
 - **WHEN** a desktop side answer is open
@@ -5059,6 +5084,8 @@ Desktop side answers SHALL use bounded nonmodal readers with Minimise and retain
 
 Send SHALL use fixed steer shortcuts and mandatory queue exceptions without saved delivery defaults or menus. A 500ms arm plus two-second pointer or Space countdown SHALL queue once at 2500ms, with safe cancellation, immutable draft ownership, accessible guidance, and fixed viewport-owned visual bounds.
 
+These rules supersede earlier per-device delivery-default, visible delivery-selector, saved keyboard-default and envelope-growth clauses.
+
 #### Scenario: A steering-capable user sends ordinary busy text, commands, or attachment-bearing drafts by pointer or keyboard
 - **WHEN** a steering-capable user sends ordinary busy text, commands, or attachment-bearing drafts by pointer or keyboard
 - **THEN** For steering-capable agents, tapping Send, desktop Enter and touch Ctrl/Command+Enter SHALL explicitly steer ordinary busy text.
@@ -5066,7 +5093,6 @@ Send SHALL use fixed steer shortcuts and mandatory queue exceptions without save
 - **AND** Steer SHALL be the fixed keyboard default, not configurable.
 - **AND** Legacy saved delivery choices SHALL be ignored without deleting browser settings, including after reload.
 - **AND** No delivery-default Settings path, dropdown, replacement selector or added layout height SHALL be introduced.
-- **AND** This supersedes earlier per-device delivery-default requirements.
 - **AND** Busy commands and attachment-bearing composer drafts SHALL queue with truthful labels; native staged-replacement semantics, explicit HTTP/dock delivery and unsupported agents' queued/idle behavior SHALL remain unchanged.
 
 #### Scenario: A pointer or focused-Send Space hold starts, arms, counts down, releases, or is invalidated by interaction or page changes
@@ -5095,7 +5121,6 @@ Send SHALL use fixed steer shortcuts and mandatory queue exceptions without save
 - **WHEN** a reader accesses Send instructions, activates it by keyboard, or completes an idle Queue hold
 - **THEN** Send SHALL expose concise aria-describedby instructions for arming/hold/cancel and fixed keyboard shortcuts; Enter on Send SHALL activate immediately.
 - **AND** There SHALL be no visible Send/Steer/Queue dropdown or replacement menu.
-- **AND** This supersedes earlier visible delivery-selector, saved keyboard-default and envelope-growth clauses.
 - **AND** Idle held Queue SHALL dispatch using existing normal idle semantics, not create fake pending input.
 - **AND** Existing authoritative personal background policy SHALL govern accepted steer actions without a second browser background request.
 
@@ -5135,22 +5160,23 @@ Send SHALL use fixed steer shortcuts and mandatory queue exceptions without save
 
 Native side generation SHALL use verified one-shot context generation outside foreground admission, history, and agent tool execution. Protected bounded requests and page-local responses SHALL preserve drafts, reject unsupported agents and attachments, and avoid inference replay or shared receipts.
 
+User-installed native plugin hooks remain outside this tool-loop guarantee. No provider-history persistence or durable exactly-once inference is promised.
+
 #### Scenario: A supported OpenCode V2 user invokes /btw for native one-shot context generation
 - **WHEN** a supported OpenCode V2 user invokes /btw for native one-shot context generation
 - **THEN** Only an agent with verified native one-shot context generation SHALL declare `side-generation` and offer `/btw <question>`.
 - **AND** OpenCode V2 SHALL use `session.generate`, with the native TUI's concise-answer/no-tools/no-actions instruction, without prompt admission, history mutation, foreground interrupt/resume/background, or an agent tool execution loop.
 - **AND** The implementation SHALL NOT substitute a foreground prompt or a new child agent.
 - **AND** Native generation may advertise tool definitions but SHALL NOT execute a returned tool call; empty text SHALL be explained honestly.
-- **AND** User-installed native plugin hooks remain outside this tool-loop guarantee.
 
 #### Scenario: A side request is validated, submitted, fails, or completes while drafts or conversation selection change
-- **WHEN** a side request is validated, submitted, fails, or completes while drafts or conversation selection change
+- **WHEN** a side request is validated, submitted, fails or completes, whether or not drafts or conversation selection change
 - **THEN** The internal aside action SHALL retain existing authentication, origin, base-path, qualified-agent and workspace-ownership gates, accept a closed `{requestId, question}` body with nonempty question bounded to 16,384 UTF-8 bytes, and return closed `{text}` with no-store.
 - **AND** Unsupported providers SHALL refuse honestly; V1/Claude SHALL not offer the command, and a typed `/btw` SHALL not fall through into ordinary prompt admission.
 - **AND** Pending attachments SHALL be refused and retained.
 - **AND** The initiating page SHALL prevent concurrent duplicate side requests, preserve newer composing drafts on failure and never automatically replay inference.
 - **AND** Responses SHALL remain page-local and not be cached in shared workspace action receipts.
-- **AND** Completion SHALL expose a deliberate answer-opening action without stealing composing focus; no provider-history persistence or durable exactly-once inference is promised.
+- **AND** Completion SHALL expose a deliberate answer-opening action without stealing composing focus.
 
 #### Scenario: A side question does not interrupt foreground work
 - **WHEN** a V2 conversation is running and the user submits `/btw` with a question
@@ -5168,7 +5194,9 @@ Native side generation SHALL use verified one-shot context generation outside fo
 
 ### Requirement: Side answers use a compact notice and safe Markdown reader
 
-Side answers SHALL use a compact deliberate notice and safe Markdown reader scoped to their originating conversation. Completion SHALL preserve composing state and reading anchors; viewport, Escape, file-link, and superseding nonmodal/minimization behavior SHALL retain existing ownership and safety contracts.
+Side answers SHALL use a compact deliberate notice and safe Markdown reader scoped to their originating conversation. Completion SHALL preserve composing state and reading anchors; viewport, Escape and superseding nonmodal/minimization behavior SHALL retain existing ownership and safety contracts.
+
+Later desktop nonmodal/Minimise behavior supersedes this requirement's modal-only Escape and close wording. One-shot/no-history/no-tool-loop/no-retry behavior remains unchanged.
 
 #### Scenario: A side answer works, completes, fails, opens in its reader, or becomes stale during conversation navigation
 - **WHEN** a side answer works, completes, fails, opens in its reader, or becomes stale during conversation navigation
@@ -5179,8 +5207,6 @@ Side answers SHALL use a compact deliberate notice and safe Markdown reader scop
 - **AND** Wide tables/code SHALL scroll inside the reader without horizontally panning the surface.
 - **AND** Reader bounds SHALL follow the visual viewport through keyboard resize/pan; Escape SHALL close only that modal and restore its surviving invoker.
 - **AND** Switching conversations SHALL close a stale reader without moving focus to an unrelated notice.
-- **AND** The existing one-shot/no-history/no-tool-loop/no-retry contract SHALL remain unchanged.
-- **AND** The nonmodal desktop and Minimise behavior in Side answers minimise without losing their answer supersedes this requirement's modal-only Escape and close wording.
 
 #### Scenario: A formatted side answer arrives during composition
 - **WHEN** inference completes while the user is reading older messages and selecting text in a newer draft

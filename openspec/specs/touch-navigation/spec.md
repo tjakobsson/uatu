@@ -36,7 +36,7 @@ The `Files` tab's surface SHALL be the existing sidebar pane stack (the visible 
 - **WHEN** the sidebar stack is used inside Files
 - **THEN** the per-pane visibility menu SHALL keep working
 - **AND** on coarse-pointer devices each pane's header SHALL act as its gesture surface: dragging resizes the boundary above, rather than using the thin desktop resizer strip as a finger target
-- **AND** double-tapping the header SHALL toggle collapse as a reachable version of the small − / + button, while taps on header controls keep working
+- **AND** on coarse-pointer devices double-tapping the header SHALL toggle collapse as a reachable version of the small − / + button, while taps on header controls keep working
 
 #### Scenario: Tree state is continuous across tabs
 - **WHEN** the user expands a directory in the Files tab, switches to Preview, and returns
@@ -77,8 +77,14 @@ A keyboard shortcut that acts on a specific surface SHALL make that surface the 
 #### Scenario: User shortcuts promote their target but background activity does not
 - **WHEN** a surface-directed shortcut is pressed
 - **THEN** `⌘F` SHALL target the preview and activate Preview, and `⇧⌘F` SHALL target the Search pane in the sidebar stack and activate Files
-- **AND** like explicit preview-bound navigation, the user's shortcut MAY promote a surface, whereas programmatic activity (follow-mode Rules C/D, file events) still MUST NOT
-- **AND** a shortcut consuming the key and suppressing the host's handling MUST NOT leave the user with nothing visible to use
+
+#### Scenario: Background activity never promotes a surface
+- **WHEN** programmatic activity occurs, including follow-mode Rules C/D or file events, whether or not a user shortcut also occurs
+- **THEN** it MUST NOT promote a surface; a shortcut the user presses is an act of intent, like explicit preview-bound navigation, so it may promote its surface
+
+#### Scenario: Consumed shortcuts leave a visible usable affordance
+- **WHEN** a shortcut consumes the key and suppresses the host's own handling
+- **THEN** it MUST NOT leave the user with nothing visible to use
 
 #### Scenario: Find brings the Preview tab forward
 - **WHEN** the Files tab is active and the user presses `⌘F` on a hardware keyboard
@@ -184,9 +190,12 @@ Desktop mode on a tablet SHALL retain the desktop arrangement while keeping side
 When a tablet uses desktop mode, the workspace SHALL fit the visible viewport during software-keyboard and hardware-keyboard accessory-bar transitions, including viewport panning.
 
 #### Scenario: Composer focus keeps desktop headers and editing controls visible
-- **WHEN** the chat composer is focused during keyboard or accessory-bar transitions
+- **WHEN** the chat composer is focused on a tablet in desktop mode, whether or not a keyboard transition is occurring
 - **THEN** sidebar, preview, and chat headers SHALL remain visible while the composer and send control stay above the occluded area
-- **AND** small accessory-bar occlusions SHALL be handled even below the software-keyboard detection threshold
+
+#### Scenario: Tablet desktop content and small occlusions retain their own boundaries
+- **WHEN** a tablet uses desktop mode, with or without composer focus
+- **THEN** small accessory-bar occlusions SHALL be handled even below the software-keyboard detection threshold
 - **AND** Chat and preview content SHALL scroll within their appropriate panes rather than requiring whole-workspace scrolling to recover headers
 
 #### Scenario: Editing geometry recovers without changing content state

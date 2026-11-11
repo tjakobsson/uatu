@@ -22,7 +22,7 @@ Document render benchmarks SHALL measure existing rendering behavior without cha
 The preview pane SHALL default to light mode and SHALL render Markdown using GitHub Flavored Markdown-compatible behavior for common GitHub README features, with sanitized raw HTML and frontmatter extraction for document metadata.
 
 #### Scenario: README features and raw HTML follow GitHub presentation safely
-- **WHEN** a Markdown README contains formatted content or raw HTML
+- **WHEN** a Markdown document contains formatted content or raw HTML
 - **THEN** the preview MUST support at least tables, task lists, strikethrough, autolinks, and fenced code blocks, with GitHub's light Markdown visual style
 - **AND** block-level and inline raw HTML MUST render as real HTML rather than escaped text, including centered hero images and attribute-bearing elements
 - **AND** rendered HTML MUST be sanitized against a GitHub-modeled whitelist before reaching the browser: `<script>`, `<iframe>`, and other active-content elements MUST NOT execute, inline event handlers such as `onerror` and `onclick` MUST be stripped, and URL attributes MUST reject unsafe protocols such as `javascript:`
@@ -97,14 +97,17 @@ The preview pane SHALL render non-Mermaid fenced code blocks with GitHub-style s
 - **AND** no syntax-highlighting markup is applied to it
 
 ### Requirement: Render non-Markdown text files as syntax-highlighted code
-The preview pane SHALL render selected text files that are not Markdown by emitting their contents as a single `<pre><code class="hljs language-X">` block whose token coloring uses GitHub-style highlight.js styling.
+The preview pane SHALL render selected text files that are not Markdown by emitting their contents as a single `<pre><code class="hljs language-X">` block whose token coloring uses GitHub-style highlight.js styling. The language map MUST be trivially extensible with one entry per extension.
 
 #### Scenario: Code rendering resolves language and bounds highlighting work
 - **WHEN** a selected text file enters the non-Markdown code render path
 - **THEN** language resolution SHALL use a file-extension to highlight.js-language map, falling back to plain escaped text inside `<pre><code class="hljs">` for unmapped extensions
 - **AND** the map MUST be trivially extensible with one entry per extension
 - **AND** files at or above 1 MB MUST render as plain escaped text without invoking syntax highlighting to keep the browser responsive
-- **AND** Markdown files MUST continue through the existing Markdown pipeline and MUST NOT be affected by the code render path
+
+#### Scenario: Markdown selection stays outside the code render path
+- **WHEN** a Markdown file is selected
+- **THEN** it MUST continue through the existing Markdown pipeline and MUST NOT be affected by the code render path
 
 #### Scenario: A YAML file renders with YAML token coloring
 - **WHEN** a user selects a `.yaml` file in the sidebar
@@ -132,7 +135,11 @@ The preview header SHALL display a small chip next to the document title indicat
 #### Scenario: Selected file type determines the chip label
 - **WHEN** a document is selected
 - **THEN** Markdown SHALL show `markdown`, and AsciiDoc SHALL show `asciidoc`
-- **AND** other text files SHALL show the mapped highlight.js language identifier (e.g. `yaml`, `python`, `typescript`), or `text` when the extension has no known language mapping
+- **AND** other text files SHALL show the mapped highlight.js language identifier (e.g. `yaml`, `python`, `typescript`) when one is mapped
+
+#### Scenario: Any selected file has an unmapped extension
+- **WHEN** the active file's extension does not map to a known language, whether or not the file is text
+- **THEN** the chip SHALL read `text`
 
 #### Scenario: A YAML file shows a `yaml` chip
 - **WHEN** a user selects a `config.yaml` file
@@ -196,7 +203,7 @@ The preview pane SHALL render a copy-to-clipboard control on every `<pre><code>`
 - **THEN** no copy control is added to the diagram
 
 ### Requirement: Render AsciiDoc files
-The preview pane SHALL render AsciiDoc files (`.adoc`, `.asciidoc`) using `@asciidoctor/core` configured with the `secure` safe mode, sanitized GitHub-aligned presentation, working references, and document metadata. The system MUST NOT classify `.asc` files as AsciiDoc (despite GitHub doing so) because that extension is dominantly used for PGP ASCII-armored signatures and keys.
+The preview pane SHALL render AsciiDoc files (`.adoc`, `.asciidoc`) using `@asciidoctor/core` configured with the `secure` safe mode, sanitized GitHub-aligned presentation, working references, and document metadata. It MUST default to light mode. The system MUST NOT classify `.asc` files as AsciiDoc (despite GitHub doing so) because that extension is dominantly used for PGP ASCII-armored signatures and keys.
 
 #### Scenario: AsciiDoc structures use the shared safe light presentation
 - **WHEN** AsciiDoc is rendered through Asciidoctor
@@ -205,15 +212,18 @@ The preview pane SHALL render AsciiDoc files (`.adoc`, `.asciidoc`) using `@asci
 - **AND** the preview MUST default to light mode, reusing GitHub-style styling for common elements and adding minimal styling for admonitions, callouts, and listing block titles
 
 #### Scenario: Standard AsciiDoc content and heading depths render completely
-- **WHEN** an AsciiDoc document contains supported document structures
+- **WHEN** an AsciiDoc document contains section titles, paragraphs, lists, tables, emphasis, footnotes, admonitions, listings, a TOC request, or in-document cross-references
 - **THEN** the preview MUST support at least section titles at every depth (level-0 doctitle as `<h1>`, `==`–`======` as `<h2>`–`<h6>`), paragraphs, ordered and unordered lists, tables, bold and italic, bottom-collected footnotes, `NOTE` / `TIP` / `IMPORTANT` / `CAUTION` / `WARNING` admonitions, `[source,LANG]` listings, TOC output with `:toc:`, and `<<id>>` in-document cross-references
-- **AND** with `:toc:` set, the renderer SHALL include heading levels 1 through 5 by default by setting Asciidoctor `toclevels` to `5`, reflecting deeper web documentation structure
+- **AND** with `:toc:` set, the renderer SHALL include heading levels 1 through 5 by default and MUST set Asciidoctor `toclevels` to `5`, reflecting deeper web documentation structure
 - **AND** a document's own header `:toclevels:` value MUST continue overriding that default, preserving authoring control
 
-#### Scenario: AsciiDoc links retain resolvable local and cross-document targets
-- **WHEN** the renderer emits TOC entries or AsciiDoc cross-references
-- **THEN** in-page anchor `href`s MUST resolve to the same document's possibly sanitize-prefixed heading `id`s so TOC entries and `<<xref>>` navigate correctly
-- **AND** `xref:other.adoc[…]`, `xref:other.adoc#section[…]`, and `<<other.adoc#section,…>>` MUST retain their original file extension in rendered `href`s so the in-app cross-document handler resolves them against watched roots
+#### Scenario: Every emitted in-page AsciiDoc anchor resolves within its document
+- **WHEN** rendered AsciiDoc HTML contains any in-page anchor `href`, including an ordinary hyperlink without TOC or cross-reference macros
+- **THEN** every such `href` MUST resolve to the same document's possibly sanitize-prefixed heading `id` so TOC entries, `<<xref>>`, and ordinary hyperlinks navigate to their targets
+
+#### Scenario: AsciiDoc cross-document references preserve their file extensions
+- **WHEN** the renderer emits cross-document AsciiDoc references
+- **THEN** `xref:other.adoc[…]`, `xref:other.adoc#section[…]`, and `<<other.adoc#section,…>>` MUST retain their original file extension in rendered `href`s so the in-app cross-document handler resolves them against watched roots
 - **AND** the system MUST NOT rewrite `.adoc` or `.asciidoc` to `.html`, enforced by setting Asciidoctor `relfilesuffix` to `.adoc`
 
 #### Scenario: Large AsciiDoc input bypasses conversion
@@ -268,7 +278,7 @@ The preview pane SHALL render AsciiDoc files (`.adoc`, `.asciidoc`) using `@asci
 The preview header SHALL remain pinned to the top of the preview pane while the document scrolls beneath it. The pinned header MUST contain the preview controls (follow and pin toggles) together on the right, so scope controls stay reachable even when the sidebar is collapsed.
 
 #### Scenario: Sticky-header styling follows backdrop-filter support
-- **WHEN** the pinned header is rendered above scrolling content
+- **WHEN** the pinned preview header is displayed, whether or not its document is currently scrolling
 - **THEN** it MUST use a translucent, blurred frosted-glass backdrop so content remains faintly visible and the transition reads as soft rather than sharp
 - **AND** supporting browsers MUST NOT use a hard bottom border
 - **AND** browsers without `backdrop-filter` MUST fall back to an opaque background with a hairline bottom border
@@ -296,7 +306,7 @@ When a reader clicks any anchor whose target is anchored inside the current docu
 #### Scenario: All target elements clear the header through both anchor paths
 - **WHEN** the in-page click handler directly scrolls a matching element or post-load scrolling resolves an inter-document cross-reference fragment
 - **THEN** clearance MUST hold for `<h1>`–`<h6>` headings, Asciidoctor section wrappers `<div class="sect1">` through `<div class="sect5">`, and explicitly identified non-heading blocks
-- **AND** those non-heading targets MUST include Asciidoctor `[#id]` anchors on tables or `[source]` listings and inline `[[id]]` anchors on paragraphs
+- **AND** non-heading examples include Asciidoctor `[#id]` anchors on tables or `[source]` listings and inline `[[id]]` anchors on paragraphs
 
 #### Scenario: Scroll-container inset covers the header and blur-fade zone uniformly
 - **WHEN** the preview stylesheet defines anchor clearance

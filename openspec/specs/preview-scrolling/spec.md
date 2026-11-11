@@ -10,8 +10,8 @@ mode, and the obligation on every scroll-and-reveal path to target it.
 
 One shared resolver SHALL select the actual preview scroll container at each use for current UI mode and layout, including viewport scrolling in touch/stacked desktop and the rendered pane in split layout.
 
-#### Scenario: A caller resolves preview scrolling after a layout or UI-mode change, including split layout
-- **WHEN** a caller resolves preview scrolling after a layout or UI-mode change, including split layout
+#### Scenario: Each scroll use resolves the current layout's container
+- **WHEN** any caller needs the preview scroll container, on initial use or after a layout or UI-mode change
 - **THEN** The system SHALL resolve, at each use, the element that actually scrolls the preview for the current layout and UI mode, rather than capturing a scroll container once at module load.
 - **AND** In the desktop layout above the stacked breakpoint the effective container SHALL be the preview shell.
 - **AND** In touch mode and in the ≤900px stacked desktop layout — where the shell is laid out `overflow: visible` and the page scrolls instead — the effective container SHALL be the document's viewport scroller.
@@ -127,8 +127,8 @@ remount.
 
 Preview visibility observation SHALL obtain its container from the shared resolver and translate it to the observing API's root semantics. Viewport scrolling MUST use the implicit viewport root; root-bound observation SHALL restart only unfinished work after container changes.
 
-#### Scenario: Preview content visibility is observed across element-scrolling, page-scrolling, and UI-mode changes
-- **WHEN** preview content visibility is observed across element-scrolling, page-scrolling, and UI-mode changes
+#### Scenario: Visibility observation uses the current API root
+- **WHEN** preview content visibility is observed in an element-scrolling or page-scrolling layout, including after a UI-mode change
 - **THEN** A feature that observes whether preview content is at or near the visible region SHALL obtain the effective scroll container from the single shared resolver and translate it into the form its observation API requires, rather than deriving a container of its own.
 - **AND** Deriving one by asking whether an element has a scrolling overflow value is specifically forbidden: an element can carry such a value while the viewport is what actually scrolls, and the resulting box tracks the document rather than the visible region.
 - **AND** Where the API distinguishes an element root from the implicit viewport root, the viewport scroller SHALL be expressed as the implicit root and never as an element — neither the document element nor the body element, whose boxes are pinned to the document origin and so cease to describe the visible region as soon as the page is scrolled.

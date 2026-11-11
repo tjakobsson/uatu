@@ -7,11 +7,19 @@ Present sanitized, consistently normalized Markdown and AsciiDoc metadata above 
 
 The preview SHALL show present document metadata in one format-agnostic card above the body, normalize curated fields, and subdue other key/value fields. All values MUST be escaped or sanitized like body HTML, and documents without metadata MUST omit the card.
 
-#### Scenario: Preview Markdown or AsciiDoc with document-level metadata
-- **WHEN** rendered source contains curated, additional, or potentially unsafe metadata values
-- **THEN** the card normalizes equivalent fields across formats and preserves the document HTML security boundary
+#### Scenario: Normalize all curated metadata across source formats
+- **WHEN** Markdown YAML/TOML frontmatter or AsciiDoc headers supply title, author(s), date, revision/version, description, tags/keywords, or status
+- **THEN** present fields appear in the single card above the rendered body; equivalent metadata MUST produce the same card shape across formats
+- **AND** format-specific keys MUST normalize consistently: AsciiDoc `:keywords:` and Markdown `tags` share the `tags` row; AsciiDoc `:revnumber:` and Markdown `version` share `revision`
 
-The preview pane SHALL render extracted document-level metadata as a single, format-agnostic metadata card placed above the body of the rendered document. The card SHALL surface a curated set of fields — title, author(s), date, revision/version, description, tags/keywords, status — when those fields are present in the source. Format-specific keys MUST be normalized so that the card looks consistent regardless of whether the source was Markdown YAML/TOML frontmatter or AsciiDoc header attributes (for example, AsciiDoc `:keywords:` MUST surface in the same `tags` row that Markdown `tags` populates; AsciiDoc `:revnumber:` MUST surface in the same `revision` row that Markdown `version` populates). Fields that are not part of the curated set MUST still render — visually subdued — as a generic key/value list so that the curated fields stand out. Every metadata value reaching the DOM MUST be HTML-escaped or passed through the same GitHub-modeled sanitize allowlist used for body HTML, so a metadata value containing `<script>`, `<iframe>`, an inline event handler, or a `javascript:` URL MUST NOT execute. The card MUST be omitted entirely when no metadata is present so documents without frontmatter or AsciiDoc header metadata render unchanged. The card MUST be available regardless of source format: a Markdown document with YAML frontmatter and an AsciiDoc document with equivalent header attributes MUST produce the same card shape.
+#### Scenario: Retain additional fields without elevating their prominence
+- **WHEN** metadata includes fields outside the curated set
+- **THEN** they MUST render as a visually subdued generic key/value list, leaving curated fields prominent
+
+#### Scenario: Enforce the metadata security boundary
+- **WHEN** any metadata value reaches the DOM
+- **THEN** it MUST be HTML-escaped or processed by the same GitHub-modeled sanitize allowlist as body HTML
+- **AND** `<script>`, `<iframe>`, inline event handlers, and `javascript:` URLs MUST NOT execute
 
 #### Scenario: A Markdown document with frontmatter shows a metadata card
 - **WHEN** a user selects a Markdown document whose frontmatter declares `title`, `author`, `date`, `description`, and `tags`

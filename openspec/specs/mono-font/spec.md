@@ -4,7 +4,7 @@ Define a single, app-wide monospace surface story for uatu: one CSS custom prope
 ## Requirements
 ### Requirement: Single CSS variable governs every monospace surface
 
-The stylesheet SHALL define a single CSS custom property `--mono-font-family` on `:root` whose value is the bundled-font stack (Hack Nerd Font Mono → OS monospace → generic monospace).
+The stylesheet SHALL define `--mono-font-family` on `:root` as the single bundled stack (Hack Nerd Font Mono → OS monospace → generic monospace). Every monospace surface SHALL use `var(--mono-font-family)`; no surface SHALL hardcode its own monospace stack, and no configuration file SHALL override the variable.
 
 #### Scenario: Monospace surfaces share the root font stack
 - **WHEN** the app renders a monospace surface

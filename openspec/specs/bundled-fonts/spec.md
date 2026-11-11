@@ -67,14 +67,15 @@ The stylesheet SHALL register exactly one `@font-face` declaration for the bundl
 
 ### Requirement: Bundled font license is allowlisted and shipped with the binary
 
-`src/shared/license-check.ts` SHALL include SIL OFL 1.1 in its permissive-license allowlist so `bun run check:licenses` continues to pass with the bundled font in place. Upstream license texts and per-icon-source notices SHALL ship with the font and remain reachable from the running app.
+`src/shared/license-check.ts` SHALL allow SIL OFL 1.1 so `bun run check:licenses` passes. Hack/Nerd Fonts MIT texts and per-icon-source NOTICES SHALL be vendored under `src/assets/fonts/` and reachable in-app.
+
+The OFL entry is load-bearing because the patched glyph data incorporates icons from upstream icon fonts that ship under SIL OFL 1.1 (e.g., FontAwesome, Weather Icons), even though the immediate upstream projects we vendor from are MIT-licensed.
 
 #### Scenario: Patched font attribution includes upstream and icon-source licenses
-- **WHEN** the bundled font is distributed
-- **THEN** the OFL allowlist entry SHALL account for patched glyph data from upstream icon fonts under SIL OFL 1.1 (e.g., FontAwesome, Weather Icons), even though the immediate vendored upstream projects are MIT-licensed
-- **AND** the upstream MIT license texts for Hack itself and the Nerd Fonts patching utility SHALL be vendored alongside the font under `src/assets/fonts/`
-- **AND** a NOTICES file SHALL enumerate the per-icon-source licenses
-- **AND** all SHALL be reachable from the running app via a dedicated route or an existing third-party-notices surface
+- **WHEN** the font's shipped attribution is inspected in `src/assets/fonts/` and in the running app
+- **THEN** the upstream MIT license texts for Hack itself and the Nerd Fonts patching utility are vendored alongside the font
+- **AND** a NOTICES file enumerates the per-icon-source licenses
+- **AND** all those texts are reachable from a dedicated route or an existing third-party-notices surface
 
 #### Scenario: License check accepts SIL OFL 1.1
 

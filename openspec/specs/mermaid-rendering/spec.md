@@ -9,13 +9,16 @@ The preview pane SHALL detect Markdown fenced code blocks whose info string is `
 #### Scenario: Deferred and bare-style diagrams retain the supported rendering contract
 - **WHEN** a supported Mermaid block approaches the viewport
 - **THEN** rendering MAY have been deferred per the lazy-rendering requirement, but its result SHALL be identical to eager rendering
-- **AND** bare `[mermaid]` SHALL be recognized on `listing` (`----`), `literal` (`....`), and `open` (`--`) contexts, matching the upstream Asciidoctor Diagram extension
+
+#### Scenario: AsciiDoc parsing recognizes bare Mermaid styles before viewport eligibility
+- **WHEN** AsciiDoc is parsed
+- **THEN** bare `[mermaid]` SHALL be recognized on `listing` (`----`), `literal` (`....`), and `open` (`--`) contexts, matching the upstream Asciidoctor Diagram extension
 
 #### Scenario: Inline diagrams use the library's intended width rather than uniform slots
 - **WHEN** Mermaid emits an SVG with inline `style="max-width: <Wpx>"`
 - **THEN** the diagram SHALL render at that diagram-specific intended width capped at available preview content width, without horizontal overflow
 - **AND** the SVG SHALL be horizontally centered within the preview column
-- **AND** detailed zoom, pan, and full-canvas inspection SHALL be provided by the fullscreen viewer modal rather than imposing uniform inline slot dimensions
+- **AND** detailed zoom, pan, and full-canvas inspection is provided by the fullscreen viewer modal; inline preview honors Mermaid's library-chosen sizing rather than imposing uniform slot dimensions
 
 #### Scenario: A Markdown Mermaid fenced block renders as a diagram
 - **WHEN** a selected Markdown file contains a fenced code block with the info string `mermaid`
@@ -59,7 +62,7 @@ The preview pane SHALL make every rendered Mermaid diagram openable in a fullscr
 - **AND** panning SHALL be bounded to retain a portion of the diagram within the viewer in every input mode, and zoom SHALL be clamped to a bounded range
 
 #### Scenario: Viewer dismissal preserves focus and avoids accidental gesture closes
-- **WHEN** the user dismisses the viewer or the watched file changes while it is open
+- **WHEN** the viewer is open
 - **THEN** the modal MUST be dismissible with Escape and an explicit toolbar close control, but MUST NOT be dismissible by a pan-like gesture
 - **AND** closing MUST return focus to the trigger that opened it
 - **AND** a watched-file change MUST close the modal automatically because the trigger no longer exists in the new render
@@ -146,9 +149,10 @@ The preview pane SHALL make every rendered Mermaid diagram openable in a fullscr
 The Mermaid renderer SHALL be initialized with theme inputs that can be supplied by the rest of the application, including a `theme` name (one of Mermaid's supported theme names) and an optional `themeVariables` object.
 
 #### Scenario: Theme defaults and live changes match the surrounding application
-- **WHEN** the application supplies initial or changed theme inputs during a watch session
+- **WHEN** the preview renders before the application provides a non-default theme
 - **THEN** until a non-default theme is supplied the preview MUST continue using Mermaid's existing light visual
-- **AND** when the application theme changes, rendered diagrams in the visible preview MUST be re-rendered with the new inputs to match the surrounding UI
+- **WHEN** the application theme changes during a watch session
+- **THEN** rendered diagrams in the visible preview MUST be re-rendered with the new inputs to match the surrounding UI
 
 #### Scenario: Diagrams render with the default light theme by default
 - **WHEN** the application is using its default light theme
@@ -184,14 +188,14 @@ The preview pane SHALL treat a Mermaid block whose source fails to parse or rend
 
 ### Requirement: Mermaid diagrams render lazily, one at a time, with rendered-SVG reuse
 
-Mermaid diagram rendering SHALL be deferred until a diagram approaches the viewport (observed with a generous ahead-of-viewport margin) instead of rendering every diagram at document mount. Diagrams that never come near the viewport MUST NOT invoke the mermaid renderer. Rendering SHALL use a yielding FIFO queue and size-bounded SVG reuse while preserving reachability and document ownership.
+Mermaid diagram rendering SHALL be deferred until a diagram approaches the viewport (observed with a generous ahead-of-viewport margin) instead of rendering every diagram at document mount. Diagrams that never come near the viewport MUST NOT invoke the mermaid renderer. Queueing, SVG reuse, reachability, and document ownership SHALL follow the scoped rules below.
 
 #### Scenario: Lazy observation follows the effective scroll container in every layout
 - **WHEN** a document is mounted or its UI mode changes during the session
 - **THEN** deferral MUST be recoverable in every layout: every mounted diagram SHALL render once scrolled to, never remaining permanently un-rendered
 - **AND** viewport observation SHALL use the preview's effective scroll container from the single shared resolver, expressed as the container element for element scrolling or the implicit viewport root for page scrolling
 - **AND** lazy-rendering machinery MUST NOT derive its own scroll container
-- **AND** since observer roots are fixed at observation start, a UI-mode change SHALL re-establish observation only for unrendered diagrams; already-rendered diagrams MUST NOT be reset to source or re-rendered when the theme has not changed
+- **AND** since observer roots are fixed at observation start, a UI-mode change SHALL re-establish observation only for unrendered diagrams; already-rendered diagrams MUST NOT be reset to source or re-rendered, since the theme has not changed
 
 #### Scenario: Eligible diagrams render incrementally without destabilizing reading
 - **WHEN** multiple diagrams become eligible together
@@ -206,9 +210,12 @@ Mermaid diagram rendering SHALL be deferred until a diagram approaches the viewp
 - **THEN** all diagrams SHALL still render through the yielding queue
 
 #### Scenario: Document changes and cache hits avoid stale or redundant rendering
-- **WHEN** the previewed document changes or a diagram's source and theme inputs are revisited
-- **THEN** the queue SHALL be invalidated on document change, abandoning superseded pending diagrams instead of rendering them into the new preview
-- **AND** SVGs SHALL be reused from an in-memory, size-bounded cache keyed by source text and active theme inputs; a cache hit MUST NOT invoke the mermaid renderer
+- **WHEN** the previewed document changes
+- **THEN** the queue SHALL be invalidated, abandoning superseded pending diagrams instead of rendering them into the new preview
+
+#### Scenario: Every rendered diagram uses bounded source-and-theme cache reuse
+- **WHEN** a diagram is rendered
+- **THEN** SVGs SHALL be reused from an in-memory, size-bounded cache keyed by source text and active theme inputs; a cache hit MUST NOT invoke the mermaid renderer
 - **AND** failed invalid-source renders MUST NOT be cached, so corrected source re-renders
 
 #### Scenario: Off-screen diagrams do not render at mount

@@ -7,14 +7,17 @@ Notify users when an agent needs an answer or finishes a turn, even when their U
 ## Requirements
 
 ### Requirement: Notifications require explicit device opt-in
-Hub-served Uatu SHALL offer feature-detected, explicit notification opt-in in supported secure contexts from dashboard and workspaces. Enrollment SHALL require current feed positions for every covered running workspace and preserve existing enrollment on refusal.
+Hub-served Uatu SHALL offer feature-detected notification opt-in in supported secure contexts from dashboard and workspaces. Permission SHALL be requested only following Enable notifications, never on installation, page load, or agent-event receipt. The UI SHALL report permission/subscription state and explain enrollment prerequisites without blocking ordinary use. Enrollment SHALL require current feed positions for every covered running workspace and preserve existing enrollment on refusal.
 
 #### Scenario: Permission enrollment follows explicit supported-context intent
 - **WHEN** Enable notifications is activated
 - **THEN** permission SHALL be requested only after that action, never at installation, page load, or agent-event receipt
-- **AND** the UI SHALL report actual permission/subscription state and explain denied permission, unsupported environments, and HTTPS without blocking normal use
-- **AND** iPhone/iPad Home Screen installation prerequisites SHALL be explained before enrollment when required
 - **AND** enrollment SHALL use feature detection from dashboard and hub-served workspaces
+
+#### Scenario: Permission and platform information precedes enrollment
+- **WHEN** notification controls are displayed, before Enable notifications is activated as well as afterwards
+- **THEN** the UI SHALL report actual permission/subscription state and explain denied permission, unsupported environments, and HTTPS requirements without blocking normal use
+- **AND** iPhone/iPad Home Screen installation prerequisites SHALL be explained before enrollment when required
 
 #### Scenario: Enrollment requires every covered running feed position
 - **WHEN** enrollment covers selected workspaces or all accessible workspaces under All workspaces
@@ -61,13 +64,17 @@ Hub-served Uatu SHALL offer feature-detected, explicit notification opt-in in su
 - **AND** stopped workspaces are covered without waiting
 
 ### Requirement: Device preferences select workspaces and event categories
-Each enrolled profile/app SHALL have authenticated-user-associated, device-specific workspace and event-category preferences. All workspaces SHALL be a standing access rule, not a saved inventory snapshot; explicit selections and other devices SHALL remain independent.
+Each enrolled profile/app SHALL have authenticated-user-associated, device-specific workspace and event-category preferences. Users SHALL be able to toggle needs-answer and successful-turn-completion notifications independently for that device in either workspace mode. All workspaces SHALL be a standing access rule, not a saved inventory snapshot; explicit selections and other devices SHALL remain independent.
 
 #### Scenario: Enrollment defaults and submission record a device's explicit choices
 - **WHEN** the enrollment form opens
 - **THEN** it SHALL offer All workspaces or explicit accessible-workspace selection and independently toggle needs-answer and successful-turn-completion categories in either mode
 - **AND** both categories SHALL default selected, All workspaces off, with current workspace preselected from a workspace and none preselected from dashboard
-- **AND** submitting SHALL confirm choices; reported device state SHALL name mode and explicit selection
+- **AND** submitting SHALL confirm choices
+
+#### Scenario: Reported device state always identifies its workspace selection
+- **WHEN** device state is reported to a client
+- **THEN** it SHALL name the mode and the explicit selection
 
 #### Scenario: Workspace mode changes retain selective history and live access coverage
 - **WHEN** All workspaces is saved
@@ -105,7 +112,7 @@ Each enrolled profile/app SHALL have authenticated-user-associated, device-speci
 - **AND** enrollment on their desktop remains active
 
 ### Requirement: Subscriptions follow authenticated ownership and access
-Subscription creation, preference changes, and removal SHALL use hub authentication and existing request protections. Ownership and workspace access SHALL be checked on changes and before sends; ended authorization SHALL prevent sending, and enrollment MUST remain account-bound and private.
+Subscription creation, preference changes, and removal SHALL require hub authentication and existing request protections. Ownership and workspace access SHALL be checked when preferences change and before sends; ended authorization SHALL prevent sending, and enrollment SHALL remain account-bound and private.
 
 #### Scenario: Authorization changes stop sends and require account reconciliation
 - **WHEN** enrollment's hub session signs out, expires, or is revoked, or workspace access is lost
@@ -136,11 +143,14 @@ OpenCode and Claude SHALL notify alike for new questions/permissions and success
 #### Scenario: Live notifications distinguish occurrences from replay and non-top-level outcomes
 - **WHEN** a new needs-answer or successful top-level-turn event occurs
 - **THEN** it SHALL identify workspace, agent-qualified conversation, event kind, and stable source occurrence, distinguishing successive pending interactions in one workspace
-- **AND** transcript replay, initial hydration, unchanged snapshots, individual tool or child-agent completion, failure, cancellation, and transition to background work SHALL NOT produce successful-turn-completion notifications
+
+#### Scenario: Historical and non-success transitions never announce successful completion
+- **WHEN** transcript replay, initial hydration, unchanged snapshots, individual tool or child-agent completion, failure, cancellation, or transition to background work occurs
+- **THEN** it SHALL NOT produce successful-turn-completion notifications
 
 #### Scenario: Resolution identity cancels the exact unsent pending occurrence
-- **WHEN** an interaction's resolution is known before dispatch
-- **THEN** its unsent notification SHALL be discarded
+- **WHEN** an interaction's resolution is known
+- **THEN** any unsent notification for it SHALL be discarded before dispatch
 - **AND** resolution SHALL carry the pending event's same identity regardless of which conversation reported it
 
 #### Scenario: Another question appears while one is pending
@@ -166,7 +176,7 @@ OpenCode and Claude SHALL notify alike for new questions/permissions and success
 - **AND** an unsent delivery for that request is discarded
 
 ### Requirement: Delivery continues without an open page
-The hub SHALL observe covered running workspaces and send eligible Web Push without open pages, conversations, or browser live streams, subject to presence rules. Shared observation SHALL avoid starting idle runtimes/workspaces and preserve enrollments, push identity, and pending delivery across restart.
+The hub SHALL observe covered running workspaces and send eligible Web Push without open pages, conversations, or browser live streams, subject to presence rules. Shared observation SHALL avoid starting idle runtimes/workspaces and preserve enrollments, push identity, and pending delivery across restart. Uatu SHALL document that the hub and agent must run, pushes are withheld while a session page is visible, and browser/OS controls delivery timing.
 
 #### Scenario: Page-independent observation respects coverage and runtime lifecycle
 - **WHEN** a device covers selected workspaces or all accessible workspaces under All workspaces
@@ -178,7 +188,6 @@ The hub SHALL observe covered running workspaces and send eligible Web Push with
 - **WHEN** the hub restarts or reconnects
 - **THEN** device enrollments, server push identity, and pending delivery SHALL survive restart, and reconnect SHALL resume retained events where possible
 - **AND** replay gaps SHALL reconcile still-pending interactions without historical-completion announcements
-- **AND** Uatu SHALL document required running hub/agent, withholding while users have visible session pages, and browser/OS control of delivery timing
 
 #### Scenario: The phone is locked
 - **WHEN** an enrolled phone is locked, its page has released its live connection, the user has no other visible session page, and an observed agent asks a question
@@ -210,15 +219,17 @@ The hub SHALL observe covered running workspaces and send eligible Web Push with
 - **AND** it does not infer old successful completions from conversation history
 
 ### Requirement: Delivery is bounded and suppresses duplicate events
-Each event/enrollment pair SHALL keep one logical delivery identity across replay and bounded retries, with a five-minute lifetime. Accepted pushes SHALL NOT be deliberately resent as new events, and Uatu SHALL NOT claim exactly-once OS delivery.
+Each event/enrollment pair SHALL keep one logical delivery identity. Temporary push failures SHALL use bounded retry and a five-minute delivery lifetime. Expired events SHALL be discarded and permanently invalid subscriptions removed from sending. Accepted pushes SHALL NOT be deliberately resent as new events, and Uatu SHALL NOT claim exactly-once OS delivery.
 
 #### Scenario: Retry lifetime and transport ambiguity preserve one logical notification
 - **WHEN** repeated frames or replay occur within supported retention
 - **THEN** recorded occurrences SHALL NOT enqueue new notifications
-- **WHEN** temporary push failures or ambiguous transport outcomes occur
-- **THEN** retries SHALL be bounded to five minutes from source event, except presence-held needs-answer lifetime SHALL start on release; expired events SHALL be discarded
-- **AND** ambiguous duplicate deliveries SHALL keep the same identity to replace rather than multiply visible entries
-- **AND** permanently invalid subscriptions SHALL be removed from sending, and accepted pushes SHALL NOT deliberately resubmit as new events
+- **WHEN** a temporary push failure occurs
+- **THEN** retry SHALL be bounded, independently of the five-minute delivery lifetime
+- **WHEN** a delivery lifetime is measured
+- **THEN** it SHALL run from the source event, except a presence-held needs-answer event's lifetime SHALL run from release
+- **WHEN** an ambiguous transport outcome causes duplicate deliveries
+- **THEN** they SHALL keep the same notification identity to replace rather than multiply visible entries
 
 #### Scenario: Source replay repeats completion
 - **WHEN** a recorded completion event is replayed after reconnect or hub restart within retention
@@ -291,7 +302,11 @@ Per-user presence across devices SHALL govern notification sending: visible auth
 - **WHEN** an event is held
 - **THEN** holding SHALL NOT add logical deliveries; it SHALL keep one identity per enrollment and send at most once
 - **AND** resolution, access loss, device removal, or any other unsent-discard rule SHALL discard held deliveries alike
-- **AND** held deliveries and release state SHALL survive restart; unanswered interactions SHALL stay reconcilable at least the 60-minute limit so replay gaps do not misreport answered or still-pending state
+- **AND** held deliveries and release state SHALL survive restart
+
+#### Scenario: Unanswered interactions retain reconciliation independently of holding
+- **WHEN** the workspace has an unanswered interaction, whether held or sent immediately
+- **THEN** the workspace SHALL keep it reconcilable for at least the 60-minute hold limit so that a replay gap does not misreport a held interaction as answered or as still pending
 
 #### Scenario: A question arrives in the conversation on screen
 - **WHEN** a user is viewing a workspace's chat on their desktop and the agent there asks a question

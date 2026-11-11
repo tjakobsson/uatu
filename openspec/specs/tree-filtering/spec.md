@@ -16,9 +16,12 @@ The system SHALL read each directory watch root's `.uatu.json ignore.exclude` as
 #### Scenario: Root configuration changes or contains invalid and retired settings
 - **WHEN** root configuration is read or changes
 - **THEN** root-level configuration SHALL be reread when changed, repairing watch coverage where necessary
-- **AND** single-file roots SHALL not consult this configuration, and nested `.uatu.json` files SHALL not be read
 - **AND** invalid shape SHALL produce one configuration warning and apply no user exclusions
 - **AND** a root `.uatu.json` still containing `ignore.include` SHALL produce one configuration warning saying the key has no effect, and the key SHALL NOT change exposure or visibility
+
+#### Scenario: Configuration reads exclude single-file roots and nested files
+- **WHEN** configuration sources are selected for any watch root
+- **THEN** single-file roots SHALL not consult this configuration, and nested `.uatu.json` files SHALL not be read
 
 #### Scenario: An `ignore.exclude` pattern hides a file from the tree
 - **WHEN** `ignore.exclude` contains `bun.lock`
@@ -72,9 +75,12 @@ The session SHALL surface every `.uatu.json` configuration warning — read fail
 - **AND** single-file watch roots read no ignore configuration and SHALL produce no config warnings
 
 #### Scenario: Empty configuration is one malformed-JSON problem
-- **WHEN** a `.uatu.json` exists but is zero-byte or whitespace-only, or more than one subsystem reads a problematic file
+- **WHEN** a `.uatu.json` exists but is zero-byte or whitespace-only
 - **THEN** an empty file SHALL be treated as malformed JSON and produce the parse warning rather than being silently accepted as valid
-- **AND** one underlying problem SHALL be reported as one warning even though more than one subsystem reads the file
+
+#### Scenario: Every underlying configuration problem produces one warning
+- **WHEN** an underlying configuration problem is reported
+- **THEN** it SHALL be reported as one warning, even when more than one subsystem reads the file
 
 #### Scenario: Empty `.uatu.json` produces a parse warning
 - **WHEN** the watch root's `.uatu.json` exists but is zero bytes or contains only whitespace
@@ -122,8 +128,12 @@ The system SHALL discover and observe permitted files independently of Git-ignor
 #### Scenario: A visibility toggle affects browsing only
 - **WHEN** a client toggles Show ignored files
 - **THEN** it SHALL neither reconstruct shared watchers nor command another client, select a preview, clear deliberate deselection, stop playback, or enable Follow
-- **AND** explicitly open files hidden by that browsing preference SHALL remain open without being injected back into results
-- **AND** visibility alone SHALL NOT deny otherwise permitted direct authenticated access
+
+#### Scenario: Hidden open files and direct access remain independent of toggles
+- **WHEN** the current browsing preference hides an explicitly open file
+- **THEN** that file SHALL remain open without being injected back into results
+- **WHEN** otherwise permitted direct authenticated access is requested
+- **THEN** visibility alone SHALL NOT deny that access
 
 #### Scenario: An unconfigured workspace shows ignored exports
 - **WHEN** no personal visibility or explicit legacy default exists and Git ignores `renders/`
@@ -166,7 +176,7 @@ The system SHALL discover and observe permitted files independently of Git-ignor
 - **THEN** it is not falsely treated as an ignored untracked export
 
 ### Requirement: Built-in exclusions match VS Code's defaults
-The system SHALL hide only the names VS Code's `files.exclude` hides by default, at any depth: the VCS metadata directories `.git`, `.svn`, `.hg`, and `.jj`, and the OS files `.DS_Store` and `Thumbs.db`. These SHALL be the only built-in exclusions.
+The system SHALL hide only the names VS Code's `files.exclude` hides by default, at any depth: the VCS metadata directories `.git`, `.svn`, `.hg`, and `.jj`, and the OS files `.DS_Store` and `Thumbs.db`. These SHALL be the only built-in exclusions and SHALL be encoded in source.
 
 #### Scenario: Built-in policy cannot be weakened or silently expanded
 - **WHEN** default exclusions are applied, with or without project configuration

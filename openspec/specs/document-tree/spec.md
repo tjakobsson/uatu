@@ -6,7 +6,7 @@ Provide a library-backed document tree with selection and reveal behavior, filte
 ## Requirements
 
 ### Requirement: Preserve manual directory open/closed state in the document tree
-Directories in the sidebar tree SHALL render collapsed (closed) by default, matching common file trees (VS Code, Finder, GitHub). Manual expansion choices SHALL survive selections and file-driven rebuilds except for additive reveal of a newly active document. Manual ancestor collapse SHALL clear the document under the requirement below; Changed-filter policies SHALL remain separate from manual deselection.
+Directories in the sidebar tree SHALL render collapsed (closed) by default, matching common file trees (VS Code, Finder, GitHub). Manual open/closed choices SHALL survive selections and file-driven rebuilds except for additive reveal of a newly active document. Manual ancestor collapse SHALL clear the document under the requirement below; Changed-filter policies SHALL remain unchanged and separate from manual deselection.
 
 #### Scenario: New active documents add required ancestors to manual expansion choices
 - **WHEN** a document becomes active by initial default, Follow auto-switch, or explicit navigation
@@ -18,15 +18,23 @@ Directories in the sidebar tree SHALL render collapsed (closed) by default, matc
 - **GIVEN** the All view's document selection is unchanged, including intentionally empty selection
 - **WHEN** content refreshes or the file list rebuilds
 - **THEN** surviving directories' open/closed state MUST be preserved; refresh/rebuild MUST NOT itself request reveal or choose a document
-- **AND** separate Changed-filter expansion and filter-transition policies MUST NOT be mistaken for manual deselection
-- **AND** folder expansion need not persist across page reloads, but intentional document deselection SHALL persist as specified below
+
+#### Scenario: Changed policies are not manual deselection
+- **WHEN** Changed-filter expansion or filter-transition policies apply
+- **THEN** those policies remain unchanged and MUST NOT be mistaken for manual deselection
+
+#### Scenario: Reload persistence differs for expansion and intentional deselection
+- **WHEN** the page reloads
+- **THEN** folder expansion need not persist, but intentional document deselection SHALL persist as specified below
 
 #### Scenario: Pending and returning selections distinguish new navigation from continuous retention
 - **WHEN** a selected path first becomes representable or returns after temporary absence
 - **THEN** a new selection SHALL receive its pending reveal on first availability, completing the selection change rather than counting as unchanged-selection refresh
 - **AND** a previously represented same-path selection SHALL synchronize without new reveal only if continuously retained as the requested selection
-- **AND** navigating elsewhere, even to an unavailable document, then returning SHALL count as a new selection
-- **AND** explicitly clearing selection then selecting the same document SHALL count as a new selection
+
+#### Scenario: Navigation away or explicit clearing makes reselection new
+- **WHEN** navigation goes to another document, even an unavailable one, and returns, or selection is explicitly cleared and the same document is selected again
+- **THEN** it SHALL count as a new selection, even if that path was already representable in the tree
 
 #### Scenario: Directories start collapsed
 - **WHEN** the document tree is first rendered and the default document is at a watched root with no ancestor directories
@@ -138,8 +146,14 @@ When the user manually collapses any ancestor directory of the active file, the 
 - **WHEN** the folder reopens, content/index refreshes, files are added/removed/renamed, filters transition, reconnect/resume reconciliation runs, or the page reloads
 - **THEN** intentional empty selection SHALL survive; none of these operations SHALL restore the closed file, choose a default document, or enable Follow
 - **AND** current session location and remembered selection SHALL represent deselection rather than restoring the closed file
-- **AND** first-visit/default behavior SHALL remain unchanged for those who have not deliberately deselected
-- **AND** explicit navigation or enabling Follow SHALL resume existing selection behavior and end intentional emptiness
+
+#### Scenario: Deliberate deselection does not change first-visit defaults
+- **WHEN** a client has not deliberately deselected a document
+- **THEN** existing first-visit/default selection behavior SHALL remain unchanged
+
+#### Scenario: Explicit navigation or Follow enable ends intentional emptiness
+- **WHEN** the user explicitly navigates to a document or enables Follow after intentional deselection
+- **THEN** existing selection behavior SHALL resume and intentional emptiness SHALL end
 
 #### Scenario: Browser-local deselection does not replace Hub-backed preferences
 - **WHEN** intentional deselection is persisted or another tab reconciles in the background
@@ -149,12 +163,19 @@ When the user manually collapses any ancestor directory of the active file, the 
 
 #### Scenario: Ordinary directory interaction conveys expansion rather than file selection
 - **WHEN** a user clicks, taps, or keyboard-navigates a directory row
-- **THEN** clicking/tapping SHALL only expand or collapse it; the directory SHALL never be presented as selected
+- **THEN** clicking/tapping SHALL only expand or collapse it
 - **AND** pointer/touch interaction SHALL NOT leave a focus ring; only keyboard navigation SHALL show it
 - **AND** on devices without hover support a tapped row SHALL NOT retain a hover tint resembling selection
 - **AND** clicking a directory that is not a collapsing active-file ancestor SHALL keep the active file selected
 - **AND** unrelated collapse, opening, focus movement without collapse, or collapse without an active document SHALL NOT close a document or change Follow
-- **AND** programmatic changes, including rebuilds, filter reconciliation, and expansion restoration, SHALL NOT count as manual collapse
+
+#### Scenario: Directory rows never show a selected-file state
+- **WHEN** a directory row is displayed, including after programmatic changes
+- **THEN** it SHALL never be presented as selected
+
+#### Scenario: Programmatic directory changes are not manual collapse
+- **WHEN** directory changes are programmatic, including rebuilds, filter reconciliation, and restoration of expansion
+- **THEN** they SHALL NOT count as manual collapse
 
 #### Scenario: Pointer collapse closes a nested active document
 - **GIVEN** `guides/setup.md` is active and `guides/` is expanded
@@ -335,9 +356,12 @@ When the Files-pane filter is in the `Changed` state, the path set fed to `@pier
 - **AND** every included ancestor MUST auto-expand so change entries are visible without further clicks
 
 #### Scenario: All and multi-root filtering retain the existing path contract
-- **WHEN** the filter is All or the session has multiple watched roots
+- **WHEN** the filter is All
 - **THEN** All MUST supply the full path set unchanged from current behavior
-- **AND** one chip SHALL control the filter for all roots together regardless of root count
+
+#### Scenario: The same filter chip controls every root together
+- **WHEN** the Files filter control is displayed in either All or Changed, with any number of watched roots
+- **THEN** the same chip controls the filter and toggles all roots together regardless of root count
 
 #### Scenario: Filter `Changed` reduces the tree to change-set entries plus their ancestors
 - **WHEN** the filter is `Changed` and the changed-files list reports two changed paths under `src/auth/` and one under `tests/`
@@ -414,7 +438,7 @@ When the filter is `Changed` and follow-mode auto-switches the active document t
 The sidebar document tree SHALL be rendered by the [`@pierre/trees`](https://github.com/pierrecomputer/pierre/tree/main/packages/trees) library (vanilla entry). uatu MUST use its path-array input (`paths`) and selection API (`getSelectedPaths` / equivalent observer hook) as the public surface. The library SHALL remain the source of truth for current directory expansion state.
 
 #### Scenario: Library integration preserves DOM, expansion, and keyboard ownership
-- **WHEN** the app renders, rebuilds paths, transitions filters, or adds reveal expansion
+- **WHEN** the app integrates the document tree, including rendering, path rebuilds, filter transitions, and additive reveal
 - **THEN** uatu MUST NOT re-implement, replace, or mutate the library's row DOM, expansion handling, or keyboard navigation
 - **AND** default expansion, path-rebuild/filter-transition state preservation, and additive reveal SHALL use public library APIs
 - **AND** uatu MUST NOT maintain a competing continuously tracked open/closed-state model
@@ -423,7 +447,10 @@ The sidebar document tree SHALL be rendered by the [`@pierre/trees`](https://git
 - **WHEN** the library reports selection or native user actions are observed
 - **THEN** selection events MUST drive the existing document-routing flow exactly as sidebar clicks do today, with manual file selection disabling Follow under existing rules
 - **AND** observing native activation or explicit ancestor-collapse deselection SHALL leave library expansion and keyboard behavior intact
-- **AND** programmatic updates MUST NOT be interpreted as user navigation
+
+#### Scenario: All programmatic tree updates remain distinct from user navigation
+- **WHEN** the tree is updated programmatically, whether or not a selection callback fires
+- **THEN** the update MUST NOT be interpreted as user navigation
 
 #### Scenario: Files pane renders the library's tree
 - **WHEN** the `Files` pane renders for a folder-scoped session
@@ -454,7 +481,10 @@ The document tree SHALL display a small file-type icon next to every leaf, click
 #### Scenario: File icons cover unknown and binary entries without overrides
 - **WHEN** a leaf has an unmapped extension or is binary
 - **THEN** an unmapped extension MUST use a generic fallback icon, and binary entries MUST also show an icon
-- **AND** uatu MAY override or extend icons through `byFileName` and `byFileExtension`, but baseline behavior MUST work without overrides
+
+#### Scenario: Icon customization is optional for all file types
+- **WHEN** icons are configured for the tree
+- **THEN** uatu MAY override or extend icons through `byFileName` and `byFileExtension`, but baseline behavior MUST work without overrides
 
 #### Scenario: Markdown documents show a markdown icon in the tree
 - **WHEN** the sidebar lists a `.md` or `.markdown` file
@@ -477,7 +507,10 @@ When repository change data is available, the document tree SHALL annotate chang
 - **AND** independent known ignore classification SHALL permit ignored styling without waiting for repository change collection
 - **AND** ignored files SHALL use muted filenames and faded icons without visible ignored-status labels or badges; Recent SHALL use the same treatment
 - **AND** selection, focus, recency cues, and playback actions SHALL remain legible and usable
-- **AND** unknown ignore status MUST NOT be presented as confirmed ignored or confirmed clean
+
+#### Scenario: Unknown ignore status remains uncertain without a classification update
+- **WHEN** ignore status is unknown
+- **THEN** it MUST NOT be presented as confirmed ignored or confirmed clean
 
 #### Scenario: Modified file shows a modified annotation
 - **WHEN** repository change data reports an uncommitted modification
@@ -505,7 +538,7 @@ When repository change data is available, the document tree SHALL annotate chang
 - **THEN** selection and playback controls remain clearly distinguishable and actionable
 
 ### Requirement: Ignored folders load their contents when expanded
-The tree SHALL show each Git-ignored folder entry as a folder row with muted ignored treatment, following Show ignored files like ignored files do. A folder whose level has not been listed SHALL be expandable even though its contents are unknown. Listings SHALL be requested on genuine expansion, with the explicit-selected-file reveal exception below.
+The tree SHALL show each Git-ignored folder entry as a folder row with muted ignored treatment, following Show ignored files like ignored files do. A folder whose level has not been listed SHALL be expandable even though its contents are unknown. Unlisted-level user expansion, already-listed levels, and programmatic expansion SHALL follow their respective listing rules below.
 
 #### Scenario: User expansion loads and merges one ignored-folder level
 - **WHEN** an unlisted folder is expanded by pointer, touch, or keyboard

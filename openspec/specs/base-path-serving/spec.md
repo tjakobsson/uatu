@@ -8,13 +8,16 @@ Make a session child relocatable under a configured path prefix: every route, as
 
 ### Requirement: A serve session is relocatable under a configured base path
 
-A session child SHALL serve its shell, assets, document and API routes under its configured base path and prefix emitted session URLs. Hub-owned routes SHALL remain explicit exceptions, with serving ownership supplied through boot context rather than inferred from a prefix.
+A session child SHALL accept a base-path prefix, serve the entire session under it, reject requests outside it as not found, and prefix every server- or SPA-emitted session URL. Hub-owned live and notification operations are explicit exceptions. Server boot context SHALL provide the SPA's base path and Hub ownership; an arbitrary prefix grants no origin-wide worker authority.
 
-#### Scenario: Load a relocated session and its Hub-owned integrations
-- **WHEN** a session runs under a configured base path
-- **THEN** session resources remain under that prefix while Hub-owned live and notification operations retain their distinct authority
+#### Scenario: Request the complete relocated session
+- **WHEN** a client loads a session under its configured prefix
+- **THEN** the HTML shell, static assets, every `/api/*` endpoint, terminal WebSocket upgrade, PWA manifest, and document routes resolve under that prefix
+- **AND** the child's SSE event routes remain prefixed internal routes for Hub subscriptions
 
-A session child SHALL accept a base path prefix and serve the entire session under it: the HTML shell, static assets, every `/api/*` endpoint including the session SSE event stream and terminal WebSocket upgrade, the PWA manifest, and document routes. When a base path is configured, the server SHALL treat requests outside the prefix as not found, and every session URL the server or SPA emits SHALL carry the prefix. Hub-owned operations are explicit exceptions: the SPA opens its single live stream at the hub origin, and a hub-served page uses hub-owned notification control routes and the hub's push worker. The child's event routes remain prefixed internal routes for the hub to subscribe to. The base path and hub ownership information SHALL reach the SPA through server-provided boot context, without treating an arbitrary path prefix as authorization to register an origin-wide worker.
+#### Scenario: A Hub page uses origin-owned integrations
+- **WHEN** a Hub-served SPA establishes live updates or notification control
+- **THEN** its single live stream opens at the Hub origin, and notifications use Hub-owned control routes and the Hub push worker
 
 #### Scenario: API and documents serve under the prefix
 - **WHEN** the server runs with base path `/s/uatu/` and a client requests `/s/uatu/api/state`
@@ -60,13 +63,12 @@ The SPA SHALL build session-relative server URLs through the shared prefix-aware
 
 ### Requirement: PWA and push worker scopes follow serving ownership
 
-PWA scope and push-worker registration SHALL follow serving ownership: generic mounts remain prefix-scoped, Hub-served sessions share the Hub's origin-scoped push worker, and standalone sessions MUST NOT offer Hub-backed push enrollment.
+Generic base-path sessions SHALL keep manifest start URL, scope, and icons under their prefix and SHALL NOT register an origin-wide worker. Hub-served sessions SHALL prefix start URL and icons but declare origin scope. The Hub SHALL own one shared origin-scoped push-worker registration per browser registration context, not one per session. Standalone sessions SHALL NOT offer Hub-backed push enrollment.
 
-#### Scenario: Install a session under a generic mount or a Hub
-- **WHEN** a session exposes its manifest and notification enrollment capabilities
-- **THEN** manifest URLs, scope, and worker ownership reflect whether the session belongs to the Hub
-
-A generic base-path session SHALL keep its manifest start URL, scope, and icons under the configured prefix and SHALL NOT register an origin-wide worker. A hub-served session SHALL keep its manifest start URL and icons under the workspace prefix while declaring origin scope so navigation to the dashboard, login, and sibling workspaces stays in the installed app. The hub SHALL own a single origin-scoped push-worker registration per browser registration context, shared by its dashboard and workspace pages, rather than registering a separate push worker per session. A standalone session outside a hub SHALL NOT offer hub-backed push enrollment.
+#### Scenario: Navigate an installed Hub app beyond its initial workspace
+- **WHEN** an installed Hub-served session navigates to the dashboard, login, or a sibling workspace
+- **THEN** origin-wide manifest scope keeps that navigation in the installed app
+- **AND** dashboard and workspace pages use the same origin-scoped push-worker registration within that browser registration context
 
 #### Scenario: Generic prefixed session stays contained
 - **WHEN** the SPA boots under a generic base path `/docs/` outside a hub

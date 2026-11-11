@@ -8,7 +8,7 @@ Define how UatuCode publishes an authoritative, versioned API contract that huma
 
 ### Requirement: Public APIs have one canonical machine-readable contract
 
-UatuCode SHALL publish one canonical OpenAPI 3.1 contract for public Hub operations and machine-readable SSE protocols, with explicit machine-checkable internal exclusions. Hub-served prefixed operations and forwarded workspace payloads SHALL retain their distinct revision ownership.
+UatuCode SHALL maintain an OpenAPI 3.1 contract for all supported external HTTP operations: the Hub API, including Hub-served workspace-prefixed operations. Session-child routes MUST NOT be published as public operations and MUST have explicit machine-checkable exclusions. Forwarded workspace payload schemas SHALL remain in the live-stream protocol under the workspace revision; Hub operations SHALL use the Hub revision. Supported SSE surfaces SHALL have machine-readable protocol definitions.
 
 #### Scenario: An external client discovers Hub HTTP operations or SSE protocols, including routes and payloads under workspace prefixes
 - **WHEN** an external client discovers Hub HTTP operations or SSE protocols, including routes and payloads under workspace prefixes

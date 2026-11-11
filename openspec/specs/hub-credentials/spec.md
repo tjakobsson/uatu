@@ -66,7 +66,10 @@ The Hub SHALL auto-detect the executables required by each credential capability
 #### Scenario: Startup and configuration changes refresh optional-tool readiness
 - **WHEN** the Hub starts or configuration changes
 - **THEN** tool readiness SHALL be re-evaluated
-- **AND** one unavailable optional tool MUST NOT disable unrelated credential types
+
+#### Scenario: Optional-tool unavailability never disables unrelated credential types
+- **WHEN** an optional tool is unavailable, regardless of when that is detected
+- **THEN** it MUST NOT disable unrelated credential types
 
 #### Scenario: GnuPG is not installed
 - **WHEN** the Hub cannot find a compatible `gpg` and the user tests OpenPGP support
@@ -79,7 +82,7 @@ The Hub SHALL auto-detect the executables required by each credential capability
 - **AND** the persisted path is used only after validation succeeds
 
 ### Requirement: Hub supports SSH authentication and signing credentials
-The Hub SHALL generate passphrase-protected SSH keys and import supported existing SSH private keys for authentication, commit signing, or both as explicitly declared by the user. It SHALL expose the public key for Git-provider registration and load private identities only into the Hub-managed SSH agent.
+The Hub SHALL generate passphrase-protected SSH keys and import supported existing SSH private keys for authentication, commit signing, or both as explicitly declared by the user. It SHALL expose the public key for Git-provider registration and load private identities only into the Hub-managed SSH agent. It SHALL discover and allow an absolute `ssh` client override separately from agent/key tools.
 
 #### Scenario: SSH import retains protection without duplicating private keys
 - **WHEN** an SSH private key is imported
@@ -87,7 +90,7 @@ The Hub SHALL generate passphrase-protected SSH keys and import supported existi
 - **AND** an already-cataloged fingerprint SHALL fail import without retaining another private-key copy
 
 #### Scenario: SSH operations use the separately validated client path without retaining passphrases
-- **WHEN** SSH tooling is configured or generation, import, unlock, or assigned SSH operations run
+- **WHEN** SSH tooling is configured or generation, import, unlock, assigned workspace SSH operations, or explicitly selected SSH clones run
 - **THEN** the Hub SHALL discover and allow an absolute `ssh` client override separately from agent/key tools
 - **AND** assigned workspace SSH operations and explicitly selected SSH clones SHALL invoke that validated path
 - **AND** submitted generation, import, or unlock passphrases MUST NOT be persisted, logged, included in diagnostics, or returned by an API
@@ -113,12 +116,15 @@ The Hub SHALL generate passphrase-protected SSH keys and import supported existi
 - **AND** the Hub automatically reloads that key when its managed agent is recreated
 
 ### Requirement: Hub supports OpenPGP commit-signing credentials
-When compatible GnuPG tooling is available, the Hub SHALL generate or import OpenPGP signing keys in a dedicated Hub GnuPG home, expose the public key and fingerprint, and make unlocked signing available through the Hub-owned OpenPGP agent. OpenPGP unavailability MUST produce an actionable capability error rather than preventing Hub startup.
+When compatible GnuPG tooling is available, the Hub SHALL generate or import OpenPGP signing keys in a dedicated Hub GnuPG home, expose the public key and fingerprint, and make unlocked signing available through the Hub-owned OpenPGP agent. OpenPGP unavailability MUST produce an actionable capability error rather than preventing Hub startup. The Hub MUST NOT expose credential-specific locking that terminates the shared GnuPG agent.
 
-#### Scenario: OpenPGP import and unlocking protect secret input
-- **WHEN** an OpenPGP key is imported or the Hub receives a private-key passphrase or pinentry response
+#### Scenario: OpenPGP import accepts exactly one primary private key
+- **WHEN** an OpenPGP key is imported
 - **THEN** an import MUST contain exactly one primary private key
-- **AND** submitted passphrases and pinentry responses MUST be handled as secrets and MUST NOT be persisted or replayed
+
+#### Scenario: OpenPGP passphrases and pinentry responses remain secret
+- **WHEN** the Hub receives a private-key passphrase or pinentry response
+- **THEN** it MUST be handled as a secret and MUST NOT be persisted or replayed
 
 #### Scenario: Per-credential disabling preserves the shared OpenPGP agent
 - **WHEN** an OpenPGP credential is locked or disabled, or the Hub shuts down
@@ -137,13 +143,15 @@ When compatible GnuPG tooling is available, the Hub SHALL generate or import Ope
 - **AND** the response is sent only to that operation and never appears in retained output
 
 ### Requirement: Hub supports HTTPS Git and provider credentials
-The Hub SHALL store HTTPS/provider credentials with an explicit provider host and declared Git and provider-CLI capabilities. Git operations SHALL obtain assigned HTTPS credentials through a Hub-controlled credential helper rather than embedding tokens in repository remotes or command arguments.
+The Hub SHALL store HTTPS/provider credentials with an explicit provider host and declared Git and provider-CLI capabilities. Git operations SHALL obtain assigned HTTPS credentials through a Hub-controlled credential helper rather than embedding tokens in repository remotes or command arguments. The Hub SHALL make the broader visibility of process-environment credentials under the local backend part of the shared-UID warning.
 
 #### Scenario: Provider CLI projection respects host ambiguity and repository boundaries
 - **WHEN** provider CLI integration supplies a workspace credential
 - **THEN** it SHALL expose the credential only to the selected Hub-started workspace process environment and MUST NOT write it into the workspace repository
-- **AND** because each provider CLI has one non-host-indexed token variable, a workspace context assigning provider-CLI credentials for multiple hosts of the same provider SHALL be rejected instead of one token replacing another
-- **AND** the broader visibility of process-environment credentials under the local backend SHALL be part of the shared-UID warning
+
+#### Scenario: Ambiguous provider-host contexts are rejected before token projection
+- **WHEN** a workspace context assigns provider-CLI credentials for multiple hosts of the same provider
+- **THEN** the Hub SHALL reject that context rather than let one token replace another, because each provider CLI uses one non-host-indexed token environment variable
 
 #### Scenario: HTTPS clone uses a stored token
 - **WHEN** a clone for the credential's configured host selects an unlocked HTTPS Git credential
@@ -177,7 +185,7 @@ New credentials SHALL have no workspace assignments by default. An authenticated
 - **THEN** the Hub SHALL configure normal Git, signing, and provider-tool selection from assignments
 
 #### Scenario: Clone authentication is retained only by explicit choice
-- **WHEN** a user chooses clone and retained workspace authentication
+- **WHEN** clone onboarding presents authentication choices
 - **THEN** they SHALL be presented as separate choices
 - **AND** the selected clone credential SHALL be offered as the default retained assignment but never retained without explicit user choice
 
@@ -230,8 +238,16 @@ Locking, disabling, unassigning, or deleting a credential SHALL prevent the Hub 
 #### Scenario: Provider CLI revocation stops actual projected uses before catalog mutation
 - **WHEN** disabling or confirming deletion of a token declaring `github-cli` or `gitlab-cli`
 - **THEN** the Hub SHALL first stop every running local workspace whose tracked projection contains it, because raw provider CLI environment is a session-start snapshot
-- **AND** current assignments and tracked projections SHALL both participate in revocation queue acquisition, but an assignment added after session start MUST NOT by itself stop that session
-- **AND** every required stop SHALL be attempted before catalog mutation; if any stop fails, the credential, its assignments, and its secret SHALL remain unchanged
+
+#### Scenario: Every revocation queue accounts for assignments and actual projections
+- **WHEN** revocation queue acquisition occurs for any credential
+- **THEN** current assignments and tracked projections SHALL both participate
+- **AND** a current assignment added after session start MUST NOT by itself cause that session to stop
+
+#### Scenario: Required revocation stops all precede catalog mutation
+- **WHEN** revocation requires one or more workspace stops
+- **THEN** the Hub SHALL attempt every required stop before catalog mutation
+- **AND** if any stop fails, the credential, its assignments, and its secret SHALL remain unchanged
 
 #### Scenario: A running session retains its actual projected credential identities
 - **WHEN** credentials are projected into a workspace session

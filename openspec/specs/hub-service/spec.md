@@ -12,7 +12,7 @@ The Hub SHALL expose an authenticated machine-readable compatibility identity co
 #### Scenario: Compatibility identity describes forwarded workspace payloads
 - **WHEN** a client reads the authenticated compatibility identity
 - **THEN** the workspace revision SHALL version workspace-owned payload schemas forwarded on the Hub live stream
-- **AND** workspace routes behind the Hub SHALL remain internal and carry no public revision
+- **AND** workspace routes behind the Hub are internal and carry no public revision
 
 #### Scenario: Native client probes Hub compatibility
 - **WHEN** an authenticated native client requests Hub state
@@ -85,7 +85,7 @@ The hub SHALL run each clone's standard streams through a dedicated pseudo-termi
 The hub SHALL enforce inactivity and hard-lifetime limits for active clone jobs and reserve each target against concurrent jobs. Cancellation, timeout, shutdown, or failure SHALL terminate the whole process group with bounded graceful-to-forced escalation, preventing orphaned Git, SSH, and descendants.
 
 #### Scenario: A clone reaches a terminal outcome or the hub shuts down
-- **WHEN** a clone succeeds, fails, times out, or is cancelled
+- **WHEN** a clone reaches any terminal outcome, including success, failure, timeout, cancellation, or hub shutdown
 - **THEN** the hub SHALL register a workspace only after successful cloning and SHALL release all reservations and terminal resources on every terminal outcome
 
 #### Scenario: Hub shutdown terminates active clone jobs
@@ -172,7 +172,7 @@ The `hub` subcommand SHALL accept `--exit-on-stdin-close`: when set, the hub SHA
 - **THEN** every child session process is terminated and the hub exits
 
 ### Requirement: Workspaces are registered with stable identifiers and a backend field
-The hub SHALL persist a registry whose entries record a stable workspace id, mutable display name, absolute canonical source folder, and session backend identifier. Registration SHALL require an absolute path to an existing directory. Identity, backend, and persistence SHALL follow the rules below.
+The hub SHALL persist a registry whose entries record a stable workspace id, mutable display name, absolute canonical source folder, and session backend identifier. Registration SHALL require an absolute path to an existing directory. Only `local` SHALL be a valid backend in this change, with its field retained for additive backends. Identity and persistence SHALL follow the rules below.
 
 #### Scenario: A workspace receives its permanent identity
 - **WHEN** a workspace is registered
@@ -208,12 +208,18 @@ The hub SHALL persist a registry whose entries record a stable workspace id, mut
 ### Requirement: Sessions are started and stopped through a session backend interface
 The hub SHALL manage sessions exclusively through a backend interface: given a workspace descriptor, base path, and resolved credential assignments, start and return a loopback HTTP endpoint plus child session token; or stop a previously started session. Proxy, dashboard, and auth MUST NOT depend on how the endpoint or credential context is produced.
 
+Normal local-session tool configuration MUST NOT select unassigned stored credentials.
+
 #### Scenario: The local backend starts and stops a workspace session
 - **WHEN** the shipped `local` backend starts a session
 - **THEN** it SHALL spawn `uatu serve <folder> --no-open --exit-on-stdin-close --base-path /s/<id>/` with explicit Git, signing, SSH-client, and provider-tool selection derived from workspace assignments
 - **AND** it SHALL parse the tokened URL from the child's first stdout line, hold stdin open for the child's lifetime, and stop the session via SIGTERM
 - **AND** it MUST NOT forward ambient agent sockets, and normal tool configuration MUST NOT select unassigned stored credentials
 - **AND** because sessions share the daemon UID and may share Hub-managed runtime resources, these advisory selections MUST NOT be represented as OS-enforced isolation
+
+#### Scenario: The local backend's credential selection is described
+- **WHEN** local-session credential selection is presented or documented, whether or not a session is being started
+- **THEN** it MUST NOT be represented as OS-enforced isolation: sessions share the daemon UID and may share Hub-managed runtime resources, so the selections are advisory
 
 #### Scenario: Local backend spawns the session-child contract
 - **WHEN** the hub starts a session for a registered workspace with credential assignments
@@ -318,7 +324,7 @@ The Hub SHALL start managed credential processes only in dedicated owner-only ru
 - **AND** unrelated system agents remain running
 
 ### Requirement: Hub exposes authenticated folder mutation operations
-The Hub SHALL expose authenticated POST operations to create a folder from an absolute parent and child name, rename from an absolute source and new sibling name, and remove an absolute folder. Cookie requests MUST pass same-origin checks. Mutations SHALL enforce the validation, no-overwrite, and Git-dependency safety rules below.
+The Hub SHALL expose public authenticated POST operations to create a folder from an absolute parent and child name, rename from an absolute source and new sibling name, and remove an absolute folder. Cookie requests MUST pass same-origin checks. Mutations SHALL enforce the validation, no-overwrite, and Git-dependency safety rules below.
 
 #### Scenario: A folder mutation validates its filesystem targets
 - **WHEN** a create, rename, or removal is requested
@@ -329,7 +335,10 @@ The Hub SHALL expose authenticated POST operations to create a folder from an ab
 - **WHEN** any otherwise supported folder-rename flow could invalidate dependencies involving linked checkouts, main checkouts, common Git directories, or their ancestors, including unregistered linked trees
 - **THEN** the Hub SHALL reject it before generic rename, even with stop authorization
 - **AND** uncertainty about affected Git dependency safety SHALL fail closed with an actionable explanation
-- **AND** ordinary/main workspace display-name changes SHALL remain unaffected; linked child names SHALL reflect their exact local branch, with independent child display-name editing and branch rename outside this change and no relaxation of folder dependency guards
+
+#### Scenario: Display-name policy remains independent of folder-rename refusals
+- **WHEN** workspace display-name changes are considered, whether or not a folder rename was requested
+- **THEN** ordinary/main workspace display-name changes SHALL remain unaffected; linked child names SHALL reflect their exact local branch, with independent child display-name editing and branch rename outside this change and no relaxation of folder dependency guards
 
 #### Scenario: Cross-origin folder mutation is rejected
 - **WHEN** a cookie-authenticated cross-origin request attempts to create, rename, or remove a folder
@@ -444,7 +453,7 @@ The Hub SHALL provide authenticated registration of existing folders and creatio
 - **THEN** the Hub SHALL preserve the configured stopped workspace and report startup failure rather than delete the completed registration
 
 #### Scenario: New workspace creation succeeds or requires cleanup
-- **WHEN** a new child repository is created
+- **WHEN** new-workspace creation is attempted
 - **THEN** its destination SHALL derive from an absolute parent plus one visible child segment; the Hub SHALL reserve the path hierarchy, create without replacement, initialize Git, and register only that new folder
 - **AND** failure after folder creation SHALL perform bounded cleanup only if the Hub can prove there is no user-added content; otherwise it SHALL retain the folder and report the required recovery action
 

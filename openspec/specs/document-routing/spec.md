@@ -208,7 +208,7 @@ An explicit non-root URL resolving to a known non-binary document, previewable i
 `popstate` SHALL restore preview destinations in-app without additional history writes. Back/Forward destination changes SHALL disable Follow; same-document fragments SHALL preserve it. Media history SHALL preserve independently active playback without starting or replacing audition sessions.
 
 #### Scenario: History restores media, unavailable destinations, and fragments without side effects
-- **WHEN** `popstate` restores documents, previewable images, or recognized media
+- **WHEN** `popstate` identifies a destination, including documents, previewable images, recognized media, and unknown or out-of-scope paths
 - **THEN** in-app preview loading SHALL avoid pushing/replacing history, and unknown/out-of-scope destinations SHALL use existing empty-preview rules
 - **AND** media SHALL be paused except the same clip's independently active session SHALL continue without duplicate source
 - **AND** destination-changing Back/Forward SHALL disable Follow, but same-document fragment-only transitions SHALL scroll to fragment/top without reload, history change, or Follow change
@@ -294,7 +294,10 @@ Absolute `http:`/`https:` preview anchors SHALL open a new tab/window without un
 #### Scenario: External-link rewrite survives sanitization without capturing relative links
 - **WHEN** Markdown or AsciiDoc renders absolute `http:`/`https:` anchors
 - **THEN** the renderer MUST add `target="_blank"` and `rel="noopener noreferrer"` before sanitization, whose `<a>` allowlist MUST permit both attributes
-- **AND** same-origin relative `other.adoc`, `guides/setup.md`, and fragment-only `#section` links MUST NOT receive those markings and MUST continue through cross-document and in-page handlers respectively
+
+#### Scenario: Relative and fragment-only links keep in-app handling independently
+- **WHEN** Markdown or AsciiDoc renders a same-origin relative link such as `other.adoc` or `guides/setup.md`, or a fragment-only link such as `#section`
+- **THEN** it MUST NOT receive the external-link markings and MUST continue through the cross-document or in-page handler respectively
 
 #### Scenario: An external Markdown link opens in a new tab
 - **WHEN** a Markdown document contains `[example](https://example.com)`

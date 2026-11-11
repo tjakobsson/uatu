@@ -71,17 +71,17 @@ The Agent accounts area SHALL list every chat agent the Hub offers, its login st
 - **AND** the next visit starts Claude Code again
 
 ### Requirement: Users log in with an API key
-For every provider or agent login method that accepts a key, Agent accounts
-SHALL offer a masked key field together with the method's own extra fields,
-honoring each field's type, options, placeholder, and the condition under
-which it appears.
+For every key-accepting login method, Agent accounts SHALL offer its key and extra fields with the agent's types, options, placeholders and visibility conditions. Keys and every sensitive field SHALL always be masked; submission SHALL hand answers to the agent, then clear those fields. Saved keys MUST NOT be redisplayed or returned; agent errors MUST NOT repeat a key or answer. Rejected keys and missing required fields SHALL be reported beside that method.
 
 #### Scenario: Key submission clears secrets and reports errors locally
 - **WHEN** a user fills and submits a key method
-- **THEN** a field the agent marks as sensitive SHALL be masked like the key
-- **AND** submitting SHALL hand the key and answers to the agent, then clear the key field and any sensitive field
+- **THEN** submitting SHALL hand the key and answers to the agent, then clear the key field and any sensitive field
 - **AND** saved keys SHALL NOT be redisplayed or returned by any response, and an agent's error message SHALL NOT repeat the key or an answer
 - **AND** a rejected key or missing required field SHALL be reported next to that method's controls
+
+#### Scenario: Sensitive extra fields are masked before submission
+- **WHEN** a key method displays an extra field the agent marks as sensitive
+- **THEN** that field is masked like the key even before any submission
 
 #### Scenario: Key with an extra field
 - **WHEN** a user logs in to a provider whose key method also asks for an account id
@@ -99,10 +99,14 @@ which it appears.
 ### Requirement: Users complete browser and device-code logins from any device
 Starting a browser login SHALL show the URL to open and the agent's instructions, including any code the user must enter. The Hub SHALL follow and report the attempt through completion, failure, expiry, or cancellation, supporting paste-back codes and remote completion of Hub-machine localhost redirects.
 
-#### Scenario: A browser flow needs a code or localhost callback
-- **WHEN** the agent's flow ends with a code to paste back or redirects to a `localhost` address on the Hub machine
-- **THEN** Agent accounts SHALL take and submit a paste-back code
-- **AND** for a localhost redirect it SHALL explain that the browser will fail to load the address unless running on the Hub machine, take the full address the browser landed on, and have the Hub deliver it to the agent's waiting listener on the Hub machine
+#### Scenario: A browser flow returns a paste-back code
+- **WHEN** the agent's browser flow ends with a code to paste back
+- **THEN** Agent accounts accepts the code and submits it to the agent
+
+#### Scenario: A browser flow redirects to the Hub machine's localhost
+- **WHEN** the agent's browser flow redirects to a `localhost` address on the Hub machine
+- **THEN** Agent accounts explains that the address will fail to load unless the browser runs on the Hub machine
+- **AND** it accepts the full address the browser landed on and has the Hub deliver it to the agent's waiting listener on the Hub machine
 
 #### Scenario: Login attempts can be cancelled, replaced, and retried safely
 - **WHEN** a login is in progress or the user starts another attempt

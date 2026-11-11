@@ -7,11 +7,20 @@ Surface per-file facts (size, line count, git provenance, freshness) as a strip 
 
 Document renders SHALL include available filesystem facts without waiting for Git. Independent Git enrichment SHALL distinguish freshness and availability, remain scoped to the selected content and repository generation, and MUST NOT replace newer facts or make Git failure block document use.
 
-#### Scenario: Render file facts while repository enrichment is pending or changes
-- **WHEN** a document render or an independent Git fact result reaches the client
-- **THEN** available filesystem facts remain usable and only applicable enrichment updates the current facts strip
+#### Scenario: Refresh filesystem facts on every render
+- **WHEN** any document is rendered
+- **THEN** the server recomputes available line count, byte size of rendered source, and observed modification time in `/api/document`
+- **AND** Source and Rendered delivery MUST NOT wait for Git subprocesses
 
-The server SHALL compute filesystem facts for every document render and attach them to the `/api/document` payload when available. Facts SHALL include the line count and byte size for the rendered source and its observed modification time. Source and Rendered content delivery MUST NOT wait for Git subprocesses. For documents inside a Git root, the client SHALL obtain the last commit touching the file and its clean, dirty, or uncommitted state independently and enrich the facts strip when available. Pending, stale, and unavailable Git facts SHALL be distinguishable from verified clean or uncommitted facts. Filesystem facts SHALL refresh with every render, and Git enrichment SHALL be scoped to the selected document, content revision, and repository generation. Obsolete enrichment MUST NOT replace newer facts. Git failure SHALL leave the document and filesystem facts usable.
+#### Scenario: Enrich a Git-root document independently
+- **WHEN** a selected document is inside a Git root
+- **THEN** the client independently obtains its last touching commit and clean, dirty, or uncommitted state and enriches the strip when available
+- **AND** pending, stale, and unavailable provenance remain distinct from verified clean or uncommitted facts
+
+#### Scenario: Admit only current Git enrichment
+- **WHEN** a Git result or failure settles
+- **THEN** enrichment applies only to the selected document, content revision, and repository generation; obsolete results MUST NOT replace newer facts
+- **AND** Git failure leaves the document and filesystem facts usable
 
 #### Scenario: Document in a git root
 - **WHEN** the client fetches a committed document
@@ -94,11 +103,10 @@ When the working tree differs from HEAD for the active file (or the file has nev
 
 Live reload of the viewed document SHALL briefly signal freshness through the visible facts strip or a fallback preview-header indicator. The signal SHALL support Rendered, Source, and Diff views and respect reduced-motion preferences.
 
-#### Scenario: The viewed file changes with or without an available facts strip
-- **WHEN** an on-disk change live-reloads the active document in place
-- **THEN** the appropriate visible freshness indicator signals the update and then clears
-
-When the actively viewed document changes on disk and the preview live-reloads in place, the UI SHALL signal the update. In Rendered, Source, and Diff views with a visible facts strip, the signal SHALL highlight the strip's freshness segment. If file facts are unavailable and no strip can be shown, the signal SHALL fall back to a transient indicator in the preview header. The signal SHALL disappear after a short interval and SHALL respect `prefers-reduced-motion` by substituting a non-animated presentation.
+#### Scenario: Signal an in-place reload in each document view
+- **WHEN** an on-disk change live-reloads the active document in Rendered, Source, or Diff
+- **THEN** the visible strip's freshness segment is highlighted, or a transient preview-header indicator appears if facts are unavailable and no strip can be shown
+- **AND** the signal disappears after a short interval, using a non-animated presentation under `prefers-reduced-motion`
 
 #### Scenario: Active file changes while in Source view
 - **WHEN** a file event for the active document triggers an in-place reload in Source view

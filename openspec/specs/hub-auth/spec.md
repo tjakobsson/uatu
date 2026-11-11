@@ -97,7 +97,7 @@ The hub SHALL capture each child's per-session token when the backend starts the
 
 ### Requirement: State-changing hub endpoints are CSRF-protected
 
-State-changing hub endpoints SHALL use POST and enforce matching Origin for cookie-authenticated requests in addition to SameSite=Lax. Explicit bearer credentials SHALL be exempt from Origin checks.
+State-changing hub endpoints SHALL use POST. For cookie-authenticated requests, a present Origin header SHALL match the hub's own origin, in addition to SameSite=Lax; an absent Origin SHALL NOT fail that check. Bearer-authenticated requests SHALL be exempt from Origin checks.
 
 #### Scenario: A client invokes login, session lifecycle, workspace creation, or session revocation endpoints
 - **WHEN** a client invokes login, session lifecycle, workspace creation, or session revocation endpoints

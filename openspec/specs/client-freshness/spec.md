@@ -37,7 +37,10 @@ The workspace server SHALL report its build identity, including version and comm
 #### Scenario: Boot and reconnect compare embedded and reported identities
 - **WHEN** the bundled web client boots or reconnects its live stream
 - **THEN** it SHALL compare the server identity with its own identity embedded at bundle time
-- **AND** it SHALL re-establish a permanently-closed event stream itself, including when EventSource automatic retry fails mid-restart, so a server restart is always eventually observed and the comparison runs
+
+#### Scenario: A permanently closed stream recovers without a browser retry
+- **WHEN** the web client's event stream becomes permanently closed, including when EventSource automatic retry fails mid-restart
+- **THEN** the web client SHALL re-establish it itself so a server restart is always eventually observed and the identity comparison runs
 
 #### Scenario: Identity mismatch has bounded reload recovery
 - **WHEN** the web client observes a server identity that differs from its own

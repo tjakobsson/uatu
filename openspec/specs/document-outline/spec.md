@@ -33,7 +33,7 @@ docked rail and a readable text column it SHALL render as a fullscreen sheet,
 and otherwise SHALL render as the docked rail.
 
 #### Scenario: Layout changes re-evaluate an open outline's presentation
-- **WHEN** window resize, device rotation, UI-mode switch, terminal dock or resize, or sidebar collapse can change the available width
+- **WHEN** available width can change, including window resize, device rotation, UI-mode switch, terminal dock or resize, or sidebar collapse
 - **THEN** the resolution SHALL be re-evaluated
 - **AND** a panel that is open across the change SHALL adopt the presentation its new width calls for
 
@@ -307,6 +307,8 @@ The outline width SHALL be adjustable in the rail presentation by dragging a
 handle on its left edge (its docked right edge staying fixed), bounded below by
 a minimum width and above by the width that still leaves a readable text column
 beside it.
+
+The chosen width SHALL persist across reloads using browser-local UI state.
 
 #### Scenario: Restoring a rail width respects the current text-column bound
 - **WHEN** the chosen rail width is reapplied after a reload or in a narrower preview area
