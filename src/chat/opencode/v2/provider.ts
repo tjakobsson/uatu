@@ -74,6 +74,8 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyPendingCounterproofAfter?: number;
   historyCapturedActivity?: Set<string>;
   historyActivityIntervals?: Map<string, number>;
+  historyParentBoundary?: { boundary: string | null; completed: number };
+  historyParentVisibilityChanged?: true;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 type PendingOutcomeRead = { started: number; completed: number; reports: readonly { child: string; at?: number; digest: string; observed?: number }[]; overflow?: true; overflowObserved?: number; provisional?: true };
@@ -454,7 +456,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private async readHistoryVisibility(sessionId: string, signal: AbortSignal, controlRead: ControlRead, cursor?: string, optionalEnrichment = false, source?: HistoryWorkerSource) {
     const complete = await this.allMessages(sessionId, signal, source);
     const executionLiveness = storedExecutionLiveness(complete);
-    const info = await this.lookupWorkerParent(sessionId, signal);
+    const info = await this.lookupWorkerParent(sessionId, signal, source);
     const { boundaryId, boundaryIndex, visible } = storedHistoryVisibility(complete, info);
     const version = historyVersion([visible, boundaryId]);
     const end = historyPageEnd(cursor, version, visible.length);
@@ -686,6 +688,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             owner.historyInferredOutcomes = undefined;
             owner.historyInferredOutcomeBytes = undefined;
           } else { retained.set(update.item.id, occurrence); owner.historyInferredOutcomeBytes = bytes; }
+          if (owner.historyParentVisibilityChanged && this.parentOutcomeHidden(owner, owner.historyParentBoundary?.boundary ?? null)) owner.revision++;
         }
       }
     }
@@ -892,7 +895,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       observe({ workerSource: source.guard, workerAssociationContradictions: source.contradictions(), workerResultFallbacks: [] });
     };
     try {
-    if (!await this.lookupWorkerParent(sessionId, signal)) throw new Error("Background parent is unavailable");
+    if (!await this.lookupWorkerParent(sessionId, signal, source.source)) throw new Error("Background parent is unavailable");
     const generation = this.streamGeneration;
     pendingSource = this.beginWorkerSourceRead(sessionId, signal, () => isCurrent() && generation === this.streamGeneration, true);
     // Text has its own source, not ownership/inventory authority. Publish it
@@ -3035,8 +3038,8 @@ export class OpenCodeV2Provider implements ChatProvider {
     return (await this.classifiedSessionLookup(sessionId, signal)).info;
   }
 
-  private async lookupWorkerParent(sessionId: string, signal: AbortSignal): Promise<SessionRecord | null> {
-    const lookup = await this.classifiedSessionLookup(sessionId, signal);
+  private async lookupWorkerParent(sessionId: string, signal: AbortSignal, owner?: HistoryWorkerSource): Promise<SessionRecord | null> {
+    const lookup = await this.classifiedSessionLookup(sessionId, signal, owner);
     if (lookup.foreignWorkspace) {
       this.controls.invalidateParentOwnership(sessionId);
       this.eventMemory?.workers.invalidateActivity(sessionId);
@@ -3081,7 +3084,20 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Native records still provide scoped counterproof to every dependent
     // source. Only the explicit consuming fold owns an overlapping response;
     // ordinary getSession/list/create callers cannot claim collecting reads.
-    return { started: ++this.sessionRecordClock, owners: owner?.phase === "collecting" && owner.historyChildren?.size ? [owner] : [] };
+    return { started: ++this.sessionRecordClock, owners: owner?.phase === "collecting" ? [owner] : [] };
+  }
+
+  private parentOutcomeHidden(source: HistoryWorkerSource, boundary: string | null): boolean {
+    if (!source.historyInferredOutcomes?.size && !source.historyOutcomeTransferUnavailable) return false;
+    // Clearing/changing an existing stage can commit its suffix. Absent a
+    // qualified complete transcript, inferred launch visibility is unknown.
+    const complete = this.historyReuse.peek(source.parent, this.streamConnected ? String(this.streamGeneration) : undefined);
+    if (boundary === null || !complete || source.historyOutcomeTransferUnavailable) return true;
+    const index = complete.findIndex(message => messageIdentity(message) === boundary);
+    return index < 0 || [...source.historyInferredOutcomes!.values()].some(occurrence => occurrence.launches.some(launch => {
+      const position = complete.findIndex(message => messageIdentity(message) === launch.message);
+      return position < 0 || position >= index;
+    }));
   }
 
   private async classifiedSessionLookup(sessionId: string, signal: AbortSignal, owner?: HistoryWorkerSource): Promise<SessionLookup> {
@@ -3109,12 +3125,27 @@ export class OpenCodeV2Provider implements ChatProvider {
     const subject = requestedId ?? (id !== undefined && id.length <= 512 && !/[\u0000-\u001f\u007f]/.test(id) ? id : undefined);
     if (subject !== undefined) {
       if (this.owns(info) && id === subject) {
+        // Parent visibility is a consuming-source dependency too, including
+        // root sessions without parentID. Only an explicit owner installs its
+        // first baseline; later ownerless records supply ordered counterproof.
+        const boundary = stringValue(asRecord(info.revert).messageID) ?? null;
+        for (const source of this.historyWorkerSources) if (source.parent === subject
+          && (source.historyParentBoundary || observation.owners.includes(source))) {
+          const previous = source.historyParentBoundary;
+          if (previous && previous.boundary !== boundary) {
+            const targets = observation.started > previous.completed ? [source] : observation.owners;
+            for (const target of targets) if (target.parent === subject) {
+              target.historyParentVisibilityChanged = true;
+              if (this.parentOutcomeHidden(target, observation.started > previous.completed ? boundary : previous.boundary)) target.revision++;
+            }
+          }
+          if (!previous || observation.started > previous.completed) source.historyParentBoundary = { boundary, completed };
+        }
         // Visibility belongs to the qualified warm transcript entry, even
         // before any parent recovery has registered a child dependency. This
         // weak metadata cannot retain an evicted entry or introduce new keys.
         const cached = this.historyReuse.peek(subject, this.streamConnected ? String(this.streamGeneration) : undefined);
         const order = cached && this.historyReadOrders.get(cached), previous = order?.visibility;
-        const boundary = stringValue(asRecord(info.revert).messageID) ?? null;
         if (order && (!previous || observation.started > previous.completed)) {
           // Entering a staged boundary filters the same complete raw history;
           // retain it and refresh visibility/cost from the current record.

@@ -141,6 +141,18 @@ covers it; genuine uncovered disagreement still ends in bounded rejection.
 An independent page-level source-current veto remains required alongside any
 continuity or qualified-inventory guard view. Replacement may substitute a direct
 old-guard delegate, not erase a separate provider veto.
+Covered Running/session-active evidence may withdraw a report-free inferred
+completion only with the same row/task/type/child and proven execution aliases.
+The resulting row is nonterminal and nondismissible, with no running clock or
+Stop authority. Explicit reports and changed executions remain protected.
+
+Native parent visibility is also a consuming-source publication dependency,
+including root sessions. One ordered boundary slot fences inferred outcomes
+when a later native record hides their launchers. Retained-prefix visibility is
+checked against the existing qualified complete-history cache; unknown visibility
+abstains. Explicit owners install baselines, and stale ownerless responses cannot
+poison newer owned reads. No additional IO, global cache or retained snapshot is
+introduced; raw complete parent-history reuse remains separate from authority.
 A previously cached child-history completion cannot override a current covered
 unresolved row for that exact execution. The adapter replaces that report-free
 inference rather than merging its terminal fields back; explicit parent reports

@@ -1355,6 +1355,20 @@ The page's separate `isWorkerSourceCurrent` veto remains required alongside its
 guard. Only direct delegation to the old guard is replaced by a qualified view;
 an independent provider veto is composed through continuity and inventory
 replacement, never overwritten by the new guard's currentness.
+Covered Running/session-active evidence can withdraw a report-free historical
+completion under the same row/task/type/child and proven execution-alias checks
+as Working evidence. Session-active does not restart an execution clock, grant
+Stop, or remain dismissible as a terminal outcome. Explicit reports and changed
+executions retain their precedence and identity boundaries.
+
+Consuming worker sources also retain one ordered native parent-boundary slot,
+including root parents without parentID. Later native visibility changes fence
+inferred outcomes whose launchers are hidden through scheduler publication. A
+qualified cached complete transcript can prove a retained prefix still visible;
+unknown visibility abstains. Explicit read ownership installs the first baseline;
+older overlapping ownerless responses cannot replace it. This source dependency
+adds no IO or retained transcript snapshot and does not evict complete raw parent
+history merely for entering a staged boundary.
 Qualification metadata reuses immutable occurrences under a 256-entry / 64 KiB
 serialized source budget; overflow declines transfer. No report text is minted
 from a digest, no deadline is renewed and no Stop basis is granted. Thus the

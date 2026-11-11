@@ -141,7 +141,7 @@ function replacesHistoryOnlyOutcome(current: ConversationItem | undefined, sourc
     && source.id === current.id && source.taskId === current.taskId && source.taskType === current.taskType
     && source.childConversationId !== undefined && source.childConversationId === current.childConversationId
     && (source.activity?.kind === "unavailable" && source.stateUncertain === true
-      || source.activity?.kind === "working" || source.activity?.kind === "needs-answer")
+      || source.activity?.kind === "working" || source.activity?.kind === "needs-answer" || source.activity?.kind === "session-active")
     && executionIds(source).some(id => knownExecutions.has(id));
 }
 

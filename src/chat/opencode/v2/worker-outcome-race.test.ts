@@ -1183,13 +1183,84 @@ test(`negative execution evidence survives generation 2 to 3 (${scenario})`, asy
   } finally { owner.abort(); stream.abort(); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
+for (const change of ["hidden", "unchanged", "other-parent", "retained-prefix", "append", "stale-response"] as const)
+test(`scheduler inferred outcome retains native parent visibility through publication (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, staged = false, appended = false, captured = false;
+  let interactionsEntered!: () => void, releaseInteractions!: () => void, folded!: () => void, finished!: () => void, olderEntered!: () => void, releaseOlder!: () => void;
+  const interactions = new Promise<void>(resolve => { interactionsEntered = resolve; }), interactionsHeld = new Promise<void>(resolve => { releaseInteractions = resolve; });
+  const returned = new Promise<void>(resolve => { folded = resolve; }), admitted = new Promise<void>(resolve => { finished = resolve; });
+  const olderPending = new Promise<void>(resolve => { olderEntered = resolve; }), olderHeld = new Promise<void>(resolve => { releaseOlder = resolve; });
+  const olderRead = new AsyncLocalStorage<boolean>();
+  let launcher: any;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/permission/request" || route === "/api/form") { interactionsEntered(); await interactionsHeld; }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 }; launcher = first;
+      return Response.json({ data: [first, { id: "hidden-parent", type: "user", text: "Retained prefix boundary", time: { created: 30 } },
+        ...(appended ? [{ id: "ordinary-output", type: "assistant", time: { created: 50 }, content: [{ type: "text", text: "Independent output" }] }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
+    if (route === `/api/session/${parent}` || route === `/api/session/${other}`) {
+      const body = await response.json();
+      if (olderRead.getStore() || staged && (change === "other-parent" ? route.endsWith(other!) : route.endsWith(parent!))) body.data.revert = { messageID: change === "retained-prefix" ? "hidden-parent" : launcher?.id };
+      if (olderRead.getStore()) { olderEntered(); await olderHeld; }
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => {
+      if (id === parent) guards.push(source.workerSource.retain(abort.signal));
+      options?.onSource?.({ ...source, workerSource: { ...source.workerSource, retain: signal => {
+        if (id === parent) { if (signal.aborted) finished(); else signal.addEventListener("abort", () => finished(), { once: true }); }
+        return source.workerSource.retain(signal);
+      } } });
+    } });
+    if (id === parent && !captured) { captured = true; expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" })); folded(); }
+    return tasks;
+  };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let older: ReturnType<typeof provider.getSession> | undefined;
+  try {
+    parent = (await provider.createSession("Parent visibility during scheduler handoff")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    other = (await provider.createSession("Other visibility owner")).id;
+    if (change === "stale-response") {
+      // Populate only a launcher identity for the stale native record payload,
+      // not a source guard or an inferred worker on the adapter projection.
+      await provider.listMessages(parent, { limit: 100, signal: abort.signal });
+      older = olderRead.run(true, () => provider.getSession(parent!)); void older.catch(() => undefined); await olderPending;
+    }
+    await adapter.subscribe(parent, { signal: abort.signal }); void adapter.startEventPump().catch(() => undefined);
+    await returned; await interactions; expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (change === "stale-response") { releaseOlder(); await older; }
+    staged = change === "hidden" || change === "retained-prefix" || change === "other-parent";
+    appended = change === "append";
+    await provider.getReversibleHistoryState!(change === "other-parent" ? other : parent);
+    const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    if (change === "hidden") expect(fresh).toEqual([]);
+    else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    releaseInteractions(); await admitted;
+    const row = adapter.projectionForTests(parent).items().find(item => item.type === "background_task" && item.taskId === worker.taskId);
+    if (change === "hidden") expect(row).toBeUndefined(); else expect(row).toMatchObject({ status: "completed" });
+    expect(guards.every(guard => guard.isCurrent())).toBe(change !== "hidden");
+  } finally { releaseOlder(); releaseInteractions(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
 for (const read of ["history", "automatic-recovery"] as const)
-for (const proof of ["same-execution", "parent-report", "changed-identity", "smaller-alias", "smaller-alias-unavailable"] as const)
+for (const proof of ["session-active", "session-active-changed", "session-active-report", "same-execution", "parent-report", "changed-identity", "smaller-alias", "smaller-alias-unavailable"] as const)
 test(`${read} resumes active work after withdrawing an inferred outcome (${proof})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, resumed = false, armed = false;
   let aliasAttempt = 0;
   const aliasChange = proof === "smaller-alias" || proof === "smaller-alias-unavailable";
+  const sessionActive = proof.startsWith("session-active"), explicitReport = proof === "parent-report" || proof === "session-active-report";
   let wire!: ReadableStreamDefaultController<Uint8Array>, finished!: () => void;
   const published = new Promise<void>(resolve => { finished = resolve; });
   const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 50, location: { directory } })}\n\n`));
@@ -1202,11 +1273,13 @@ test(`${read} resumes active work after withdrawing an inferred outcome (${proof
     if (route.endsWith("/inbox")) return Response.json({ data: [] });
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
-      const body = await response.json(), first = body.data[0], changed = resumed && proof === "changed-identity";
+      const body = await response.json(), first = body.data[0], changed = resumed && (proof === "changed-identity" || proof === "session-active-changed");
       first.time = { created: changed ? 30 : 10 }; first.content[0].time = changed ? { created: 30, ran: 31, completed: 32 } : { created: 10, ran: 11, completed: 12 };
       const alias = structuredClone(first); alias.id = "proven-alias-message"; alias.content[0].id = `proven-alias-call-${aliasAttempt}`;
       alias.time = { created: 13 }; alias.content[0].time = { created: 13, ran: 14, completed: 15 };
-      return Response.json({ data: [first, ...(resumed && aliasChange ? [alias] : []), ...(proof === "parent-report" ? [{ id: "parent-result", type: "synthetic", time: { created: 25 }, text: "Explicit parent report", metadata: { source: "subagent", childID: child, state: "completed" } }] : [])], cursor: {} });
+      const competitor = structuredClone(first); competitor.id = "competing-message"; competitor.content[0].id = "competing-call";
+      competitor.content[0].state = { status: "running", input: { sessionID: child, prompt: "Competing invocation" }, metadata: {} };
+      return Response.json({ data: [first, ...(resumed && sessionActive ? [competitor] : []), ...(resumed && aliasChange ? [alias] : []), ...(explicitReport ? [{ id: "parent-result", type: "synthetic", time: { created: 25 }, text: "Explicit parent report", metadata: { source: "subagent", childID: child, state: "completed" } }] : [])], cursor: {} });
     }
     if (route === `/api/session/${child}/message`) return Response.json({ data: resumed ? [] : [
       { id: "reverted-child-input", type: "user", text: "Committed reverted suffix", time: { created: 15 } },
@@ -1243,8 +1316,8 @@ test(`${read} resumes active work after withdrawing an inferred outcome (${proof
       expect(fresh[0]?.activity?.executionId! < original!).toBe(true);
       expect(fresh[0]?.activity?.executionAliases).toContain(original);
     }
-    expect(fresh[0]).toMatchObject({ status: proof === "parent-report" ? "completed" : "running", activity: { kind: proof === "parent-report" ? "ended" : proof === "smaller-alias-unavailable" ? "unavailable" : "working" } });
-    expect(fresh[0]?.activity?.executionId === original).toBe(proof !== "changed-identity" && !aliasChange);
+    expect(fresh[0]).toMatchObject({ status: explicitReport ? "completed" : "running", activity: { kind: explicitReport ? "ended" : sessionActive ? "session-active" : proof === "smaller-alias-unavailable" ? "unavailable" : "working" } });
+    expect(fresh[0]?.activity?.executionId === original).toBe(proof !== "changed-identity" && proof !== "session-active-changed" && !aliasChange);
     if (proof === "same-execution") expect(fresh[0]?.control?.available).toBe(false);
     armed = true;
     let items: import("../../types").ConversationItem[];
@@ -1255,11 +1328,15 @@ test(`${read} resumes active work after withdrawing an inferred outcome (${proof
       items = (await adapter.subscribe(parent, { signal: abort.signal })).snapshot.items;
     }
     const current = items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-    expect(current?.status).toBe(proof === "same-execution" || aliasChange ? "running" : "completed");
+    expect(current?.status).toBe(proof === "same-execution" || proof === "session-active" || aliasChange ? "running" : "completed");
     expect(workerExecutionClockRuns(current!)).toBe(proof === "same-execution" || proof === "smaller-alias");
     if (aliasChange) { expect(current?.activity?.executionAliases).toContain(original); expect(workerCanStop(current!)).toBe(false); }
     if (proof === "same-execution") { expect(current?.activity?.kind).toBe("working"); expect(adapter.activity().working).toBe(true); }
-    if (proof === "parent-report") expect(current).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
+    if (explicitReport) expect(current).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
+    if (proof === "session-active") {
+      expect(current?.activity?.kind).toBe("session-active"); expect(workerDismissalEvidence(current)?.dismissible).toBe(false);
+      expect(workerCanStop(current!)).toBe(false); expect(current?.resultId).toBeUndefined(); expect(current?.terminalReportedAt).toBeUndefined();
+    }
   } finally { armed = false; abort.abort(); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
