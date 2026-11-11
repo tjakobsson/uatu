@@ -9,6 +9,28 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
 for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`intervening start vetoes share the ledger budget and coalesce replay (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  for (const at of [11, 35, 55]) workers.executionStarted("child", nativeProof({ id: `start-${at}`, created: at }, { child: "child", phase: "started" }));
+  for (let replay = 0; replay < 300; replay++) workers.executionStarted("child", nativeProof({ id: "start-11", created: 11 }, { child: "child", phase: "started" }));
+  expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(true);
+  const newer = { ...candidate, launches: candidate.launches.map(launch => ({ ...launch, created: 34, ran: 35, completed: 36 })) };
+  expect(workers.historyOutcomeContradicted(newer, 40)).toBe(false);
+  expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  // Distinct clock growth is charged to the existing aggregate byte budget,
+  // not a new unbounded event log or a silently lossy maximum.
+  for (let at = 56; at < 356 && workers.controlEvidenceAvailable; at++)
+    workers.executionStarted("child", nativeProof({ id: `start-${at}`, created: at }, { child: "child", phase: "started" }));
+  // Per-child overflow is an outcome-only unknown; tighter aggregate byte
+  // budgets may saturate first. Neither case silently forgets the old veto.
+  expect(workers.controlEvidenceAvailable).toBe(budget.bytes === undefined);
+  expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(true); checkBytes(workers);
+});
+
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
 test(`outcome veto clocks remain bounded and unknown ends stay sticky (${JSON.stringify(budget)})`, () => {
   const workers = new BackgroundWorkers(budget);
   const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",

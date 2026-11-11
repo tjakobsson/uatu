@@ -121,6 +121,9 @@ old admission. Matching event/transcript clocks are counted once, but duplicate
 transcript idles remain ambiguous. An undated observed end retains one sticky
 unknown-clock flag under the same ledger budget. Only valid visible transcript
 outcomes can infer terminal status; explicit parent reports still take precedence.
+The retained-end overlay and its retention gaps constrain outcome inference
+only. They do not reclassify the shared control/admission fold or suppress
+compatible ended activity and independently covered controls after saturation.
 The old row remains outcome-unknown
 and activity-unavailable, with its clock stopped and no new Stop authority or
 fabricated end timestamp. An otherwise qualified unavailable row can supply
@@ -131,6 +134,20 @@ structure or budget is introduced.
 The ledger retains distinct-start counterproof as one greatest observed clock
 (or unknown-clock veto), independent of the latest arrival. Replaying an older
 start cannot revive the previous execution or create a positive timestamp.
+For outcomes, the same byte-budgeted record additionally keeps up to 128 distinct
+start clocks, coalescing replays. A later start cannot erase an intervening start
+before an older outcome. Per-child overflow leaves a sticky outcome-only unknown;
+the earliest start alone remains compatible with a first late admission.
+
+Newer inactive inventory also fences already returned cold activity through
+publication. After native parent history declares the bounded child scope, the
+existing active-inventory read retains one ordered membership bit per child on
+its source lease, not a workspace-wide snapshot. Inactive evidence downgrades
+dependent cold activity to unavailable and stops its execution clock without
+inventing an outcome or end timestamp. Older overlapping arrivals cannot revoke
+newer evidence, cancellation cannot publish counterproof, and unchanged/other-child
+membership or independently live controls do not lose authority. Leases retire
+the slot. No additional native IO or Stop authority is introduced.
 A covered Working/Needs-answer replacement for that exact execution also clears
 the inferred end and resumes the running clock and background progress. Its
 activity authority does not require available Stop controls.

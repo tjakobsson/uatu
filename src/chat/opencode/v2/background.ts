@@ -764,7 +764,7 @@ export class BackgroundWorkers {
   private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests;
     /** Greatest known distinct-start clock; null means its clock is unknown.
      * Negative evidence only, never a positive execution start/end timestamp. */
-    startCounterproof?: number | null; undatedEnd?: true }>();
+    startCounterproof?: number | null; startClocks?: readonly number[] | null; undatedEnd?: true }>();
   private readonly unmatched = new Map<string, { parent: string; worker: string; item: BackgroundTaskItem; correlatable: boolean; published: boolean }>();
   private readonly ended = new Map<string, number[]>();
   private readonly aliases = new Map<string, string>();
@@ -927,11 +927,15 @@ export class BackgroundWorkers {
     if (candidate.kind !== "agent") return false;
     const ends = this.observedExecutionEnds(candidate.worker);
     if (!ends) return true;
-    const start = this.terminalProofs.get(candidate.worker)?.startCounterproof;
+    const boundary = this.terminalProofs.get(candidate.worker), start = boundary?.startCounterproof;
+    if (boundary?.startClocks === null) return true;
+    const clocks = boundary?.startClocks ?? [];
+    const first = clocks.length ? Math.min(...clocks) : undefined;
     return candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
       return !window || ends.some(end => end >= window.start && end < at)
-        || start === null || start !== undefined && start <= at && start > window.end;
+        || start === null || clocks.some(clock => clock !== first && clock <= at && clock > window.end)
+        || start !== undefined && start <= at && start > window.end;
     });
   }
 
@@ -1264,12 +1268,20 @@ export class BackgroundWorkers {
       && proof.created >= birth.proof.created && initial.evidence.launches.every(launch => (launch.created === undefined || launch.created <= birth.proof?.created!)
         && (launch.completed ?? launch.reportedCompletion) !== undefined && birth.proof?.created! <= (launch.completed ?? launch.reportedCompletion)!)
       && ![...this.invocations.values()].some(invocation => invocation.fact.requestedChild === child && invocation.occurrence !== initial.evidence.key)) {
-      this.set(this.terminalProofs, child, { occurrences: [], started: { proof, pending: initial.evidence.key } });
+      this.set(this.terminalProofs, child, { occurrences: [], started: { proof, pending: initial.evidence.key }, startClocks: [proof.created] });
       this.bindInitialStart(initial);
       this.bound();
       return;
     }
     let startCounterproof = previous?.startCounterproof;
+    // Keep distinct native clocks inside the existing byte-budgeted record.
+    // A later maximum cannot erase an intervening start for an older outcome.
+    // The earliest start alone is not proof of reuse; exact replays coalesce.
+    let startClocks = previous?.startClocks === null ? null : [...previous?.startClocks ?? []];
+    if (startClocks && proof?.created !== undefined && !startClocks.includes(proof.created)) {
+      if (startClocks.length === 128) startClocks = null; // Sticky outcome-only retention gap.
+      else startClocks.push(proof.created);
+    }
     if (proof && previous && !candidates.length) {
       // Arrival order can regress on an older replay. Preserve the greatest
       // already observed distinct-start clock in one budgeted scalar, without
@@ -1279,6 +1291,7 @@ export class BackgroundWorkers {
         ? null : Math.max(startCounterproof ?? -Infinity, priorStart?.created ?? -Infinity, proof.created);
     }
     if (proof) this.set(this.terminalProofs, child, { ...(previous ?? { occurrences: [] }), started: { proof },
+      startClocks,
       ...(startCounterproof === undefined ? {} : { startCounterproof }),
       // A second native execution before launcher admission is reuse, not a
       // newborn's first execution. Do not start another provisional window.
@@ -1393,12 +1406,17 @@ export class BackgroundWorkers {
 
   /** A typed native outcome may settle one proven interval. A bare idle only
    * fences activity; missing/straddling windows never identify its execution. */
-  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot(), counterInvocations: readonly LauncherEvidence[] = [], contradicted?: (candidate: WorkerOccurrenceEvidence, at: number) => boolean): NormalizedProviderUpdate[] {
+  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot(), counterInvocations: readonly LauncherEvidence[] = [], observed?: { contradicted(candidate: WorkerOccurrenceEvidence, at: number): boolean; ends(child: string): readonly number[] | undefined }): NormalizedProviderUpdate[] {
     if (!this.budget.executionHistory) return [];
     const updates: NormalizedProviderUpdate[] = [];
     for (const [child, results] of outcomes ?? []) {
-      const ends = this.budget.executionHistory.get(child);
-      if (!ends) continue;
+      const transcriptEnds = this.budget.executionHistory.get(child), observedEnds = observed ? observed.ends(child) : [];
+      if (!transcriptEnds || !observedEnds) continue;
+      // Retained boundaries constrain outcomes only. Feeding them back into
+      // the control/admission fold would revoke independently valid controls
+      // and compatible ended activity, including after unrelated saturation.
+      const ends = [...transcriptEnds];
+      for (const end of observedEnds) if (!ends.includes(end)) ends.push(end);
       for (const result of results) {
         if (ends.filter(end => end === result.at).length !== 1 || results.some(other => other.at === result.at && other.status !== result.status)) continue;
         const previous = ends.filter(end => end < result.at).reduce<number | undefined>((latest, end) => latest === undefined || end > latest ? end : latest, undefined);
@@ -1415,7 +1433,7 @@ export class BackgroundWorkers {
           && occurrence.launches.some(overlaps));
         const occurrence = candidates.length === 1 ? candidates[0] : undefined;
         const task = occurrence && this.tasks.get(occurrence.taskId);
-        if (!occurrence || !task || task.item.status !== "running" || occurrence.uncertain || task.evidence.uncertain || task.item.stateUncertain || contradicted?.(occurrence, result.at) || !occurrence.launches.every(launch => {
+        if (!occurrence || !task || task.item.status !== "running" || occurrence.uncertain || task.evidence.uncertain || task.item.stateUncertain || observed?.contradicted(occurrence, result.at) || !occurrence.launches.every(launch => {
           const window = this.admissionWindow(launch);
           return window && window.end < result.at && (previous === undefined || window.start > previous);
         })) continue;

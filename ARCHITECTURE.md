@@ -1195,6 +1195,25 @@ Distinct-start counterproof keeps the greatest observed native start clock (or
 an unknown-clock veto) in one scalar inside the existing ledger record. An older
 start replay may not erase that negative evidence or revive the old execution;
 the scalar never supplies a positive start, end, outcome or Stop timestamp.
+Outcome attribution also retains up to 128 distinct native start clocks per
+child in that same byte-budgeted record. Replays coalesce; exceeding the cap
+leaves a sticky outcome-only unknown rather than discarding an intervening
+start. A later start beyond an outcome cannot erase an earlier start inside
+its interval. The earliest start alone remains compatible with first-execution
+admission, including a first late start. Aggregate ledger saturation still
+withholds inferred outcomes, not independently covered control/history recovery.
+
+Cold activity publication has a separate native active-inventory dependency.
+After parent history declares its bounded child scope, recovery starts the
+existing active-inventory read and retains only one ordered membership bit per
+scoped child on the existing source lease. A newer inactive observation marks
+only dependent cold activity unavailable and revokes an already returned cold
+activity lease. Request order protects newer evidence from older overlapping
+responses; cancellation is checked before observation. Unchanged membership,
+other-child changes and independently live controls do not borrow this cold
+authority. No global inventory snapshot, extra read, outcome or Stop proof is
+retained. Starting inventory after scope declaration trades some read
+parallelism for bounded pending-read counterproof without a workspace-wide buffer.
 
 Pending notifications are folded after stored messages, not necessarily in their
 native chronological order. During complete-history recovery, a dated report
@@ -1232,10 +1251,13 @@ counted twice, while duplicate transcript clocks remain ambiguous. An earlier
 observed end or a distinct start separating the admission from a later outcome
 vetoes that outcome; a matching unique terminal can still settle its admission.
 An undated observed end leaves a sticky unknown-clock veto in the existing
-budgeted ledger record. None of these retained events supplies a positive
+budgeted ledger record. These extra boundaries and retention gaps apply inside
+outcome inference only, not the shared control/admission or visibility fold.
+They cannot suppress compatible ended activity or independently covered Stop
+recovery after unrelated projection saturation. None of these retained events supplies a positive
 outcome, report timestamp or Stop proof, and explicit parent reports retain
-precedence. This history-only
-attribution counts the complete native parent's competing occurrences even when
+precedence. This history-only attribution counts the complete native parent's
+competing occurrences even when
 a staged parent revert hides their rows. Prefix visibility cannot turn an
 ambiguous child outcome into a terminal result; launches proven to belong to
 separate child intervals or other children do not compete for that outcome.

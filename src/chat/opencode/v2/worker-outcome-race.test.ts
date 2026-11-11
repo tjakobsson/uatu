@@ -6,11 +6,92 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { workerCanStop, workerExecutionClockRuns } from "../../worker-state";
 import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
 
+for (const mode of ["older-inactive", "newer-inactive-pending", "cancelled-inactive", "released-owner", "live-inactive"] as const)
+test(`cold inventory counterproof respects native ordering and source lifetime (${mode})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, activeReads = 0, active = true;
+  let entered!: () => void, release!: () => void, wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const observed = new Promise<void>(resolve => { applied = resolve; });
+  const frame = (type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created, location: { directory } })}\n\n`));
+  let launcher: Record<string, unknown> | undefined;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (mode === "live-inactive" && route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route === "/api/session/active") {
+      const index = ++activeReads, data = active && child ? { [child]: { status: "running" } } : {};
+      if ((mode === "older-inactive" || mode === "newer-inactive-pending") && index === 1 || mode === "cancelled-inactive" && index === 2) { entered(); await held; }
+      return Response.json({ data });
+    }
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
+      first.content[0].time = { created: 10, ran: 11, completed: 12 }; launcher = first;
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const owner = new AbortController(), probe = new AbortController(), lifetime = new AbortController();
+  const guards: import("../../provider").WorkerSourceGuard[] = [];
+  const recover = (signal: AbortSignal, retain = false, id = parent!) => provider.reconcileBackgroundTasks!(id, { fresh: true, signal,
+    ...(retain ? { onSource: (source: import("../../provider").WorkerRecoverySource) => guards.push(source.workerSource.retain(owner.signal)) } : {}) });
+  let older: ReturnType<typeof recover> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Ordered cold inventory")).id; child = fake.launchRequestWorker(parent).childId;
+    const peer = (await provider.createSession("Independent inventory reader")).id; fake.launchRequestWorker(peer);
+    if (mode === "live-inactive") {
+      // Use the real native launcher projection; no synthetic source guards.
+      await provider.listMessages(parent, { limit: 100, signal: lifetime.signal });
+      pump = (async () => { for await (const event of provider.events(lifetime.signal)) if (event.eventType === "diagnostic.live-inventory-ready") applied(); })();
+      await provider.waitForEventStream!(lifetime.signal);
+      frame("session.message.content.updated", { sessionID: parent, messageID: launcher!.id, content: launcher!.content }, 12);
+      frame("diagnostic.live-inventory-ready", {}, 13); await observed;
+    }
+    if (mode === "older-inactive" || mode === "newer-inactive-pending") {
+      active = mode !== "older-inactive";
+      // Same-parent fresh reads intentionally serialize. An independent
+      // parent's public recovery supplies the overlapping global inventory.
+      older = recover(probe.signal, false, mode === "older-inactive" ? peer : parent); void older.catch(() => undefined); await pending;
+      active = !active;
+      const newer = await recover(owner.signal, true, mode === "older-inactive" ? parent : peer);
+      expect(newer[0]?.activity?.kind).toBe(active ? "working" : "unavailable");
+      expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+      release(); const stale = await older;
+      expect(stale[0]?.activity?.kind).toBe("unavailable");
+      expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    } else {
+      const initial = await recover(owner.signal, true);
+      expect(initial[0]?.activity?.kind).toBe("working"); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+      if (mode === "released-owner") owner.abort();
+      active = false;
+      if (mode === "cancelled-inactive") {
+        older = recover(probe.signal); void older.catch(() => undefined); await pending;
+        probe.abort(); release(); await older.catch(() => undefined);
+        expect(guards.every(guard => guard.isCurrent())).toBe(true);
+      } else {
+        await recover(lifetime.signal);
+        // Independent live-control evidence does not borrow cold inventory's
+        // publication lease. Released leases are already retired.
+        expect(guards.every(guard => guard.isCurrent())).toBe(mode === "live-inactive");
+      }
+    }
+    active = true;
+    const fresh = await recover(lifetime.signal);
+    expect(fresh[0]?.activity?.kind).toBe("working");
+  } finally { release(); owner.abort(); probe.abort(); lifetime.abort(); await older?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
 for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
-for (const scenario of ["later-outcome", "start-only", "unique-terminal", "duplicate-idles", "earlier-boundary", "new-admission", "missing-clock", "undated-idle", "undated-end", "other-child", "foreign-workspace", "explicit-report", "explicit-after-undated"] as const)
+for (const scenario of ["later-outcome", "start-only", "third-start", "third-start-older-replay", "third-start-new-admission", "unique-after-start", "unique-late-after-start", "unique-terminal", "duplicate-idles", "earlier-boundary", "new-admission", "missing-clock", "undated-idle", "undated-end", "other-child", "foreign-workspace", "explicit-report", "explicit-after-undated"] as const)
 test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, finished = false;
+  const laterAdmission = scenario === "new-admission" || scenario === "third-start-new-admission";
   let wire!: ReadableStreamDefaultController<Uint8Array>;
   const barriers = new Map<string, () => void>();
   const frame = (type: string, data: unknown, created: number | undefined, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory: location } })}\n\n`));
@@ -24,8 +105,8 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
     if (route === "/api/session/active") return Response.json({ data: !finished && child ? { [child]: { status: "running" } } : {} });
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
-      const body = await response.json(), first = body.data[0]; first.time = { created: scenario === "new-admission" ? 34 : 10 };
-      first.content[0].time = scenario === "new-admission" ? { created: 34, ran: 35, completed: 36 }
+      const body = await response.json(), first = body.data[0]; first.time = { created: laterAdmission ? 34 : 10 };
+      first.content[0].time = laterAdmission ? { created: 34, ran: 35, completed: 36 }
         : scenario === "missing-clock" ? { created: 10 } : { created: 10, ran: 11, completed: 12 };
       return Response.json({ data: [first, ...(finished && (scenario === "explicit-report" || scenario === "explicit-after-undated") ? [{ id: "parent-result", type: "synthetic", time: { created: 45 },
         text: "Parent owns result", metadata: { source: "subagent", childID: child, state: "completed" } }] : [])], cursor: {} });
@@ -50,9 +131,9 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
     await provider.waitForEventStream!(abort.signal);
     const subject = scenario === "other-child" ? otherChild : child, location = scenario === "foreign-workspace" ? `${directory}/foreign` : directory;
     frame("session.created", { sessionID: subject, parentID: subject === child ? parent : unrelated, location: { directory } }, scenario === "earlier-boundary" ? 3 : 11);
-    frame("session.execution.started", { sessionID: child }, 11);
-    if (scenario !== "unique-terminal" && scenario !== "duplicate-idles") {
-      if (scenario !== "start-only") frame("session.execution.succeeded", { sessionID: subject }, scenario === "undated-end" || scenario === "explicit-after-undated" ? undefined : scenario === "earlier-boundary" ? 5 : 20, location);
+    frame("session.execution.started", { sessionID: child }, scenario === "unique-late-after-start" ? 20 : 11);
+    if (scenario !== "unique-terminal" && scenario !== "unique-after-start" && scenario !== "unique-late-after-start" && scenario !== "duplicate-idles") {
+      if (scenario !== "start-only" && !scenario.startsWith("third-start")) frame("session.execution.succeeded", { sessionID: subject }, scenario === "undated-end" || scenario === "explicit-after-undated" ? undefined : scenario === "earlier-boundary" ? 5 : 20, location);
       frame("session.revert.committed", { sessionID: subject, to: "removed-idle" }, 30, location);
       if (scenario !== "undated-end") frame("session.execution.started", { sessionID: subject }, scenario === "earlier-boundary" ? 11 : 35, location);
     }
@@ -63,10 +144,17 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
       expect(before.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe("unavailable");
     finished = true; frame("session.execution.failed", { sessionID: child, error: { type: "unknown", message: "Later execution failed" } }, 40);
     await barrier("diagnostic.outcome-after-final-idle");
+    if (scenario.startsWith("third-start") || scenario === "unique-after-start" || scenario === "unique-late-after-start") {
+      const initial = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      expect(initial.find(task => task.taskId === worker.taskId)?.status).toBe(scenario.startsWith("third-start") && !laterAdmission ? "running" : "failed");
+      frame("session.execution.started", { sessionID: child }, 55);
+      if (scenario === "third-start-older-replay") frame("session.execution.started", { sessionID: child }, 11);
+      await barrier("diagnostic.outcome-after-third-start");
+    }
     const rows = read === "listMessages" ? (await provider.listMessages(parent, { limit: 100, signal: abort.signal })).items
       : await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     const row = rows.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-    const withheld = ["later-outcome", "start-only", "missing-clock", "undated-idle", "undated-end", "duplicate-idles"].includes(scenario);
+    const withheld = ["later-outcome", "start-only", "third-start", "third-start-older-replay", "missing-clock", "undated-idle", "undated-end", "duplicate-idles"].includes(scenario);
     const reported = scenario === "explicit-report" || scenario === "explicit-after-undated";
     expect(row?.status).toBe(reported ? "completed" : withheld ? "running" : "failed");
     expect(workerCanStop(row!)).toBe(false);
@@ -76,10 +164,10 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
   } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const change of ["distinct-start", "distinct-start-replay", "first-late-start", "exact-start-replay", "replay-storm", "text-noise", "other-child", "foreign-workspace"] as const)
+for (const change of ["inactive", "unchanged-active", "other-inactive", "distinct-start", "distinct-start-replay", "first-late-start", "exact-start-replay", "replay-storm", "text-noise", "other-child", "foreign-workspace"] as const)
 test(`returned cold activity remains covered through scheduler admission (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
-  let parent: string | undefined, child: string | undefined, armed = false, parentHeldOnce = false, interrupts = 0;
+  let parent: string | undefined, child: string | undefined, unrelatedChild: string | undefined, armed = false, parentHeldOnce = false, interrupts = 0, inactive = false, otherInactive = false;
   let wire!: ReadableStreamDefaultController<Uint8Array>, parentEntered!: () => void, releaseParent!: () => void,
     folded!: (tasks: import("../../types").BackgroundTaskItem[]) => void, interactionsEntered!: () => void, releaseInteractions!: () => void;
   const parentPending = new Promise<void>(resolve => { parentEntered = resolve; }), parentHeld = new Promise<void>(resolve => { releaseParent = resolve; });
@@ -96,7 +184,10 @@ test(`returned cold activity remains covered through scheduler admission (${chan
     } }), { headers: { "content-type": "text/event-stream" } });
     if (route.endsWith("/inbox")) return Response.json({ data: [] });
     if (route === "/api/permission/request" || route === "/api/form") { interactionsEntered(); await interactionsHeld; }
-    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    if (route === "/api/session/active") return Response.json({ data: {
+      ...(child && !inactive ? { [child]: { status: "running" } } : {}),
+      ...(unrelatedChild && !otherInactive ? { [unrelatedChild]: { status: "running" } } : {}),
+    } });
     const response = await fetch(request);
     if (route === `/api/session/${parent}/message`) {
       const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
@@ -129,7 +220,7 @@ test(`returned cold activity remains covered through scheduler admission (${chan
     await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
     parent = (await provider.createSession("Returned activity start counterproof")).id;
     const worker = fake.launchRequestWorker(parent); child = worker.childId;
-    const unrelated = (await provider.createSession("Other execution owner")).id, unrelatedChild = fake.launchRequestWorker(unrelated).childId;
+    const unrelated = (await provider.createSession("Other execution owner")).id; unrelatedChild = fake.launchRequestWorker(unrelated).childId;
     const subscription = await adapter.subscribe(parent, { signal: abort.signal });
     publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
       throw new Error("Scheduler ended before worker admission"); })(); void publication.catch(() => undefined);
@@ -141,13 +232,16 @@ test(`returned cold activity remains covered through scheduler admission (${chan
     const initial = await returned; await interactions;
     expect(initial.find(task => task.taskId === worker.taskId)).toMatchObject({ status: "running", activity: { kind: "working", generation: 2 }, control: { available: false } });
     expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
-    if (change === "replay-storm") for (let replay = 0; replay < 300; replay++) frame("session.execution.started", { sessionID: child }, 11);
+    if (change === "inactive") inactive = true;
+    else if (change === "other-inactive") otherInactive = true;
+    else if (change === "unchanged-active") { /* Native inventory is unchanged. */ }
+    else if (change === "replay-storm") for (let replay = 0; replay < 300; replay++) frame("session.execution.started", { sessionID: child }, 11);
     else if (change === "text-noise") frame("session.message.content.updated", { sessionID: child, messageID: "later-output", content: [{ type: "text", text: "More output" }] }, 35);
     else frame("session.execution.started", { sessionID: change === "other-child" ? unrelatedChild : child }, change === "exact-start-replay" ? 11 : 35,
       change === "foreign-workspace" ? `${directory}/foreign` : directory);
     if (change === "distinct-start-replay") frame("session.execution.started", { sessionID: child }, 11);
     await barrier("diagnostic.returned-cold-start");
-    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal }), denied = change === "distinct-start" || change === "distinct-start-replay";
+    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal }), denied = change === "inactive" || change === "distinct-start" || change === "distinct-start-replay";
     expect(current.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe(denied ? "unavailable" : "working");
     if (!denied) expect(guards.every(guard => guard.isCurrent())).toBe(true);
     releaseInteractions(); const published = await publication;
