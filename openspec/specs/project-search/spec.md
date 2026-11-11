@@ -111,6 +111,13 @@ sweep is still running. The pane SHALL report the running match and file counts.
 
 ### Requirement: Search is bounded in work and in results
 
+Search SHALL debounce queries, enforce a minimum query length, cap results, and label truncated or deadline-limited output incomplete. Deadline enforcement SHALL acknowledge that a single regular-expression attempt is not interruptible.
+
+#### Scenario: Run a query that reaches its result cap or sweep deadline
+- **WHEN** a debounced eligible query exhausts its result or time budget
+- **THEN** search stops at the supported boundary and identifies collected results as incomplete rather than claiming a complete match set
+
+
 Queries SHALL be debounced and SHALL NOT run below a minimum query length.
 Results SHALL be capped, and when the cap is reached the pane SHALL say results
 were truncated rather than presenting a partial list as complete.

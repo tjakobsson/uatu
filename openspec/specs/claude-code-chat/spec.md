@@ -11,6 +11,13 @@ against Claude Code's native session storage.
 ## Requirements
 
 ### Requirement: Chat uses the workspace's Claude Code installation and identity
+
+Claude Code conversations SHALL use the workspace's existing installation, configuration, and authentication. Login SHALL remain in the Hub's Agent accounts area through Claude Code's own interface; credentials MUST NOT be requested by chat or copied by UatuCode. Unavailability SHALL remain isolated to Claude Code.
+
+#### Scenario: Start Claude Code chat with the workspace's existing identity
+- **WHEN** the workspace first needs a Claude Code conversation
+- **THEN** installation discovery and availability checks reuse that identity without leaving a long-lived idle service or disrupting other workspace capabilities
+
 When a Claude Code conversation is first needed, UatuCode SHALL discover
 the `claude` executable available to the workspace process and use the
 user's existing Claude Code configuration and authentication. A
@@ -38,6 +45,13 @@ usable.
 - **AND** OpenCode conversations, preview, search, and terminal continue working
 
 ### Requirement: A Claude Code conversation runs as its own agent session
+
+A Claude Code conversation SHALL own a workspace-scoped session only while it has an active turn, live background work, or an uncancelled scheduled wakeup. Idle prompting SHALL start or resume transparently, and shutdown SHALL terminate owned sessions while retaining native history.
+
+#### Scenario: Reconcile a conversation's session with its live work
+- **WHEN** a conversation is prompted, changes activity state, is interrupted, or its workspace shuts down
+- **THEN** its session lifetime follows authoritative idle state and retained background or scheduled work
+
 Each Claude Code conversation with an active turn, live background work, or
 a pending scheduled wakeup the user has not cancelled SHALL be served by its
 own agent session scoped to the workspace directory; a conversation that has
@@ -79,6 +93,13 @@ completed history in Claude Code's native session storage.
 - **AND** their history remains available from native session storage on a later workspace start
 
 ### Requirement: Conversations are discovered from Claude Code's native session storage
+
+The workspace SHALL discover and read resumable Claude Code history from native storage for its canonical directory without starting a turn. Other-directory sessions MUST be rejected, malformed sessions skipped, and stored authorship respected when presenting user messages and titles.
+
+#### Scenario: Open the native conversation inventory without a running turn
+- **WHEN** the workspace enumerates stored Claude Code sessions and reads their records
+- **THEN** directory ownership and native authorship determine which conversations and user-authored content are presented
+
 The workspace SHALL enumerate resumable Claude Code conversations for the
 canonical workspace directory from Claude Code's own session storage, and
 SHALL present a conversation's history without starting a turn or
@@ -117,6 +138,13 @@ person SHALL be presented as their message whatever its text looks like.
 - **AND** no background task row is produced for it
 
 ### Requirement: Claude Code activity is normalized into the shared timeline
+
+Claude Code activity SHALL become ordered shared conversation events, including streamed assistant text and model-attributed usage. Unknown or unparseable messages and content blocks SHALL be skipped and counted by type without recording their payloads or ending the stream.
+
+#### Scenario: Consume streamed Claude Code session activity
+- **WHEN** the server receives supported, unknown, or malformed session activity
+- **THEN** recognized activity reaches the shared timeline while unknown messages and blocks contribute only type-level counters
+
 The server SHALL normalize Claude Code session activity into the shared
 ordered conversation events covering user and assistant content,
 reasoning, tool lifecycle, tool progress, background task lifecycle,
@@ -168,6 +196,13 @@ is.
 - **AND** the conversation stream continues
 
 ### Requirement: Tool permissions are brokered interactively
+
+Tool permission requests SHALL identify their action and resources in the owning conversation and return the user's decision. Session-scoped approval SHALL require an accurate native-rule confirmation, MUST NOT forward persistent updates, and SHALL settle visibly if the session ends while approval is pending.
+
+#### Scenario: Confirm the exact scope of a live or recovered permission request
+- **WHEN** Claude Code requests tool permission and the user considers a session-scoped reply
+- **THEN** the conversation presents the request and confirms exactly the permitted updates that will be forwarded
+
 When a Claude Code session asks for permission to use a tool, the request
 SHALL surface as a pending permission in the owning conversation,
 identifying the action and affected resources, and the user's approval or
@@ -259,6 +294,13 @@ the workspace.
 - **AND** that mode is presented as the conversation's active choice
 
 ### Requirement: Models and effort levels follow Claude Code's catalog
+
+Claude Code's catalog SHALL govern offered models, defaults, and supported effort variants. Additional and typed model choices SHALL remain distinct. Window discovery and attribution SHALL use applicable native evidence without blocking the catalog, silently falling back after rejection, or overwriting stronger window knowledge.
+
+#### Scenario: Read, select, and enrich Claude Code model choices
+- **WHEN** the model catalog is read, a model or effort is chosen, or further native context-window evidence becomes available
+- **THEN** available choices, defaults, attribution, and window limits follow the native catalog and discovery rules
+
 The Claude Code agent SHALL list the models Claude Code offers and SHALL
 offer each model's supported effort levels as that model's reasoning
 variants. Claude Code's own recommended default SHALL be offered as a
@@ -469,6 +511,13 @@ labeled placeholder rather than failing the history.
 - **AND** the rest of the history renders normally
 
 ### Requirement: Subagent runs open as child transcripts
+
+Claude Code subagents and other forked runs SHALL appear as attributable work and open as their own child transcripts, not inventory conversations. Live views SHALL follow native activity or refreshed native records, and completed runs and typed-command output SHALL remain readable after reopening.
+
+#### Scenario: Inspect a running or completed Claude Code child run
+- **WHEN** Claude Code names a subagent, skill fork, or typed-command run
+- **THEN** the conversation exposes its own activity, available attribution, and eventual output through the shared inspection behavior
+
 Each subagent run in a Claude Code conversation SHALL be represented by
 its launching row in the parent timeline and SHALL be openable as a
 child transcript through the shared drill-down behavior, rendered from
@@ -547,6 +596,13 @@ and the operation MUST NOT claim that history or files changed.
 - **AND** the transcript and files are reported unchanged
 
 ### Requirement: Plan approvals offer implementation intents
+
+Completed plans SHALL surface in the owning conversation with distinct supported implementation intents. Approval SHALL apply the chosen subsequent mode, while rejection SHALL retain planning mode and allow planning to continue without a separate mode change.
+
+#### Scenario: Accept or reject a plan with an explicit implementation intent
+- **WHEN** a planning session presents its completed plan for approval
+- **THEN** the conversation shows the plan and applies the selected supported transition rather than treating every approval as the same mode change
+
 When a Claude Code session in a planning mode presents a completed plan
 for approval, the request SHALL surface as a plan approval in the owning
 conversation, presenting the plan's content. Approval SHALL offer
@@ -599,6 +655,13 @@ SHALL be discoverable under the declared commands capability.
 - **AND** the client presents no control for them
 
 ### Requirement: Context usage measures the window, not the turn's spend
+
+Context usage SHALL measure the latest model call's window occupancy, not cumulative turn spend. Occupancy and applicable window knowledge SHALL update independently, preserve model and execution attribution, expose estimates or uncertainty, and refresh connected and reconnecting clients without requiring another completed turn.
+
+#### Scenario: Update context occupancy and its applicable limit independently
+- **WHEN** model usage, compaction, window discovery, model selection, or reconnection changes the context evidence
+- **THEN** the readout uses the correct occupancy and limit with their provenance rather than reusing an unrelated count or stronger-looking estimate
+
 Context usage for a Claude Code conversation SHALL be the occupancy of the
 context window after the most recent model call: the tokens that call
 sent as input, read from cache, and wrote to cache. It MUST NOT be summed
@@ -706,6 +769,13 @@ those values and SHALL NOT label the latter as the model's hard capacity.
 - **AND** it does not discard that reported boundary using the rule for disproven estimates
 
 ### Requirement: Background tasks are surfaced, stoppable, and wake the model
+
+Claude Code background tasks SHALL be visible and stoppable while running, with inspectable native progress and output. Their settled outcomes SHALL replay as task rows, retained work SHALL keep a distinct composer state, and task completion SHALL preserve the native model-wakeup behavior.
+
+#### Scenario: Follow background work through running and settled states
+- **WHEN** Claude Code launches, reports on, completes, fails, or stops background work
+- **THEN** the conversation retains the task's activity, inspection and stop affordances, settled outcome, and applicable session state
+
 When a Claude Code session starts a task in the background — a backgrounded
 shell command, a backgrounded subagent, or a monitor — the conversation
 SHALL show that background work exists while it runs, naming each task
@@ -796,6 +866,13 @@ of the background-work state.
 - **AND** the workspace's activity summary does not report it working on their account
 
 ### Requirement: Scheduled wakeups are held, shown, fired, and releasable
+
+Supported Claude Code wakeups SHALL have visible schedules and lifecycle rows, a distinct scheduled state, per-wakeup cancellation, and session release. Cancellation MUST prevent future turns without spending one; lost or rebuildable schedules SHALL remain explicit, and the workspace MUST NOT start sessions merely to keep paused wakeups running.
+
+#### Scenario: Schedule, fire, cancel, or resume a native wakeup
+- **WHEN** the session manages future turns or ends with wakeups pending
+- **THEN** each wakeup's displayed state and authority to run follow its native lifecycle and the user's cancellation or release decision
+
 When a Claude Code session schedules a future turn for itself — a
 self-paced wakeup, a cron, or a loop — the conversation SHALL enter a
 scheduled state distinct from working, background, and idle for as long as
@@ -899,6 +976,13 @@ outcome rather than remaining pending.
 - **AND** the submitted values, or the decline, are returned to the session
 
 ### Requirement: Session signals surface as status, not silence
+
+Claude Code session signals SHALL surface through appropriate status, plan-standing, timeline, or recalled-context presentation. Rate-limit standing and plan utilization SHALL remain current, accessible, and attributed to native evidence rather than becoming duplicate timeline events or fabricated utilization.
+
+#### Scenario: Present native session signals and plan-standing updates
+- **WHEN** Claude Code reports retries, compaction, fallback, recalled context, utilization, or a change in rate-limit standing
+- **THEN** the conversation updates the relevant status and readouts while preserving their source, freshness, and accessibility rules
+
 The conversation SHALL surface Claude Code's routine session signals where
 they affect what the user is waiting on: an API retry SHALL show as a
 retrying state with the reason where reported; a claude.ai plan
@@ -1126,6 +1210,13 @@ take precedence over both.
 
 ### Requirement: Claude transcript paging reuses unchanged native history
 
+Verified unchanged native Claude transcripts SHALL be reused within bounded, identity-scoped limits. History changes or uncertain freshness SHALL trigger authoritative reconciliation or reads. Reuse MUST preserve timeline and cursor semantics, MUST NOT start turns, and MUST NOT block available history on optional catalog readiness.
+
+#### Scenario: Page or reopen native history as its contents and metadata change
+- **WHEN** a client requests Claude history repeatedly, including after a native transcript mutation
+- **THEN** bounded reuse avoids redundant work only while authoritative identity and freshness remain established
+
+
 Repeated paging or reopening of a verified unchanged native Claude Code transcript within the documented reuse limits SHALL avoid rereading, reparsing, and renormalizing the entire transcript for every request. Reusable history SHALL be bounded in memory and isolated by workspace and native transcript identity, including child transcripts and forked histories. Eviction or a transcript larger than those limits SHALL fall back to authoritative reads without losing content. A transcript append, rewrite, replacement, truncation, deletion, or history mutation SHALL invalidate or reconcile affected state before it is returned as current. Uncertain freshness SHALL cause an authoritative read.
 
 The optimization MUST preserve transcript order, parent/child separation, token accounting, model attribution, reversible-history boundaries, and cursor correctness. Reading history SHALL NOT start a turn. Optional catalog readiness MUST NOT prevent displaying available transcript content; catalog-dependent readouts SHALL remain explicitly unknown until reliable metadata arrives.
@@ -1146,6 +1237,13 @@ The optimization MUST preserve transcript order, parent/child separation, token 
 - **AND** unresolved model-dependent values are presented as unknown until resolved
 
 ### Requirement: A rate-limit reset names its day when it is not today
+
+Rate-limit resets SHALL use zero-padded 24-hour time in the reader's time zone and name the weekday when not today. Live standings and announcements SHALL include the required remaining time; retained timeline notices SHALL always name the weekday and omit relative remaining time.
+
+#### Scenario: Read a reset time live or from a retained timeline notice
+- **WHEN** a plan summary, expanded readout, accessibility announcement, or timeline notice presents a rate-limit reset
+- **THEN** its clock, day, and relative-time treatment match the presentation's live or retained lifetime
+
 Wherever the conversation states when a rate-limit standing resets — the
 composer's plan summary, the standing line in the readout it opens, and the
 announcement made to assistive technology — the reset SHALL be stated as a

@@ -44,7 +44,13 @@ The route table (`src/server/routes.ts` via `buildRoutes`) SHALL expose the bund
 
 ### Requirement: `@font-face` registers the bundled font with local-then-url precedence
 
-The stylesheet SHALL register exactly one `@font-face` declaration for the bundled face. Its `font-family` SHALL match the upstream family name (`"Hack Nerd Font Mono"`). Its `src` SHALL list `local("Hack Nerd Font Mono")` first and a `url(...) format("woff2")` second — pointing at the vendored WOFF2 via a path the CSS bundler can resolve at build time (in practice, a path relative to `src/styles.css`, which Bun's CSS bundler chunkifies into a content-hashed asset URL at runtime) — so a locally-installed copy is used where the browser permits and the bundled copy is fetched otherwise.
+The stylesheet SHALL register exactly one `@font-face` declaration for the bundled face. Its `font-family` SHALL match the upstream family name (`"Hack Nerd Font Mono"`), with local-then-url source precedence.
+
+#### Scenario: Font sources resolve at build time and prefer a permitted local copy
+- **WHEN** the stylesheet's bundled face is resolved
+- **THEN** its `src` SHALL list `local("Hack Nerd Font Mono")` first and a `url(...) format("woff2")` second
+- **AND** the URL SHALL point at the vendored WOFF2 via a path the CSS bundler can resolve at build time (in practice, relative to `src/styles.css`, which Bun's CSS bundler chunkifies into a content-hashed asset URL at runtime)
+- **AND** a locally-installed copy SHALL be used where the browser permits and the bundled copy SHALL be fetched otherwise
 
 #### Scenario: `@font-face` declares local then url
 
@@ -61,7 +67,14 @@ The stylesheet SHALL register exactly one `@font-face` declaration for the bundl
 
 ### Requirement: Bundled font license is allowlisted and shipped with the binary
 
-`src/shared/license-check.ts` SHALL include SIL OFL 1.1 in its permissive-license allowlist so `bun run check:licenses` continues to pass with the bundled font in place. The OFL entry is load-bearing because the patched glyph data incorporates icons from upstream icon fonts that ship under SIL OFL 1.1 (e.g., FontAwesome, Weather Icons), even though the immediate upstream projects we vendor from are MIT-licensed. The upstream license texts (MIT for Hack itself, MIT for the Nerd Fonts patching utility) SHALL be vendored alongside the font under `src/assets/fonts/`, accompanied by a NOTICES file that enumerates the per-icon-source licenses; all SHALL be reachable from the running app (either via a dedicated route or by being included in an existing third-party-notices surface).
+`src/shared/license-check.ts` SHALL include SIL OFL 1.1 in its permissive-license allowlist so `bun run check:licenses` continues to pass with the bundled font in place. Upstream license texts and per-icon-source notices SHALL ship with the font and remain reachable from the running app.
+
+#### Scenario: Patched font attribution includes upstream and icon-source licenses
+- **WHEN** the bundled font is distributed
+- **THEN** the OFL allowlist entry SHALL account for patched glyph data from upstream icon fonts under SIL OFL 1.1 (e.g., FontAwesome, Weather Icons), even though the immediate vendored upstream projects are MIT-licensed
+- **AND** the upstream MIT license texts for Hack itself and the Nerd Fonts patching utility SHALL be vendored alongside the font under `src/assets/fonts/`
+- **AND** a NOTICES file SHALL enumerate the per-icon-source licenses
+- **AND** all SHALL be reachable from the running app via a dedicated route or an existing third-party-notices surface
 
 #### Scenario: License check accepts SIL OFL 1.1
 

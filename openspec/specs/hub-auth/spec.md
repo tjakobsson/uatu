@@ -5,7 +5,25 @@
 Define the hub's authentication and access-control model: a login gate in front of the dashboard and every proxied session on every interface, server-side session records (one opaque id over cookie and bearer transports, revocable immediately) with configured users and memory-hard password hashes, sign-out as server-side revocation, server-side brokering of child session tokens so users never handle them, CSRF protection on state-changing endpoints, and an explicitly documented trust model (all hub users share the daemon's OS user).
 ## Requirements
 ### Requirement: Hub access requires an authenticated user
-The hub SHALL authenticate every client before serving the dashboard, any dashboard API, or any proxied session route, on every interface including loopback. Unauthenticated requests SHALL receive the login page (for navigations) or 401 (for API and WebSocket requests) and MUST NOT reach a child session. When a navigation is redirected to the login page, the hub SHALL carry the originally requested path as a return-to parameter, and a successful login SHALL redirect to that path when — and only when — it validates as a same-origin absolute path (begins with a single `/`, carries no scheme or authority); any absent or invalid return-to target SHALL fall back to the dashboard (`/`). The return-to target SHALL survive a failed attempt: every re-render of the login form after an error — invalid credentials, a rate-limited attempt, a malformed request, a cross-origin submission — SHALL carry the same validated target the attempt arrived with, so that a retry after a mistyped password lands where the gate bounced from. The target SHALL be validated on every hop, both when it is rendered into the form and when it is acted on, and an invalid target SHALL be replaced by `/` rather than being echoed back. The hub configuration SHALL define users as a list of entries containing a user name and a password hash produced by a memory-hard algorithm (`Bun.password` defaults); plaintext passwords MUST NOT be stored. A single-entry list SHALL be fully supported as the expected initial configuration. Starting the hub without any configured users SHALL fail with an error that explains how to create the initial user entry.
+
+The hub SHALL authenticate all dashboard and proxied-session access, including loopback, against configured memory-hard password hashes. Login redirects SHALL preserve and revalidate safe return paths across errors; missing users SHALL prevent startup.
+
+#### Scenario: Every interface gates dashboard and session access
+- **WHEN** a client requests the dashboard, a dashboard API, or a proxied session route
+- **THEN** The hub SHALL authenticate every client before serving the dashboard, any dashboard API, or any proxied session route, on every interface including loopback.
+- **AND** Unauthenticated requests SHALL receive the login page (for navigations) or 401 (for API and WebSocket requests) and MUST NOT reach a child session.
+
+#### Scenario: Login return paths survive validation and failed attempts
+- **WHEN** a navigation is redirected to login and the form is rendered or submitted again
+- **THEN** When a navigation is redirected to the login page, the hub SHALL carry the originally requested path as a return-to parameter, and a successful login SHALL redirect to that path when — and only when — it validates as a same-origin absolute path (begins with a single `/`, carries no scheme or authority); any absent or invalid return-to target SHALL fall back to the dashboard (`/`).
+- **AND** The return-to target SHALL survive a failed attempt: every re-render of the login form after an error — invalid credentials, a rate-limited attempt, a malformed request, a cross-origin submission — SHALL carry the same validated target the attempt arrived with, so that a retry after a mistyped password lands where the gate bounced from.
+- **AND** The target SHALL be validated on every hop, both when it is rendered into the form and when it is acted on, and an invalid target SHALL be replaced by `/` rather than being echoed back.
+
+#### Scenario: Hub startup validates the configured user list
+- **WHEN** the hub starts with zero, one, or several configured user entries
+- **THEN** The hub configuration SHALL define users as a list of entries containing a user name and a password hash produced by a memory-hard algorithm (`Bun.password` defaults); plaintext passwords MUST NOT be stored.
+- **AND** A single-entry list SHALL be fully supported as the expected initial configuration.
+- **AND** Starting the hub without any configured users SHALL fail with an error that explains how to create the initial user entry.
 
 #### Scenario: Unauthenticated session request is blocked
 - **WHEN** a browser without a valid hub session requests `/s/uatu/api/state`
@@ -47,7 +65,15 @@ The hub SHALL authenticate every client before serving the dashboard, any dashbo
 - **AND** further attempts are rate-limited, keyed to the requesting client — behind a loopback fronting proxy the trusted hop of the forwarded-address header (the last entry, the one the immediate proxy appended) identifies the client, so one remote attacker cannot exhaust a bucket shared by every user
 
 ### Requirement: Users can sign out
-The hub SHALL provide a logout action — a POST endpoint guarded by the same-origin check for cookie-authenticated requests — that marks the presented session revoked in the session store and clears the cookie. Revocation SHALL be server-side and immediate: any subsequent request presenting that session id, by cookie or bearer, SHALL be treated as unauthenticated. The dashboard SHALL surface sign-out as a control, and the in-session workspace switcher SHALL offer a sign-out entry. Signing out one session SHALL NOT affect other sessions of the same user.
+
+Sign-out SHALL revoke only the presented server-side session immediately across cookie and bearer transports, clear its cookie, and remain available in dashboard and workspace controls through a protected POST.
+
+#### Scenario: A user signs out from the dashboard or in-session workspace switcher
+- **WHEN** a user signs out from the dashboard or in-session workspace switcher
+- **THEN** The hub SHALL provide a logout action — a POST endpoint guarded by the same-origin check for cookie-authenticated requests — that marks the presented session revoked in the session store and clears the cookie.
+- **AND** Revocation SHALL be server-side and immediate: any subsequent request presenting that session id, by cookie or bearer, SHALL be treated as unauthenticated.
+- **AND** The dashboard SHALL surface sign-out as a control, and the in-session workspace switcher SHALL offer a sign-out entry.
+- **AND** Signing out one session SHALL NOT affect other sessions of the same user.
 
 #### Scenario: Signing out re-gates the hub
 - **WHEN** an authenticated user activates sign out
@@ -70,7 +96,14 @@ The hub SHALL capture each child's per-session token when the backend starts the
 - **THEN** the session loads and the terminal authenticates without any token appearing in the browser-visible URL
 
 ### Requirement: State-changing hub endpoints are CSRF-protected
-Every state-changing hub endpoint (login excepted for the credential POST itself, session start/stop, workspace create/clone/init, session revocation) SHALL require a POST request. For cookie-authenticated requests the hub SHALL verify that the request's `Origin` header, when present, matches the hub's own origin, in addition to the `SameSite=Lax` cookie attribute. Bearer-authenticated requests are exempt from the Origin check: a bearer credential is attached explicitly by the client and cannot be ridden by a cross-site page.
+
+State-changing hub endpoints SHALL use POST and enforce matching Origin for cookie-authenticated requests in addition to SameSite=Lax. Explicit bearer credentials SHALL be exempt from Origin checks.
+
+#### Scenario: A client invokes login, session lifecycle, workspace creation, or session revocation endpoints
+- **WHEN** a client invokes login, session lifecycle, workspace creation, or session revocation endpoints
+- **THEN** Every state-changing hub endpoint (login excepted for the credential POST itself, session start/stop, workspace create/clone/init, session revocation) SHALL require a POST request.
+- **AND** For cookie-authenticated requests the hub SHALL verify that the request's `Origin` header, when present, matches the hub's own origin, in addition to the `SameSite=Lax` cookie attribute.
+- **AND** Bearer-authenticated requests are exempt from the Origin check: a bearer credential is attached explicitly by the client and cannot be ridden by a cross-site page.
 
 #### Scenario: Cross-origin state change is refused
 - **WHEN** a POST to a session-stop endpoint arrives bearing a valid cookie but an `Origin` of another site
@@ -88,7 +121,17 @@ The self-hosting runbook SHALL state that hub authentication decides who may ent
 - **THEN** they find explicit statements that login is required on every interface, that revocation is server-side, and that hub users share the daemon's OS user with no per-user isolation
 
 ### Requirement: Hub sessions are server-side records with one id over two transports
-The hub SHALL issue each login as a server-side session record persisted in its state directory: an opaque, unguessable session id mapped to the authenticated user, issue time, and a device label, stored owner-only and written atomically. Browsers SHALL carry the session id in an `HttpOnly; SameSite=Lax` cookie, marked `Secure` whenever the browser-facing connection is HTTPS — the hub terminating TLS itself, or a fronting proxy reporting `X-Forwarded-Proto: https` (the header can only add the attribute, never remove it). Native clients SHALL carry the same kind of session id as an `Authorization: Bearer` credential; both transports resolve through the same store. A presented id that is unknown, revoked, expired past the session max age, or whose user is no longer present in the configuration SHALL be treated as absent. Restarting the hub SHALL NOT invalidate sessions (the store persists); deleting the store SHALL invalidate all sessions. Session ids MUST NOT appear in URLs.
+
+Hub sessions SHALL persist as owner-only, atomically written opaque server-side records shared by cookie and bearer transports. Secure cookie handling, lifetime and user checks, revocation, restart persistence, and deletion invalidation SHALL apply without putting IDs in URLs.
+
+#### Scenario: The hub issues, stores, resolves, or invalidates a session across browser and native transports
+- **WHEN** the hub issues, stores, resolves, or invalidates a session across browser and native transports
+- **THEN** The hub SHALL issue each login as a server-side session record persisted in its state directory: an opaque, unguessable session id mapped to the authenticated user, issue time, and a device label, stored owner-only and written atomically.
+- **AND** Browsers SHALL carry the session id in an `HttpOnly; SameSite=Lax` cookie, marked `Secure` whenever the browser-facing connection is HTTPS — the hub terminating TLS itself, or a fronting proxy reporting `X-Forwarded-Proto: https` (the header can only add the attribute, never remove it).
+- **AND** Native clients SHALL carry the same kind of session id as an `Authorization: Bearer` credential; both transports resolve through the same store.
+- **AND** A presented id that is unknown, revoked, expired past the session max age, or whose user is no longer present in the configuration SHALL be treated as absent.
+- **AND** Restarting the hub SHALL NOT invalidate sessions (the store persists); deleting the store SHALL invalidate all sessions.
+- **AND** Session ids MUST NOT appear in URLs.
 
 #### Scenario: Unknown session id is treated as unauthenticated
 - **WHEN** a request carries a session id that has no record in the store
@@ -111,7 +154,16 @@ The hub SHALL issue each login as a server-side session record persisted in its 
 - **THEN** sessions belonging to that user no longer resolve
 
 ### Requirement: Hub session cookie is scoped to the request's Host port
-The hub session cookie's name SHALL be derived from the port of the request's `Host` header: the bare name `uatu_hub` when the request arrives at the scheme's default port (no port in `Host`, or `:80` on http and `:443` on https), and `uatu_hub_<port>` for any other port, e.g. `uatu_hub_4701` for a hub reached at `127.0.0.1:4701`. The hub SHALL apply this derivation consistently when it issues the cookie at login, when it reads a presented session from a request, and when it clears the cookie at sign-out or self-revocation. The port used SHALL be the one the browser sent, not the port the hub listens on. A bare `uatu_hub` cookie presented to a hub at a non-default port SHALL NOT be read. A browser holding only that cookie signs in once more.
+
+Hub cookie names SHALL follow the browser-supplied Host port consistently at issuance, reading, and clearing. Non-default ports SHALL use uatu_hub_<port> and MUST NOT accept legacy bare cookies.
+
+#### Scenario: A request reaches a hub through a default, non-default, or forwarded browser-facing Host port
+- **WHEN** a request reaches a hub through a default, non-default, or forwarded browser-facing Host port
+- **THEN** The hub session cookie's name SHALL be derived from the port of the request's `Host` header: the bare name `uatu_hub` when the request arrives at the scheme's default port (no port in `Host`, or `:80` on http and `:443` on https), and `uatu_hub_<port>` for any other port, e.g. `uatu_hub_4701` for a hub reached at `127.0.0.1:4701`.
+- **AND** The hub SHALL apply this derivation consistently when it issues the cookie at login, when it reads a presented session from a request, and when it clears the cookie at sign-out or self-revocation.
+- **AND** The port used SHALL be the one the browser sent, not the port the hub listens on.
+- **AND** A bare `uatu_hub` cookie presented to a hub at a non-default port SHALL NOT be read.
+- **AND** A browser holding only that cookie signs in once more.
 
 #### Scenario: Hubs on different ports of one host keep independent sessions
 - **WHEN** two hubs are reached at `127.0.0.1:4700` and `127.0.0.1:4701` and the user signs in to both
@@ -137,7 +189,14 @@ The hub session cookie's name SHALL be derived from the port of the request's `H
 - **THEN** the response clears `uatu_hub_4701` and no other hub's cookie
 
 ### Requirement: Native clients authenticate with the session id as a bearer credential
-The login endpoint SHALL accept an `application/json` body (`{name, password}`, with an optional device label) in addition to the form-encoded body, and SHALL succeed for requests that carry no `Origin` header (native HTTP clients). A successful JSON login SHALL set the session cookie and SHALL additionally return the session id in the JSON response body so native clients can store it (e.g. in the macOS Keychain) and present it as `Authorization: Bearer`. Unauthenticated requests to API routes SHALL receive a JSON 401 (never an HTML redirect), so a native client can distinguish "signed out" from other failures.
+
+Native clients SHALL be able to log in using JSON without Origin and receive the same session ID in cookie and JSON transports. Unauthenticated API requests SHALL receive JSON 401 rather than HTML or redirects.
+
+#### Scenario: A native HTTP client logs in using JSON or calls an API without valid authentication
+- **WHEN** a native HTTP client logs in using JSON or calls an API without valid authentication
+- **THEN** The login endpoint SHALL accept an `application/json` body (`{name, password}`, with an optional device label) in addition to the form-encoded body, and SHALL succeed for requests that carry no `Origin` header (native HTTP clients).
+- **AND** A successful JSON login SHALL set the session cookie and SHALL additionally return the session id in the JSON response body so native clients can store it (e.g. in the macOS Keychain) and present it as `Authorization: Bearer`.
+- **AND** Unauthenticated requests to API routes SHALL receive a JSON 401 (never an HTML redirect), so a native client can distinguish "signed out" from other failures.
 
 #### Scenario: JSON login from a native client
 - **WHEN** a native client POSTs `{name, password}` as JSON to the login endpoint without an `Origin` header
@@ -146,4 +205,3 @@ The login endpoint SHALL accept an `application/json` body (`{name, password}`, 
 #### Scenario: Revoked bearer yields a machine-readable 401
 - **WHEN** a native client calls the state API with a revoked or unknown bearer id
 - **THEN** the hub responds 401 with a JSON body, not an HTML page or redirect
-

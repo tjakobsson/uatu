@@ -5,7 +5,16 @@
 Define how UatuCode Desktop connects to uatu hubs beyond the bundled local one: a persisted roster of remote hubs with Keychain-held credentials, native ownership of hub authentication with cookie injection into web views, per-hub state probing that drives the splash cards, and a clear distinction between app-lifetime local sessions and hub-lifetime remote sessions.
 ## Requirements
 ### Requirement: Users can manage a roster of remote hubs
-The app SHALL let users add, rename, and remove remote hubs. Adding a hub takes a URL, user name, and password, and SHALL verify them with a login attempt before saving; failures SHALL distinguish unreachable-host from rejected-credentials. Roster entries (identifier, display name, URL, user name) SHALL persist across app restarts; passwords and session cookies MUST be stored only in the macOS Keychain, never in preferences or on disk in plaintext. Removing a hub SHALL delete its Keychain items. Remote hub URLs MUST be HTTPS; plain HTTP SHALL be accepted only for loopback addresses.
+
+The app SHALL verify and persist an editable remote-hub roster with Keychain-only secrets, distinct connectivity/credential errors, secret deletion on removal, and HTTPS except for loopback HTTP.
+
+#### Scenario: A user adds, renames, removes, or reconnects a configured remote hub
+- **WHEN** a user adds, renames, removes, or reconnects a configured remote hub
+- **THEN** The app SHALL let users add, rename, and remove remote hubs.
+- **AND** Adding a hub takes a URL, user name, and password, and SHALL verify them with a login attempt before saving; failures SHALL distinguish unreachable-host from rejected-credentials.
+- **AND** Roster entries (identifier, display name, URL, user name) SHALL persist across app restarts; passwords and session cookies MUST be stored only in the macOS Keychain, never in preferences or on disk in plaintext.
+- **AND** Removing a hub SHALL delete its Keychain items.
+- **AND** Remote hub URLs MUST be HTTPS; plain HTTP SHALL be accepted only for loopback addresses.
 
 #### Scenario: Adding a hub verifies credentials
 - **WHEN** the user adds a hub with a valid URL and correct credentials
@@ -35,7 +44,24 @@ For each configured hub the app SHALL derive one of three states from an authent
 - **THEN** the app performs no periodic hub state requests
 
 ### Requirement: The native layer holds the hub session id and injects it into web views
-The app SHALL authenticate to hubs natively — a JSON login request without an `Origin` header — and SHALL hold the returned session id as the single credential, stored only in the macOS Keychain. Native API calls SHALL present it as `Authorization: Bearer`. Before any web view navigates to a hub origin, the app SHALL write the session id into the web view's cookie store as the hub session cookie, scoped to that hub's origin and named by the hub's port rule (`uatu_hub` at the scheme's default port, `uatu_hub_<port>` otherwise), so web and native surfaces share one server-side session. Clearing a hub's cookie SHALL use the same name. When either surface receives a 401, the session is dead server-side: the app SHALL attempt at most one silent re-login with the Keychain password per signed-out transition (respecting the hub's login rate limit), then present a sign-in prompt. Observing a sign-out navigation in a web view SHALL cause the app to discard the session id and stored password for that hub — the hub's server-side revocation makes further client-side verification unnecessary. TLS validation SHALL use system trust; certificate exceptions are not offered.
+
+The native app SHALL own the Keychain-held Hub session ID, use bearer transport for APIs, and inject the port-scoped cookie before web navigation. It SHALL bound silent re-login, forget credentials on web sign-out, and enforce system TLS trust without certificate bypass.
+
+#### Scenario: Native and web-view surfaces authenticate, navigate, receive 401, sign out, or validate a hub certificate
+- **WHEN** native and web-view surfaces authenticate, navigate, receive 401, sign out, or validate a hub certificate
+- **THEN** The app SHALL authenticate to hubs natively — a JSON login request without an `Origin` header — and SHALL hold the returned session id as the single credential, stored only in the macOS Keychain.
+- **AND** Native API calls SHALL present it as `Authorization: Bearer`.
+- **AND** Before any web view navigates to a hub origin, the app SHALL write the session id into the web view's cookie store as the hub session cookie, scoped to that hub's origin and named by the hub's port rule (`uatu_hub` at the scheme's default port, `uatu_hub_<port>` otherwise), so web and native surfaces share one server-side session.
+- **AND** Clearing a hub's cookie SHALL use the same name.
+
+#### Scenario: A signed-out transition permits only one silent recovery
+- **WHEN** either the native API or a hub web view receives a 401
+- **THEN** When either surface receives a 401, the session is dead server-side: the app SHALL attempt at most one silent re-login with the Keychain password per signed-out transition (respecting the hub's login rate limit), then present a sign-in prompt.
+- **AND** Observing a sign-out navigation in a web view SHALL cause the app to discard the session id and stored password for that hub — the hub's server-side revocation makes further client-side verification unnecessary.
+
+#### Scenario: Native hub connections enforce system TLS trust
+- **WHEN** a configured hub connection validates its TLS certificate
+- **THEN** TLS validation SHALL use system trust; certificate exceptions are not offered.
 
 #### Scenario: Opening a session is seamless when signed in
 - **WHEN** the user opens a workspace on a signed-in hub
@@ -59,4 +85,3 @@ The app SHALL authenticate to hubs natively — a JSON login request without an 
 #### Scenario: Untrusted certificate is a hard error
 - **WHEN** a hub presents a certificate the system does not trust
 - **THEN** the connection fails with an error explaining the certificate problem, with no bypass offered
-

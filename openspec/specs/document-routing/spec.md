@@ -6,7 +6,24 @@ Route documents, commit previews, cross-document links, and fragments through th
 ## Requirements
 
 ### Requirement: Navigate cross-document anchor clicks inside the preview
-When a user clicks an anchor inside the rendered preview whose resolved URL has the same origin as the current page and a non-`http(s):` exclusion does not apply, the browser UI SHALL handle the click in the SPA rather than letting the browser perform a full navigation. If the resolved path maps to a known non-binary document under any watched root, the SPA SHALL switch the preview to that document via the in-app document load path. If the resolved path does NOT map to a known viewable document (the path is unknown, or it resolves to a document classified as binary), the SPA SHALL render the in-app "Document not found" empty state and push the unknown path to the URL bar, EXCEPT that clicks resolving to a binary document MUST continue to fall through to the browser so the static-file fallback can serve the bytes. The interception MUST resolve the click target against the per-document `<base href>` so cross-document references written as relative paths (e.g. `xref:other.adoc[…]`, `[setup](guides/setup.md)`) reach the correct document. The interception MUST NOT fire for any of the following — those clicks MUST fall through to the browser's default behavior: a fragment-only href (handled by the existing in-page anchor handler), a modifier-click (Cmd, Ctrl, Shift, or Alt held), an explicit `target` attribute other than `_self`, a URL whose origin differs from the current page, a non-`http(s):` protocol (`mailto:`, `javascript:`, `tel:`, etc.), and a path that resolves to a document classified as binary. After the in-app load completes for a resolvable doc, a fragment in the resolved URL (e.g. `other.adoc#section`) SHALL scroll the matching element into view, mirroring sanitize's `user-content-` id prefix the same way the in-page anchor handler does. When the interception fires AND the active document or URL is changing as a result of the click, the system MUST push a new browser history entry via `history.pushState`, with the new URL being the target document's relative path (per-segment percent-encoded), so the back button can return to the previously selected document. While rendering the in-app "Document not found" empty state, the SPA MUST NOT tear down or restart its open WebSocket connections (notably the embedded terminal's per-pane WebSockets).
+Eligible same-origin preview links SHALL navigate through the SPA, loading known non-binary watched documents or showing the in-app unknown-path state. Interception SHALL preserve native exclusions, document-relative resolution, fragments, browser history, and existing WebSocket connections.
+
+#### Scenario: Preview interception resolves documents and unknown paths in place
+- **WHEN** a rendered-preview anchor resolves to the current origin and no non-`http(s):` or other exclusion applies
+- **THEN** the SPA SHALL handle it without full navigation and SHALL load known non-binary documents under any watched root through its document load path
+- **AND** unknown/non-viewable paths SHALL show "Document not found" and push the unknown path to the URL bar, EXCEPT binary documents MUST fall through to native static-file byte delivery
+- **AND** targets MUST resolve against per-document `<base href>` so relative `xref:other.adoc[…]` and `[setup](guides/setup.md)` reach the correct document
+- **AND** rendering the unknown-path state MUST NOT tear down/restart open WebSockets, notably terminal per-pane connections
+
+#### Scenario: Native link gestures and protocols bypass cross-document interception
+- **WHEN** a preview click has fragment-only href, Cmd/Ctrl/Shift/Alt modifier, explicit non-`_self` target, different origin, non-`http(s):` protocol such as `mailto:`, `javascript:`, or `tel:`, or a binary document path
+- **THEN** cross-document interception MUST NOT fire and browser default behavior MUST remain, with fragment-only href left to the existing in-page handler
+
+#### Scenario: Resolved cross-document links retain fragment and Back behavior
+- **WHEN** an intercepted link changes active document or URL
+- **THEN** it MUST push `history.pushState` with target relative path percent-encoded per segment so Back can return to the prior document
+- **WHEN** a resolvable document load completes with a fragment such as `other.adoc#section`
+- **THEN** it SHALL scroll to the matching element using sanitize's `user-content-` prefix behavior like the in-page anchor handler
 
 #### Scenario: Clicking an AsciiDoc cross-document link swaps the preview in place
 - **WHEN** a user clicks an anchor in an AsciiDoc preview whose `href` is `asciidoc-cheatsheet.adoc`
@@ -59,7 +76,15 @@ When a user clicks an anchor inside the rendered preview whose resolved URL has 
 - **AND** Asciidoctor is not invoked on the contents
 
 ### Requirement: Reflect the active document in the URL
-The browser URL pathname SHALL track the document currently rendered in the preview, at all times during a watch session. User-initiated changes to the active document (sidebar tree click, in-preview cross-document link click, manual pin/unpin that changes the rendered file) MUST push a new entry onto the browser history stack via `history.pushState`, with the new URL being the document's relative path (per-segment percent-encoded). Follow-mode auto-switches caused by file-system events MUST update the URL via `history.replaceState` so the address bar stays accurate without polluting the back stack with file-change-driven entries. On initial page load, the system MUST call `history.replaceState` once to populate `history.state` with the current document identifier so subsequent `popstate` events can be resolved unambiguously. The system MUST NOT update the URL while the active document is unchanged.
+The URL pathname SHALL track the previewed document throughout the watch session. User document changes MUST push history, Follow filesystem switches MUST replace history, and unchanged documents MUST NOT trigger URL updates.
+
+#### Scenario: Document URL updates distinguish user navigation from Follow
+- **WHEN** sidebar click, cross-document preview link, or manual pin/unpin changes the rendered file
+- **THEN** the system MUST `history.pushState` with its relative path percent-encoded per segment
+- **WHEN** filesystem-driven Follow auto-switches the document
+- **THEN** it MUST `history.replaceState` to keep the address accurate without adding file-change entries
+- **WHEN** the page initially loads
+- **THEN** it MUST call `history.replaceState` once to populate the current document identifier in `history.state` for unambiguous `popstate`
 
 #### Scenario: Clicking a sidebar entry pushes a history entry
 - **WHEN** a user clicks a non-binary document in the sidebar tree
@@ -84,7 +109,14 @@ The browser URL pathname SHALL track the document currently rendered in the prev
 - **AND** the URL remains parseable and round-trips back to the original relative path on decode
 
 ### Requirement: Open a document by direct URL
-The browser UI SHALL initialize on the document or preview identified by an explicit URL. With no explicit preview query at the workspace root, it SHALL restore a valid personal document path, otherwise the session default. Known non-binary documents, previewable images, and recognized audio/video files SHALL be valid explicit and saved preview destinations. Explicit commit-preview and other supported preview queries SHALL override a saved document. Media URLs and saved media previews SHALL open paused, without restoring an audition session. A CLI single-file constraint SHALL not be widened by an explicit path. Unknown paths SHALL retain existing static-fallback/SPA behavior; fragments SHALL retain normal post-render handling where applicable. Existing intentional-deselection rules SHALL continue to override implicit restoration.
+Explicit URLs SHALL determine the initial document or preview. Root arrivals without explicit preview queries SHALL restore valid personal destinations or session defaults, subject to intentional deselection and unchanged scope, fallback, fragment, and paused-media rules.
+
+#### Scenario: Explicit and saved destinations respect preview priority and scope
+- **WHEN** an initial preview destination is resolved
+- **THEN** known non-binary documents, previewable images, and recognized audio/video SHALL be valid explicit/saved destinations
+- **AND** explicit commit-preview and other supported queries SHALL override saved documents; absent an explicit root preview query a valid personal document path SHALL restore, otherwise session default
+- **AND** media URLs/saved previews SHALL open paused without restoring audition sessions; explicit paths SHALL not widen CLI single-file scope
+- **AND** unknown paths SHALL retain static-fallback/SPA behavior, fragments SHALL retain applicable normal post-render handling, and intentional deselection SHALL override implicit restoration
 
 #### Scenario: Root URL restores the personal document
 - **WHEN** the workspace root is opened and personal state names a valid document
@@ -127,7 +159,13 @@ The browser UI SHALL initialize on the document or preview identified by an expl
 - **THEN** its paused preview is restored without restoring prior playback position or active auditioning
 
 ### Requirement: Server returns the SPA shell for unknown HTML-preferring navigations
-The server's navigation fallback SHALL distinguish HTML-preferring navigation requests (i.e., a top-level browser navigation whose `Accept` header expresses a preference for `text/html`) from non-HTML-preferring requests (e.g., `curl` with `Accept: */*`, sub-resource fetches with `Accept: image/*`). For an HTML-preferring request whose path does NOT resolve to a known viewable document AND does NOT match an existing static file under any watched root, the server SHALL return the SPA shell (the same HTML body it returns for known viewable doc paths) instead of a `404 Not Found` response. The SPA then renders the in-app "Document not found" empty state from its own boot path. For non-HTML-preferring requests at unknown paths, the server's behavior is unchanged — `404 Not Found`.
+Unknown-path navigation fallback SHALL serve the SPA shell for HTML-preferring navigations without an existing static file under any watched root. Non-HTML-preferring unknown requests SHALL retain `404 Not Found` behavior.
+
+#### Scenario: Accept preference distinguishes SPA navigation from raw resource requests
+- **WHEN** a top-level browser navigation prefers `text/html` in `Accept` and its path is neither a known viewable document nor existing static file under any watched root
+- **THEN** the server SHALL return the same SPA HTML shell used for known viewable paths rather than 404, and SPA boot renders "Document not found"
+- **WHEN** an unknown-path request is non-HTML-preferring, such as `curl` with `Accept: */*` or a subresource with `Accept: image/*`
+- **THEN** server behavior SHALL remain `404 Not Found`
 
 #### Scenario: HTML-preferring navigation to an unknown path serves the SPA shell
 - **WHEN** the server receives a GET to `/no-such-doc.md` with `Accept: text/html,application/xhtml+xml,*/*`
@@ -167,7 +205,14 @@ An explicit non-root URL resolving to a known non-binary document, previewable i
 - **THEN** existing eligible document/image catch-up behavior resumes without autoplaying media
 
 ### Requirement: Navigate document history with the browser back and forward buttons
-The system SHALL restore the destination identified by popstate through in-app preview loading, without pushing or replacing additional history. Recognized media SHALL be valid history destinations alongside documents and previewable images. A restored media preview SHALL be paused unless it presents the same clip's independently active playback session, which SHALL continue without a duplicate source. Unknown/out-of-scope destinations SHALL follow the existing empty-preview rules. Destination-changing Back/Forward SHALL disable Follow. A same-document fragment-only transition SHALL scroll to the fragment or top without reloading, changing history, or disabling Follow. History navigation alone SHALL not start or replace an independently active audition session.
+`popstate` SHALL restore preview destinations in-app without additional history writes. Back/Forward destination changes SHALL disable Follow; same-document fragments SHALL preserve it. Media history SHALL preserve independently active playback without starting or replacing audition sessions.
+
+#### Scenario: History restores media, unavailable destinations, and fragments without side effects
+- **WHEN** `popstate` restores documents, previewable images, or recognized media
+- **THEN** in-app preview loading SHALL avoid pushing/replacing history, and unknown/out-of-scope destinations SHALL use existing empty-preview rules
+- **AND** media SHALL be paused except the same clip's independently active session SHALL continue without duplicate source
+- **AND** destination-changing Back/Forward SHALL disable Follow, but same-document fragment-only transitions SHALL scroll to fragment/top without reload, history change, or Follow change
+- **AND** history alone SHALL not start or replace an independently active audition session
 
 #### Scenario: Back button restores a previously selected document
 - **WHEN** Back follows navigation across several document destinations
@@ -198,7 +243,12 @@ The system SHALL restore the destination identified by popstate through in-app p
 - **THEN** that video's preview opens paused and does not replace or duplicate the active audition
 
 ### Requirement: Navigate Git Log commit previews by URL
-The browser UI SHALL represent Git Log commit previews with a same-origin URL using the query parameters `repository` and `commit` on the SPA root path. A commit preview URL MUST resolve against the bounded repository commit-log data already present in the current state payload. The browser UI MUST restore a resolvable commit preview on direct-link arrival, refresh, and `popstate`. When the URL references a repository or commit that is not present in the current bounded state payload, the browser UI MUST render a clear empty-preview unavailable state instead of selecting an unrelated document.
+Git Log commit previews SHALL use same-origin SPA-root URLs with `repository` and `commit` queries. They MUST resolve only against current bounded repository commit-log state, restore on direct arrival, refresh, and `popstate`, and show unavailable rather than unrelated documents when unresolved.
+
+#### Scenario: Commit destination resolution stays within current bounded state
+- **WHEN** a commit preview URL arrives directly, is refreshed, or is restored by `popstate`
+- **THEN** the browser MUST resolve it against repository commit-log data already in the current bounded state payload
+- **AND** absent repository/commit data MUST produce a clear empty-preview unavailable state, not unrelated document selection
 
 #### Scenario: Direct commit preview URL renders the commit message
 - **WHEN** a user navigates directly to `/?repository=<repositoryId>&commit=<commitSha>`
@@ -239,7 +289,12 @@ The browser UI SHALL represent Git Log commit previews with a same-origin URL us
 - **AND** the preview renders an unavailable empty state when the commit is no longer present
 
 ### Requirement: Open external links from the preview in a new browser tab
-Anchors in the rendered preview whose `href` is an absolute `http:` or `https:` URL SHALL open in a new browser tab/window so that following them does NOT unload the uatu SPA. The renderer MUST mark such anchors with `target="_blank"` and `rel="noopener noreferrer"` before sanitization passes the HTML to the browser. The sanitize allowlist MUST permit those two attributes on `<a>` so the markings survive. Same-origin relative links (`other.adoc`, `guides/setup.md`, fragment-only `#section`) MUST NOT be marked and MUST continue to flow through the in-app cross-document and in-page anchor handlers respectively. Both the Markdown and AsciiDoc render paths MUST apply the same rewrite uniformly.
+Absolute `http:`/`https:` preview anchors SHALL open a new tab/window without unloading the SPA, using safe renderer markings preserved through sanitization. Both Markdown and AsciiDoc MUST apply the rewrite uniformly; relative and fragment links MUST retain in-app handling.
+
+#### Scenario: External-link rewrite survives sanitization without capturing relative links
+- **WHEN** Markdown or AsciiDoc renders absolute `http:`/`https:` anchors
+- **THEN** the renderer MUST add `target="_blank"` and `rel="noopener noreferrer"` before sanitization, whose `<a>` allowlist MUST permit both attributes
+- **AND** same-origin relative `other.adoc`, `guides/setup.md`, and fragment-only `#section` links MUST NOT receive those markings and MUST continue through cross-document and in-page handlers respectively
 
 #### Scenario: An external Markdown link opens in a new tab
 - **WHEN** a Markdown document contains `[example](https://example.com)`
@@ -264,7 +319,14 @@ Anchors in the rendered preview whose `href` is an absolute `http:` or `https:` 
 - **AND** the in-page anchor handler intercepts the click and scrolls within the document
 
 ### Requirement: In-page fragment clicks push a browser history entry
-When a user clicks an anchor whose `href` begins with `#` inside the rendered preview, the system SHALL push a new browser history entry whose URL is the current pathname and search query concatenated with the new fragment, so that the back button returns the user to the previous scroll state (fragment-less URL or prior fragment) of the same document rather than to a previously selected document. The system MUST scroll the matching element into view as before. The system MUST NOT push a new history entry when the resulting URL is identical to the current URL (clicking a TOC entry that already corresponds to the active fragment is a no-op). The system MUST NOT disable follow mode for hash-only navigations — follow mode is a document-selection concept and intra-document TOC navigation does not change the active document.
+Rendered-preview fragment clicks SHALL push changed fragment URLs and scroll to matching elements, allowing Back to restore the same document's prior scroll state. Identical URLs MUST NOT add history, and hash-only navigation MUST NOT disable Follow.
+
+#### Scenario: Fragment history preserves the current document and Follow state
+- **WHEN** a rendered-preview anchor whose href begins `#` is clicked
+- **THEN** the system SHALL push current pathname plus search query plus new fragment so Back reaches the same document's prior fragment or fragment-less scroll state, not a previously selected document
+- **AND** it MUST scroll the matching element into view as before
+- **AND** if resulting URL is identical it MUST NOT push, making repeated active-TOC clicks no-ops
+- **AND** hash-only navigation MUST NOT disable Follow because it changes no active document
 
 #### Scenario: Clicking a TOC entry pushes a history entry
 - **WHEN** a user views a rendered AsciiDoc document with a `:toc:` block

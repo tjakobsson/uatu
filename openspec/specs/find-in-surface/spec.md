@@ -55,6 +55,13 @@ an act about the document. The initial value SHALL be `preview`.
 
 ### Requirement: Find shortcut routes to the active surface
 
+Find and match-navigation shortcuts SHALL target the active supported surface or fall back to Preview. The target SHALL become visible before mounting its find bar; suppressing native find MUST NOT leave the user with a hidden find surface.
+
+#### Scenario: Invoke find from a visible surface or the touch Files tab
+- **WHEN** a find shortcut targets a surface that is not currently visible or lacks its own find implementation
+- **THEN** the supported target is brought forward before its find UI replaces native browser find
+
+
 `⌘F` (`Ctrl+F` on non-Apple platforms) SHALL open find on the active surface and
 SHALL prevent the host's native find from acting. `⌘G` and `⇧⌘G` SHALL advance to
 the next and previous match on the same surface. When the active surface has no

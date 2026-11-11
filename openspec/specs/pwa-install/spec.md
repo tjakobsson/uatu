@@ -5,6 +5,13 @@ Define the Progressive Web App installation capability for UatuCode: a valid web
 ## Requirements
 
 ### Requirement: App is installable as a Progressive Web App
+
+PWA installation SHALL depend on a valid manifest and icons, not notification permission or offline support. Hub push workers SHALL remain push-only. Boot SHALL safely remove only identified legacy Uatu workers without delaying startup or disturbing current push and unrelated registrations.
+
+#### Scenario: Boot or install the app with or without service-worker support
+- **WHEN** a supported browser evaluates installation or the app reconciles worker registrations at boot
+- **THEN** installability remains independent of push enrollment and worker cleanup preserves the current registration boundaries
+
 The UI SHALL meet Chromium's installability criteria so that Edge, Chrome, and Brave surface their native install affordance when a user visits the Uatu URL. Installation SHALL depend on a valid manifest and icons, not notification permission, push enrollment, a service worker, or offline capability. A hub-served app SHALL support a push-only service worker for notification enrollment and existing subscription reconciliation; that worker SHALL NOT intercept document/API requests or provide an offline content cache. Boot SHALL clean up only identified legacy Uatu service-worker registrations and SHALL preserve the current push registration and unrelated registrations. Cleanup and notification support detection SHALL be safe where service workers are unavailable and SHALL NOT block or delay boot.
 
 #### Scenario: Install affordance appears in Edge
@@ -48,6 +55,13 @@ The UI SHALL meet Chromium's installability criteria so that Edge, Chrome, and B
 - **AND** notification settings explain the unavailable capability without a boot error
 
 ### Requirement: Server serves a valid web app manifest
+
+The server SHALL serve and link a valid web-app manifest with the required branding, standalone display, colors, and icon entries. Scope SHALL follow serving ownership: origin-wide for Hub-served navigation, confined to the prefix for a generic base-path mount.
+
+#### Scenario: Load a manifest from a Hub-served or generic-mounted session
+- **WHEN** the browser requests the linked web-app manifest
+- **THEN** its content type, required fields, relocated URLs, and declared scope match the session's serving mode
+
 The server SHALL serve `/manifest.webmanifest` with `Content-Type: application/manifest+json`, declaring at minimum `name`, `short_name`, `start_url`, `display: "standalone"`, `background_color`, `theme_color`, and an `icons` array including 192x192 and 512x512 PNG entries with `purpose: "any"`. The HTML shell SHALL link to this manifest from `<head>`. Manifest `scope` SHALL depend on the serving mode: a session served through a uatu hub SHALL declare the origin root (`/`) as its scope while keeping `start_url` and icon paths relocated under the session's base path, so that navigating to the hub dashboard, login, or a sibling session stays inside the installed app; a session served under a generic `--base-path` mount SHALL keep its scope confined to the base path, because a generic mount does not own its origin.
 
 #### Scenario: Manifest is reachable and well-typed
@@ -70,6 +84,13 @@ The server SHALL serve `/manifest.webmanifest` with `Content-Type: application/m
 - **THEN** the manifest's `scope`, `start_url`, and icon `src` values are all relocated under `<base>`
 
 ### Requirement: Server serves PWA icons
+
+The server SHALL serve appropriately typed and cached raster icons derived from the logo, with padded, aspect-preserving Home Screen artwork and safe maskable bounds. Hub and workspace pages SHALL link Apple touch icons, and changed artwork SHALL receive revisioned URLs.
+
+#### Scenario: Fetch installation and Home Screen artwork after an icon revision
+- **WHEN** a browser reads manifest or HTML icon metadata and requests the advertised artwork
+- **THEN** the logo remains padded and legible at the required sizes without reusing an obsolete cached icon URL
+
 The server SHALL serve raster icons at `/assets/icon-192.png` and `/assets/icon-512.png` derived from the existing `uatu-logo.svg`, with appropriate `Content-Type: image/png` headers and a long `Cache-Control` lifetime. Home Screen icon images SHALL have an opaque white background and preserve the logo's aspect ratio with visible padding. Icons advertised as maskable SHALL keep the complete mark inside the centered safe circle of radius 40% of the image width. Hub and workspace pages SHALL provide an explicit Apple touch-icon link to the same padded artwork. Icon URLs in manifests and HTML metadata SHALL carry a revision query when the artwork changes so a fresh icon request does not reuse the previous HTTP cache entry.
 
 #### Scenario: 192px icon is reachable
@@ -95,6 +116,13 @@ The server SHALL serve raster icons at `/assets/icon-192.png` and `/assets/icon-
 - **AND** the applicable manifest advertises the same artwork revision
 
 ### Requirement: Server uses a stable default port
+
+Session children SHALL default to port 4711 and roll to the next available port only when no explicit port was supplied. Explicit ports SHALL be honored without rolling, including ephemeral port 0; Hub children SHALL use ephemeral loopback ports proxied at the Hub origin.
+
+#### Scenario: Start a session child with a default or explicit port
+- **WHEN** a source-run or Hub-managed child binds its HTTP listener
+- **THEN** port selection, rolled-port diagnostics, and the printed child URL follow the invocation's explicit or default-port contract
+
 A session child SHALL bind to a stable default port (4711) when no `--port` flag is provided. If the default port is in use, the session child SHALL pick the next available port and log the rolled port to stderr. A session child's invocation MAY override the default with `--port <n>`, which is honored without rolling, including `--port 0` to opt into ephemeral port behavior. The hub starts every session child with `--port 0`, so hub-managed sessions bind kernel-assigned loopback ports that the hub reads from each child's printed URL and fronts at its own origin. The default port therefore applies to session children started without `--port`, such as a source run.
 
 #### Scenario: Default port is used when free

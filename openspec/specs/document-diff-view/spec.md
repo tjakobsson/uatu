@@ -4,7 +4,21 @@ Define the Diff view in the preview pane: a third view-mode (alongside Rendered 
 ## Requirements
 ### Requirement: Diff view is sourced from a dedicated document-diff endpoint
 
-The server SHALL expose `GET /api/document/diff?id=<absolutePath>` returning a JSON payload describing the diff for the given document against the resolved review base. The payload SHALL include the resolved base ref when relevant and one of the following discriminated kinds: `text` (with the unified diff patch string, byte size, added and deleted line counts), `unchanged`, `binary`, or `unsupported-no-git`. The `text` kind MAY additionally include `oldContents` and `newContents` (the full file blobs at the base ref and in the worktree respectively) and `oldPath` (for renamed files) when both blobs fit under a per-blob size cap; the client uses these to drive @pierre/diffs' two-blob input path so the "N unmodified lines" chevrons can expand arbitrary context. When either blob exceeds the per-blob cap, the response SHALL omit both blob fields and the client SHALL fall back to a patch-only render. The endpoint SHALL invoke `git diff` with rename detection enabled (`-M`) so renamed files render as a single hunk pair rather than as an add-delete pair. When `git diff` returns an empty patch for a file that exists on disk but is not tracked, the endpoint SHALL fall back to `git diff --no-index /dev/null <path>` so newly-added files surface as additions rather than as a misleading "unchanged" state. The endpoint MUST NOT 404 on a non-git workspace; instead it returns `unsupported-no-git` so the client can render the muted fallback card. The endpoint MUST validate that the document id resolves to a watched file before running git, mirroring the existing document-rendering endpoint's path-safety posture.
+The server SHALL expose `GET /api/document/diff?id=<absolutePath>` returning a discriminated JSON diff against the resolved review base. It MUST validate watched-file identity before Git execution and support text, unchanged, binary, and non-Git outcomes.
+
+#### Scenario: Diff requests carry bounded content and path-safe Git results
+- **WHEN** a document diff is requested
+- **THEN** the endpoint MUST validate that its id resolves to a watched file before Git execution, matching document-rendering path safety
+- **AND** the payload SHALL include the relevant resolved base ref and kind `text` (unified patch, byte size, added/deleted line counts), `unchanged`, `binary`, or `unsupported-no-git`
+- **AND** text MAY include full base/worktree blobs as `oldContents`/`newContents` and renamed `oldPath` when both fit the per-blob cap, enabling @pierre/diffs two-blob input and arbitrary "N unmodified lines" context expansion
+- **WHEN** either blob exceeds the cap
+- **THEN** both blob fields SHALL be omitted and the client SHALL render patch-only
+
+#### Scenario: Git execution handles renames, additions, and non-Git roots
+- **WHEN** the endpoint obtains the watched file's diff
+- **THEN** it SHALL use `git diff -M` for single rename hunk pairs rather than add/delete pairs
+- **AND** an empty patch for an on-disk untracked file SHALL fall back to `git diff --no-index /dev/null <path>` to show an addition, not unchanged
+- **AND** a non-Git workspace MUST NOT produce 404; it SHALL return `unsupported-no-git` for the muted client card
 
 #### Scenario: Endpoint returns a text-kind payload for a modified text file
 - **WHEN** a request is made for a file that is modified against the resolved review base
@@ -45,7 +59,12 @@ The server SHALL expose `GET /api/document/diff?id=<absolutePath>` returning a J
 
 ### Requirement: Diff view degrades gracefully in non-git, unchanged, and binary cases
 
-When the document-diff endpoint returns `unsupported-no-git`, `unchanged`, or `binary` for the active file, the Diff view SHALL render a single muted state card inside the preview body in place of any diff content. The card SHALL communicate the case to the reader and SHALL NOT load or invoke `@pierre/diffs`. For `unsupported-no-git`, the card MUST identify that no git history is available. For `unchanged`, the card MUST identify that the file has no changes against the resolved base and SHALL display the base ref. For `binary`, the card MUST identify the file as a changed binary and SHALL display the base ref. In each case the view choice SHALL remain Diff (the segment stays selected) so the user can leave it without re-activating the toggle.
+For `unsupported-no-git`, `unchanged`, or `binary`, Diff SHALL replace diff content with one explanatory muted preview-body card, without loading or invoking `@pierre/diffs`, and SHALL keep Diff selected.
+
+#### Scenario: State cards explain the exact non-text outcome
+- **WHEN** the active file returns a non-text diff kind
+- **THEN** `unsupported-no-git` MUST identify no Git history; `unchanged` MUST identify no changes against the resolved base and SHALL display that ref; `binary` MUST identify a changed binary and SHALL display the ref
+- **AND** the Diff segment SHALL remain selected so leaving requires no toggle reactivation
 
 #### Scenario: Non-git workspace shows a muted "no git history" card
 - **WHEN** the active Diff view targets a file whose watched root is not in a git repository
@@ -67,7 +86,14 @@ When the document-diff endpoint returns `unsupported-no-git`, `unchanged`, or `b
 
 ### Requirement: Diff view falls back to a lightweight render for very large diffs
 
-When the document-diff endpoint returns `kind: "text"` but the patch exceeds either the configured byte cutoff (`DIFF_MAX_BYTES`, default 256 KB) or the configured changed-line cutoff (`DIFF_MAX_LINES`, default 5 000 — the sum of added and deleted lines), the Diff view SHALL render the diff using a lightweight escaped-HTML emitter inside a `<pre>` block. The lightweight path SHALL distinguish added lines (`+`-prefixed), deleted lines (`-`-prefixed), context lines, and hunk headers (`@@…@@`) via background and prefix styling, but SHALL NOT invoke syntax highlighting and SHALL NOT call into `@pierre/diffs`. The emitter SHALL group lines into fixed-size chunks styled with `content-visibility: auto` and an intrinsic-size hint so offscreen chunks skip layout and paint. A one-line notice MUST be rendered above or alongside the lightweight diff to explain why syntax highlighting was disabled. Both cutoffs SHALL be exported as module-level constants in the Diff view implementation so they are tunable and overridable from tests.
+Text patches exceeding `DIFF_MAX_BYTES` (default 256 KB) or `DIFF_MAX_LINES` (default 5 000 added plus deleted lines) SHALL use a lightweight escaped-HTML `<pre>` render instead of syntax highlighting or `@pierre/diffs`.
+
+#### Scenario: Oversized patches retain classified lines and explain reduced rendering
+- **WHEN** a patch with `kind: "text"` exceeds either configured patch cutoff
+- **THEN** the lightweight emitter SHALL distinguish added `+`, deleted `-`, context, and `@@…@@` hunk-header lines through background and prefix styling without syntax highlighting or Pierre calls
+- **AND** fixed-size chunks SHALL use `content-visibility: auto` and an intrinsic-size hint to skip offscreen layout/paint
+- **AND** a one-line notice above or alongside MUST explain disabled highlighting
+- **AND** both cutoffs SHALL be exported module-level Diff constants, tunable and overridable by tests
 
 #### Scenario: A patch above the byte cutoff renders via the lightweight emitter
 - **WHEN** the diff endpoint returns a text patch larger than `DIFF_MAX_BYTES`
@@ -92,7 +118,14 @@ When the document-diff endpoint returns `kind: "text"` but the patch exceeds eit
 
 ### Requirement: A single Shiki highlighter is cached and reused across diff renders
 
-The Diff view implementation SHALL initialize at most one Shiki highlighter instance per browser session and reuse it across every subsequent `@pierre/diffs` render in that session. The highlighter SHALL be created lazily — on the first Diff render that actually invokes `@pierre/diffs`, or earlier via the prewarm path when Diff rendering is plausibly imminent — and never on the fallback render paths themselves. Subsequent diff renders, including renders triggered by view-mode toggles, file switches, and in-place refreshes, MUST NOT re-create the highlighter and MUST NOT re-load grammars that are already loaded on the cached highlighter. The cached highlighter MAY load additional grammars on demand when a file requires a language not yet loaded.
+Diff SHALL initialize at most one Shiki highlighter per browser session and reuse it for all `@pierre/diffs` renders. Creation SHALL be lazy or explicitly prewarmed, never triggered by fallback render paths.
+
+#### Scenario: Lazy highlighting reuses its instance and loaded grammars
+- **WHEN** the first Pierre render needs highlighting or prewarm finds Diff plausibly imminent
+- **THEN** the highlighter SHALL be created lazily or by that prewarm, never by fallback rendering itself
+- **WHEN** view-mode toggles, file switches, or in-place refreshes render another diff
+- **THEN** they MUST NOT recreate the highlighter or reload grammars already cached
+- **AND** the cached instance MAY load additional grammars on demand for a new language
 
 #### Scenario: First Diff render initializes one highlighter
 - **WHEN** a user activates the Diff view for the first time in a session for a file that exercises the @pierre/diffs path
@@ -115,7 +148,13 @@ The Diff view implementation SHALL initialize at most one Shiki highlighter inst
 
 ### Requirement: Diff view loads @pierre/diffs lazily and only on the Pierre render path
 
-The `@pierre/diffs` library SHALL be loaded via a dynamic `import()` and MUST NOT be present in the initial application bundle's eager imports. The import SHALL be triggered either by the first Diff render that needs Pierre output, or by an explicit prewarm invoked when Diff rendering is plausibly imminent: at browser idle time after boot in a session where the Diff view is reachable (a git workspace), or on hover/focus of the Diff segment. Once loaded, the resolved module SHALL be cached for the lifetime of the session so subsequent Pierre-path renders reuse it without re-importing. The fallback render paths (`unsupported-no-git`, `unchanged`, `binary`, lightweight large-diff) MUST NOT themselves trigger the dynamic import, though a prewarm MAY have loaded the module independently of them.
+`@pierre/diffs` SHALL load only through dynamic `import()`, not eager initial-bundle imports, and SHALL be cached for the session. Only a Pierre render or explicit imminent-use prewarm SHALL initiate loading.
+
+#### Scenario: Pierre loading follows actual need or explicit prewarm
+- **WHEN** a first Pierre render needs output, a reachable Git-workspace Diff session reaches post-boot browser idle, or Diff is hovered/focused
+- **THEN** the import SHALL be triggered by that first render or explicit plausibly-imminent prewarm, and its resolved module SHALL be reused for the session without re-import
+- **WHEN** `unsupported-no-git`, `unchanged`, `binary`, or lightweight large-diff fallback renders
+- **THEN** it MUST NOT itself trigger import, though independent prewarm MAY already have loaded Pierre
 
 #### Scenario: Pierre is not eagerly bundled
 - **WHEN** the application boots
@@ -163,7 +202,16 @@ The whole-file source `<pre>` distinguishing class (used by single Source view a
 
 ### Requirement: Diff view exposes a Unified / Split layout toggle inside the diff body
 
-The Diff view SHALL render a two-segment toggle inside the diff host that switches Pierre's internal diff layout between **Unified** (stacked: deletions above additions, classic git-diff shape) and **Split** (side-by-side: deletions left, additions right). The toggle SHALL use the same in-content segmented-pill visual primitive as the inline layout chooser, so all in-body segmented controls in the app read as one primitive. The user's choice SHALL be a single global preference, persisted to `localStorage` under a key distinct from `uatu:view-mode` and `uatu:view-layout`, defaulting to **Unified** on first visit. Clicking a segment MUST update the persisted preference immediately and MUST re-render the active Diff in place using the cached payload — no network round-trip, no full document reload. The toggle SHALL appear only when Pierre's render path is taken (i.e. not on the state-card fallback paths nor the lightweight large-diff fallback, which have no notion of unified-vs-split). The toggle SHALL NOT appear outside the Diff view.
+Pierre-path Diff SHALL expose an in-host Unified/Split toggle with one global persisted preference, default Unified. Changing it MUST rerender from cached payload without a network round-trip or full document reload; fallback and non-Diff views SHALL omit it.
+
+#### Scenario: In-host layout choice uses shared styling and independent persistence
+- **WHEN** a Pierre-path Diff renders
+- **THEN** its two-segment toggle SHALL use the inline layout chooser's in-content segmented-pill primitive
+- **AND** Unified SHALL stack deletions above additions in classic Git shape; Split SHALL place deletions left and additions right
+- **AND** one global preference SHALL persist in `localStorage` under a key distinct from `uatu:view-mode` and `uatu:view-layout`, defaulting Unified on first visit
+- **WHEN** a segment is clicked
+- **THEN** persistence MUST update immediately and the active diff MUST rerender in place using cached payload without fetch or full reload
+- **AND** state-card and lightweight large-diff fallbacks SHALL omit the toggle, as SHALL every non-Diff view
 
 #### Scenario: First visit defaults to Unified
 - **WHEN** the user opens the Diff view for the first time on a fresh `localStorage`
@@ -192,15 +240,14 @@ The Diff view SHALL render a two-segment toggle inside the diff host that switch
 
 ### Requirement: Diff view honors the global Wrap preference
 
-When the diff renders via the Pierre render path, the Diff view SHALL
-honor the global Wrap preference by configuring the library's line
-overflow mode: wrapping long lines when Wrap is on and scrolling them
-horizontally when Wrap is off. The library's own per-line line numbers
-SHALL remain correct in both modes. Toggling Wrap MUST re-render the
-active diff in place from the already-cached payload — no network
-round-trip and no full document reload. On the state-card fallback paths
-and the lightweight large-diff fallback (which do not use the library's
-line renderer), the Wrap preference MAY have no visible effect.
+Pierre-path Diff SHALL honor global Wrap through the library's line-overflow mode, preserve correct line numbers, and rerender Wrap changes in place from cached payload without network or full reload.
+
+#### Scenario: Wrap configures Pierre without imposing behavior on fallbacks
+- **WHEN** global Wrap is applied to a Pierre diff
+- **THEN** long lines SHALL wrap when on and scroll horizontally when off, with the library's per-line numbers correct in both modes
+- **WHEN** Wrap is toggled
+- **THEN** active Diff MUST rerender from cached payload without network round-trip or full document reload
+- **AND** state-card and lightweight large-diff fallback paths, which do not use the library line renderer, MAY show no visible Wrap effect
 
 #### Scenario: Wrap on wraps diff lines
 - **WHEN** the diff renders via the Pierre path and the global Wrap preference is on
@@ -218,7 +265,14 @@ line renderer), the Wrap preference MAY have no visible effect.
 
 ### Requirement: Diff view signals loading while a diff is being prepared
 
-When a diff is requested (view-mode click, compare-target switch, or file selection while Diff is active) and no cached payload is available, the Diff view SHALL provide loading feedback in two layers. First, the Diff segment of the view chooser SHALL enter a visible busy state (including `aria-busy="true"`) immediately when the request starts and leave it when the render completes or fails. Second, if the diff is not fully rendered within a delay threshold (approximately 200 ms), an indeterminate progress indicator SHALL appear over the preview pane without hiding the previously rendered content; once shown, the indicator SHALL remain visible for a minimum display time (approximately 300 ms) to avoid flicker. The preview pane MUST NOT be cleared until the replacement diff content is ready to render — "ready" meaning the payload is in hand and, on the Pierre path, the library and highlighter are loaded. The implementation SHALL yield to the browser paint cycle after showing the loading state and before invoking a potentially long synchronous render, so the busy indication is actually visible during the render.
+An uncached Diff request SHALL immediately mark the Diff segment busy and show delay-gated pane progress while retaining prior content until the replacement is ready. Rendering SHALL yield to paint so progress is visible.
+
+#### Scenario: Uncached diff preparation exposes stable two-layer progress
+- **WHEN** a view-mode click, compare-target switch, or file selection with Diff active requests an uncached payload
+- **THEN** the Diff segment SHALL immediately show busy including `aria-busy="true"` until render completes or fails
+- **AND** if not fully rendered after approximately 200 ms, an indeterminate pane indicator SHALL overlay rather than hide previous content and remain visible at least approximately 300 ms once shown
+- **AND** the pane MUST NOT clear until payload is in hand and, for Pierre, library/highlighter are loaded
+- **AND** after showing loading and before potentially long synchronous rendering, implementation SHALL yield to the browser paint cycle so busy state is visible during render
 
 #### Scenario: Fast diffs show no pane indicator
 - **WHEN** a user activates the Diff view and the payload arrives and renders within the delay threshold
@@ -241,7 +295,13 @@ When a diff is requested (view-mode click, compare-target switch, or file select
 
 ### Requirement: Diff view skips grammar highlighting above a size threshold
 
-The Diff view SHALL define an exported byte threshold (`DIFF_MAX_HIGHLIGHT_BYTES`) below the existing `DIFF_MAX_BYTES` / `DIFF_MAX_LINES` cutoffs. When a text diff's size (patch bytes, plus blob sizes when blobs are present) meets or exceeds this threshold while remaining under the Pierre cutoffs, the Diff view SHALL still render via `@pierre/diffs` — preserving diff structure, word-level diffing, expand-context chevrons, the Unified / Split toggle, and Wrap behavior — but SHALL force the plaintext language so no grammar tokenization runs. A one-line notice SHALL explain that syntax highlighting was disabled for size, consistent with the existing lightweight-fallback notice. The threshold SHALL be exported as a module-level constant overridable from tests.
+Diff SHALL export test-overridable `DIFF_MAX_HIGHLIGHT_BYTES` below the existing Pierre cutoffs. Text diffs meeting that threshold but below Pierre cutoffs SHALL use plaintext Pierre rendering with preserved diff interactions and a size explanation.
+
+#### Scenario: Highlight-size calculation preserves Pierre interactions without tokenization
+- **WHEN** patch bytes plus any blob sizes meet or exceed `DIFF_MAX_HIGHLIGHT_BYTES` but remain under `DIFF_MAX_BYTES` / `DIFF_MAX_LINES`
+- **THEN** `@pierre/diffs` SHALL force plaintext with no grammar tokenization, preserving diff structure, word-level diffing, expand-context chevrons, Unified/Split, and Wrap
+- **AND** a one-line notice SHALL explain disabled highlighting for size, consistent with lightweight fallback
+- **AND** the byte threshold SHALL be an exported module-level constant below the existing cutoffs and overridable by tests
 
 #### Scenario: A large-but-renderable diff renders via Pierre without grammar highlighting
 - **WHEN** the diff endpoint returns a text payload whose size meets the highlight threshold but stays under the Pierre cutoffs
@@ -255,7 +315,12 @@ The Diff view SHALL define an exported byte threshold (`DIFF_MAX_HIGHLIGHT_BYTES
 
 ### Requirement: Document-diff endpoint runs repo-wide rename detection only for pure-addition patches
 
-The document-diff endpoint SHALL obtain the file-scoped diff first and SHALL run repo-wide rename detection (`git diff -M --name-status` without a path filter) only when that file-scoped patch presents the file as a pure addition (or when the patch is empty for an untracked-looking file) — the only cases in which a rename can masquerade as an add. When the scan identifies a prior path, the endpoint SHALL re-run the file-scoped diff with both paths so the response still carries a single rename diff with `oldPath` populated. Requests for ordinary modified files MUST NOT execute a repo-wide diff scan.
+The endpoint SHALL obtain a file-scoped diff first and run repository-wide rename detection only for pure additions or empty untracked-looking patches. Ordinary modified-file requests MUST NOT execute a repository-wide diff scan.
+
+#### Scenario: Rename fallback scans only addition-shaped candidates
+- **WHEN** a file-scoped patch is a pure addition or empty for an untracked-looking file, where a rename can masquerade as an addition
+- **THEN** the endpoint SHALL run `git diff -M --name-status` without a path filter
+- **AND** if it finds a prior path it SHALL rerun the file-scoped diff with both paths, returning one rename diff with `oldPath` populated
 
 #### Scenario: Modified files skip the repo-wide scan
 - **WHEN** a request is made for a tracked file whose file-scoped patch contains both old and new sides
@@ -268,7 +333,13 @@ The document-diff endpoint SHALL obtain the file-scoped diff first and SHALL run
 
 ### Requirement: Document-diff endpoint reuses cached base resolution while HEAD is unchanged
 
-The document-diff endpoint SHALL cache the resolved review base and review settings per repository root and reuse them for subsequent requests, validating the cache with a single cheap probe of the repository's current `HEAD` commit. When `HEAD` has moved, or a bounded time-to-live (approximately 30 seconds) has elapsed, the endpoint SHALL re-resolve from scratch. A warm request MUST NOT re-execute the full base-resolution chain (toplevel discovery, settings load, remote-default lookup, ref existence probes, merge-base).
+The endpoint SHALL cache review base and settings per repository root, validating reuse with one cheap current-`HEAD` probe. `HEAD` movement or an approximately 30-second TTL SHALL force fresh resolution.
+
+#### Scenario: Warm base resolution skips the expensive chain
+- **WHEN** a cached root has unchanged `HEAD` and an unexpired bounded approximately 30-second TTL
+- **THEN** review base/settings SHALL be reused with a single cheap current-`HEAD` probe
+- **AND** the warm request MUST NOT rerun toplevel discovery, settings load, remote-default lookup, ref-existence probes, or merge-base
+- **AND** moved `HEAD` or elapsed TTL SHALL trigger resolution from scratch
 
 #### Scenario: Consecutive diff requests reuse the resolved base
 - **WHEN** two diff requests for files in the same repository arrive while `HEAD` is unchanged and within the TTL
@@ -281,12 +352,20 @@ The document-diff endpoint SHALL cache the resolved review base and review setti
 
 ### Requirement: Diff view renders the active file's git diff against the resolved compare base
 
-The preview pane SHALL expose a **Diff** view that renders the git diff of the currently selected file against the base implied by the active compare target. When the compare target is `base`, the base ref SHALL be resolved automatically in priority order (`origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`), falling back to staged and unstaged worktree changes against `HEAD` when no remote base is resolvable. When the compare target is `last-commit`, the Diff view SHALL compare the selected file against `HEAD` (staged and unstaged worktree changes). The Diff view SHALL render only the hunks for the selected file — never the diff for other files in the repository. The rendered output SHALL be produced by the `@pierre/diffs` library (vanilla-JS entry) for normal-sized diffs, via one of two input shapes:
+The preview pane SHALL expose Diff for only the selected file's hunks against the active compare target. Normal-sized diffs SHALL use the vanilla-JS `@pierre/diffs` entry with blob or patch input; normal Source and Rendered views SHALL NOT invoke Pierre.
 
-- **Two-blob path** — when the server payload carries both `oldContents` and `newContents`, the client SHALL feed them to Pierre as `oldFile` / `newFile`. This path enables Pierre's "N unmodified lines" chevrons to interactively expand surrounding context drawn from the blobs.
-- **Patch-only path** — when blobs are absent (the per-blob size cap was exceeded), the client SHALL parse the unified-diff `patch` string via the library's patch-input API and feed Pierre the resulting metadata. The chevrons still render but expansion is bounded by the context git embedded in the patch.
+#### Scenario: Compare targets select the review base without unrelated hunks
+- **WHEN** compare target is `base`
+- **THEN** the base SHALL resolve automatically in order `origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`, falling back to staged/unstaged changes against `HEAD` when no remote base resolves
+- **WHEN** target is `last-commit`
+- **THEN** selected-file comparison SHALL be against `HEAD` for staged/unstaged changes
+- **AND** only selected-file hunks SHALL render, never unrelated repository files
 
-Pierre SHALL NOT be invoked on the normal Source view or Rendered view — its scope is the Diff view only.
+#### Scenario: Pierre inputs control available context expansion
+- **WHEN** payload carries `oldContents` and `newContents`
+- **THEN** the client SHALL feed them as `oldFile` / `newFile`, enabling "N unmodified lines" chevrons to expand surrounding blob context
+- **WHEN** blobs are absent because the per-blob cap was exceeded
+- **THEN** the client SHALL parse unified `patch` through Pierre's patch-input API and feed resulting metadata; chevrons still render but expansion is bounded by Git's embedded patch context
 
 #### Scenario: A modified Markdown file shows added and deleted lines against the resolved base
 - **WHEN** a user selects a Markdown file that has been modified against the resolved base
@@ -326,7 +405,12 @@ Pierre SHALL NOT be invoked on the normal Source view or Rendered view — its s
 - **THEN** the `@pierre/diffs` library is not loaded or invoked for that render
 
 ### Requirement: Diff view follows only repository changes that can affect the active diff
-After a repository update, the Diff view SHALL re-fetch the active file's diff only when that update can change the diff. That is the case when the file's entry in the changed-files context changed, the resolved compare base changed, `HEAD` moved, or a `.gitattributes` file changed, since attributes decide how Git diffs a file. Any other repository update MUST NOT re-fetch the diff, re-render it, or show the Diff loading indicator. This requirement does not affect refreshing when the active file itself changes on disk.
+Repository updates SHALL refresh active Diff only when they can affect it. Unrelated updates MUST NOT refetch, rerender, or show Diff loading; active-file disk-change refresh remains unaffected.
+
+#### Scenario: Repository invalidation is limited to diff-relevant facts
+- **WHEN** a repository update is received
+- **THEN** active Diff SHALL refetch only for changed active-file entry in changed-files context, changed resolved compare base, moved `HEAD`, or changed `.gitattributes` (which controls Git diff behavior)
+- **AND** other updates MUST NOT refetch, rerender, or show loading, without changing active-file-on-disk refresh behavior
 
 #### Scenario: Another file changes
 - **WHEN** the Diff view is active for file A

@@ -6,15 +6,14 @@ Define the shared Wrap toggle in the preview toolbar: a single global, persisted
 
 ### Requirement: Preview exposes a shared Wrap toggle in the preview toolbar
 
-The preview SHALL render a single **Wrap** toggle in the preview toolbar
-(alongside the Rendered / Source / Diff view chooser). The toggle SHALL be
-a single pressed-state control (a button exposing its on/off state to
-assistive technology, e.g. via `aria-pressed`), using the toolbar's
-existing control vocabulary rather than a bare checkbox. When on, soft
-word-wrap is applied to the active view; when off, long lines scroll
-horizontally as they do today. Wrap MUST be soft (visual) only — it MUST
-NOT insert real newlines into the underlying content, and MUST NOT change
-copy-to-clipboard output.
+Preview SHALL offer one accessible pressed-state Wrap toolbar button for wrappable views. It SHALL apply visual-only wrapping when on and horizontal scrolling when off, without changing underlying newlines or copied text.
+
+#### Scenario: The reader uses the Wrap control beside the Rendered / Source / Diff chooser and copies the displayed content
+- **WHEN** the reader uses the Wrap control beside the Rendered / Source / Diff chooser and copies the displayed content
+- **THEN** The preview SHALL render a single **Wrap** toggle in the preview toolbar (alongside the Rendered / Source / Diff view chooser).
+- **AND** The toggle SHALL be a single pressed-state control (a button exposing its on/off state to assistive technology, e.g. via `aria-pressed`), using the toolbar's existing control vocabulary rather than a bare checkbox.
+- **AND** When on, soft word-wrap is applied to the active view; when off, long lines scroll horizontally as they do today.
+- **AND** Wrap MUST be soft (visual) only — it MUST NOT insert real newlines into the underlying content, and MUST NOT change copy-to-clipboard output.
 
 #### Scenario: Wrap toggle is present for a wrappable view
 - **WHEN** the user is in Source view or Diff view for a document

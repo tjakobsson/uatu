@@ -47,7 +47,17 @@ The Files pane SHALL provide a filename/path query that works in All, Recent, an
 - **AND** clearing the query restores the unqueried tree
 
 ### Requirement: Live Recent updates preserve activation and reading position
-File additions, writes, renames, and deletions SHALL update Recent from existing indexed state. An update MUST NOT cause a pointer/touch activation begun on one file to activate another file. Structural updates SHALL wait until an in-progress activation settles, then preserve the surviving scroll anchor and file-keyed keyboard focus. A reader below the top MUST NOT be jumped to the newest row. Updates and view switches MUST NOT choose a preview, clear intentional deselection, enable Follow, or start media playback.
+File additions, writes, renames, and deletions SHALL update Recent from existing indexed state while preserving activation, reading position, and deliberate selection.
+
+#### Scenario: Structural updates respect an activation in progress
+- **WHEN** a structural Recent update arrives during a pointer/touch activation
+- **THEN** the update MUST NOT cause an activation begun on one file to activate another file
+- **AND** structural updates SHALL wait until the activation settles, then preserve the surviving scroll anchor and file-keyed keyboard focus
+
+#### Scenario: Updates and view switches do not navigate for the reader
+- **WHEN** Recent updates or the user switches Files views
+- **THEN** a reader below the top MUST NOT be jumped to the newest row
+- **AND** updates and view switches MUST NOT choose a preview, clear intentional deselection, enable Follow, or start media playback
 
 #### Scenario: A render arrives under a finger
 - **WHEN** a user presses a row and a newer file arrives before the activation finishes

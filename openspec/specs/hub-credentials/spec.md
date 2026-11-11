@@ -6,7 +6,13 @@ Define how a standalone Hub stores, configures, tests, and supplies Git authenti
 ## Requirements
 
 ### Requirement: Hub maintains a protected credential catalog
-The Hub SHALL maintain persistent credential records for SSH authentication, SSH commit signing, OpenPGP commit signing, and HTTPS/provider tokens. Each record SHALL have a stable id, user-facing name, credential type, declared capabilities, public metadata where applicable, and workspace assignments. Secret-bearing files MUST be created with owner-only permissions and updated atomically; authenticated read APIs MUST return metadata and public material only, never private keys, passphrases, or token values. Credential-management mutations MUST be POST operations protected by the Hub's same-origin policy.
+The Hub SHALL maintain persistent credential records for SSH authentication, SSH commit signing, OpenPGP commit signing, and HTTPS/provider tokens. Each record SHALL have a stable id, user-facing name, credential type, declared capabilities, public metadata where applicable, and workspace assignments.
+
+#### Scenario: Catalog persistence and access protect secret material
+- **WHEN** credentials are stored, read, or mutated
+- **THEN** secret-bearing files MUST be created with owner-only permissions and updated atomically
+- **AND** authenticated read APIs MUST return metadata and public material only, never private keys, passphrases, or token values
+- **AND** credential-management mutations MUST be POST operations protected by the Hub's same-origin policy
 
 #### Scenario: Credential metadata is listed safely
 - **WHEN** an authenticated user lists Hub credentials after importing a private key or token
@@ -18,7 +24,16 @@ The Hub SHALL maintain persistent credential records for SSH authentication, SSH
 - **THEN** the Hub rejects it without changing stored or agent state
 
 ### Requirement: Hub manages dedicated credential runtimes
-The Hub SHALL use dedicated owner-only runtime locations for every SSH or OpenPGP agent it manages and MUST give Hub clone jobs and workspace sessions explicit paths to those runtimes. It MUST NOT load keys into, lock, stop, reconfigure, or delete sockets belonging to an inherited system agent. Hub shutdown SHALL stop only agents whose ownership and lifecycle the Hub can prove; stale runtime state SHALL be validated and recovered without signaling unrelated processes. On Linux, the Hub SHALL retain enough boot identity in newly created SSH guardian ownership state to distinguish exact managed artifacts left by an earlier system boot.
+The Hub SHALL use dedicated owner-only runtime locations for every SSH or OpenPGP agent it manages and MUST give Hub clone jobs and workspace sessions explicit paths to those runtimes. It MUST NOT load keys into, lock, stop, reconfigure, or delete sockets belonging to an inherited system agent.
+
+#### Scenario: Shutdown and stale-runtime recovery require provable ownership
+- **WHEN** the Hub shuts down or recovers stale credential runtime state
+- **THEN** shutdown SHALL stop only agents whose ownership and lifecycle the Hub can prove
+- **AND** stale state SHALL be validated and recovered without signaling unrelated processes
+
+#### Scenario: Linux creates a new SSH guardian ownership record
+- **WHEN** new SSH guardian ownership state is created on Linux, including ordinary fresh runtime creation
+- **THEN** it SHALL retain enough boot identity to distinguish exact managed artifacts left by an earlier system boot
 
 #### Scenario: Ambient agents remain untouched
 - **WHEN** the Hub starts with system `SSH_AUTH_SOCK` and GnuPG sockets already present
@@ -41,7 +56,17 @@ The Hub SHALL use dedicated owner-only runtime locations for every SSH or OpenPG
 - **AND** it reports the credential runtime unavailable with recovery guidance
 
 ### Requirement: Credential tooling is discoverable and testable
-The Hub SHALL auto-detect the executables required by each credential capability from its service environment and SHALL allow an authenticated user to configure an explicit absolute executable path. A configured path MUST be validated as an executable regular file before use. The settings test action SHALL distinguish binary discovery, compatible version, agent operation, and usable-key or signing readiness; it SHALL return bounded sanitized diagnostics and platform-appropriate installation guidance without returning environment secrets or unrestricted command output. Tool readiness SHALL be re-evaluated at Hub startup and after configuration changes, and one unavailable optional tool MUST NOT disable unrelated credential types.
+The Hub SHALL auto-detect the executables required by each credential capability from its service environment and SHALL allow an authenticated user to configure an explicit absolute executable path. A configured path MUST be validated as an executable regular file before use.
+
+#### Scenario: Tool testing reports separate readiness layers with bounded diagnostics
+- **WHEN** the settings test action checks credential tooling
+- **THEN** it SHALL distinguish binary discovery, compatible version, agent operation, and usable-key or signing readiness
+- **AND** it SHALL return bounded sanitized diagnostics and platform-appropriate installation guidance without environment secrets or unrestricted command output
+
+#### Scenario: Startup and configuration changes refresh optional-tool readiness
+- **WHEN** the Hub starts or configuration changes
+- **THEN** tool readiness SHALL be re-evaluated
+- **AND** one unavailable optional tool MUST NOT disable unrelated credential types
 
 #### Scenario: GnuPG is not installed
 - **WHEN** the Hub cannot find a compatible `gpg` and the user tests OpenPGP support
@@ -54,7 +79,18 @@ The Hub SHALL auto-detect the executables required by each credential capability
 - **AND** the persisted path is used only after validation succeeds
 
 ### Requirement: Hub supports SSH authentication and signing credentials
-The Hub SHALL generate passphrase-protected SSH keys and import supported existing SSH private keys for authentication, commit signing, or both as explicitly declared by the user. Imported keys SHALL retain their existing passphrase protection: the supplied existing passphrase unlocks an encrypted key, while a key without a passphrase remains usable without an unlock operation. Importing an SSH key whose fingerprint is already cataloged SHALL fail without retaining another private-key copy. The Hub SHALL expose the public key for registration with a Git provider and load private identities only into the Hub-managed SSH agent. The Hub SHALL discover and allow an absolute override for the `ssh` client separately from its agent/key tools; assigned workspace SSH operations and explicitly selected SSH clones SHALL invoke that validated path. Passphrases submitted for generation, import, or unlock MUST NOT be persisted, logged, included in diagnostics, or returned by an API.
+The Hub SHALL generate passphrase-protected SSH keys and import supported existing SSH private keys for authentication, commit signing, or both as explicitly declared by the user. It SHALL expose the public key for Git-provider registration and load private identities only into the Hub-managed SSH agent.
+
+#### Scenario: SSH import retains protection without duplicating private keys
+- **WHEN** an SSH private key is imported
+- **THEN** it SHALL retain its existing passphrase protection: the supplied existing passphrase unlocks an encrypted key, while an unprotected key remains usable without an unlock operation
+- **AND** an already-cataloged fingerprint SHALL fail import without retaining another private-key copy
+
+#### Scenario: SSH operations use the separately validated client path without retaining passphrases
+- **WHEN** SSH tooling is configured or generation, import, unlock, or assigned SSH operations run
+- **THEN** the Hub SHALL discover and allow an absolute `ssh` client override separately from agent/key tools
+- **AND** assigned workspace SSH operations and explicitly selected SSH clones SHALL invoke that validated path
+- **AND** submitted generation, import, or unlock passphrases MUST NOT be persisted, logged, included in diagnostics, or returned by an API
 
 #### Scenario: User generates an SSH signing key
 - **WHEN** an authenticated user provides a name and passphrase and generates an SSH credential for commit signing
@@ -77,9 +113,18 @@ The Hub SHALL generate passphrase-protected SSH keys and import supported existi
 - **AND** the Hub automatically reloads that key when its managed agent is recreated
 
 ### Requirement: Hub supports OpenPGP commit-signing credentials
-When compatible GnuPG tooling is available, the Hub SHALL generate or import OpenPGP signing keys in a dedicated Hub GnuPG home, expose the public key and fingerprint, and make unlocked signing available through the Hub-owned OpenPGP agent. Private-key passphrases and pinentry responses submitted through the Hub MUST be handled as secrets and MUST NOT be persisted or replayed. OpenPGP unavailability MUST produce an actionable capability error rather than preventing Hub startup.
+When compatible GnuPG tooling is available, the Hub SHALL generate or import OpenPGP signing keys in a dedicated Hub GnuPG home, expose the public key and fingerprint, and make unlocked signing available through the Hub-owned OpenPGP agent. OpenPGP unavailability MUST produce an actionable capability error rather than preventing Hub startup.
 
-An OpenPGP import MUST contain exactly one primary private key. Because OpenPGP credentials share the Hub GnuPG agent, the Hub MUST NOT expose credential-specific locking that terminates that shared agent. Disabling one OpenPGP credential SHALL block its new use without clearing cached passphrases for unrelated credentials; Hub shutdown MAY terminate the shared agent.
+#### Scenario: OpenPGP import and unlocking protect secret input
+- **WHEN** an OpenPGP key is imported or the Hub receives a private-key passphrase or pinentry response
+- **THEN** an import MUST contain exactly one primary private key
+- **AND** submitted passphrases and pinentry responses MUST be handled as secrets and MUST NOT be persisted or replayed
+
+#### Scenario: Per-credential disabling preserves the shared OpenPGP agent
+- **WHEN** an OpenPGP credential is locked or disabled, or the Hub shuts down
+- **THEN** the Hub MUST NOT expose credential-specific locking that terminates the shared GnuPG agent
+- **AND** disabling one credential SHALL block its new use without clearing cached passphrases for unrelated credentials
+- **AND** Hub shutdown MAY terminate the shared agent
 
 #### Scenario: OpenPGP signing key is ready
 - **WHEN** a compatible OpenPGP key is imported, unlocked, and its signing capability test succeeds
@@ -92,7 +137,13 @@ An OpenPGP import MUST contain exactly one primary private key. Because OpenPGP 
 - **AND** the response is sent only to that operation and never appears in retained output
 
 ### Requirement: Hub supports HTTPS Git and provider credentials
-The Hub SHALL store HTTPS/provider credentials with an explicit provider host and declared Git and provider-CLI capabilities. Git operations SHALL obtain assigned HTTPS credentials through a Hub-controlled credential helper rather than embedding tokens in repository remotes or command arguments. Provider CLI integration SHALL expose a credential only to the selected Hub-started workspace process environment and MUST NOT write it into the workspace repository. Because each provider CLI uses one non-host-indexed token environment variable, the Hub SHALL reject a workspace context that assigns provider-CLI credentials for multiple hosts of the same provider rather than allowing one token to replace another. The Hub SHALL make the broader visibility of process environment credentials under the local backend part of the shared-UID warning.
+The Hub SHALL store HTTPS/provider credentials with an explicit provider host and declared Git and provider-CLI capabilities. Git operations SHALL obtain assigned HTTPS credentials through a Hub-controlled credential helper rather than embedding tokens in repository remotes or command arguments.
+
+#### Scenario: Provider CLI projection respects host ambiguity and repository boundaries
+- **WHEN** provider CLI integration supplies a workspace credential
+- **THEN** it SHALL expose the credential only to the selected Hub-started workspace process environment and MUST NOT write it into the workspace repository
+- **AND** because each provider CLI has one non-host-indexed token variable, a workspace context assigning provider-CLI credentials for multiple hosts of the same provider SHALL be rejected instead of one token replacing another
+- **AND** the broader visibility of process-environment credentials under the local backend SHALL be part of the shared-UID warning
 
 #### Scenario: HTTPS clone uses a stored token
 - **WHEN** a clone for the credential's configured host selects an unlocked HTTPS Git credential
@@ -111,9 +162,33 @@ The Hub SHALL store HTTPS/provider credentials with an explicit provider host an
 - **THEN** the Hub configures that provider CLI without exposing the token through the Git credential helper
 
 ### Requirement: Hub assigns credentials to workspaces without overstating isolation
-New credentials SHALL have no workspace assignments by default. An authenticated user SHALL be able to grant and revoke credentials for selected registered workspaces and SHALL be able to select compatible authentication and signing defaults while creating, cloning, or registering a workspace before its first start. Onboarding assignment selection and workspace registration SHALL commit as one coherent result: invalid, unavailable, incompatible, or conflicting selections MUST NOT leave a partial new registration or assignment. The Hub SHALL configure normal Git, signing, and provider-tool selection from assignments when it starts a clone job or workspace session. Clone authentication and retained workspace authentication SHALL be presented as separate choices, with the selected clone credential offered as the default retained assignment but never retained without explicit user choice.
+New credentials SHALL have no workspace assignments by default. An authenticated user SHALL be able to grant and revoke credentials for selected registered workspaces and select compatible authentication and signing defaults while creating, cloning, or registering a workspace before its first start. Assignments SHALL be atomic with onboarding and disclose the local backend's advisory boundary.
 
-Assignments SHALL permit at most one default authentication credential per provider host and one default commit-signing credential per workspace so normal tool selection is deterministic. For the local backend, every assignment surface and API SHALL identify the workspace boundary as advisory because all workspaces share the daemon OS UID, and SHALL warn that another local workspace may be able to discover or exercise credentials outside its assignments. The persisted assignment model MUST distinguish individual credentials so a future isolated backend can project and enforce only the selected set.
+#### Scenario: Onboarding commits deterministic assignments before using them
+- **WHEN** workspace registration and onboarding assignment selection commit
+- **THEN** they SHALL commit as one coherent result; invalid, unavailable, incompatible, or conflicting selections MUST NOT leave partial new registration or assignment
+
+#### Scenario: Initial or later assignments retain deterministic defaults
+- **WHEN** assignments are created or updated, during or after onboarding
+- **THEN** they SHALL allow at most one default authentication credential per provider host and one default commit-signing credential per workspace for deterministic normal tool selection
+
+#### Scenario: Every clone or workspace start resolves the current assignments
+- **WHEN** a clone job or workspace session starts, including later starts after onboarding
+- **THEN** the Hub SHALL configure normal Git, signing, and provider-tool selection from assignments
+
+#### Scenario: Clone authentication is retained only by explicit choice
+- **WHEN** a user chooses clone and retained workspace authentication
+- **THEN** they SHALL be presented as separate choices
+- **AND** the selected clone credential SHALL be offered as the default retained assignment but never retained without explicit user choice
+
+#### Scenario: Assignment surfaces disclose shared-UID limits and preserve credential identity
+- **WHEN** any assignment surface or API is used with the local backend, including reads without a new assignment
+- **THEN** every assignment surface and API SHALL identify the workspace boundary as advisory because all workspaces share the daemon OS UID
+- **AND** they SHALL warn that another local workspace may discover or exercise credentials outside its assignments
+
+#### Scenario: Persisted assignment records retain individual credential identity
+- **WHEN** credential assignments are persisted
+- **THEN** the model MUST distinguish individual credentials so a future isolated backend can project and enforce only the selected set
 
 #### Scenario: Credentials are assigned before first start
 - **WHEN** a user adds or creates a workspace with compatible authentication and signing credentials
@@ -150,7 +225,29 @@ Assignments SHALL permit at most one default authentication credential per provi
 - **THEN** workspace startup identifies the locked assignment instead of starting with unusable Git configuration
 
 ### Requirement: Credential revocation has defined runtime behavior
-Locking, disabling, unassigning, or deleting a credential SHALL prevent the Hub from supplying it to new clone jobs, new workspace sessions, and new helper or agent requests. The Hub SHALL track the credential ids actually projected into each running session until natural exit or successful stop. Disabling or confirming deletion of a token credential that declares `github-cli` or `gitlab-cli` SHALL first stop every running local workspace whose tracked projection contains it because the raw provider CLI environment is a session-start snapshot. Current assignments and tracked projections SHALL both participate in revocation queue acquisition, but a current assignment added after session start MUST NOT by itself cause that session to stop. Confirmed deletion with no current references SHALL stop a stale projected use even when `unassign` is false; current references without explicit unassignment SHALL remain a conflict and MUST NOT stop a workspace. The Hub SHALL attempt every required stop before catalog mutation and SHALL leave the credential and its assignments and secret unchanged if any stop fails. HTTPS-only token revocation, enable, and rejected deletion MUST NOT stop a workspace. Deletion SHALL remove its private backing only after it is no longer referenced by an assignment. The Hub SHALL report that an already-authenticated external connection, such as an SSH multiplexed connection, may survive credential revocation until that connection ends; it MUST NOT claim retroactive provider-session revocation it cannot enforce.
+Locking, disabling, unassigning, or deleting a credential SHALL prevent the Hub from supplying it to new clone jobs, new workspace sessions, and new helper or agent requests. Revocation SHALL account for actual running projections, preserve catalog state on failed required stops, and disclose external-connection limits.
+
+#### Scenario: Provider CLI revocation stops actual projected uses before catalog mutation
+- **WHEN** disabling or confirming deletion of a token declaring `github-cli` or `gitlab-cli`
+- **THEN** the Hub SHALL first stop every running local workspace whose tracked projection contains it, because raw provider CLI environment is a session-start snapshot
+- **AND** current assignments and tracked projections SHALL both participate in revocation queue acquisition, but an assignment added after session start MUST NOT by itself stop that session
+- **AND** every required stop SHALL be attempted before catalog mutation; if any stop fails, the credential, its assignments, and its secret SHALL remain unchanged
+
+#### Scenario: A running session retains its actual projected credential identities
+- **WHEN** credentials are projected into a workspace session
+- **THEN** the Hub SHALL track actually projected credential ids until natural session exit or successful stop, before any revocation request is needed
+
+#### Scenario: Deletion distinguishes current references from stale projections
+- **WHEN** credential deletion is requested or another credential state change is applied
+- **THEN** confirmed deletion with no current references SHALL stop stale projected use even with `unassign` false
+- **AND** current references without explicit unassignment SHALL remain a conflict and MUST NOT stop a workspace
+- **AND** HTTPS-only token revocation, enable, and rejected deletion MUST NOT stop a workspace
+- **AND** deletion SHALL remove private backing only after no assignment references it
+
+#### Scenario: Revocation does not promise termination of external provider sessions
+- **WHEN** credential revocation is reported
+- **THEN** the Hub SHALL report that an already-authenticated external connection, such as an SSH multiplexed connection, may survive until that connection ends
+- **AND** it MUST NOT claim retroactive provider-session revocation it cannot enforce
 
 #### Scenario: Assigned credential is disabled
 - **WHEN** a user disables a credential that is assigned to a running workspace

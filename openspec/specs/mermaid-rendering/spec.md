@@ -4,7 +4,18 @@
 Lazily render themed Mermaid blocks from Markdown and AsciiDoc with isolated error handling, cached SVG reuse, responsive inline sizing, and an accessible fullscreen pan-and-zoom viewer.
 ## Requirements
 ### Requirement: Render Mermaid diagrams from fenced code blocks
-The preview pane SHALL detect Markdown fenced code blocks whose info string is `mermaid` and AsciiDoc listings declared with either the `[source,mermaid]` style or the bare `[mermaid]` block style, and SHALL render those blocks as Mermaid diagrams in the browser instead of leaving them as plain code blocks. Rendering MAY be deferred until a block approaches the viewport (per the lazy-rendering requirement); once rendered, the result SHALL be identical to an eagerly rendered diagram. The bare `[mermaid]` block style SHALL be recognized on `listing` (`----`), `literal` (`....`), and `open` (`--`) block contexts, matching the surface of the upstream Asciidoctor Diagram extension. Each rendered diagram SHALL render at the size Mermaid emits (the library's diagram-specific intended display width, exposed via the SVG's inline `style="max-width: <Wpx>"`), capped at the available preview content width so the diagram does not overflow horizontally. The SVG SHALL be horizontally centered within the preview column. Detailed inspection (zoom, pan, full-canvas viewing) is provided by the fullscreen viewer modal — the inline preview honors Mermaid's library-chosen sizing rather than imposing uniform slot dimensions.
+The preview pane SHALL detect Markdown fenced code blocks whose info string is `mermaid` and AsciiDoc listings declared with either the `[source,mermaid]` style or the bare `[mermaid]` block style, and SHALL render those blocks as Mermaid diagrams in the browser instead of leaving them as plain code blocks.
+
+#### Scenario: Deferred and bare-style diagrams retain the supported rendering contract
+- **WHEN** a supported Mermaid block approaches the viewport
+- **THEN** rendering MAY have been deferred per the lazy-rendering requirement, but its result SHALL be identical to eager rendering
+- **AND** bare `[mermaid]` SHALL be recognized on `listing` (`----`), `literal` (`....`), and `open` (`--`) contexts, matching the upstream Asciidoctor Diagram extension
+
+#### Scenario: Inline diagrams use the library's intended width rather than uniform slots
+- **WHEN** Mermaid emits an SVG with inline `style="max-width: <Wpx>"`
+- **THEN** the diagram SHALL render at that diagram-specific intended width capped at available preview content width, without horizontal overflow
+- **AND** the SVG SHALL be horizontally centered within the preview column
+- **AND** detailed zoom, pan, and full-canvas inspection SHALL be provided by the fullscreen viewer modal rather than imposing uniform inline slot dimensions
 
 #### Scenario: A Markdown Mermaid fenced block renders as a diagram
 - **WHEN** a selected Markdown file contains a fenced code block with the info string `mermaid`
@@ -33,7 +44,25 @@ The preview pane SHALL detect Markdown fenced code blocks whose info string is `
 - **AND** the diagram is not horizontally clipped, and its aspect ratio is preserved
 
 ### Requirement: Inspect Mermaid diagrams in a fullscreen viewer
-The preview pane SHALL make every rendered Mermaid diagram openable in a fullscreen modal viewer, operable by mouse, keyboard, and touch alone. The trigger MUST be the rendered diagram itself, presented as a button-like surface with a `cursor: zoom-in` affordance and a visible expand badge that appears on hover or keyboard focus. The viewer modal SHALL fill the entire browser viewport (full width and height), sized against the viewport that is actually visible so that no control is placed outside it on engines whose nominal viewport height exceeds the visible area. The viewer's controls SHALL remain clear of device safe areas in every orientation, and SHALL present touch targets of at least 44px on coarse-pointer devices. The viewer modal SHALL support: drag-to-pan with a single pointer, wheel-to-zoom centered on the cursor, two-finger pinch-to-zoom anchored on the midpoint between the pointers, double-click and double-tap to fit-to-screen, an inline toolbar for zoom-in / zoom-out / fit-to-screen, and keyboard shortcuts `+`, `-`, and `0` or `f` (fit-to-screen). An in-progress single-pointer pan MUST NOT be disturbed by an additional pointer arriving or leaving; the viewer SHALL resume panning from the surviving pointer's position without displacing the diagram. Panning SHALL be bounded so that a portion of the diagram always remains within the viewer, in every input mode. Zoom SHALL be clamped to a bounded range. The modal MUST be dismissible with the Escape key and by an explicit close control in the toolbar, and MUST NOT be dismissible by a pan-like gesture. When the modal closes, focus MUST return to the trigger element that opened it. When the watched file changes while the modal is open, the modal MUST close automatically because the trigger element no longer exists in the new render.
+The preview pane SHALL make every rendered Mermaid diagram openable in a fullscreen modal viewer, operable by mouse, keyboard, and touch alone.
+
+#### Scenario: Diagram activation opens a viewport-safe viewer
+- **WHEN** a rendered diagram is offered for inspection
+- **THEN** the trigger MUST be the diagram itself, presented as a button-like surface with `cursor: zoom-in` and an expand badge visible on hover or keyboard focus
+- **AND** the modal SHALL fill the entire browser viewport in width and height, sized against the actually visible viewport so controls remain inside it even when nominal viewport height exceeds the visible area
+- **AND** controls SHALL clear device safe areas in every orientation and present targets of at least 44px on coarse-pointer devices
+
+#### Scenario: Viewer navigation supports pointer, touch, toolbar, and keyboard input
+- **WHEN** the viewer is open
+- **THEN** it SHALL support single-pointer drag-to-pan, cursor-centered wheel-to-zoom, midpoint-anchored two-finger pinch-to-zoom, double-click and double-tap to fit-to-screen, an inline zoom-in / zoom-out / fit-to-screen toolbar, and `+`, `-`, and `0` or `f` (fit-to-screen) shortcuts
+- **AND** an in-progress single-pointer pan MUST NOT be disturbed by another pointer arriving or leaving; panning SHALL resume from the surviving pointer's position without displacing the diagram
+- **AND** panning SHALL be bounded to retain a portion of the diagram within the viewer in every input mode, and zoom SHALL be clamped to a bounded range
+
+#### Scenario: Viewer dismissal preserves focus and avoids accidental gesture closes
+- **WHEN** the user dismisses the viewer or the watched file changes while it is open
+- **THEN** the modal MUST be dismissible with Escape and an explicit toolbar close control, but MUST NOT be dismissible by a pan-like gesture
+- **AND** closing MUST return focus to the trigger that opened it
+- **AND** a watched-file change MUST close the modal automatically because the trigger no longer exists in the new render
 
 #### Scenario: A rendered diagram is keyboard-focusable and announced as a button
 - **WHEN** a user tabs through the preview
@@ -114,7 +143,12 @@ The preview pane SHALL make every rendered Mermaid diagram openable in a fullscr
 - **AND** the inline diagrams reflect the new file contents
 
 ### Requirement: Apply the active UI theme to Mermaid diagrams
-The Mermaid renderer SHALL be initialized with theme inputs that can be supplied by the rest of the application, including a `theme` name (one of Mermaid's supported theme names) and an optional `themeVariables` object. Until the application provides a non-default theme, the preview MUST continue to use Mermaid's existing light visual. When the application's theme changes during a watch session, the rendered Mermaid diagrams in the visible preview MUST be re-rendered with the new theme inputs so they match the surrounding UI.
+The Mermaid renderer SHALL be initialized with theme inputs that can be supplied by the rest of the application, including a `theme` name (one of Mermaid's supported theme names) and an optional `themeVariables` object.
+
+#### Scenario: Theme defaults and live changes match the surrounding application
+- **WHEN** the application supplies initial or changed theme inputs during a watch session
+- **THEN** until a non-default theme is supplied the preview MUST continue using Mermaid's existing light visual
+- **AND** when the application theme changes, rendered diagrams in the visible preview MUST be re-rendered with the new inputs to match the surrounding UI
 
 #### Scenario: Diagrams render with the default light theme by default
 - **WHEN** the application is using its default light theme
@@ -127,7 +161,13 @@ The Mermaid renderer SHALL be initialized with theme inputs that can be supplied
 - **AND** the new visuals match the active UI theme
 
 ### Requirement: Tolerate invalid Mermaid diagrams without aborting the preview
-The preview pane SHALL treat a Mermaid block whose source fails to parse or render as a per-block failure, not a document-level failure. The renderer MUST NOT propagate the failure as an unhandled promise rejection. The failing block SHALL display Mermaid's built-in inline error indicator at the position where the diagram would have rendered. Other Mermaid diagrams in the same document — both before and after the failing block — MUST continue to render normally. Non-diagram content (Markdown text, AsciiDoc sections, code blocks) MUST continue to render normally regardless of any Mermaid failure.
+The preview pane SHALL treat a Mermaid block whose source fails to parse or render as a per-block failure, not a document-level failure. The renderer MUST NOT propagate the failure as an unhandled promise rejection.
+
+#### Scenario: Invalid blocks preserve surrounding document rendering
+- **WHEN** a Mermaid block fails to parse or render
+- **THEN** it SHALL display Mermaid's built-in inline error indicator where the diagram would have rendered
+- **AND** other diagrams both before and after it MUST continue rendering normally
+- **AND** non-diagram content (Markdown text, AsciiDoc sections, code blocks) MUST continue rendering normally regardless of any Mermaid failure
 
 #### Scenario: A diagram with invalid syntax does not break the preview
 - **WHEN** the watched document contains a Mermaid block with invalid syntax (for example, an unrecognized diagram keyword such as `flowchat` instead of `flowchart`)
@@ -144,7 +184,32 @@ The preview pane SHALL treat a Mermaid block whose source fails to parse or rend
 
 ### Requirement: Mermaid diagrams render lazily, one at a time, with rendered-SVG reuse
 
-Mermaid diagram rendering SHALL be deferred until a diagram approaches the viewport (observed with a generous ahead-of-viewport margin) instead of rendering every diagram at document mount. Diagrams that never come near the viewport MUST NOT invoke the mermaid renderer. Deferral MUST be recoverable in every layout: any diagram in the mounted document SHALL render once the user scrolls to it, so no diagram is left permanently un-rendered. Viewport observation SHALL be performed against the preview's effective scroll container as resolved by the single shared resolver, expressed in the form the observation API requires — the container element when the preview scrolls inside an element, and the implicit viewport root when the page is what scrolls. The lazy-rendering machinery MUST NOT derive its own scroll container. Because an observer's root is fixed when observation begins, observation SHALL be re-established when the UI mode changes during a session, and re-establishing it MUST affect only diagrams that have not yet rendered — already-rendered diagrams MUST NOT be reset to their source or re-rendered, since the theme has not changed. When multiple diagrams become eligible together, they SHALL render through a single FIFO queue that processes one diagram per pass and yields to the browser's paint cycle between passes, so a batch of diagrams never blocks the main thread as one unit. Un-rendered diagram slots SHALL act as placeholders that reserve a minimum height so lazy rendering does not destabilize scroll position, and SHALL be visually identifiable as pending diagrams rather than broken content. The queue SHALL be invalidated when the previewed document changes, so a superseded document's pending diagrams are abandoned rather than rendered into the new preview. Rendered diagram SVGs SHALL be reused from an in-memory, size-bounded cache keyed by the diagram's source text and the active theme inputs — a cache hit MUST NOT invoke the mermaid renderer. Failed (invalid-source) renders MUST NOT be cached, so a corrected source re-renders. In environments without viewport observation, all diagrams SHALL still render through the yielding queue.
+Mermaid diagram rendering SHALL be deferred until a diagram approaches the viewport (observed with a generous ahead-of-viewport margin) instead of rendering every diagram at document mount. Diagrams that never come near the viewport MUST NOT invoke the mermaid renderer. Rendering SHALL use a yielding FIFO queue and size-bounded SVG reuse while preserving reachability and document ownership.
+
+#### Scenario: Lazy observation follows the effective scroll container in every layout
+- **WHEN** a document is mounted or its UI mode changes during the session
+- **THEN** deferral MUST be recoverable in every layout: every mounted diagram SHALL render once scrolled to, never remaining permanently un-rendered
+- **AND** viewport observation SHALL use the preview's effective scroll container from the single shared resolver, expressed as the container element for element scrolling or the implicit viewport root for page scrolling
+- **AND** lazy-rendering machinery MUST NOT derive its own scroll container
+- **AND** since observer roots are fixed at observation start, a UI-mode change SHALL re-establish observation only for unrendered diagrams; already-rendered diagrams MUST NOT be reset to source or re-rendered when the theme has not changed
+
+#### Scenario: Eligible diagrams render incrementally without destabilizing reading
+- **WHEN** multiple diagrams become eligible together
+- **THEN** they SHALL render through one FIFO queue, one diagram per pass, yielding to the browser's paint cycle between passes so the batch never blocks the main thread as one unit
+
+#### Scenario: A single or multiple diagrams remain unrendered
+- **WHEN** a mounted diagram has not yet rendered
+- **THEN** its slot SHALL reserve a minimum placeholder height to stabilize scroll position and SHALL look like a pending diagram rather than broken content
+
+#### Scenario: Viewport observation is unavailable for any number of diagrams
+- **WHEN** the environment does not support viewport observation, including a document with only one diagram
+- **THEN** all diagrams SHALL still render through the yielding queue
+
+#### Scenario: Document changes and cache hits avoid stale or redundant rendering
+- **WHEN** the previewed document changes or a diagram's source and theme inputs are revisited
+- **THEN** the queue SHALL be invalidated on document change, abandoning superseded pending diagrams instead of rendering them into the new preview
+- **AND** SVGs SHALL be reused from an in-memory, size-bounded cache keyed by source text and active theme inputs; a cache hit MUST NOT invoke the mermaid renderer
+- **AND** failed invalid-source renders MUST NOT be cached, so corrected source re-renders
 
 #### Scenario: Off-screen diagrams do not render at mount
 - **WHEN** a document containing many Mermaid diagrams is mounted and most diagrams are far below the viewport

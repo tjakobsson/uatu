@@ -7,7 +7,12 @@ Define the uatu hub daemon: a long-running service that keeps a persistent works
 ## Requirements
 
 ### Requirement: Hub reports its public API compatibility identity
-The Hub SHALL expose an authenticated machine-readable compatibility identity containing its public Hub API revision and the workspace revision, which versions the workspace-owned payload schemas the Hub forwards on its live stream (the workspace routes behind the Hub are internal and carry no public revision). These revisions SHALL identify wire-contract compatibility independently from the product version and source-build identity, and SHALL correspond to published contract metadata. Clients MUST NOT need to infer API compatibility from a display-formatted version string.
+The Hub SHALL expose an authenticated machine-readable compatibility identity containing its public Hub API revision and workspace payload revision. These revisions SHALL identify wire-contract compatibility independently from product version and source-build identity and correspond to published contract metadata. Clients MUST NOT need to infer compatibility from a display-formatted version string.
+
+#### Scenario: Compatibility identity describes forwarded workspace payloads
+- **WHEN** a client reads the authenticated compatibility identity
+- **THEN** the workspace revision SHALL version workspace-owned payload schemas forwarded on the Hub live stream
+- **AND** workspace routes behind the Hub SHALL remain internal and carry no public revision
 
 #### Scenario: Native client probes Hub compatibility
 - **WHEN** an authenticated native client requests Hub state
@@ -19,7 +24,15 @@ The Hub SHALL expose an authenticated machine-readable compatibility identity co
 - **THEN** the corresponding public API revision remains unchanged
 
 ### Requirement: Hub manages clone operations as authenticated jobs
-The hub SHALL execute each repository clone as an in-memory job owned by the authenticated user who created it. Creation SHALL return a non-blocking job identifier; the owner SHALL be able to receive a bounded replayable stream of job output and state, submit terminal responses, and cancel the job. Another user MUST NOT be able to observe or control the job. Input and cancellation SHALL be POST operations protected like other state-changing hub endpoints. Completed jobs and their bounded output SHALL expire automatically and MUST NOT survive a hub restart.
+The hub SHALL execute each repository clone as an in-memory job owned by its authenticated creator. Creation SHALL return a non-blocking job identifier. The owner SHALL be able to receive bounded replayable output/state, submit terminal responses, and cancel the job; another user MUST NOT observe or control it.
+
+#### Scenario: A clone receives input or cancellation
+- **WHEN** the owner submits input or cancellation
+- **THEN** those operations SHALL use POST with the protection applied to other state-changing hub endpoints
+
+#### Scenario: Completed clone jobs expire without owner interaction
+- **WHEN** a clone job completes, whether or not the owner submitted input or cancellation
+- **THEN** the job and its bounded output SHALL expire automatically and MUST NOT survive a hub restart
 
 #### Scenario: Clone creation does not hold one request open
 - **WHEN** an authenticated user starts a clone
@@ -38,7 +51,17 @@ The hub SHALL execute each repository clone as an in-memory job owned by the aut
 - **THEN** the hub rejects it without starting or altering a clone
 
 ### Requirement: Clone prompts are isolated to the job terminal
-The hub SHALL run a clone with a dedicated pseudo-terminal for its standard streams so terminal prompts are captured by the job and never use the hub daemon's controlling terminal. For the clone invocation, the hub SHALL prevent ambient Git and SSH askpass programs and ambient Git credential helpers from supplying or displaying requested credentials. It SHALL construct explicit Git and credential configuration that selects the compatible Hub credential chosen for the job; it MUST NOT inherit an external SSH agent or automatically fall back to another stored credential. With no selected credential, or when Git or SSH requires additional interaction, prompts SHALL remain on the job PTY. A response submitted to the job SHALL be written only to its terminal and MUST NOT be persisted, logged, included in job events, returned by an API, or promoted into the credential catalog automatically. This command-level selection MUST NOT be described as isolation when the clone runs under the local backend's shared UID.
+The hub SHALL run each clone's standard streams through a dedicated pseudo-terminal, capturing prompts in the job rather than the daemon's controlling terminal. Clone credential selection SHALL be explicit, and submitted responses SHALL remain terminal-only under the rules below. Command-level selection MUST NOT be described as isolation under the local backend's shared UID.
+
+#### Scenario: Git or SSH requests credentials for a clone
+- **WHEN** a clone invokes Git or SSH
+- **THEN** the hub SHALL prevent ambient Git/SSH askpass programs and ambient Git credential helpers from supplying or displaying requested credentials
+- **AND** explicit Git and credential configuration SHALL select the compatible Hub credential chosen for the job; the clone MUST NOT inherit an external SSH agent or automatically fall back to another stored credential
+- **AND** with no selected credential or when additional Git/SSH interaction is required, prompts SHALL remain on the job PTY
+
+#### Scenario: A clone terminal response contains a secret
+- **WHEN** a response is submitted to the job
+- **THEN** it SHALL be written only to that terminal and MUST NOT be persisted, logged, included in job events, returned by an API, or automatically promoted into the credential catalog
 
 #### Scenario: Git cannot prompt through daemon terminal or askpass
 - **WHEN** a clone needs a credential that is unavailable from its selected Hub credential context
@@ -59,7 +82,15 @@ The hub SHALL run a clone with a dedicated pseudo-terminal for its standard stre
 - **AND** the Hub does not fall back to another stored or ambient credential
 
 ### Requirement: Clone jobs are bounded and cleaned up
-The hub SHALL enforce an inactivity timeout and a hard lifetime for active clone jobs. Cancellation, timeout, hub shutdown, or clone failure SHALL terminate the clone's whole process group with bounded graceful-to-forced escalation so Git, SSH, and their descendants cannot remain orphaned. The hub SHALL reserve a clone target while its job is active so concurrent jobs cannot target the same checkout. It SHALL register a workspace only after a successful clone, SHALL release all reservations and terminal resources on every terminal outcome, and SHALL terminate all active clone jobs during graceful hub shutdown.
+The hub SHALL enforce inactivity and hard-lifetime limits for active clone jobs and reserve each target against concurrent jobs. Cancellation, timeout, shutdown, or failure SHALL terminate the whole process group with bounded graceful-to-forced escalation, preventing orphaned Git, SSH, and descendants.
+
+#### Scenario: A clone reaches a terminal outcome or the hub shuts down
+- **WHEN** a clone succeeds, fails, times out, or is cancelled
+- **THEN** the hub SHALL register a workspace only after successful cloning and SHALL release all reservations and terminal resources on every terminal outcome
+
+#### Scenario: Hub shutdown terminates active clone jobs
+- **WHEN** the hub shuts down gracefully while clones are active
+- **THEN** it SHALL terminate all active clone jobs
 
 #### Scenario: Credential prompt is abandoned
 - **WHEN** a clone waits without output or input beyond the inactivity limit
@@ -110,7 +141,15 @@ The Hub SHALL handle the personal-state API under `/s/<workspace-id>/` before ge
 - **AND** the client's live updates arrive over the Hub's brokered live stream, not through a proxied workspace SSE route
 
 ### Requirement: The binary provides a hub daemon subcommand
-The `uatu` binary SHALL provide a `hub` subcommand that starts a long-running daemon from a configuration file (listen port, TLS certificate and key paths, users, state directory override), suitable for supervision by systemd or launchd. The hub SHALL persist its workspace registry and secrets under an XDG-resolved state directory, creating secret-bearing files with owner-only permissions. On SIGTERM or SIGINT the hub SHALL stop every running session and exit cleanly. The configuration SHALL NOT define a workspaces root: workspaces are registered by absolute path and the hub SHALL reject a configuration containing the removed `workspacesDir` key with an error naming it.
+The `uatu` binary SHALL provide a `hub` subcommand starting a long-running daemon from a configuration file (listen port, TLS certificate/key paths, users, state directory override), suitable for systemd or launchd supervision. Registry and secrets SHALL persist under an XDG-resolved state directory, with owner-only secret-bearing files.
+
+#### Scenario: Hub configuration or termination is processed
+- **WHEN** the hub starts from configuration
+- **THEN** configuration SHALL NOT define a workspaces root: registration SHALL use absolute paths, and a removed `workspacesDir` key SHALL cause rejection with an error naming it
+
+#### Scenario: A termination signal stops every running session
+- **WHEN** the hub receives SIGTERM or SIGINT
+- **THEN** it SHALL stop every running session and exit cleanly
 
 #### Scenario: Hub starts from a config file
 - **WHEN** `uatu hub --config <path>` starts with a valid configuration
@@ -133,9 +172,21 @@ The `hub` subcommand SHALL accept `--exit-on-stdin-close`: when set, the hub SHA
 - **THEN** every child session process is terminated and the hub exits
 
 ### Requirement: Workspaces are registered with stable identifiers and a backend field
-The hub SHALL maintain a persistent workspace registry where each entry records a stable workspace id, mutable user-facing display name, workspace source as an absolute canonical folder path, and session backend identifier. Registration SHALL validate that the path is absolute and refers to an existing directory. The id SHALL be a slug derived from the workspace folder name, suffixed on collision, and SHALL never change once assigned, so session URLs (`/s/<id>/…`) survive Hub and session restarts, folder renames, and display-name changes. Display names SHALL default from the folder basename but SHALL NOT determine identity or uniqueness. In this change the only valid backend identifier SHALL be `local`; the field SHALL remain in the registry schema so additional backends are additive.
+The hub SHALL persist a registry whose entries record a stable workspace id, mutable display name, absolute canonical source folder, and session backend identifier. Registration SHALL require an absolute path to an existing directory. Identity, backend, and persistence SHALL follow the rules below.
 
-Registry persistence SHALL be serialized and atomic. Concurrent mutations may neither interleave writes nor let an older snapshot finish last, and a crash mid-write MUST NOT corrupt the file. The Hub MUST NOT prune registry entries at startup based on their location; an entry whose folder no longer exists SHALL remain registered and surface as failing to start, never as silently forgotten.
+#### Scenario: A workspace receives its permanent identity
+- **WHEN** a workspace is registered
+- **THEN** its id SHALL be a folder-name-derived slug, suffixed on collision, and never change once assigned, preserving `/s/<id>/…` URLs across Hub/session restarts, folder renames, and display-name changes
+- **AND** display names SHALL default from the folder basename but SHALL NOT determine identity or uniqueness
+- **AND** only `local` SHALL be a valid backend in this change; the backend field SHALL remain in the schema so additional backends are additive
+
+#### Scenario: Registry writes overlap or a saved folder disappears
+- **WHEN** the registry is written, including non-overlapping mutations
+- **THEN** persistence SHALL be serialized and atomic: writes may not interleave or allow an older snapshot to finish last, and a crash mid-write MUST NOT corrupt the file
+
+#### Scenario: Hub startup retains registrations whose folders are missing
+- **WHEN** the Hub starts and reads the registry
+- **THEN** it MUST NOT prune entries based on location; a missing folder SHALL remain registered and fail to start rather than be silently forgotten
 
 #### Scenario: Workspace id is stable across restarts
 - **WHEN** a workspace display name and source folder are renamed and the Hub restarts
@@ -155,7 +206,14 @@ Registry persistence SHALL be serialized and atomic. Concurrent mutations may ne
 - **THEN** the Hub rejects it and the registry is unchanged
 
 ### Requirement: Sessions are started and stopped through a session backend interface
-The hub SHALL manage session processes exclusively through a backend interface whose contract is: given a workspace descriptor, base path, and resolved credential assignment context, start a session and return a loopback HTTP endpoint plus the child's session token; and stop a previously started session. Hub components (proxy, dashboard, auth) MUST NOT depend on how the endpoint or credential context is produced. The shipped `local` backend SHALL spawn `uatu serve <folder> --no-open --exit-on-stdin-close --base-path /s/<id>/` with explicit Git, signing, SSH-client, and provider-tool selection derived from the workspace's assignments, parse the tokened URL from the child's first stdout line, hold the child's stdin open for its lifetime, and stop the session via SIGTERM. It MUST NOT forward ambient agent sockets, and normal tool configuration MUST NOT select unassigned stored credentials. Because local sessions share the daemon UID and may share Hub-managed runtime resources, these selections are advisory and MUST NOT be represented as OS-enforced isolation.
+The hub SHALL manage sessions exclusively through a backend interface: given a workspace descriptor, base path, and resolved credential assignments, start and return a loopback HTTP endpoint plus child session token; or stop a previously started session. Proxy, dashboard, and auth MUST NOT depend on how the endpoint or credential context is produced.
+
+#### Scenario: The local backend starts and stops a workspace session
+- **WHEN** the shipped `local` backend starts a session
+- **THEN** it SHALL spawn `uatu serve <folder> --no-open --exit-on-stdin-close --base-path /s/<id>/` with explicit Git, signing, SSH-client, and provider-tool selection derived from workspace assignments
+- **AND** it SHALL parse the tokened URL from the child's first stdout line, hold stdin open for the child's lifetime, and stop the session via SIGTERM
+- **AND** it MUST NOT forward ambient agent sockets, and normal tool configuration MUST NOT select unassigned stored credentials
+- **AND** because sessions share the daemon UID and may share Hub-managed runtime resources, these advisory selections MUST NOT be represented as OS-enforced isolation
 
 #### Scenario: Local backend spawns the session-child contract
 - **WHEN** the hub starts a session for a registered workspace with credential assignments
@@ -171,7 +229,20 @@ The hub SHALL manage session processes exclusively through a backend interface w
 - **THEN** each child server exits on its own because its standard input reached EOF
 
 ### Requirement: All session traffic is reverse-proxied under the workspace prefix
-The hub SHALL proxy every request under `/s/<id>/` to that workspace's loopback endpoint, covering plain HTTP and WebSocket upgrades. Live updates for hub-served pages SHALL NOT be proxied one browser stream to one child stream: the hub SHALL deliver them over its brokered live stream, subscribing to each child's topics once and fanning out, so the hub's outbound connections for live delivery are bounded by watched topics rather than by connected clients. The per-stream workspace SSE routes (`/s/<id>/api/events`, `/s/<id>/api/chat/conversations/events`, `/s/<id>/api/chat/conversations/<conversation>/events`) SHALL NOT be proxied: a request for one SHALL receive a non-cached error naming the brokered stream as its replacement, and the child's routes remain the internal source the hub subscribes to. WebSocket proxying SHALL forward messages and close events in both directions, preserving application close codes (including the terminal's 4001, 4409, and 4410). Requests for an unknown or stopped workspace SHALL receive a non-cached error response that links back to the dashboard. Children SHALL bind loopback only and MUST NOT be directly reachable from the network.
+The hub SHALL proxy workspace traffic under `/s/<id>/` to its loopback endpoint for HTTP and WebSocket upgrades, except the per-stream SSE routes below. Hub-served live updates SHALL use brokered fanout with one subscription per child topic, bounding outbound live connections by watched topics rather than clients. Children SHALL bind loopback only and MUST NOT be directly network-reachable.
+
+#### Scenario: A browser requests a per-stream SSE route through the hub
+- **WHEN** a request targets `/s/<id>/api/events`, `/s/<id>/api/chat/conversations/events`, or `/s/<id>/api/chat/conversations/<conversation>/events`
+- **THEN** it SHALL NOT be proxied and SHALL receive a non-cached error naming the brokered live stream as replacement
+- **AND** child event routes SHALL remain the internal source for hub subscriptions, not one child stream per browser stream
+
+#### Scenario: A proxied WebSocket closes or a workspace is unavailable
+- **WHEN** WebSocket messages or close events traverse a workspace proxy
+- **THEN** they SHALL be forwarded both ways, preserving application close codes including terminal 4001, 4409, and 4410
+
+#### Scenario: Any proxied request targets an unknown or stopped workspace
+- **WHEN** a request targets an unknown or stopped workspace, whether HTTP or WebSocket
+- **THEN** it SHALL receive a non-cached error response linking to the dashboard
 
 #### Scenario: A session round-trips through the hub
 - **WHEN** an authenticated browser requests `/s/uatu/api/state`
@@ -221,7 +292,13 @@ The hub SHALL serve HTTPS using a certificate and private key referenced by its 
 - **THEN** clients connect over HTTPS and secure-context features (service worker, clipboard) function on remote devices
 
 ### Requirement: The self-hosting runbook documents working certificate and startup paths
-The self-hosting runbook SHALL provide complete, copy-pasteable walkthroughs for obtaining a certificate and starting the hub, covering at minimum: mkcert for LAN homelabs (including installing the root CA on iOS), and tailscale in both supported shapes — native TLS via `tailscale cert` (enabling MagicDNS and HTTPS in the tailnet, generating the PEM files, pointing the hub config at them, and renewing on a schedule since the certificates expire) and fronted via `tailscale serve` proxying HTTPS to a loopback plain-HTTP hub. Each walkthrough SHALL end with a working service definition (systemd unit or launchd plist) that starts the hub in that shape.
+The self-hosting runbook SHALL provide complete, copy-pasteable certificate and hub-startup walkthroughs for mkcert LAN homelabs and both native-TLS and HTTPS-proxy Tailscale deployments. Each walkthrough SHALL end with a working systemd unit or launchd plist starting the hub in that shape.
+
+#### Scenario: An operator follows a certificate and startup walkthrough
+- **WHEN** an operator chooses a supported self-hosting shape
+- **THEN** mkcert guidance SHALL include installing its root CA on iOS
+- **AND** native `tailscale cert` guidance SHALL cover enabling MagicDNS and tailnet HTTPS, generating PEM files, configuring the hub to use them, and scheduled renewal because certificates expire
+- **AND** `tailscale serve` guidance SHALL cover proxying HTTPS to a loopback plain-HTTP hub
 
 #### Scenario: Tailscale user reaches a working HTTPS hub with native certs
 - **WHEN** an operator follows the runbook's `tailscale cert` walkthrough
@@ -241,9 +318,18 @@ The Hub SHALL start managed credential processes only in dedicated owner-only ru
 - **AND** unrelated system agents remain running
 
 ### Requirement: Hub exposes authenticated folder mutation operations
-The Hub SHALL expose public authenticated POST operations to create a folder from an absolute parent path and child name, rename a folder from an absolute source path and new sibling name, and remove an absolute folder path. Cookie-authenticated requests MUST pass the Hub's same-origin check. The Hub MUST reject relative paths, invalid names, non-directory or symbolic-link sources, rename destinations that already exist, and removal of any non-empty folder. A mutation MUST NOT recursively delete content or overwrite an existing filesystem entry. Before generic rename, the Hub SHALL reject moves that would invalidate Git worktree dependencies involving linked checkouts, main checkouts, common Git directories or their ancestors, including unregistered linked trees. This safety restriction SHALL apply to all otherwise supported folder-rename flows, even with stop authorization; uncertainty about affected Git dependency safety SHALL fail closed with an actionable explanation. Display-name changes SHALL remain unaffected.
+The Hub SHALL expose authenticated POST operations to create a folder from an absolute parent and child name, rename from an absolute source and new sibling name, and remove an absolute folder. Cookie requests MUST pass same-origin checks. Mutations SHALL enforce the validation, no-overwrite, and Git-dependency safety rules below.
 
-The display-name allowance applies to ordinary/main workspaces. Linked child workspace names SHALL reflect their exact local branch; independent child display-name editing and branch rename are outside this change. This does not relax any folder dependency guard.
+#### Scenario: A folder mutation validates its filesystem targets
+- **WHEN** a create, rename, or removal is requested
+- **THEN** the Hub MUST reject relative paths, invalid names, non-directory or symbolic-link sources, existing rename destinations, and removal of any non-empty folder
+- **AND** a mutation MUST NOT recursively delete content or overwrite an existing filesystem entry
+
+#### Scenario: Generic rename could invalidate Git worktree dependencies
+- **WHEN** any otherwise supported folder-rename flow could invalidate dependencies involving linked checkouts, main checkouts, common Git directories, or their ancestors, including unregistered linked trees
+- **THEN** the Hub SHALL reject it before generic rename, even with stop authorization
+- **AND** uncertainty about affected Git dependency safety SHALL fail closed with an actionable explanation
+- **AND** ordinary/main workspace display-name changes SHALL remain unaffected; linked child names SHALL reflect their exact local branch, with independent child display-name editing and branch rename outside this change and no relaxation of folder dependency guards
 
 #### Scenario: Cross-origin folder mutation is rejected
 - **WHEN** a cookie-authenticated cross-origin request attempts to create, rename, or remove a folder
@@ -270,7 +356,15 @@ The display-name allowance applies to ordinary/main workspaces. Linked child wor
 - **THEN** the Hub leaves the filesystem unchanged and explains how to resolve or investigate the blocker
 
 ### Requirement: Folder mutations preserve registered workspace identity and consistency
-Before renaming a folder, the Hub SHALL identify every registered workspace whose path is the source or a descendant of it. A successful rename MUST update all affected registered paths by replacing the source prefix, MUST preserve every workspace id, backend, personal state, credential assignment, and session URL, and MUST persist the path updates as one registry mutation. Removing an empty folder that is itself a registered workspace MUST remove that registration and its associated personal state and credential assignments. A folder mutation and its registry or metadata changes MUST either complete coherently or be recovered or rolled back so a process interruption does not silently leave a registered path at the pre-mutation location after the folder moved.
+Before renaming a folder, the Hub SHALL identify every registered workspace at or below the source. Successful rename MUST replace the source prefix in all affected paths as one registry mutation, preserving every id, backend, personal state, credential assignment, and session URL. Removal and interruption SHALL follow the consistency rules below.
+
+#### Scenario: A registered folder is removed or mutation is interrupted
+- **WHEN** an empty folder that is itself a registered workspace is removed
+- **THEN** its registration, associated personal state, and credential assignments MUST be removed
+
+#### Scenario: Any registered folder mutation completes or is interrupted
+- **WHEN** folder mutation changes the filesystem and associated registry or metadata
+- **THEN** those changes MUST complete coherently or be recovered or rolled back, so interruption cannot silently leave a registered path at its old location after the folder moved
 
 #### Scenario: Registered descendant paths move together
 - **WHEN** registered workspaces at `/srv/group/a` and `/srv/group/nested/b` are stopped and `/srv/group` is renamed to `/srv/team`
@@ -291,7 +385,16 @@ Before renaming a folder, the Hub SHALL identify every registered workspace whos
 - **THEN** the folder, registry entry, all users' personal workspace state, and credential assignments for that workspace are absent after a Hub restart
 
 ### Requirement: Folder mutations coordinate with sessions and clone targets
-The Hub SHALL serialize a registered folder mutation against lifecycle operations for every affected workspace. Without explicit stop authorization, a request affecting a running or starting workspace MUST return a conflict that identifies every workspace requiring a stop and MUST change nothing. With explicit stop authorization, the Hub MUST await and stop any in-flight or running affected session before performing the mutation, and no concurrent start may observe or use a partially updated path. The Hub MUST also reject create, rename, or removal operations whose source, destination, or affected subtree conflicts with an active clone target; folder mutation and clone reservation checks SHALL be coordinated so neither can enter a path reserved by the other.
+The Hub SHALL serialize registered folder mutations against lifecycle operations for every affected workspace. Without explicit stop authorization, mutations affecting running or starting workspaces MUST return a conflict naming every workspace requiring a stop and MUST change nothing. Authorized stops and clone reservations SHALL follow the coordination rules below.
+
+#### Scenario: An authorized folder mutation overlaps session starts
+- **WHEN** a folder mutation has explicit stop authorization
+- **THEN** the Hub MUST await and stop any in-flight or running affected session before mutation, and no concurrent start may observe or use a partially updated path
+
+#### Scenario: Clone reservations constrain every folder mutation
+- **WHEN** create, rename, or removal is requested, with or without stop authorization
+- **THEN** it MUST be rejected if its source, destination, or affected subtree conflicts with an active clone target
+- **AND** folder mutation and clone reservation checks SHALL coordinate so neither enters a path reserved by the other
 
 #### Scenario: Mutation reports sessions requiring a stop
 - **WHEN** a rename affects running workspace `alpha` and starting descendant workspace `beta` without stop authorization
@@ -312,7 +415,11 @@ The Hub SHALL serialize a registered folder mutation against lifecycle operation
 - **THEN** the Hub rejects the mutation without moving or removing the clone target or its containing path
 
 ### Requirement: Hub stores mutable workspace display names
-Every workspace registration SHALL include a non-empty user-facing display name separate from its immutable stable id and filesystem path. Display names MAY contain spaces, punctuation, and duplicate another workspace's display name within a bounded length. Renaming a workspace SHALL atomically persist only the display name and SHALL NOT change its id, `/s/<id>/` URL, source path, backend, personal state, credential assignments, or running session. Existing registry entries without a display name SHALL load with a deterministic default derived from their folder basename without changing their id.
+Every workspace registration SHALL include a non-empty display name separate from its immutable id and filesystem path. Names MAY contain spaces, punctuation, and duplicates within a bounded length. Renaming SHALL atomically persist only the display name, without changing id, `/s/<id>/` URL, source path, backend, personal state, credential assignments, or running session.
+
+#### Scenario: A registry entry predates display names
+- **WHEN** an existing entry without a display name loads
+- **THEN** it SHALL receive a deterministic folder-basename-derived default without changing its id
 
 #### Scenario: Existing registry entry receives a default name
 - **WHEN** the Hub loads a registry entry written before display names existed
@@ -330,9 +437,16 @@ Every workspace registration SHALL include a non-empty user-facing display name 
 - **AND** the child process is neither stopped nor restarted
 
 ### Requirement: Hub atomically configures new workspace registrations
-The Hub SHALL provide authenticated operations that register an existing folder or create a new child repository with a display name, optional authentication and signing assignments, and an explicit start choice. The default start choice SHALL be false. Before reporting success, the Hub MUST persist the registration and all requested assignments as one coherent onboarding result; a validation, initialization, registry, or assignment failure MUST leave no partial registration or assignment. If an explicitly requested first start fails after configuration commits, the Hub SHALL preserve the stopped configured workspace and report the startup failure rather than deleting the user's completed registration.
+The Hub SHALL provide authenticated registration of existing folders and creation of child repositories with a display name, optional authentication/signing assignments, and explicit start choice defaulting to false. Before success, registration and requested assignments MUST persist as one coherent onboarding result, with no partial registration or assignment after validation, initialization, registry, or assignment failure.
 
-Creating a workspace SHALL derive the destination from an absolute parent plus one visible child segment, reserve the path hierarchy, create without replacement, initialize Git, and register only that newly created folder. A failure after folder creation SHALL perform bounded cleanup only when the Hub can prove the created repository contains no user-added content; otherwise it SHALL retain the folder and report the recovery action required.
+#### Scenario: An explicitly requested first start fails after onboarding commits
+- **WHEN** configuration commits but the requested first start fails
+- **THEN** the Hub SHALL preserve the configured stopped workspace and report startup failure rather than delete the completed registration
+
+#### Scenario: New workspace creation succeeds or requires cleanup
+- **WHEN** a new child repository is created
+- **THEN** its destination SHALL derive from an absolute parent plus one visible child segment; the Hub SHALL reserve the path hierarchy, create without replacement, initialize Git, and register only that new folder
+- **AND** failure after folder creation SHALL perform bounded cleanup only if the Hub can prove there is no user-added content; otherwise it SHALL retain the folder and report the required recovery action
 
 #### Scenario: Existing folder is configured stopped
 - **WHEN** a valid Git repository, display name, and assignments are submitted without start authorization
@@ -351,7 +465,11 @@ Creating a workspace SHALL derive the destination from an absolute parent plus o
 - **THEN** the Hub creates the child, runs Git initialization, and records one stopped workspace for its canonical path
 
 ### Requirement: Hub stores a default workspace parent preference
-The Hub SHALL persist an optional absolute default workspace parent directory in Hub-owned state. Updating it SHALL require an existing direct non-symbolic-link directory and SHALL use authenticated same-origin mutation protection. The value SHALL guide initial create, clone, and browse locations but MUST NOT constrain registration, folder operations, or shell access to that subtree. If the saved path later becomes missing or unreadable, the Hub SHALL retain the preference for diagnosis while returning the daemon user's home as the effective onboarding default.
+The Hub SHALL persist an optional absolute default workspace parent in Hub-owned state. Updates SHALL require an existing direct non-symbolic-link directory and authenticated same-origin mutation protection. It SHALL guide initial create, clone, and browse locations but MUST NOT constrain registration, folder operations, or shell access to that subtree.
+
+#### Scenario: The default workspace parent becomes unusable
+- **WHEN** the saved path becomes missing or unreadable
+- **THEN** the Hub SHALL retain the preference for diagnosis and return the daemon user's home as the effective onboarding default
 
 #### Scenario: Preference survives restart
 - **WHEN** an authenticated user saves `/srv/workspaces` and the Hub restarts
@@ -366,7 +484,19 @@ The Hub SHALL persist an optional absolute default workspace parent directory in
 - **THEN** Hub state identifies it as unavailable and provides the daemon user's home as the effective default
 
 ### Requirement: Terminal bridges release abandoned connections and preserve recovery
-For proxied terminal WebSockets, the Hub SHALL propagate browser departure to the corresponding child connection and release both sides when bridge establishment fails or is cancelled. A late upstream connection completion MUST NOT retain an abandoned terminal holder or deliver queued input after the browser has departed. A child attachment refusal SHALL leave the browser able to reconcile the terminal through authenticated inventory without treating transport establishment as successful terminal attachment. Bridge failure SHALL NOT create or terminate a PTY or transfer ownership. Established terminal connections SHALL retain existing bidirectional message forwarding and application close-code semantics.
+For proxied terminal WebSockets, the Hub SHALL propagate browser departure to the child connection and release both sides after failed or cancelled bridge establishment. Late upstream completion MUST NOT retain an abandoned terminal holder or deliver queued input after browser departure. Attachment refusal and bridge failure SHALL preserve the terminal recovery and ownership rules below.
+
+#### Scenario: A child refuses attachment or terminal bridging fails
+- **WHEN** the child refuses attachment
+- **THEN** the browser SHALL remain able to reconcile through authenticated inventory without treating transport establishment as successful terminal attachment
+
+#### Scenario: A terminal bridge fails independently of attachment refusal
+- **WHEN** a terminal bridge fails
+- **THEN** that failure SHALL NOT create or terminate a PTY or transfer ownership
+
+#### Scenario: An established terminal bridge forwards traffic
+- **WHEN** an established terminal connection carries messages or closes
+- **THEN** it SHALL retain existing bidirectional forwarding and application close-code semantics
 
 #### Scenario: Navigation releases the old holder
 - **WHEN** a browser leaves a workspace and closes its terminal connection

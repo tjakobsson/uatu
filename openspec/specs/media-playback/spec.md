@@ -6,6 +6,13 @@ Let users preview audio and video files directly from Files, with one controllab
 ## Requirements
 
 ### Requirement: Audio and video files have paused previews
+
+Media filename selection SHALL open a paused, browser-supported preview without implicitly starting or replacing playback. Decode failures SHALL retain identity and offer permitted download and explicit retry; file listing MUST NOT preload complete clips or derive full-content previews.
+
+#### Scenario: Preview a media file without explicitly starting playback
+- **WHEN** a user selects a media filename or reaches it through navigation, resume, discovery, or updates
+- **THEN** preview and any existing player session follow explicit-play intent rather than starting or replacing a clip automatically
+
 Recognized audio and video files SHALL open in an in-app player when their filename is selected. Preview selection, direct links, history, personal resume, discovery, and file updates MUST NOT start playback without an explicit Play action. Returning to an already playing clip's preview SHALL present its existing session without interrupting it; previewing a different clip SHALL show a paused Play affordance without replacing that session until Play is pressed. Supported playback SHALL depend on actual browser/container/codec support. Unsupported or failed decoding SHALL retain file identity and offer a permitted download and explicit retry action rather than a document-not-found error. Listing files MUST NOT preload each clip or compute waveforms/thumbnails from complete media contents.
 
 #### Scenario: A WAV file is selected
@@ -27,6 +34,13 @@ Recognized audio and video files SHALL open in an in-app player when their filen
 - **THEN** its existing session and time are presented without another source or a playback interruption
 
 ### Requirement: Quick audition is separate from preview navigation
+
+Media row audition SHALL be keyboard- and touch-operable, retain Files and preview navigation, and disable Follow. Starting another clip SHALL release the previous clip and start at zero; denied Play requests SHALL expose an actionable state without retry loops.
+
+#### Scenario: Audition media from Recent or hierarchical row actions
+- **WHEN** a user explicitly plays a media row without selecting its filename for preview
+- **THEN** the clip plays independently of preview navigation and any prior clip is stopped and released
+
 Recent SHALL offer a keyboard- and touch-operable Play action for recognized media rows, separate from filename selection. Activating it SHALL play that clip while retaining the Files surface, current preview, and preview URL, and SHALL disable Follow as explicit audition intent. Hierarchical views SHALL offer Play and Open preview through their row actions. Starting another clip SHALL stop and release the previous clip before playing the new one at time zero. A denied browser Play request SHALL surface an actionable state without an automatic retry loop.
 
 #### Scenario: The user compares two snippets on a phone
@@ -39,6 +53,13 @@ Recent SHALL offer a keyboard- and touch-operable Play action for recognized med
 - **THEN** normal manual preview navigation opens that file paused
 
 ### Requirement: One persistent player survives application-surface changes
+
+One page-local player SHALL own playback across app surfaces and layouts with the specified controls and supported video presentation. Duplicate preview surfaces MUST NOT overlap playback. Closing SHALL release resources, and full-page navigation or reload SHALL NOT automatically restore active playback.
+
+#### Scenario: Move between app surfaces while a clip is active
+- **WHEN** Files, Preview, Chat, Terminal, or layout changes present the active clip
+- **THEN** one existing player session owns playback and its resources until explicitly closed or the page ends
+
 One page-local player session SHALL own the active clip across Files, Preview, Chat, Terminal, and desktop/touch layout changes. It SHALL provide file identity, play/pause, seeking, elapsed time and duration when known, Previous/Next, current-clip Loop, and Close. Video SHALL have an expandable presentation and fullscreen where supported. Showing the same clip in Preview and a compact player MUST NOT create overlapping playback. Closing the player SHALL release its source and pending transfers. Full-page/workspace navigation ends the session, and reload SHALL NOT restore active playback automatically.
 
 #### Scenario: Chat opens during an audition
@@ -54,6 +75,13 @@ One page-local player session SHALL own the active clip across Files, Preview, C
 - **THEN** playback stops, pending transfers are cancelled, and the compact player is removed
 
 ### Requirement: Previous and Next follow an explicit audition order
+
+Row audition SHALL capture the current eligible media order. Previous/Next SHALL traverse it without wrapping, skip unavailable entries, and start at zero. Later arrivals and filter changes MUST NOT silently reorder it, and clip completion MUST NOT advance automatically.
+
+#### Scenario: Navigate an audition session as the Files results change
+- **WHEN** a user starts a row audition, invokes Previous/Next, or reaches the clip's end
+- **THEN** playback follows the captured order and explicit current-clip Loop intent
+
 Starting a row audition SHALL capture the currently ordered eligible media results under the selected Files view, filename/path query, ignored visibility, and media-type filter. Previous/Next SHALL traverse that order without wrapping, skipping removed or no-longer-permitted entries, and start each chosen clip at zero. Later arrivals and view/filter changes MUST NOT silently reorder that session. Playing a row explicitly SHALL establish a new order. End-of-clip SHALL stop unless current-clip Loop is enabled; it MUST NOT advance automatically.
 
 #### Scenario: A new render arrives during comparison
@@ -78,6 +106,13 @@ Files SHALL offer All types, Audio, and Video filters across All, Recent, and Ch
 - **AND** audio, source files, and unrelated binaries do not appear
 
 ### Requirement: Active media updates are explicit and revision-aware
+
+Unrelated updates SHALL preserve playback. A write to the active clip SHALL expose an explicit Reload, invalidate obsolete transfers, and prevent old-revision looping. Reload SHALL select the latest revision paused at zero; deleted or excluded clips SHALL stop, and write time MUST NOT imply producer completion.
+
+#### Scenario: The active clip is rewritten, deleted, or exposure-excluded
+- **WHEN** a live update affects the active media revision
+- **THEN** the player makes the revision change explicit and stops obsolete requests or unavailable playback without inferring render completion
+
 Unrelated live updates SHALL leave the player source and time unchanged. A detected write to the active file SHALL show New render available with Reload, invalidate pending old-revision transfers, and prevent further automatic looping of that old revision. Already buffered playback SHALL continue only while it can do so without obsolete transfers; otherwise it SHALL pause with the update notice. Reload SHALL select the latest revision at zero and leave it paused. Deleted/exposure-excluded clips SHALL stop and show unavailable state. Recent write time MUST NOT be presented as proof the producer has finished rendering.
 
 #### Scenario: A looping audio file is overwritten

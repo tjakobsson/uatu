@@ -4,7 +4,12 @@ Define a single, app-wide monospace surface story for uatu: one CSS custom prope
 ## Requirements
 ### Requirement: Single CSS variable governs every monospace surface
 
-The stylesheet SHALL define a single CSS custom property `--mono-font-family` on `:root` whose value is the bundled-font stack (Hack Nerd Font Mono → OS monospace → generic monospace). Every monospace surface in the app — including but not limited to rendered Markdown code blocks, AsciiDoc code blocks, the source view, the diff view, file-path labels, the build badge, and metadata card label rows — SHALL resolve its `font-family` to `var(--mono-font-family)`. No surface SHALL hardcode its own monospace stack, and no configuration file SHALL override the variable.
+The stylesheet SHALL define a single CSS custom property `--mono-font-family` on `:root` whose value is the bundled-font stack (Hack Nerd Font Mono → OS monospace → generic monospace).
+
+#### Scenario: Monospace surfaces share the root font stack
+- **WHEN** the app renders a monospace surface
+- **THEN** every such surface — including rendered Markdown code blocks, AsciiDoc code blocks, the source view, the diff view, file-path labels, the build badge, and metadata card label rows — SHALL resolve its `font-family` to `var(--mono-font-family)`
+- **AND** no surface SHALL hardcode its own monospace stack, and no configuration file SHALL override the variable
 
 #### Scenario: Default value renders the bundled face
 
@@ -31,4 +36,3 @@ The stylesheet SHALL include rules that win on CSS specificity against `github-m
 
 - **WHEN** a maintainer greps `src/styles.css` for `!important` near `font-family`
 - **THEN** the only such usages are pre-existing (not introduced by this change)
-

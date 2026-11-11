@@ -4,6 +4,13 @@
 Surface per-file facts (size, line count, git provenance, freshness) as a strip in every document view, and signal in-place updates when the active document changes on disk.
 ## Requirements
 ### Requirement: File facts ride the document render payload
+
+Document renders SHALL include available filesystem facts without waiting for Git. Independent Git enrichment SHALL distinguish freshness and availability, remain scoped to the selected content and repository generation, and MUST NOT replace newer facts or make Git failure block document use.
+
+#### Scenario: Render file facts while repository enrichment is pending or changes
+- **WHEN** a document render or an independent Git fact result reaches the client
+- **THEN** available filesystem facts remain usable and only applicable enrichment updates the current facts strip
+
 The server SHALL compute filesystem facts for every document render and attach them to the `/api/document` payload when available. Facts SHALL include the line count and byte size for the rendered source and its observed modification time. Source and Rendered content delivery MUST NOT wait for Git subprocesses. For documents inside a Git root, the client SHALL obtain the last commit touching the file and its clean, dirty, or uncommitted state independently and enrich the facts strip when available. Pending, stale, and unavailable Git facts SHALL be distinguishable from verified clean or uncommitted facts. Filesystem facts SHALL refresh with every render, and Git enrichment SHALL be scoped to the selected document, content revision, and repository generation. Obsolete enrichment MUST NOT replace newer facts. Git failure SHALL leave the document and filesystem facts usable.
 
 #### Scenario: Document in a git root
@@ -84,6 +91,13 @@ When the working tree differs from HEAD for the active file (or the file has nev
 - **THEN** the freshness segment shows the last-commit date with no `uncommitted` marker
 
 ### Requirement: On-disk change signal
+
+Live reload of the viewed document SHALL briefly signal freshness through the visible facts strip or a fallback preview-header indicator. The signal SHALL support Rendered, Source, and Diff views and respect reduced-motion preferences.
+
+#### Scenario: The viewed file changes with or without an available facts strip
+- **WHEN** an on-disk change live-reloads the active document in place
+- **THEN** the appropriate visible freshness indicator signals the update and then clears
+
 When the actively viewed document changes on disk and the preview live-reloads in place, the UI SHALL signal the update. In Rendered, Source, and Diff views with a visible facts strip, the signal SHALL highlight the strip's freshness segment. If file facts are unavailable and no strip can be shown, the signal SHALL fall back to a transient indicator in the preview header. The signal SHALL disappear after a short interval and SHALL respect `prefers-reduced-motion` by substituting a non-animated presentation.
 
 #### Scenario: Active file changes while in Source view

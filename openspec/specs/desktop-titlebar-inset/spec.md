@@ -4,6 +4,13 @@
 Coordinate the desktop wrapper's native titlebar inset with SPA layout and selective glass effects so interactive chrome remains visible while eligible scrolling content frosts beneath it.
 ## Requirements
 ### Requirement: The wrapper announces a titlebar inset to the SPA
+
+The desktop wrapper SHALL announce native chrome coverage through a document-root marker and CSS height property. A document-start script MUST establish it before first paint, and native chrome height changes SHALL update the inset in place.
+
+#### Scenario: Load or resize native chrome above the hosted page
+- **WHEN** the desktop page loads, reloads, or gains a different native chrome height
+- **THEN** the SPA receives the current covered height early enough to clear native controls
+
 The desktop wrapper SHALL announce to the hosted page that native chrome
 covers the top of the content area, by setting a marker class and a CSS
 custom property carrying the covered height in CSS pixels on the document
@@ -53,6 +60,13 @@ content still flows beneath the floating toolbar. When the marker is absent
 - **THEN** no top padding is added and layout matches pre-change behavior
 
 ### Requirement: The page frosts the covered strip
+
+With the inset marker present, the SPA SHALL frost scrolling content beneath native chrome without intercepting interaction. Inset-cleared solid surfaces SHALL be excluded, fullscreen terminals SHALL receive no falloff, and the app's own top chrome SHALL remain crisp above the frost.
+
+#### Scenario: Scrolling content passes beneath native titlebar controls
+- **WHEN** the inset marker identifies a strip covered by native chrome
+- **THEN** the frost follows scrolling regions without washing solid app surfaces or obscuring app-header controls
+
 When the inset marker is present, the SPA SHALL render a non-interactive
 progressive frost over the covered strip — blur-forward with a light tint,
 dissolving over an eased ramp below the inset — so content beneath the

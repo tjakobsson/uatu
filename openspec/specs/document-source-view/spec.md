@@ -6,12 +6,24 @@ Define the per-document Source / Rendered view toggle and layout chooser in the 
 
 ### Requirement: Per-document Source/Rendered view toggle in the preview header
 
-The preview header SHALL expose a per-document view chooser as a segmented radio control with up to three segments — **Rendered**, **Source**, and **Diff** — using the same visual language as the existing Mode toggle. The set of segments shown SHALL depend on the active document's kind:
+The preview header SHALL expose a per-document segmented radio chooser using the existing Mode toggle's visual language: Rendered/Source/Diff for Markdown and AsciiDoc, and Source/Diff only for text/source files. The chooser SHALL remain usable in split layouts and respect the preview-kind and preference-fallback rules below.
 
-- For **Markdown** and **AsciiDoc** documents the chooser SHALL display all three segments: Rendered, Source, Diff.
-- For **text / source** documents (for example `.ts`, `.py`, `.json`) the chooser SHALL display two segments: Source, Diff. The Rendered segment SHALL NOT appear because text / source files have no separate rendered representation.
+#### Scenario: View segments reflect document kind and preview context
+- **WHEN** the active document is text/source (for example `.ts`, `.py`, `.json`)
+- **THEN** Rendered SHALL NOT appear because there is no separate rendered representation
 
-The chooser SHALL NOT appear for non-document previews (commit views, review-score views, empty state) and SHALL NOT appear for binary "preview unavailable" previews. The chooser SHALL remain visible in side-by-side and stacked layouts so the Diff segment stays reachable — Diff replaces both panes and would otherwise be unreachable from a split layout; clicking Source or Rendered while in split updates the persisted preference for the next return to single layout but does not change the visible content. When the persisted view preference is not in the set of segments available for the active document's kind, the system SHALL fall back to the first available segment (Source for text / source files, Rendered for Markdown and AsciiDoc) without overwriting the persisted preference.
+#### Scenario: Non-document and binary previews suppress view segments
+- **WHEN** a non-document commit view, review-score view, empty state, or binary "preview unavailable" preview is active
+- **THEN** the chooser SHALL NOT appear
+
+#### Scenario: An unavailable view preference falls back for any document kind
+- **WHEN** a document kind cannot provide the persisted preferred view
+- **THEN** it SHALL fall back to the first segment (Source for text/source, Rendered for Markdown/AsciiDoc) without overwriting the preference
+
+#### Scenario: A split view keeps Diff and future single-view choices reachable
+- **WHEN** side-by-side or stacked layout is active
+- **THEN** the chooser SHALL remain visible so Diff can replace both panes
+- **AND** clicking Source or Rendered SHALL update the persisted preference for the next return to single layout without changing visible split content
 
 #### Scenario: Chooser appears with three segments for Markdown documents
 - **WHEN** the active preview is a Markdown document
@@ -52,7 +64,11 @@ The chooser SHALL NOT appear for non-document previews (commit views, review-sco
 
 ### Requirement: View-mode preference is global and persisted
 
-The user's choice between Rendered, Source, and Diff SHALL be a single global preference, not per-document. The preference MUST be persisted to `localStorage` and MUST default to Rendered on first visit. Switching the chooser MUST update the persisted preference immediately and MUST take effect both for the currently-displayed document and for every subsequent document opened, including across page reloads. The persisted value SHALL be one of `"rendered"`, `"source"`, or `"diff"`; values outside this set MUST be treated as missing and fall back to the default.
+Rendered/Source/Diff SHALL be one global preference, not per-document. It MUST persist to `localStorage`, default to Rendered on first visit, and update immediately when the chooser switches, taking effect for the current and every subsequently opened document across reloads. Persisted values SHALL be `"rendered"`, `"source"`, or `"diff"`; other values MUST be treated as missing and use the default.
+
+#### Scenario: Stored view mode is outside the supported enum
+- **WHEN** `localStorage` contains a view preference other than `"rendered"`, `"source"`, or `"diff"`
+- **THEN** it MUST be treated as missing and fall back to Rendered
 
 #### Scenario: First visit defaults to Rendered
 - **WHEN** the user opens UatuCode for the first time on a fresh `localStorage`
@@ -79,9 +95,25 @@ The user's choice between Rendered, Source, and Diff SHALL be a single global pr
 
 ### Requirement: Source view renders the file's raw text with the line-number gutter
 
-When the user is in Source view (single layout) or when the Source pane is visible in a split layout, the affected region SHALL render the active document's verbatim on-disk text as a syntax-highlighted code block (highlighted by file kind), with a line-number gutter. No Markdown / AsciiDoc parsing or transformation MAY be applied to the displayed content. The whole-file source block MUST carry a distinguishing class so other parts of the UI (for example the word-wrap control) can identify it unambiguously and distinguish it from fenced code blocks rendered inside Markdown / AsciiDoc body content. This distinguishing class MUST be applied in both single Source view and the Source pane of split layouts.
+Single Source view and split Source panes SHALL display the active document's verbatim on-disk text as a file-kind-highlighted code block with line-number gutter, without Markdown/AsciiDoc parsing or transformation. Whole-file identification, wrapping, line-number alignment, and copying SHALL follow the rules below.
 
-When the global Wrap preference is **off** (the default), long lines SHALL scroll horizontally and each logical line occupies one visual row, as before. When Wrap is **on**, long lines SHALL soft-wrap within the available width and the line-number gutter SHALL remain **truthful to the code**: each line number SHALL align to the start of its own logical line, continuation rows of a wrapped line SHALL carry no number, and the next line's number SHALL align to where that next logical line begins. The gutter MUST NOT renumber wrapped continuation rows and MUST NOT desynchronize from the code. Line numbers MUST remain excluded from copy-to-clipboard and from text selection in both wrapped and unwrapped modes, and copied source text MUST preserve the file's real line breaks without inserting breaks at soft-wrap points.
+#### Scenario: A whole-file Source block is mounted in single or split layout
+- **WHEN** Source is rendered in either layout
+- **THEN** its whole-file block MUST carry a distinguishing class so controls such as word-wrap can unambiguously distinguish it from fenced code blocks inside Markdown/AsciiDoc body content
+
+#### Scenario: Wrap changes visual rows without changing logical lines
+- **WHEN** global Wrap is off (the default)
+- **THEN** long lines SHALL scroll horizontally with one visual row per logical line
+
+#### Scenario: Wrap on preserves logical line numbering
+- **WHEN** global Wrap is on
+- **THEN** long lines SHALL soft-wrap within available width, with each number aligned to its logical line's start, unnumbered continuation rows, and the next number aligned to the next logical line's start
+- **AND** the gutter MUST NOT renumber continuations or desynchronize from code
+
+#### Scenario: Source text is selected or copied with either Wrap setting
+- **WHEN** the user selects or copies wrapped or unwrapped Source
+- **THEN** line numbers MUST be excluded from selection and clipboard content
+- **AND** copied source MUST preserve real file line breaks without inserting breaks at soft-wrap points
 
 #### Scenario: Markdown source view shows raw markdown text
 - **WHEN** a user views a Markdown document in single Source view
@@ -141,7 +173,17 @@ Toggling between Rendered, Source, and Diff MUST NOT change which document is se
 
 ### Requirement: Layout chooser in the preview header
 
-The preview surface SHALL expose a **layout chooser** above the document body — rendered inline inside the preview surface (specifically as a sibling above the `#preview` element in the preview shell) rather than as a control inside the pinned preview header pill — for documents that have a non-trivial rendered representation (Markdown, AsciiDoc). The chooser MUST be a three-segment radio control with the text-labeled states **Single**, **Side by side**, and **Stacked**, using the same segmented-pill visual primitive as the header view chooser and the Diff view's Unified / Split toggle so all in-content segmented controls in the app read as one primitive. The chooser SHALL NOT appear for non-document previews (commit views, review-score views, empty state) and SHALL NOT appear for documents whose rendered view is identical to their source view (text / source files such as `.ts`, `.py`, `.json`, etc.). The chooser SHALL additionally be hidden whenever the active view-mode is **Diff**, because the split layouts in this capability pair Source and Rendered only — Diff is a single-pane view and has no split orientation in this version. When the view-mode returns to Rendered or Source, the layout chooser SHALL reappear for Markdown / AsciiDoc documents.
+Markdown/AsciiDoc previews SHALL expose an inline layout chooser above the body as a sibling above `#preview` in the preview shell, not inside the pinned header pill. It MUST be a three-segment radio control labelled **Single**, **Side by side**, and **Stacked**, using the same segmented-pill primitive as the header view chooser and Diff Unified/Split toggle. Visibility SHALL follow the rules below.
+
+#### Scenario: Preview kind or view mode determines layout-chooser visibility
+- **WHEN** a non-document preview (commit view, review-score view, empty state) or a text/source document with identical rendered/source views (such as `.ts`, `.py`, `.json`) is active
+- **THEN** the layout chooser SHALL NOT appear
+
+#### Scenario: Diff suppresses layout orientation until another view is selected
+- **WHEN** Diff is active
+- **THEN** the layout chooser SHALL be hidden because Diff is single-pane with no split orientation in this version; these split layouts pair Source and Rendered only
+- **WHEN** the view returns to Rendered or Source for a Markdown/AsciiDoc document
+- **THEN** the layout chooser SHALL return
 
 #### Scenario: Layout chooser appears for Markdown documents
 - **WHEN** the active preview is a Markdown document
@@ -172,7 +214,11 @@ The preview surface SHALL expose a **layout chooser** above the document body �
 
 ### Requirement: Layout preference is global and persisted
 
-The user's choice between **single**, **side-by-side**, and **stacked** layouts SHALL be a single global preference, not per-document. The preference MUST be persisted to `localStorage` under a key distinct from the Source / Rendered preference and MUST default to **single** on first visit. Activating a layout-chooser segment MUST update the persisted preference immediately and MUST take effect both for the currently-displayed document and for every subsequent document opened, including across page reloads.
+The **single**/**side-by-side**/**stacked** choice SHALL be one global preference, not per-document. It MUST persist to `localStorage` under a key distinct from Source/Rendered and default to **single** on first visit. Activating a segment MUST immediately persist the choice and apply it to the current and all subsequently opened documents across reloads.
+
+#### Scenario: Layout choice is saved independently of view mode
+- **WHEN** a user activates a layout-chooser segment
+- **THEN** the layout MUST be persisted under a `localStorage` key distinct from Source/Rendered, without becoming a per-document choice
 
 #### Scenario: First visit defaults to single layout
 - **WHEN** the user opens UatuCode for the first time on a fresh `localStorage`
@@ -193,7 +239,24 @@ The user's choice between **single**, **side-by-side**, and **stacked** layouts 
 
 ### Requirement: Split layouts render Source and Rendered together with a draggable resizer
 
-When the layout is **side-by-side** or **stacked**, the preview body SHALL render both the Source view and the Rendered view of the active document at the same time, in two adjacent panes, separated by a draggable resizer. In **side-by-side** the Source pane is on the left and the Rendered pane is on the right; the resizer is vertical and dragging adjusts horizontal allocation. In **stacked** the Source pane is on top and the Rendered pane is below; the resizer is horizontal and dragging adjusts vertical allocation. The two panes MUST scroll independently — scrolling one pane MUST NOT cause the other pane to scroll in response. The Source pane MUST apply the same rendering rules as the single Source view (raw text in a `<pre><code>` block with the line-number gutter and the same distinguishing class on the whole-file `<pre>`). The Rendered pane MUST apply the same rendering rules as the single Rendered view. Each pane MUST retain at least a minimum size (no smaller than 160 CSS pixels) along the split axis during drag.
+Side-by-side and stacked layouts SHALL simultaneously render the active document's Source and Rendered views in adjacent panes separated by a draggable resizer. The panes MUST scroll independently without one pane's scrolling moving the other. Orientation, rendering parity, and minimum sizing SHALL follow the rules below.
+
+#### Scenario: A split is oriented and resized
+- **WHEN** side-by-side is active
+- **THEN** Source SHALL be left and Rendered right, with a vertical resizer adjusting horizontal allocation
+
+#### Scenario: A stacked split is oriented and resized
+- **WHEN** stacked is active
+- **THEN** Source SHALL be above Rendered with a horizontal resizer adjusting vertical allocation
+
+#### Scenario: Either split orientation enforces a minimum pane size
+- **WHEN** a pane is dragged in either split orientation
+- **THEN** each pane MUST retain a minimum size no smaller than 160 CSS pixels along the split axis during drag
+
+#### Scenario: Split panes render their respective representations
+- **WHEN** a split layout renders the active document
+- **THEN** Source MUST follow single Source rendering rules: raw text in `<pre><code>`, line-number gutter, and the same distinguishing class on the whole-file `<pre>`
+- **AND** Rendered MUST follow single Rendered rendering rules
 
 #### Scenario: Side-by-side renders source on the left and rendered on the right
 - **WHEN** a user is viewing a Markdown document
@@ -226,7 +289,15 @@ When the layout is **side-by-side** or **stacked**, the preview body SHALL rende
 
 ### Requirement: Split ratio is persisted per orientation
 
-The split ratio between the two panes SHALL be persisted to `localStorage` independently for **side-by-side** and **stacked** orientations. Each stored ratio MUST be a numeric value representing the Source pane's fraction of the available split-container size along the active axis, clamped to a range that respects the minimum pane size. Default ratio for both orientations MUST be 0.5 on first visit. Dragging the resizer MUST update the persisted ratio for the current orientation immediately. Switching between orientations MUST restore each orientation's previously stored ratio (changing to side-by-side restores the last side-by-side ratio; changing to stacked restores the last stacked ratio).
+Split ratios SHALL persist independently in `localStorage` for **side-by-side** and **stacked**. Each MUST be numeric, represent Source's fraction of available split-container size along the active axis, and be clamped to respect minimum pane size. Both MUST default to 0.5 on first visit. Dragging and orientation changes MUST save and restore ratios as below.
+
+#### Scenario: A drag is followed by an orientation change
+- **WHEN** the resizer is dragged
+- **THEN** the current orientation's persisted ratio MUST update immediately
+
+#### Scenario: An orientation switch restores its own ratio without another drag
+- **WHEN** the user switches to side-by-side or stacked
+- **THEN** switching to side-by-side MUST restore its last ratio, and switching to stacked MUST restore its last ratio, independently
 
 #### Scenario: First visit defaults to a 50/50 ratio
 - **WHEN** the user activates side-by-side or stacked layout on a fresh `localStorage`
@@ -246,7 +317,11 @@ The split ratio between the two panes SHALL be persisted to `localStorage` indep
 
 ### Requirement: Side-by-side auto-stacks at narrow widths without overwriting preference
 
-When the user's stored layout preference is **side-by-side** but the preview body's available width is below the threshold needed to render two readable panes (no smaller than `2 × minPaneSize` plus the resizer width), the system SHALL render the **stacked** layout for that document view. The user's stored preference MUST NOT be changed by this fallback. When the preview body's available width grows above the threshold again, the stored preference SHALL be honored and the layout SHALL revert to side-by-side without user action.
+If stored layout is **side-by-side** but available preview-body width is below the readable two-pane threshold (no smaller than `2 × minPaneSize` plus resizer width), the system SHALL render **stacked** without changing the stored preference. Above that threshold again, it SHALL restore side-by-side without user action.
+
+#### Scenario: Available width determines automatic fallback
+- **WHEN** side-by-side cannot fit two readable panes
+- **THEN** the fallback threshold SHALL be no smaller than `2 × minPaneSize` plus resizer width, and the fallback MUST NOT overwrite the stored layout preference
 
 #### Scenario: Auto-stack engages at narrow widths
 - **WHEN** the layout preference is side-by-side
@@ -265,7 +340,12 @@ When the user's stored layout preference is **side-by-side** but the preview bod
 
 ### Requirement: Activating the layout chooser does not change the active document or navigation
 
-Activating any segment of the layout chooser MUST NOT change which document is selected, MUST NOT push a new history entry, MUST NOT alter Pin / Follow state, MUST NOT switch the Mode toggle, and MUST NOT change the Source / Rendered preference. The change SHOULD apply without a full document reload — switching layouts MUST NOT cause an "Document unavailable" or empty-preview flash for documents whose representations are already in the in-memory document view cache. When only one of Source / Rendered is currently cached for the active document and the layout change requires the other, the missing representation MAY be fetched via the existing document API, but the previously rendered content MUST remain visible during that fetch (no empty-state flash).
+Activating a layout segment MUST NOT change selected document, push history, alter Pin/Follow, switch Mode, or change Source/Rendered preference. It SHOULD apply without a full document reload and MUST NOT flash "Document unavailable" or an empty preview when representations are already in the in-memory document view cache. Missing representations SHALL follow the fetch rule below.
+
+#### Scenario: A layout change requires an uncached representation
+- **WHEN** only Source or Rendered is cached and the new layout requires the other
+- **THEN** the missing representation MAY be fetched through the existing document API
+- **AND** previously rendered content MUST remain visible during the fetch, without an empty-state flash
 
 #### Scenario: Active path stays the same after layout change
 - **WHEN** a user is viewing document A in single layout

@@ -7,7 +7,19 @@ Notify users when an agent needs an answer or finishes a turn, even when their U
 ## Requirements
 
 ### Requirement: Notifications require explicit device opt-in
-Hub-served Uatu SHALL offer an Enable notifications action in supported secure browser contexts. Permission SHALL be requested only following that action, never on installation, page load, or receipt of an agent event. The UI SHALL report the actual permission and subscription state and SHALL explain denied permission, unsupported environments, and HTTPS requirements without blocking ordinary use. On iPhone and iPad environments requiring a Home Screen installation, the UI SHALL explain that prerequisite before attempting enrollment. Enrollment SHALL use feature detection and SHALL work from the hub dashboard and a hub-served workspace. Enrollment SHALL succeed only when the hub knows the current notification-feed position of every running workspace the enrollment covers — the selected workspaces, or every accessible workspace when All workspaces is on; otherwise the hub SHALL refuse with a retryable error naming the workspace(s) it could not reach, SHALL leave the device's existing enrollment unchanged, and the UI SHALL present that refusal rather than reporting the device enabled.
+Hub-served Uatu SHALL offer feature-detected, explicit notification opt-in in supported secure contexts from dashboard and workspaces. Enrollment SHALL require current feed positions for every covered running workspace and preserve existing enrollment on refusal.
+
+#### Scenario: Permission enrollment follows explicit supported-context intent
+- **WHEN** Enable notifications is activated
+- **THEN** permission SHALL be requested only after that action, never at installation, page load, or agent-event receipt
+- **AND** the UI SHALL report actual permission/subscription state and explain denied permission, unsupported environments, and HTTPS without blocking normal use
+- **AND** iPhone/iPad Home Screen installation prerequisites SHALL be explained before enrollment when required
+- **AND** enrollment SHALL use feature detection from dashboard and hub-served workspaces
+
+#### Scenario: Enrollment requires every covered running feed position
+- **WHEN** enrollment covers selected workspaces or all accessible workspaces under All workspaces
+- **THEN** success SHALL require the hub to know every covered running workspace's current notification-feed position
+- **AND** otherwise the hub SHALL refuse retryably naming unreachable workspaces, leave existing enrollment unchanged, and the UI SHALL present refusal rather than enabled state
 
 #### Scenario: Installed iPhone app enrolls
 - **WHEN** a user opens Uatu as a Home Screen app over HTTPS on a supported iPhone and taps Enable notifications
@@ -49,7 +61,21 @@ Hub-served Uatu SHALL offer an Enable notifications action in supported secure b
 - **AND** stopped workspaces are covered without waiting
 
 ### Requirement: Device preferences select workspaces and event categories
-Each enrolled browser profile or installed app SHALL have notification preferences associated with its authenticated hub user. For each device the user SHALL choose one workspace mode: All workspaces, or an explicit selection of accessible workspaces. The user SHALL be able to toggle needs-answer notifications and successful-turn-completion notifications independently for that device, in either mode. Both categories SHALL initially be selected in the enrollment form, All workspaces SHALL initially be off, and in the explicit mode the current workspace SHALL be preselected when enrollment starts there and no workspace preselected on the dashboard. Submitting the form SHALL confirm the choice. All workspaces SHALL be stored as a standing rule for the device: it SHALL cover every workspace the user can access at the time of each event, including workspaces registered after it was saved, and SHALL NOT be recorded as the list of workspaces that existed when it was saved. Under the explicit mode, new workspaces SHALL NOT be subscribed automatically. Turning All workspaces off SHALL return the device to its previous explicit selection, or to no workspaces if it never had one. The device state reported to the client SHALL name the mode and the explicit selection. Disabling notifications SHALL stop future sends to that device without affecting the user's other devices.
+Each enrolled profile/app SHALL have authenticated-user-associated, device-specific workspace and event-category preferences. All workspaces SHALL be a standing access rule, not a saved inventory snapshot; explicit selections and other devices SHALL remain independent.
+
+#### Scenario: Enrollment defaults and submission record a device's explicit choices
+- **WHEN** the enrollment form opens
+- **THEN** it SHALL offer All workspaces or explicit accessible-workspace selection and independently toggle needs-answer and successful-turn-completion categories in either mode
+- **AND** both categories SHALL default selected, All workspaces off, with current workspace preselected from a workspace and none preselected from dashboard
+- **AND** submitting SHALL confirm choices; reported device state SHALL name mode and explicit selection
+
+#### Scenario: Workspace mode changes retain selective history and live access coverage
+- **WHEN** All workspaces is saved
+- **THEN** it SHALL stand for every workspace accessible at each event, including later registrations, and SHALL NOT store the then-existing inventory list
+- **WHEN** All workspaces is turned off
+- **THEN** the prior explicit selection SHALL return, or none if absent; explicit mode SHALL NOT automatically subscribe new workspaces
+- **WHEN** notifications are disabled on one device
+- **THEN** future sends SHALL stop there without affecting the user's other devices
 
 #### Scenario: Phone and desktop have different preferences
 - **WHEN** a user selects two workspaces on their phone and only one on their desktop browser
@@ -79,7 +105,17 @@ Each enrolled browser profile or installed app SHALL have notification preferenc
 - **AND** enrollment on their desktop remains active
 
 ### Requirement: Subscriptions follow authenticated ownership and access
-Subscription creation, preference changes, and removal SHALL require hub authentication and the hub's existing request protections. The server SHALL verify subscription ownership and workspace access both when preferences change and before sending. Signing out of the enrollment's hub session, expiration or revocation of that session, or loss of workspace access SHALL prevent subsequent sends under that authorization. Signing in again SHALL reconcile enrollment with the current account before sending resumes; a previously enrolled endpoint SHALL NOT silently transfer between users. Subscription details and push credentials SHALL NOT appear in application logs or responses to other users.
+Subscription creation, preference changes, and removal SHALL use hub authentication and existing request protections. Ownership and workspace access SHALL be checked on changes and before sends; ended authorization SHALL prevent sending, and enrollment MUST remain account-bound and private.
+
+#### Scenario: Authorization changes stop sends and require account reconciliation
+- **WHEN** enrollment's hub session signs out, expires, or is revoked, or workspace access is lost
+- **THEN** subsequent sends under that authorization SHALL stop
+- **WHEN** sign-in occurs again
+- **THEN** enrollment SHALL reconcile with the current account before sends resume, and endpoints SHALL NOT silently transfer users
+
+#### Scenario: Normal enrollment operation retains subscription privacy
+- **WHEN** subscription details or push credentials are handled, with or without an authorization change
+- **THEN** they SHALL NOT appear in application logs or other users' responses
 
 #### Scenario: Another user cannot change a subscription
 - **WHEN** an authenticated user attempts to modify or remove another user's enrollment
@@ -95,7 +131,17 @@ Subscription creation, preference changes, and removal SHALL require hub authent
 - **THEN** the hub stops sending that workspace's notifications to that user, including queued unsent events
 
 ### Requirement: Notifications describe live agent events
-Uatu SHALL produce needs-answer notifications for newly pending questions and permission requests and completion notifications for successful completion of a top-level agent turn in a selected workspace. Events SHALL identify the workspace, agent-qualified conversation, event kind, and stable source occurrence. OpenCode and Claude SHALL follow the same behavior. A new pending interaction SHALL remain distinguishable from an earlier pending interaction in the same workspace. Transcript replay, initial state hydration, unchanged status snapshots, individual tool completion, child-agent completion, failure, cancellation, and a transition into background work SHALL NOT produce a successful-turn-completion notification. An already resolved interaction SHALL be discarded before its unsent notification is dispatched when its resolution is known. A resolution SHALL carry the same identity as the pending event it resolves, regardless of which conversation reported the resolution.
+OpenCode and Claude SHALL notify alike for new questions/permissions and successful top-level turns in selected workspaces, using stable occurrence identities. Historical or non-success transitions SHALL NOT produce completion notifications, and known resolved interactions SHALL be discarded before unsent dispatch.
+
+#### Scenario: Live notifications distinguish occurrences from replay and non-top-level outcomes
+- **WHEN** a new needs-answer or successful top-level-turn event occurs
+- **THEN** it SHALL identify workspace, agent-qualified conversation, event kind, and stable source occurrence, distinguishing successive pending interactions in one workspace
+- **AND** transcript replay, initial hydration, unchanged snapshots, individual tool or child-agent completion, failure, cancellation, and transition to background work SHALL NOT produce successful-turn-completion notifications
+
+#### Scenario: Resolution identity cancels the exact unsent pending occurrence
+- **WHEN** an interaction's resolution is known before dispatch
+- **THEN** its unsent notification SHALL be discarded
+- **AND** resolution SHALL carry the pending event's same identity regardless of which conversation reported it
 
 #### Scenario: Another question appears while one is pending
 - **WHEN** a second distinct question becomes pending while the workspace already has an unanswered question
@@ -120,7 +166,19 @@ Uatu SHALL produce needs-answer notifications for newly pending questions and pe
 - **AND** an unsent delivery for that request is discarded
 
 ### Requirement: Delivery continues without an open page
-For running workspaces a device covers — its selected workspaces, or every accessible workspace under All workspaces — the hub SHALL observe eligible events and submit Web Push notifications without requiring a browser live stream, an open conversation, or any visible page. Whether an event is sent at once, held, or discarded SHALL follow the presence rule of this capability; an absent page SHALL never prevent a send. Observation SHALL be shared across enrolled devices and SHALL NOT start an unused agent runtime or stopped workspace merely to watch it. A workspace registered after an All workspaces enrollment SHALL be observed once it runs, without any client action; events that occurred before the hub first saw the workspace registered SHALL be treated as history for that device. Device enrollments, server push identity, and pending delivery state SHALL survive hub restart. A reconnect SHALL resume retained events where possible; a replay gap SHALL reconcile still-pending interactions without announcing historical completions. Uatu SHALL document that the hub and agent must be running, that pushes are withheld while the user has a visible session page, and that platform delivery timing is controlled by the browser/OS.
+The hub SHALL observe covered running workspaces and send eligible Web Push without open pages, conversations, or browser live streams, subject to presence rules. Shared observation SHALL avoid starting idle runtimes/workspaces and preserve enrollments, push identity, and pending delivery across restart.
+
+#### Scenario: Page-independent observation respects coverage and runtime lifecycle
+- **WHEN** a device covers selected workspaces or all accessible workspaces under All workspaces
+- **THEN** eligible running-workspace events SHALL be observed/submitted without browser live stream, open conversation, or visible page; presence SHALL decide send/hold/discard, never page absence preventing send
+- **AND** observation SHALL be shared across enrolled devices and SHALL NOT start unused agent runtimes or stopped workspaces solely to watch
+- **AND** later-registered All workspaces members SHALL be observed on running without client action, treating events before the hub first saw registration as history for that device
+
+#### Scenario: Restart and replay gaps preserve pending delivery rather than historical completions
+- **WHEN** the hub restarts or reconnects
+- **THEN** device enrollments, server push identity, and pending delivery SHALL survive restart, and reconnect SHALL resume retained events where possible
+- **AND** replay gaps SHALL reconcile still-pending interactions without historical-completion announcements
+- **AND** Uatu SHALL document required running hub/agent, withholding while users have visible session pages, and browser/OS control of delivery timing
 
 #### Scenario: The phone is locked
 - **WHEN** an enrolled phone is locked, its page has released its live connection, the user has no other visible session page, and an observed agent asks a question
@@ -152,7 +210,15 @@ For running workspaces a device covers — its selected workspaces, or every acc
 - **AND** it does not infer old successful completions from conversation history
 
 ### Requirement: Delivery is bounded and suppresses duplicate events
-Each event/enrollment pair SHALL have one logical delivery identity. Repeated source frames and replay within the supported retention window SHALL NOT enqueue a new notification for an already recorded occurrence. Temporary push failures SHALL use bounded retry and a five-minute delivery lifetime. The lifetime SHALL be measured from the source event, except for a needs-answer event held under the presence rule, whose lifetime SHALL be measured from its release; expired events SHALL be discarded. Permanently invalid subscriptions SHALL be removed from sending. Platform-accepted pushes SHALL NOT be deliberately resubmitted as new events. Duplicate deliveries caused by an ambiguous transport outcome SHALL use the same notification identity so they replace rather than multiply visible entries. Uatu SHALL NOT claim exactly-once OS delivery.
+Each event/enrollment pair SHALL keep one logical delivery identity across replay and bounded retries, with a five-minute lifetime. Accepted pushes SHALL NOT be deliberately resent as new events, and Uatu SHALL NOT claim exactly-once OS delivery.
+
+#### Scenario: Retry lifetime and transport ambiguity preserve one logical notification
+- **WHEN** repeated frames or replay occur within supported retention
+- **THEN** recorded occurrences SHALL NOT enqueue new notifications
+- **WHEN** temporary push failures or ambiguous transport outcomes occur
+- **THEN** retries SHALL be bounded to five minutes from source event, except presence-held needs-answer lifetime SHALL start on release; expired events SHALL be discarded
+- **AND** ambiguous duplicate deliveries SHALL keep the same identity to replace rather than multiply visible entries
+- **AND** permanently invalid subscriptions SHALL be removed from sending, and accepted pushes SHALL NOT deliberately resubmit as new events
 
 #### Scenario: Source replay repeats completion
 - **WHEN** a recorded completion event is replayed after reconnect or hub restart within retention
@@ -177,7 +243,14 @@ Each event/enrollment pair SHALL have one logical delivery identity. Repeated so
 - **AND** drops it if it has not been accepted by then
 
 ### Requirement: Notifications open the relevant conversation
-Notifications SHALL display a concise needs-answer or turn-completed message and workspace identity without including transcript text, question answers, permission details, or tool output. Each notification SHALL carry a same-origin destination for the corresponding workspace and agent-qualified conversation. Tapping it SHALL reuse a suitable Uatu window or open one, activate Chat in the current UI mode, and select that conversation. If login is required, the intended destination SHALL survive login. Missing or inaccessible destinations SHALL produce an understandable unavailable state rather than opening a different conversation as though it were the target. Each delivered push SHALL request a visible notification; foreground pages SHALL NOT also display a duplicate local notification.
+Notifications SHALL identify workspace and needs-answer/completion state without conversation details and carry same-origin conversation destinations. Activation SHALL open the correct Chat, survive login, and explain unavailable targets; delivered pushes SHALL visibly notify without foreground duplicates.
+
+#### Scenario: Push content and activation preserve privacy and exact conversation destination
+- **WHEN** a notification is delivered or tapped
+- **THEN** its concise needs-answer/turn-completed message and workspace identity SHALL exclude transcript text, question answers, permission details, and tool output
+- **AND** its same-origin destination SHALL identify workspace and agent-qualified conversation; tapping SHALL reuse a suitable Uatu window or open one, activate Chat in current UI mode, and select that conversation
+- **AND** login SHALL preserve destination; missing/inaccessible destinations SHALL show understandable unavailable state rather than a different conversation as target
+- **AND** each push SHALL request a visible notification while foreground pages SHALL NOT duplicate it locally
 
 #### Scenario: Notification opens an installed iPad app
 - **WHEN** the user taps a question notification while using the Home Screen installation
@@ -197,14 +270,28 @@ Notifications SHALL display a concise needs-answer or turn-completed message and
 - **THEN** only the push path requests an OS notification
 
 ### Requirement: Delivery stays quiet while the user is present
-The hub SHALL treat a hub user as *present* while at least one hub-served session page authenticated as that user is visible on any device, and as *recently present* for 30 seconds after the last such page stops being visible or loses its connection. A user who is neither SHALL be *away*. The hub dashboard, the login page, and pages hidden in the background SHALL NOT make a user present. Presence SHALL be evaluated per hub user across all of that user's devices and SHALL govern every enrolled device of that user regardless of each device's workspace and category preferences. When the hub starts, every user SHALL begin as recently present so that pages reconnecting after a restart are counted before any delivery is decided.
+Per-user presence across devices SHALL govern notification sending: visible authenticated session pages imply present, the next 30 seconds imply recently present, otherwise away. Presence SHALL discard or hold completions and hold pending questions, retaining bounded release and restart-safe delivery identities.
 
-Presence SHALL affect sending as follows:
-- A successful-turn-completion event that becomes sendable while its user is present SHALL be discarded. One that becomes sendable while its user is recently present SHALL be held; it SHALL be sent if the user becomes away and discarded if the user becomes present first.
-- A needs-answer event that becomes sendable while its user is present or recently present SHALL be held. A held needs-answer event SHALL be released for sending when its user becomes away, provided its interaction is still pending and no more than 60 minutes have passed since the source event; otherwise it SHALL be discarded.
-- An event that becomes sendable while its user is away SHALL be sent without delay, as before.
+#### Scenario: Presence is user-wide and excludes non-session or hidden pages
+- **WHEN** presence is evaluated
+- **THEN** any visible hub-served session page authenticated as that user on any device SHALL make the user present, with recently-present lasting 30 seconds after the last such page hides or disconnects, and away otherwise
+- **AND** dashboard, login, and background-hidden pages SHALL NOT make presence; state SHALL govern every enrolled device regardless of workspace/category preferences
+- **WHEN** the hub starts
+- **THEN** every user SHALL begin recently present so reconnecting pages count before delivery decisions
 
-Holding SHALL NOT create additional logical deliveries: a held event keeps its one delivery identity per enrollment and is sent at most once. A resolution of a held interaction, loss of workspace access, device removal, and every other rule that discards an unsent delivery SHALL discard a held one alike. Held deliveries and their release state SHALL survive a hub restart. The workspace SHALL keep an unanswered interaction reconcilable for at least the 60-minute hold limit so that a replay gap does not misreport a held interaction as answered or as still pending.
+#### Scenario: Sendable events obey distinct completion and pending-question presence rules
+- **WHEN** a successful top-level completion becomes sendable
+- **THEN** it SHALL be discarded if present, held if recently present, then sent on away or discarded if presence returns first
+- **WHEN** needs-answer becomes sendable while present or recently present
+- **THEN** it SHALL be held and released on away only if still pending and at most 60 minutes from source event, otherwise discarded
+- **WHEN** any event becomes sendable while away
+- **THEN** it SHALL send without delay as before
+
+#### Scenario: Held deliveries survive restart without multiplying or outliving resolved requests
+- **WHEN** an event is held
+- **THEN** holding SHALL NOT add logical deliveries; it SHALL keep one identity per enrollment and send at most once
+- **AND** resolution, access loss, device removal, or any other unsent-discard rule SHALL discard held deliveries alike
+- **AND** held deliveries and release state SHALL survive restart; unanswered interactions SHALL stay reconcilable at least the 60-minute limit so replay gaps do not misreport answered or still-pending state
 
 #### Scenario: A question arrives in the conversation on screen
 - **WHEN** a user is viewing a workspace's chat on their desktop and the agent there asks a question

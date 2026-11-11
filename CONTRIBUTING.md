@@ -47,6 +47,22 @@ The proposal, design, delta specs, and tasks describe intent and acceptance
 criteria. Current behavior belongs in `openspec/specs/`; completed planning
 artifacts belong in `openspec/changes/archive/`.
 
+Keep each requirement body at or below 500 characters, with detailed cases
+in scenarios using `WHEN`/`GIVEN` and `THEN` steps. Move examples and edge
+cases into scenarios, or split independent behaviors into separate requirements
+without losing their acceptance criteria. OpenSpec 1.14.1 and later report
+overlong main-spec and ADDED requirement bodies as warnings, which fail the
+repository's strict validation. Headings and scenario text do not count toward
+the body limit.
+
+The generated OpenSpec skills are committed in both `.agents/skills/` and
+`.claude/skills/`. When adopting a CLI release, refresh both trees with that
+version, retaining the six workflows: propose, explore, apply, update, sync,
+and archive. Use skills-only delivery and an isolated `XDG_CONFIG_HOME` with
+an explicit custom workflow profile so machine-local settings cannot change
+the repository's workflow set. Inspect `openspec update --dry-run --json`
+before applying the refresh, then repeat it to confirm no changes remain.
+
 ## Pull requests and commits
 
 Pull requests are squash-merged, so the PR title becomes the commit seen by

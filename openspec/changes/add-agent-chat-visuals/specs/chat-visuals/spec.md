@@ -260,6 +260,13 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **AND** a terminated closing-fence line or authoritative native text completion permits capture of the final exact SVG source
 
 ### Requirement: Managed agents receive scoped presentation guidance
+
+Managed Claude Code and OpenCode sessions SHALL attempt native visual-presentation guidance without replacing prompts, permissions, or configuration. Guidance SHALL cover new and resumed sessions; failure SHALL remain optional, preserve native startup, and produce only a sanitized explanation.
+
+#### Scenario: Add optional visual guidance to a new or resumed native session
+- **WHEN** a managed session prepares its native presentation guidance
+- **THEN** it preserves inherited authority and continues without optional hints if injection cannot be completed safely
+
 Managed Claude Code and OpenCode sessions SHALL attempt to add native presentation
 guidance describing supported embeds, limits, immutable capture, and resource
 restrictions. Injection SHALL preserve existing prompts, instructions, and

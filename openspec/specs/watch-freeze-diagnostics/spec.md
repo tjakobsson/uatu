@@ -4,6 +4,13 @@
 Detect and recover from wedged session-child processes (the internal `serve` process defined by `serve-cli-startup`) through suspend-safe heartbeat monitoring, bounded forensic capture, diagnostic counters, force termination, and self-pruning XDG cache storage.
 ## Requirements
 ### Requirement: Watchdog subprocess detects and recovers from a wedged session child
+
+A session child SHALL start a sibling watchdog using the same binary. Heartbeat staleness MUST accumulate observed watchdog ticks rather than suspended wall-clock time. A stale heartbeat MUST trigger a forensic dump and force termination, and the watchdog MUST exit when its parent is gone.
+
+#### Scenario: Observe a heartbeat stall across awake and suspended runtime
+- **WHEN** the watchdog samples its parent heartbeat or resumes after system suspension
+- **THEN** only observed running ticks contribute to staleness before forensic capture and forced recovery
+
 A session child process SHALL spawn a sibling watchdog subprocess at startup. The main process MUST refresh a heartbeat file mtime at least once per second. The watchdog MUST stat the heartbeat file at least once per second and MUST treat the heartbeat as stale only when its mtime has not advanced across a number of consecutive watchdog ticks equivalent to the configured staleness threshold (default 30 seconds of observed ticks). Staleness MUST NOT be derived from comparing the heartbeat mtime against wall-clock time: ticks accumulate only while the watchdog itself is running, so a system suspend/resume cycle — during which both processes are frozen and wall-clock time advances — MUST NOT count toward staleness. When the heartbeat goes stale, the watchdog MUST capture a forensic dump bundle (see "Forensic dump bundle" below) and then SHALL force-terminate the main process with `SIGKILL`. The watchdog MUST exit cleanly when the main process is no longer reachable, regardless of cause. The watchdog MUST be a single re-execution of the same uatu binary (no separate executable, no new runtime dependency).
 
 #### Scenario: Healthy heartbeat keeps uatu alive
@@ -42,6 +49,13 @@ A session child process SHALL spawn a sibling watchdog subprocess at startup. Th
 - **AND** the session child operates exactly as it did before this capability was introduced (modulo other features in this change)
 
 ### Requirement: Forensic dump bundle is written when the watchdog detects a freeze
+
+Before terminating a stale parent, the watchdog SHALL write collision-safe forensic artifacts with platform-specific stack/FD capture, recent counters, and a JSON cause. External capture commands MUST be time-bounded with partial-output sentinels; limited capture fidelity MUST NOT prevent termination.
+
+#### Scenario: Capture a frozen parent's evidence on a supported platform
+- **WHEN** the watchdog detects a stale heartbeat and prepares to terminate its parent
+- **THEN** bounded platform adapters retain available forensic evidence and mark incomplete captures without making termination platform-dependent
+
 When the watchdog acts on a stale heartbeat, it SHALL write a dump bundle into the cache directory before terminating the main process. The bundle MUST include: a stack-state capture of the wedged process, a file-descriptor listing, the most recent counter history available (verbose NDJSON tail when verbose metrics are enabled, otherwise the always-on counter snapshot file), and a small JSON cause file naming the watchdog reason, recording the heartbeat age at detection, and recording the platform under which the dump was taken. Stack and FD capture MUST be implemented as platform adapters: on macOS via `sample` and `lsof`; on Linux via direct reads of `/proc/<pid>/`; on Windows the capture MAY be omitted and a sentinel file written instead. Each external command MUST be capped at 5 seconds; if a command exceeds the cap the partial output MUST still be written and MUST be marked with a "timed out" sentinel. Dump filenames MUST encode the wedged PID and a timestamp so multiple dumps can coexist without collision. Force-termination of the wedged process MUST work on every supported platform regardless of the fidelity of the stack/FD capture step.
 
 #### Scenario: Dump bundle captures stack, fds, metrics tail, and cause
@@ -120,6 +134,13 @@ When `--debug` is set, the local watch server SHALL expose a `/debug/metrics` ro
 - **THEN** the server responds 404
 
 ### Requirement: A wedged session child is force-terminated within the watchdog staleness threshold without operator intervention
+
+The watchdog MUST force-terminate an unresponsive session within the configured observed-runtime threshold without manual escalation. System suspension SHALL NOT consume that budget; normal process-exit cleanup MUST reap owned resources without regressing termination of PTY children.
+
+#### Scenario: Recover from an event loop that cannot run shutdown handlers
+- **WHEN** the session stops refreshing its heartbeat while its JavaScript event loop is wedged
+- **THEN** the independent watchdog bounds recovery and the operating system cleans up the terminated process's resources
+
 A user MUST be able to recover from a wedged session child without escalating to `kill -9` from a separate terminal. When the JavaScript event loop is unresponsive, the existing JS-side shutdown handlers cannot run; the watchdog subprocess MUST therefore be the killability primitive in that state. From the moment the main process stops refreshing its heartbeat, no more than the configured staleness threshold of watchdog runtime MAY elapse before the watchdog force-terminates the parent; watchdog runtime equals wall-clock time whenever the system is awake, and excludes intervals during which the system is suspended. Resources owned by the process (PTY masters, listening sockets, native watcher handles) MUST be reaped via the operating system's normal process-exit cleanup after force-termination; the change MUST NOT regress the user-visible outcome that PTY children are terminated when the session child exits.
 
 #### Scenario: Ctrl+C exits a healthy source-run session child immediately

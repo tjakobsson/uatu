@@ -60,6 +60,13 @@ existing clipboard helper.
 - **THEN** the button shows brief failure feedback
 
 ### Requirement: Narrow viewports stack the preview toolbar below the heading
+
+Below the narrow-width breakpoint, the preview header SHALL stack its heading above a wrapping toolbar independently of pointer type. Controls MUST stay visible and tappable without crushing the title or overflowing horizontally, while sticky positioning and backdrop treatment remain unchanged.
+
+#### Scenario: Display the preview heading and controls on a portrait phone
+- **WHEN** viewport width falls below the breakpoint chosen to distinguish portrait and landscape phones
+- **THEN** the toolbar occupies its own wrapping row and preserves access to every control
+
 Below a narrow-width breakpoint (chosen so a portrait phone stacks and a landscape phone does not, independent of pointer type), the preview header SHALL lay out as a column — document heading first, then the toolbar (view segments, wrap control, action icons) on its own row — instead of a single flex row. The toolbar SHALL be allowed to wrap. Every control MUST remain visible and tappable, the document title MUST NOT be crushed or clipped by the toolbar, and the header MUST NOT overflow the viewport horizontally. Sticky-header positioning and the existing header backdrop treatment SHALL be unchanged.
 
 #### Scenario: Portrait phone shows title and controls on separate rows
