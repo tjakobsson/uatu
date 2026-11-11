@@ -142,7 +142,7 @@ test(`prebaseline native positives retain scope and order (${carrier}/${mode})`,
   } finally { release(); releaseInbox(); abort.abort(); await reading?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const mode of ["older-relevant", "newer-relevant", "older-stale", "older-stale-overflow", "older-overflow", "older-bytes", "older-duplicates", "unrelated"] as const)
+for (const mode of ["prebaseline-owned-report", "prebaseline-owned-cover", "prebaseline-newer-relevant", "prebaseline-newer-overflow", "prebaseline-newer-bytes", "prebaseline-newer-duplicates", "prebaseline-older-only", "older-relevant", "newer-relevant", "older-stale", "older-stale-overflow", "older-overflow", "older-bytes", "older-duplicates", "unrelated"] as const)
 test(`inventory provisional positives merge independently of response order (${mode})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, final = false;
@@ -157,11 +157,14 @@ test(`inventory provisional positives merge independently of response order (${m
     if (route.endsWith("/inbox")) {
       if (route !== `/api/session/${parent}/inbox`) return Response.json({ data: [] });
       const order = explicit.getStore();
-      if (!order && !final) { ownedEntered(); await ownedHeld; return Response.json({ data: [] }); }
+      if (!order && !final) { ownedEntered(); await ownedHeld; return Response.json({ data: mode === "prebaseline-owned-report" || mode === "prebaseline-owned-cover" ? [entry("actual-provisional-failure", child!)] : [] }); }
       if (order === "older") { olderEntered(); await olderHeld; }
-      const relevant = final || order === "newer" && mode === "newer-relevant" || order === "older" && ["older-relevant", "older-stale", "older-duplicates"].includes(mode);
+      const relevant = final || order === "newer" && ["newer-relevant", "prebaseline-newer-relevant", "prebaseline-newer-duplicates", "prebaseline-owned-cover"].includes(mode) || order === "older" && ["older-relevant", "older-stale", "older-duplicates", "prebaseline-older-only"].includes(mode);
       const report = entry(relevant ? "actual-provisional-failure" : "unrelated-failure", relevant ? child! : "unrelated");
       return Response.json({ data: order === "older" && (mode === "older-overflow" || mode === "older-stale-overflow") ? Array.from({ length: 257 }, (_, index) => entry(`overflow-${index}`, "unrelated"))
+        : order === "newer" && mode === "prebaseline-newer-overflow" ? Array.from({ length: 257 }, (_, index) => entry(`overflow-${index}`, "unrelated"))
+        : order === "newer" && mode === "prebaseline-newer-bytes" ? [entry("oversized", "z".repeat(32_768))]
+        : order === "newer" && mode === "prebaseline-newer-duplicates" ? Array.from({ length: 400 }, () => report)
         : order === "older" && mode === "older-bytes" ? [entry("oversized", "z".repeat(32_768))]
         : order === "older" && mode === "older-duplicates" ? Array.from({ length: 400 }, () => report) : [report] });
     }
@@ -180,19 +183,21 @@ test(`inventory provisional positives merge independently of response order (${m
   const startOlder = async () => { older = explicit.run("older", () => provider.listPendingInbox!(parent!, { signal: abort.signal })); void older.catch(() => undefined); await olderPending; };
   try {
     parent = (await provider.createSession("Owned empty inventory baseline with overlapping positives")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
-    if (mode.startsWith("older-stale")) await startOlder();
+    if (mode.startsWith("older-stale") || mode.startsWith("prebaseline-")) await startOlder();
     reading = provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal, onSource: source => guards.push(source.workerSource.retain(abort.signal)) }); void reading.catch(() => undefined);
     await Promise.all([parentPending, ownedPending]);
-    if (!mode.startsWith("older-stale")) await startOlder();
+    if (!mode.startsWith("older-stale") && !mode.startsWith("prebaseline-")) await startOlder();
     await explicit.run("newer", () => provider.listPendingInbox!(parent!, { signal: abort.signal }));
     releaseOlder(); await older; releaseParent(); releaseOwned();
     const result = await reading.then(value => ({ value }), error => ({ error }));
-    const denied = !["older-stale", "older-stale-overflow", "unrelated"].includes(mode);
+    const ownedReport = mode === "prebaseline-owned-report" || mode === "prebaseline-owned-cover";
+    const denied = !ownedReport && !["older-stale", "older-stale-overflow", "prebaseline-older-only", "unrelated"].includes(mode);
     if (denied) expect(result).not.toMatchObject({ value: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] });
     expect(guards.length).toBeGreaterThan(0);
     expect(guards.every(guard => guard.isCurrent())).toBe(!denied);
     if (denied) expect(result).toHaveProperty("error");
-    else expect(result).toMatchObject({ value: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] });
+    else expect(result).toMatchObject({ value: [expect.objectContaining({ taskId: worker.taskId, status: ownedReport ? "failed" : "completed",
+      ...(ownedReport ? { resultId: "actual-provisional-failure", summary: "Actual provisional failure", terminalReportedAt: 45 } : {}) })] });
     final = true;
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: "failed", resultId: "actual-provisional-failure", summary: "Actual provisional failure", terminalReportedAt: 45 });
@@ -1765,6 +1770,57 @@ test(`automatic recovery guards native ${carrier === "stored" ? "parent" : carri
     if (failed || change === "same-report") expect(published).toMatchObject({ resultId: "native-parent-result", summary: "Native parent result" });
     else expect(published.resultId).toBeUndefined();
   } finally { release(); abort.abort(); await adapter.dispose(); await pump; await events?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
+for (const change of ["reverse", "new-load", "unchanged", "staged-only", "unrelated"] as const)
+test(`late staged native reply fences only pre-transition warm history (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, staged = false, removed = false, holdLookup = false, childReads = 0;
+  let entered!: () => void, release!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 }; return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) { childReads++; return Response.json({ data: [{ id: "prompt", type: "user", text: "Execution", time: { created: 15 } },
+      ...(!removed ? [{ id: "old-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : [])], cursor: {} }); }
+    if (route === `/api/session/${change === "unrelated" ? other : child}`) {
+      const body = await response.json(); if (staged) body.data.revert = { messageID: "old-idle" };
+      if (holdLookup) { holdLookup = false; entered(); await held; } return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), abort = new AbortController();
+  let older: ReturnType<typeof provider.getSession> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Reversed native visibility replies")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId; other = fake.launchRequestWorker(parent).childId;
+    pump = adapter.startEventPump(); void pump.catch(() => undefined); await provider.waitForEventStream!(abort.signal);
+    await provider.getReversibleHistoryState!(child); expect(childReads).toBe(1);
+    staged = change !== "unchanged"; holdLookup = true;
+    older = provider.getSession(change === "unrelated" ? other : child); void older.catch(() => undefined); await pending;
+    staged = change === "staged-only"; removed = change === "reverse" || change === "new-load";
+    await provider.getSession(change === "unrelated" ? other : child);
+    if (change === "new-load") {
+      const newer = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      expect(newer.find(item => item.taskId === worker.taskId)).toMatchObject({ status: "running", activity: { kind: "working" } }); expect(childReads).toBe(2);
+    }
+    release(); await older;
+    const history = await adapter.history(parent);
+    const row = history.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    expect(row?.status).toBe(removed || staged ? "running" : "completed");
+    expect(childReads).toBe(removed ? 2 : 1);
+    if (removed) {
+      const evidence = await adapter.workerEvidence(parent);
+      expect(evidence.entries.find(entry => entry.executionId === row?.activity?.executionId)?.dismissible).toBe(false);
+      const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: "running", activity: { kind: "working" } });
+    }
+  } finally { release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await pump; await fake.stop(); }
 }, 10_000);
 
 for (const change of ["staged-cleared", "unchanged", "staged-only", "other-child", "stale-overlap"] as const)

@@ -285,6 +285,10 @@ An inventory consumer's provisional baseline merges older-arriving positive
 observations as well: older than a newer unrelated request does not mean older
 than the owned empty inbox baseline. Per-fact ordering still discards genuinely
 stale facts/overflow, and exact digest coalescing plus the existing caps bound it.
+An envelope predating the owned request cannot discard individual newer facts
+or overflow. Conversely, provisional positives never invent an empty baseline
+or veto actual owned report content for unrelated children; matching report
+content, ID and native clock retain authority under existing source guards.
 
 Registered pending child-history dependencies retain native staged/cleared
 boundary changes before an idle is classified as a positive outcome. Existing
@@ -294,8 +298,11 @@ A genuinely newer boundary transition invalidates obsolete child-history reuse;
 ordered native reads, not stale ownerless response arrival, govern that decision.
 Warm child transcripts need no parent dependency to observe native visibility.
 Each qualified cache entry carries a constant-size boundary observation from
-pending-load registration through retention. Native request-start order rejects
-pre-registration and stale overlapping observations. Invalidation retires the
+pending-load registration through retention. Native request-start order retains
+the newest baseline. A late staged reply after a newer cleared reply can veto
+only a load registered before that intermediate stage. It cannot replace the
+newer baseline or invalidate a load begun after the stage/clear pair.
+Invalidation retires the
 pending entry before a late value can install over a replacement; eviction and
 disposal release the same metadata. No independent visibility keys are retained.
 Entering a staged boundary filters the same

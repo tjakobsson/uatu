@@ -1895,13 +1895,18 @@ export class OpenCodeV2Provider implements ChatProvider {
           ...(previous ? this.mergePendingOutcome(previous, incoming) : incoming), provisional: true };
         continue;
       }
-      if (!previous || previous.provisional && source === owner && observation.started >= previous.started) continue;
+      if (!previous) continue;
       if (previous.overflow && source !== owner) continue;
       const target = observation.started > previous.completed ? source : owner;
       if (!target) continue;
       const baseline = previous.provisional && source === owner ? this.pendingFactsAfter(previous, observation.started) : previous;
       for (const [child, launches] of target.historyParentLaunches ?? []) {
-        if (!baseline.overflow && !incoming.overflow && this.pendingOutcomeSignature(baseline, child, launches) === this.pendingOutcomeSignature(incoming, child, launches)) continue;
+        const signature = this.pendingOutcomeSignature(baseline, child, launches);
+        // Provisional positives are deny-only, not a consumed empty baseline.
+        // Only facts/overflow individually newer than this owned request may
+        // veto it; an older envelope cannot discard them or invent absences.
+        if (previous.provisional && source === owner && !baseline.overflow && !signature) continue;
+        if (!baseline.overflow && !incoming.overflow && signature === this.pendingOutcomeSignature(incoming, child, launches)) continue;
         if (observation.started <= previous.completed) conflictingOverlap = true;
         target.historyParentChanges.add(child);
         if (dependsOnWorkerHistory(target, child)) target.revision++;
@@ -3149,7 +3154,13 @@ export class OpenCodeV2Provider implements ChatProvider {
         // this load; invalidation also prevents its late value installation.
         const order = this.historyReuse.peekObservation(subject, this.streamConnected ? String(this.streamGeneration) : undefined);
         const previous = order?.visibility;
-        if (order && observation.started > order.recordsAfter && (!previous || observation.started > previous.started)) {
+        if (order && observation.started > order.recordsAfter && previous && observation.started < previous.started
+          && boundary !== null && previous.boundary === null) {
+          // A late intermediate stage is deny-only against a load registered
+          // before it. It cannot replace the newer cleared baseline, and cannot
+          // affect a replacement load registered after that stage/clear pair.
+          this.historyReuse.invalidate(subject);
+        } else if (order && observation.started > order.recordsAfter && (!previous || observation.started > previous.started)) {
           // Entering a staged boundary filters the same complete raw history;
           // retain it and refresh visibility/cost from the current record.
           // Leaving/changing an existing boundary can commit removed content,

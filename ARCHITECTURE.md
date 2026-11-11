@@ -1250,6 +1250,10 @@ unrelated response. Both observations can be newer than the consuming empty
 inbox request. The existing compact fact/byte caps and sticky overflow bound
 this merge; stale facts are filtered by their own native request start, not
 renewed or dropped according to the provisional envelope's arrival order.
+When that envelope began before the owned inbox request, its individual newer
+facts and overflow still veto the owned baseline. A provisional snapshot cannot
+invent absence for a child: genuinely stale/unrelated positives do not veto
+actual owned report content, and matching owned reports remain authoritative.
 
 Native child revert-boundary observations begin when the read registers its
 pending child-history dependency, before the response classifies positive
@@ -1262,14 +1266,17 @@ replace the newer owned boundary baseline or revoke it on late arrival.
 Before any dependent parent read exists, transcript cache entries own a
 constant-size native visibility observation from load registration, before a
 value exists. The metadata transfers to retained values and retires with the
-entry. Native request-start order rejects pre-registration and stale overlapping
-observations. A staged→cleared change retires a pending entry before its obsolete
+entry. Native request-start order keeps the newest visibility baseline. A late
+intermediate stage can deny reuse of a load registered before it when a newer
+cleared reply arrived first; it never replaces that newer baseline or affects
+a replacement load registered after the stage/clear pair. A staged→cleared
+change retires a pending entry before its obsolete
 response can install or overwrite a replacement. No session keys are added.
 Entering a staged boundary retains the complete raw transcript and
 refreshes native cost/visibility filtering on each fold. Leaving or changing an
 existing boundary can commit removed content and therefore invalidates reuse.
 Unchanged or unrelated observations preserve reuse, and overlapping older
-records cannot replace a newer baseline. The weak metadata adds no retained
+records cannot replace a newer baseline. Cache-owned metadata adds no retained
 session keys, global visibility map, ownership or read phase. Eviction,
 generation invalidation and disposal release the cache entry as before.
 
