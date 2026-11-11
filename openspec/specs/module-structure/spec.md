@@ -6,7 +6,12 @@ Define how the uatu codebase is physically organized so that contributors — hu
 ## Requirements
 ### Requirement: src/ is organized into feature folders that mirror the running app
 
-The `src/` directory SHALL be organized into top-level folders named after regions of the running application or coherent domains, not after tech categories (`hooks/`, `services/`, `utils/`). The folders `shell/`, `preview/`, `sidebar/`, `terminal/`, and `server/` SHALL exist and own the code for their respective UI regions or subsystems. Cross-cutting domains (document data — including the repository-level git data sweep, rendering, ignore policy, watchdog, debug instrumentation) SHALL each have their own folder.
+The `src/` tree SHALL use application-region or coherent-domain folders, not technology categories (`hooks/`, `services/`, `utils/`). `shell/`, `preview/`, `sidebar/`, `terminal/` and `server/` SHALL exist and own their regions/subsystems. Document data (including the repository-level git sweep), rendering, ignore policy, watchdog and debug instrumentation SHALL each have their own folder.
+
+#### Scenario: Domain ownership is visible in the source tree
+- **WHEN** the checked-out `src/` tree and its module responsibilities are inspected
+- **THEN** `shell/`, `preview/`, `sidebar/`, `terminal/` and `server/` each own the corresponding region or subsystem
+- **AND** document data, including the repository-level git data sweep, rendering, ignore policy, watchdog and debug instrumentation each occupy their own domain folder rather than technology-category folders
 
 #### Scenario: Required feature folders exist
 - **WHEN** the `src/` directory is listed
@@ -33,7 +38,13 @@ The `src/app.ts` file SHALL function as a thin wire-up entrypoint that imports f
 
 ### Requirement: The HTTP route table is declared in exactly one place
 
-The set of HTTP routes served by uatu SHALL be declared in exactly one source file (`src/server/routes.ts`), through a single `buildRoutes` function. Production (`src/cli.ts`) and the E2E harness (`tests/e2e/server.ts`) SHALL both obtain their routes by calling `buildRoutes` and SHALL NOT redeclare individual route paths inline. Request paths that cannot be served from Bun's static route table — the `/api/terminal` WebSocket upgrade, `/api/auth` (GET and POST), and the `/api/terminal/sessions` inventory — SHALL be handled by a single shared fetch-fallback builder (`buildFetchFallback(deps)`) declared alongside `buildRoutes` in `src/server/`. Production and the E2E harness SHALL both obtain their `fetch` handler from this builder and SHALL NOT reimplement the terminal-upgrade, auth, or sessions handling inline.
+All HTTP routes SHALL be declared once in `src/server/routes.ts` through `buildRoutes`. Production `src/cli.ts` and E2E `tests/e2e/server.ts` SHALL call it, not redeclare paths. Both SHALL obtain `fetch` from one shared `buildFetchFallback(deps)` alongside it in `src/server/`, not reimplement `/api/terminal` upgrade, `/api/auth` GET/POST or `/api/terminal/sessions` handling inline.
+
+#### Scenario: Both entrypoints use the canonical route builders
+- **WHEN** the production and E2E server source is inspected
+- **THEN** `src/cli.ts` and `tests/e2e/server.ts` each call `buildRoutes` and `buildFetchFallback(deps)` from `src/server/`
+- **AND** the only route-table declaration is `buildRoutes` in `src/server/routes.ts`
+- **AND** neither entrypoint redeclares route paths or implements the terminal upgrade, auth GET/POST or terminal-session inventory fallback inline
 
 #### Scenario: Route literals are not duplicated across server entry points
 - **WHEN** the codebase is searched for production API route literals such as `"/api/state"`, `"/api/document"`, `"/api/events"`, `"/api/scope"`, and `"/api/document/diff"`
@@ -95,9 +106,17 @@ The score-explanation HTML builder (`buildScoreExplanationHTML`) SHALL live in `
 
 ### Requirement: appState is importable from a single module
 
-The application state singleton (`appState`) SHALL be defined and exported from `src/shell/state.ts`. Modules that need to read application state SHALL import from this module. The state singleton SHALL NOT be redefined elsewhere.
+`appState` SHALL be defined/exported only in `src/shell/state.ts`; readers SHALL import it there. Every field SHALL have one owner in ARCHITECTURE.md's ownership table. External mutations MUST use that owner's exported named mutators; direct assignment SHALL occur only inside the owner. Preference mutators SHALL own localStorage writes. State.ts SHALL contain initial values/types, not mutation logic. Follow-mode's four rules remain exclusive for `followEnabled` and `selectedId` transitions.
 
-Every field of `appState` SHALL have exactly one owning module, documented in a field-ownership table in ARCHITECTURE.md. The owning module SHALL export named mutator functions for its fields, and any mutation of a field from outside its owning module MUST go through those mutators — direct assignment (`appState.<field> = …`) SHALL appear only inside the field's owning module. Mutators whose fields persist a preference SHALL own the corresponding localStorage write, so persistence and assignment cannot drift apart. `src/shell/state.ts` itself SHALL remain a container (initial values and types), not an owner of mutation logic. The follow-mode capability's four rules remain the exclusive authority for `followEnabled` and `selectedId` transitions; this requirement codifies the same single-writer shape for every other field.
+#### Scenario: The singleton has no second declaration
+- **WHEN** all application-state declarations and readers in the source tree are inspected
+- **THEN** `src/shell/state.ts` defines and exports the only `appState` singleton and every reader imports that singleton
+
+#### Scenario: Every field has one documented mutation owner
+- **WHEN** the `appState` declaration, ARCHITECTURE.md ownership table and all field writes are compared
+- **THEN** each field has exactly one documented owning module exporting named mutators, and all external writes use those mutators rather than direct assignment (`appState.<field> = …`)
+- **AND** preference mutators perform their own localStorage writes, while `src/shell/state.ts` contains initial values and types, not mutation logic
+- **AND** only the follow-mode capability's four rules govern `followEnabled` and `selectedId` transitions
 
 #### Scenario: appState has a single home
 - **WHEN** the codebase is searched for the top-level declaration `const appState = {`
@@ -159,7 +178,13 @@ All code related to the in-browser terminal panel, the WebSocket terminal server
 
 ### Requirement: An architecture document exists at the repo root
 
-An `ARCHITECTURE.md` file SHALL exist at the repository root describing the runtime architecture of uatu in sufficient depth that a new contributor — human or AI — can orient in a single sitting. The document SHALL cover: a short elevator pitch, a runtime map (CLI / server / SPA / terminal boundaries), a folder tour of `src/` and `tests/`, the request lifecycle, the state lifecycle (SSE → `appState` → re-render), the terminal subsystem (xterm.js ↔ WebSocket ↔ PTY), review-vs-author mode differences, "how to extend" recipes for common contributions, and a run/test quickstart. The document SHALL use Mermaid diagrams for the runtime map, request lifecycle, state lifecycle, and terminal subsystem. The README and `CLAUDE.md` SHALL link to `ARCHITECTURE.md`.
+Root `ARCHITECTURE.md` SHALL orient a new human or AI contributor in one sitting: elevator pitch, CLI/server/SPA/terminal runtime map, `src/`/`tests/` tour, request and SSE → `appState` → re-render lifecycles, xterm.js ↔ WebSocket ↔ PTY, review/author modes, extension recipes and run/test quickstart. Runtime, request, state and terminal flows SHALL use Mermaid diagrams. README and `CLAUDE.md` SHALL link to it.
+
+#### Scenario: Architecture coverage is present without a contributor action
+- **WHEN** the checked-out root documentation is inspected
+- **THEN** `ARCHITECTURE.md` contains the elevator pitch, CLI/server/SPA/terminal runtime map, `src/` and `tests/` tour, request lifecycle, SSE → `appState` → re-render state lifecycle and xterm.js ↔ WebSocket ↔ PTY subsystem
+- **AND** it covers review-vs-author differences, common "how to extend" recipes and the run/test quickstart, with Mermaid diagrams for runtime, request, state and terminal flows
+- **AND** README and `CLAUDE.md` link to it
 
 #### Scenario: ARCHITECTURE.md exists and covers required sections
 - **WHEN** the repository is inspected after the change
@@ -185,7 +210,13 @@ An `ARCHITECTURE.md` file SHALL exist at the repository root describing the runt
 
 ### Requirement: The server core is decomposed into cohesive modules
 
-The server-side building blocks SHALL be split into modules with one responsibility each; no single module under `src/server/` SHALL combine CLI parsing, filesystem scanning, render dispatch, static-file security, HTTP navigation, and the live-reload engine. Specifically: CLI argument parsing, usage/version text, and TTY startup output SHALL live in a `src/cli/` domain folder (the `src/cli.ts` entrypoint remains at the `src/` root and imports from it); the live-reload engine, root resolution/scanning, document render dispatch, static-file resolution, and SPA navigation handling SHALL each live in their own module under `src/server/`. The former god-file `src/server/session.ts` SHALL NOT exist. Unit tests SHALL move with their subjects as colocated siblings.
+Server building blocks SHALL have one responsibility each. CLI parsing, usage/version text and TTY output SHALL live in `src/cli/`, imported by root `src/cli.ts`. Live reload, root resolution/scanning, render dispatch, static-file resolution and SPA navigation SHALL each have their own `src/server/` module, not be combined with CLI handling. `src/server/session.ts` SHALL NOT exist. Unit tests SHALL move with their subjects as colocated siblings.
+
+#### Scenario: The server tree keeps distinct responsibilities
+- **WHEN** the checked-out CLI/server modules and their tests are inspected
+- **THEN** CLI parsing, usage/version text and TTY startup output are in `src/cli/`, imported by root `src/cli.ts`
+- **AND** live reload, root resolution/scanning, render dispatch, static-file security/resolution and HTTP/SPA navigation each have their own single-responsibility module under `src/server/`
+- **AND** `src/server/session.ts` does not exist and unit tests are colocated siblings of their subjects
 
 #### Scenario: The god-file is gone
 - **WHEN** the repository is inspected after the change
@@ -201,4 +232,3 @@ The server-side building blocks SHALL be split into modules with one responsibil
 - **WHEN** the full unit and E2E suites are run after the split
 - **THEN** all tests pass without changes to their assertions (import paths aside)
 - **AND** `bun run build` produces a working binary whose `--help`, startup output, and routes are unchanged
-

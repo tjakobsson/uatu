@@ -25,24 +25,23 @@ accounts area SHALL state this scope where logins are changed.
 - **THEN** the area states that logins apply to every workspace and every user of this Hub and to the agents' own tools on this machine
 
 ### Requirement: Agent accounts lists login state per agent and provider
-The Agent accounts area SHALL list every chat agent the Hub offers. For
-Claude Code it SHALL show whether a usable login exists. When the agent
-reports them, it SHALL also show the account email, organization, plan, and
-whether the login is a subscription, an API key, an environment-provided key
-or token, or a third-party cloud provider. For OpenCode it SHALL list the
-logged-in providers first, each with its credential kind and, on OpenCode 2.x,
-its credential label. The providers that can be logged in to SHALL be listed
-after them, findable by name. A login method that Agent accounts cannot run
-itself, such as one that reads an environment variable or runs a local
-helper command, SHALL be listed with what the user does instead: the
-variable to set in the Hub's environment, or the agent's own login command.
-An agent that is not installed or cannot be reached SHALL be reported with
-its diagnostic, without hiding the other agents. An agent that does not
-answer a status read or any step of a login, logout, or switch within a
-bounded time SHALL be reported as not answering, and SHALL NOT hold up later
-requests; a login it had in progress SHALL be reported as failed, and the
-next request SHALL start it again. Status reads SHALL NOT start a login, change a credential, or spend
-model tokens.
+The Agent accounts area SHALL list every chat agent the Hub offers, its login state and available methods, with independent diagnostics and bounded requests. Status reads SHALL NOT start a login, change a credential, or spend model tokens.
+
+#### Scenario: Account status describes Claude Code and OpenCode logins
+- **WHEN** Agent accounts reads agent status
+- **THEN** Claude Code SHALL show whether a usable login exists and, when reported by the agent, the account email, organization, plan, and whether the login is a subscription, an API key, an environment-provided key or token, or a third-party cloud provider
+- **AND** OpenCode SHALL list logged-in providers first, each with its credential kind and, on OpenCode 2.x, its credential label
+- **AND** providers that can be logged in to SHALL follow them, findable by name
+
+#### Scenario: A login method needs configuration outside Agent accounts
+- **WHEN** a method cannot be run by Agent accounts, such as one reading an environment variable or running a local helper command
+- **THEN** it SHALL be listed with the variable to set in the Hub's environment or the agent's own login command
+
+#### Scenario: Missing and unresponsive agents do not block account management
+- **WHEN** an agent is not installed, cannot be reached, or does not answer a status read or any login, logout, or switch step within a bounded time
+- **THEN** missing or unreachable agents SHALL be reported with their diagnostic without hiding other agents
+- **AND** an unresponsive agent SHALL be reported as not answering and SHALL NOT hold up later requests
+- **AND** its in-progress login SHALL be reported as failed and the next request SHALL start it again
 
 #### Scenario: Claude Code is not logged in
 - **WHEN** Claude Code is installed but has no usable login
@@ -72,14 +71,17 @@ model tokens.
 - **AND** the next visit starts Claude Code again
 
 ### Requirement: Users log in with an API key
-For every provider or agent login method that accepts a key, Agent accounts
-SHALL offer a masked key field together with the method's own extra fields,
-honoring each field's type, options, placeholder, and the condition under
-which it appears. A field the agent marks as sensitive SHALL be masked like
-the key. Submitting SHALL hand the key and answers to the agent, then
-clear the key field and any sensitive field. Saved keys SHALL NOT be redisplayed or returned by any
-response, and an agent's error message SHALL NOT repeat the key or an answer. A rejected key or missing required field SHALL be reported next to
-that method's controls.
+For every key-accepting login method, Agent accounts SHALL offer its key and extra fields with the agent's types, options, placeholders and visibility conditions. Keys and every sensitive field SHALL always be masked; submission SHALL hand answers to the agent, then clear those fields. Saved keys MUST NOT be redisplayed or returned; agent errors MUST NOT repeat a key or answer. Rejected keys and missing required fields SHALL be reported beside that method.
+
+#### Scenario: Key submission clears secrets and reports errors locally
+- **WHEN** a user fills and submits a key method
+- **THEN** submitting SHALL hand the key and answers to the agent, then clear the key field and any sensitive field
+- **AND** saved keys SHALL NOT be redisplayed or returned by any response, and an agent's error message SHALL NOT repeat the key or an answer
+- **AND** a rejected key or missing required field SHALL be reported next to that method's controls
+
+#### Scenario: Sensitive extra fields are masked before submission
+- **WHEN** a key method displays an extra field the agent marks as sensitive
+- **THEN** that field is masked like the key even before any submission
 
 #### Scenario: Key with an extra field
 - **WHEN** a user logs in to a provider whose key method also asks for an account id
@@ -95,20 +97,22 @@ that method's controls.
 - **THEN** the field appears only while that answer is selected and is not submitted otherwise
 
 ### Requirement: Users complete browser and device-code logins from any device
-Starting a browser login SHALL show the URL to open and the agent's
-instructions, including any code the user must enter. The Hub SHALL then
-follow the attempt until it completes, fails, expires, or is cancelled, and
-show which. When the agent's flow ends with a code to paste back, Agent
-accounts SHALL take the code and submit it. When the flow redirects to a
-`localhost` address on the Hub machine, Agent accounts SHALL tell the user
-that the browser will fail to load that address unless it runs on the Hub
-machine, take the full address the browser landed on, and have the Hub
-deliver it to the agent's waiting listener on the Hub machine. A user SHALL
-be able to cancel an attempt in progress. Starting a login for an agent or
-provider SHALL replace that agent's or provider's earlier unfinished attempt,
-and starts made at the same moment SHALL leave at most one unfinished. Starting
-again after a failed or expired attempt SHALL reuse its answers, except that
-a sensitive field SHALL be asked for again rather than kept by the page.
+Starting a browser login SHALL show the URL to open and the agent's instructions, including any code the user must enter. The Hub SHALL follow and report the attempt through completion, failure, expiry, or cancellation, supporting paste-back codes and remote completion of Hub-machine localhost redirects.
+
+#### Scenario: A browser flow returns a paste-back code
+- **WHEN** the agent's browser flow ends with a code to paste back
+- **THEN** Agent accounts accepts the code and submits it to the agent
+
+#### Scenario: A browser flow redirects to the Hub machine's localhost
+- **WHEN** the agent's browser flow redirects to a `localhost` address on the Hub machine
+- **THEN** Agent accounts explains that the address will fail to load unless the browser runs on the Hub machine
+- **AND** it accepts the full address the browser landed on and has the Hub deliver it to the agent's waiting listener on the Hub machine
+
+#### Scenario: Login attempts can be cancelled, replaced, and retried safely
+- **WHEN** a login is in progress or the user starts another attempt
+- **THEN** the user SHALL be able to cancel an in-progress attempt
+- **AND** a start SHALL replace that agent's or provider's earlier unfinished attempt, with simultaneous starts leaving at most one unfinished
+- **AND** a restart after failure or expiry SHALL reuse answers except sensitive fields, which SHALL be asked for again rather than kept by the page
 
 #### Scenario: Device-code login from a phone
 - **WHEN** a user starts a device-code login on a phone
@@ -153,14 +157,17 @@ or failed, not the listener's response body.
 - **THEN** the Hub rejects it without making any request
 
 ### Requirement: Users log out and switch credentials where the agent allows
-Agent accounts SHALL offer log out for each OpenCode provider credential the
-installed OpenCode can remove, and for a Claude Code login that UatuCode or the Claude Code CLI created. Where the
-installed OpenCode supports it, Agent accounts SHALL offer to make a different
-saved credential the active one when an integration has more than one. Logging out SHALL ask for
-confirmation, stating that every workspace and the agent's own tools lose
-that login. Agent accounts SHALL NOT offer log out for a login it cannot
-remove, such as a key from the Hub's environment or a third-party cloud
-provider. For those it SHALL say where the login is configured.
+Agent accounts SHALL offer log out for each OpenCode provider credential the installed OpenCode can remove, and for a Claude Code login that UatuCode or the Claude Code CLI created. Credential switching SHALL be offered where supported, and logout SHALL disclose its scope and require confirmation.
+
+#### Scenario: An integration has multiple saved credentials
+- **WHEN** the installed OpenCode supports switching and an integration has more than one saved credential
+- **THEN** Agent accounts SHALL offer to make a different saved credential active
+
+#### Scenario: Logout distinguishes removable and externally configured logins
+- **WHEN** a user manages a login
+- **THEN** logging out SHALL ask for confirmation stating that every workspace and the agent's own tools lose that login
+- **AND** Agent accounts SHALL NOT offer log out for a login it cannot remove, such as a Hub-environment key or a third-party cloud provider
+- **AND** for those logins it SHALL say where the login is configured
 
 #### Scenario: OpenCode provider logout
 - **WHEN** a user confirms log out for a logged-in OpenCode provider

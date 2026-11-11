@@ -30,11 +30,12 @@ AsciiDoc documents without renderer-specific logic.
 The outline SHALL choose its presentation from the width available to the
 preview area rather than from the UI mode: when that area cannot host both the
 docked rail and a readable text column it SHALL render as a fullscreen sheet,
-and otherwise SHALL render as the docked rail. The resolution SHALL be
-re-evaluated whenever the available width can change — window resize, device
-rotation, UI-mode switch, terminal dock or resize, and sidebar collapse — so a
-panel that is open across such a change adopts the presentation its new width
-calls for.
+and otherwise SHALL render as the docked rail.
+
+#### Scenario: Layout changes re-evaluate an open outline's presentation
+- **WHEN** available width can change, including window resize, device rotation, UI-mode switch, terminal dock or resize, or sidebar collapse
+- **THEN** the resolution SHALL be re-evaluated
+- **AND** a panel that is open across the change SHALL adopt the presentation its new width calls for
 
 #### Scenario: Phone-width preview renders the sheet
 - **WHEN** the user opens the outline on a viewport whose preview area is too
@@ -305,12 +306,18 @@ reflow the document, since it covers the preview rather than sitting beside it.
 The outline width SHALL be adjustable in the rail presentation by dragging a
 handle on its left edge (its docked right edge staying fixed), bounded below by
 a minimum width and above by the width that still leaves a readable text column
-beside it. The chosen width SHALL persist across reloads using browser-local UI
-state, and SHALL be capped to that same bound when reapplied in a preview area
-too narrow to honour it, so a width chosen on a large display cannot squeeze the
-document on a smaller one. The sheet presentation SHALL NOT render a resize
-handle, since it is sized to the available surface rather than to a stored
-width.
+beside it.
+
+The chosen width SHALL persist across reloads using browser-local UI state.
+
+#### Scenario: Restoring a rail width respects the current text-column bound
+- **WHEN** the chosen rail width is reapplied after a reload or in a narrower preview area
+- **THEN** the chosen width SHALL persist across reloads using browser-local UI state
+- **AND** the applied width SHALL be capped to the same readable-text-column bound, so a width chosen on a large display cannot squeeze the document on a smaller one
+
+#### Scenario: Sheet geometry follows the available surface
+- **WHEN** the outline uses the sheet presentation
+- **THEN** it SHALL NOT render a resize handle, since it is sized to the available surface rather than to a stored width
 
 #### Scenario: Resizing by dragging the left edge
 - **WHEN** the user drags the outline's left-edge handle in the rail

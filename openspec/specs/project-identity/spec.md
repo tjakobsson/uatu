@@ -20,7 +20,13 @@ The client SHALL derive a project label from the state payload's roots: the firs
 - **THEN** the tab title is `uatu` and no project marker is shown
 
 ### Requirement: Session derives a stable identity hue from root paths
-The client SHALL derive an identity hue (0–359) from a hash of the session's watched-entry paths (each root's `id`, which is the watched file or directory's absolute path — NOT `RootGroup.path`, which degrades to the parent directory for file-scoped roots), sorted so CLI argument order does not affect the result. The same set of watched entries SHALL always produce the same hue, and the hue SHALL be derived from paths — not labels — so identically named projects in different locations get different hues.
+
+The client SHALL derive a stable 0–359 identity hue from sorted watched-entry absolute paths rather than labels or parent-directory paths, so argument order does not affect identity.
+
+#### Scenario: Identity hue is computed for directory or file-scoped roots, including same-named projects and reordered arguments
+- **WHEN** identity hue is computed for directory or file-scoped roots, including same-named projects and reordered arguments
+- **THEN** The client SHALL derive an identity hue (0–359) from a hash of the session's watched-entry paths (each root's `id`, which is the watched file or directory's absolute path — NOT `RootGroup.path`, which degrades to the parent directory for file-scoped roots), sorted so CLI argument order does not affect the result.
+- **AND** The same set of watched entries SHALL always produce the same hue, and the hue SHALL be derived from paths — not labels — so identically named projects in different locations get different hues.
 
 #### Scenario: Hue is stable across sessions
 - **WHEN** the identity hue is derived twice for the same set of root paths
@@ -61,7 +67,14 @@ The client SHALL install a favicon as a dynamically generated SVG `link rel="ico
 - **THEN** exactly one dynamic favicon link element exists
 
 ### Requirement: Change Overview names each repository with an identity badge
-The client SHALL render each repository's name in the Change Overview pane as a badge tinted with an identity hue derived from that repository's watched roots' paths — the same derivation the favicon uses, so a single-repository session's badge color matches the favicon exactly. The badge SHALL carry a tooltip (`title` attribute) listing the full path of every watched root belonging to that repository. The sidebar brand block SHALL NOT carry a separate project label — the Change Overview badge is the in-app marker.
+
+Change Overview SHALL identify each repository with a path-derived hue badge matching the favicon derivation and a full-root-path tooltip. The sidebar brand block MUST NOT duplicate the project label.
+
+#### Scenario: Change Overview renders repository identity badges alongside the sidebar brand block
+- **WHEN** Change Overview renders repository identity badges alongside the sidebar brand block
+- **THEN** The client SHALL render each repository's name in the Change Overview pane as a badge tinted with an identity hue derived from that repository's watched roots' paths — the same derivation the favicon uses, so a single-repository session's badge color matches the favicon exactly.
+- **AND** The badge SHALL carry a tooltip (`title` attribute) listing the full path of every watched root belonging to that repository.
+- **AND** The sidebar brand block SHALL NOT carry a separate project label — the Change Overview badge is the in-app marker.
 
 #### Scenario: Badge shows the repository name with hue and paths tooltip
 - **WHEN** the app boots against a session watching a repository labeled `docs`

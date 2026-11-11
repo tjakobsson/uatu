@@ -6,9 +6,17 @@ Deliver permitted workspace audio and video as independently cancellable HTTP re
 ## Requirements
 
 ### Requirement: Media bytes have an independent authenticated HTTP path
-The system SHALL expose GET and HEAD media delivery under the workspace base path, identified by watched-root identity, root-relative path, and the requested file revision within its session epoch. Delivery SHALL enforce workspace authentication, indexed membership, current exposure policy, and realpath containment. Media bytes MUST NOT enter document JSON, personal state, or pushed-update events. Hiding Gitignored files SHALL NOT itself deny an otherwise permitted authenticated media request.
 
-The media route SHALL remain an internal child-proxied protocol, documented and verified with HTTP contract tests. Its GET and HEAD methods SHALL have explicit machine-checkable non-public exclusions. Child media operations MUST NOT be published in the public OpenAPI surface or expand the public Hub API. Existing publication/revision rules SHALL continue to govern public personal-state and forwarded live-payload changes.
+Media GET/HEAD SHALL use revision-bound routes under the workspace base path, enforcing authentication, indexed membership, current exposure policy, and realpath containment. Each method SHALL have explicit machine-checkable non-public exclusions. Bytes MUST NOT enter document JSON, personal state, or pushed events. Documented, HTTP-contract-tested delivery SHALL be internal and child-proxied; child operations MUST NOT enter public OpenAPI or expand the Hub API.
+
+#### Scenario: Resolve a permitted revision without visibility-based denial
+- **WHEN** a media request identifies a watched root, root-relative path, and file revision within its session epoch
+- **THEN** those identifiers select the authenticated, indexed, exposed, realpath-contained representation
+- **AND** hiding Gitignored files SHALL NOT by itself deny an otherwise permitted authenticated request
+
+#### Scenario: Maintain internal route and public payload contracts
+- **WHEN** public personal-state or forwarded live-payload changes are made
+- **THEN** existing publication and revision rules SHALL govern those changes, without publishing child media operations
 
 #### Scenario: Media route coverage preserves the internal boundary
 - **WHEN** route coverage classifies GET/HEAD media delivery
@@ -46,7 +54,21 @@ The media route SHALL remain an internal child-proxied protocol, documented and 
 - **AND** the file stays indexed for the rest of the session even if later writes fill the live-write window
 
 ### Requirement: Media delivery defines range and HEAD semantics
-A successful full GET SHALL return 200, the media MIME type, the representation byte length, and Accept-Ranges: bytes. A satisfiable single explicit, open-ended, or suffix range SHALL return 206 with exact Content-Range and Content-Length for the returned bytes. An unsatisfiable range SHALL return 416 with Content-Range: bytes */size and no media body. Malformed or multiple ranges SHALL be ignored and answered with the normal full representation. HEAD SHALL return the full representation's metadata without a body and SHALL ignore Range. The Hub SHALL preserve these semantics without compression or byte transformation.
+
+Media delivery SHALL implement full GET, single-range GET, unsatisfiable-range, and HEAD responses with exact representation metadata. Malformed or multiple ranges SHALL fall back to full delivery; the Hub SHALL preserve these semantics without compression or byte transformation.
+
+#### Scenario: Deliver full and partial media representations
+- **WHEN** a successful GET is full or carries a satisfiable single explicit, open-ended, or suffix range
+- **THEN** full delivery returns 200, media MIME type, representation byte length, and `Accept-Ranges: bytes`; ranged delivery returns 206 with exact `Content-Range` and `Content-Length` for its bytes
+
+#### Scenario: Reject an unsatisfiable range without a media body
+- **WHEN** a single range cannot be satisfied
+- **THEN** the response is 416 with `Content-Range: bytes */size` and no media body
+
+#### Scenario: Preserve metadata and fallback semantics through the Hub
+- **WHEN** HEAD, malformed Range, or multiple ranges are requested
+- **THEN** HEAD ignores Range and returns full metadata without a body; malformed or multiple ranges receive the normal full representation
+- **AND** the Hub preserves these and successful GET semantics without compression or byte transformation
 
 #### Scenario: The player seeks into a clip
 - **WHEN** the player requests `bytes=1024-2047` from a sufficiently large file
@@ -70,7 +92,17 @@ A successful full GET SHALL return 200, the media MIME type, the representation 
 - **THEN** the server returns a normal full 200 representation rather than partial or malformed multipart data
 
 ### Requirement: Media transfer has bounded buffering and cancellation
-Media delivery SHALL begin without reading or buffering the whole file at the workspace child, Hub, or browser application layer. A slow consumer SHALL apply backpressure. Replacing or closing the active clip, abandoning a request, or leaving the workspace SHALL cancel obsolete transfers through the Hub to the child within a bounded period. Transfer buffering SHALL remain bounded independently of file length. Media traffic MUST NOT require Git completion or block independent live-update/control requests behind application buffering.
+
+Media delivery SHALL stream with bounded buffering and backpressure rather than read whole files. Obsolete transfers SHALL cancel through the Hub to the child within a bounded period, without waiting for Git or blocking independent live/control requests.
+
+#### Scenario: Begin streaming without whole-file buffering
+- **WHEN** media delivery starts at the child, Hub, or browser application layer
+- **THEN** none reads or buffers the whole file before delivery; buffering stays bounded independently of file length and slow consumers apply backpressure
+- **AND** media traffic MUST NOT require Git completion or block independent live-update/control requests behind application buffering
+
+#### Scenario: Cancel every obsolete transfer
+- **WHEN** the active clip is replaced or closed, a request is abandoned, or the workspace is left
+- **THEN** cancellation reaches through the Hub to the child and releases obsolete transfers within a bounded period
 
 #### Scenario: A large video is playing
 - **WHEN** a client reads only an initial range of a large video

@@ -8,16 +8,15 @@ mode, and the obligation on every scroll-and-reveal path to target it.
 ## Requirements
 ### Requirement: The preview's effective scroll container is resolved per use
 
-The system SHALL resolve, at each use, the element that actually scrolls the
-preview for the current layout and UI mode, rather than capturing a scroll
-container once at module load. In the desktop layout above the stacked
-breakpoint the effective container SHALL be the preview shell. In touch mode and
-in the ≤900px stacked desktop layout — where the shell is laid out
-`overflow: visible` and the page scrolls instead — the effective container SHALL
-be the document's viewport scroller. In split layout the rendered pane, which is
-its own scroll container, SHALL remain the effective container for content
-inside it. Exactly one resolver SHALL serve every caller, so that no call site
-re-derives the rule and none can drift from it.
+One shared resolver SHALL select the actual preview scroll container at each use for current UI mode and layout, including viewport scrolling in touch/stacked desktop and the rendered pane in split layout.
+
+#### Scenario: Each scroll use resolves the current layout's container
+- **WHEN** any caller needs the preview scroll container, on initial use or after a layout or UI-mode change
+- **THEN** The system SHALL resolve, at each use, the element that actually scrolls the preview for the current layout and UI mode, rather than capturing a scroll container once at module load.
+- **AND** In the desktop layout above the stacked breakpoint the effective container SHALL be the preview shell.
+- **AND** In touch mode and in the ≤900px stacked desktop layout — where the shell is laid out `overflow: visible` and the page scrolls instead — the effective container SHALL be the document's viewport scroller.
+- **AND** In split layout the rendered pane, which is its own scroll container, SHALL remain the effective container for content inside it.
+- **AND** Exactly one resolver SHALL serve every caller, so that no call site re-derives the rule and none can drift from it.
 
 #### Scenario: Desktop single layout resolves to the preview shell
 
@@ -41,16 +40,14 @@ re-derives the rule and none can drift from it.
 
 ### Requirement: Every reveal-and-scroll path SHALL target the effective scroll container
 
-Every path that scrolls the preview to a position SHALL act on the effective
-scroll container, and SHALL have an observable effect in every layout and UI
-mode. The paths so bound are: find-bar match navigation, the externally supplied
-highlight-and-reveal that project search uses, outline entry jumps, in-page
-anchor clicks, the fragment scroll after a cross-document navigation, and the
-scroll-to-top on a document switch or on a hash-only back navigation. Reveal
-geometry SHALL be computed against the container's visible scrollport rather
-than its full content box, so that the "already in view" test and the reveal
-offset stay correct when the container is the viewport scroller. A scroll
-request that resolves to a non-scrolling element is a defect, not a no-op.
+Every preview reveal-and-scroll path SHALL act observably on the effective scroll container and measure reveal geometry against its visible scrollport. Resolving a non-scrolling element SHALL be treated as a defect.
+
+#### Scenario: Find, project-search reveal, outline, anchor, fragment, document-switch, or hash-only-back navigation scrolls the preview
+- **WHEN** find, project-search reveal, outline, anchor, fragment, document-switch, or hash-only-back navigation scrolls the preview
+- **THEN** Every path that scrolls the preview to a position SHALL act on the effective scroll container, and SHALL have an observable effect in every layout and UI mode.
+- **AND** The paths so bound are: find-bar match navigation, the externally supplied highlight-and-reveal that project search uses, outline entry jumps, in-page anchor clicks, the fragment scroll after a cross-document navigation, and the scroll-to-top on a document switch or on a hash-only back navigation.
+- **AND** Reveal geometry SHALL be computed against the container's visible scrollport rather than its full content box, so that the "already in view" test and the reveal offset stay correct when the container is the viewport scroller.
+- **AND** A scroll request that resolves to a non-scrolling element is a defect, not a no-op.
 
 #### Scenario: A search result scrolls to its match in touch mode
 
@@ -128,23 +125,15 @@ remount.
 
 ### Requirement: Viewport observation SHALL express the effective container in the observing API's own terms
 
-A feature that observes whether preview content is at or near the visible
-region SHALL obtain the effective scroll container from the single shared
-resolver and translate it into the form its observation API requires, rather
-than deriving a container of its own. Deriving one by asking whether an element
-has a scrolling overflow value is specifically forbidden: an element can carry
-such a value while the viewport is what actually scrolls, and the resulting box
-tracks the document rather than the visible region. Where the API distinguishes
-an element root from the implicit viewport root, the viewport scroller SHALL be
-expressed as the implicit root and never as an element — neither the document
-element nor the body element, whose boxes are pinned to the document origin and
-so cease to describe the visible region as soon as the page is scrolled.
-Passing either clips content permanently out of the observed region rather than
-deferring it, so content below the first screenful is never reported and never
-acted on. Where such an API fixes its root when observation begins, observation
-SHALL be re-established whenever the effective container changes — on a UI-mode
-switch in particular — and re-establishing it SHALL be limited to content that
-has not yet been acted on, so work already completed is not repeated.
+Preview visibility observation SHALL obtain its container from the shared resolver and translate it to the observing API's root semantics. Viewport scrolling MUST use the implicit viewport root; root-bound observation SHALL restart only unfinished work after container changes.
+
+#### Scenario: Visibility observation uses the current API root
+- **WHEN** preview content visibility is observed in an element-scrolling or page-scrolling layout, including after a UI-mode change
+- **THEN** A feature that observes whether preview content is at or near the visible region SHALL obtain the effective scroll container from the single shared resolver and translate it into the form its observation API requires, rather than deriving a container of its own.
+- **AND** Deriving one by asking whether an element has a scrolling overflow value is specifically forbidden: an element can carry such a value while the viewport is what actually scrolls, and the resulting box tracks the document rather than the visible region.
+- **AND** Where the API distinguishes an element root from the implicit viewport root, the viewport scroller SHALL be expressed as the implicit root and never as an element — neither the document element nor the body element, whose boxes are pinned to the document origin and so cease to describe the visible region as soon as the page is scrolled.
+- **AND** Passing either clips content permanently out of the observed region rather than deferring it, so content below the first screenful is never reported and never acted on.
+- **AND** Where such an API fixes its root when observation begins, observation SHALL be re-established whenever the effective container changes — on a UI-mode switch in particular — and re-establishing it SHALL be limited to content that has not yet been acted on, so work already completed is not repeated.
 
 #### Scenario: Page-scrolling layouts observe against the visible region
 

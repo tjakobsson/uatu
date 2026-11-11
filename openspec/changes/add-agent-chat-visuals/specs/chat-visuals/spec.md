@@ -260,14 +260,18 @@ enrichment SHALL preserve native replay ordering and cursor semantics.
 - **AND** a terminated closing-fence line or authoritative native text completion permits capture of the final exact SVG source
 
 ### Requirement: Managed agents receive scoped presentation guidance
-Managed Claude Code and OpenCode sessions SHALL attempt to add native presentation
-guidance describing supported embeds, limits, immutable capture, and resource
-restrictions. Injection SHALL preserve existing prompts, instructions, and
-permissions; it SHALL NOT edit repository or global configuration. Guidance
-SHALL apply to resumed sessions as well as new ones.
-Presentation hints are optional: an injection failure SHALL NOT prevent native
-OpenCode startup or replace inherited configuration. Uatu SHALL log a sanitized
-reason and let OpenCode apply its own configuration validation.
+
+Managed Claude Code and OpenCode sessions SHALL attempt native guidance covering supported embeds, limits, immutable capture, and resource restrictions for new and resumed sessions. Injection SHALL preserve existing prompts, instructions, and permissions and SHALL NOT edit repository or global configuration. Optional-hint failure SHALL NOT prevent native OpenCode startup or replace inherited configuration; Uatu SHALL log a sanitized reason and leave validation to OpenCode.
+
+#### Scenario: Keep guidance scoped across both managed agents and session lifetimes
+- **WHEN** guidance is attempted for a new or resumed managed Claude Code or OpenCode session
+- **THEN** it describes supported embeds, limits, immutable capture, and resource restrictions while preserving existing prompts, instructions, and permissions
+- **AND** injection SHALL NOT edit repository or global configuration, regardless of agent or new/resumed status
+
+#### Scenario: Degrade optional guidance without overriding OpenCode validation
+- **WHEN** native guidance injection fails
+- **THEN** native OpenCode startup and inherited configuration remain unchanged
+- **AND** Uatu logs a sanitized reason and lets OpenCode apply its own configuration validation
 
 #### Scenario: Claude starts or resumes a session
 - **WHEN** Uatu starts a new or resumed Claude Code session

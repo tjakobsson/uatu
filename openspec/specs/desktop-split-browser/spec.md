@@ -57,7 +57,18 @@ With the in-app default active, activating an external `http(s)` link in the uat
 - **THEN** the URL opens in the default browser and the split is unchanged
 
 ### Requirement: Tabs carry browser chrome with an editable address bar
-Each tab SHALL expose back/forward/reload controls, an editable address bar, and an eject control. Committing address-bar input that parses as a URL (or as a bare host or host:port, which gets `https://` prefixed) SHALL load it when the scheme is `http(s)`; input with a non-web scheme (`mailto:`, …) SHALL be handed to its system handler without navigating the tab; other input SHALL run a web search with a default engine. Eject SHALL open the tab's current URL in the system browser and close the tab.
+
+Each browser tab SHALL expose navigation, an editable address bar, and Eject. Address input SHALL resolve to web navigation, an external scheme handler, or a default-engine search; Eject SHALL open the current URL externally and close the tab.
+
+#### Scenario: Resolve committed address input
+- **WHEN** address-bar input is committed
+- **THEN** a parsed `http(s)` URL loads in the tab, with `https://` prepended to a bare host or host:port
+- **AND** a non-web scheme such as `mailto:` goes to its system handler without tab navigation; other input searches with the default engine
+
+#### Scenario: Browser controls remain available per tab
+- **WHEN** a browser tab is displayed
+- **THEN** it exposes Back, Forward, Reload, an editable address bar, and Eject
+- **AND** activating Eject opens its current URL in the system browser and closes the tab
 
 #### Scenario: Non-web scheme in the address bar
 
@@ -94,18 +105,12 @@ Browser tabs SHALL share one persistent website data store, separate from the ua
 
 ### Requirement: The split browser provides find over its selected tab
 
-The split browser SHALL provide a find bar that searches the page loaded in the
-selected tab, reveals the match, reports whether a match was found, and supports
-forward and backward navigation with wrap-around. Find state SHALL belong to the
-tab: switching tabs SHALL NOT carry one tab's match onto another, and closing a
-tab SHALL discard its find state.
+The split browser SHALL provide per-tab find over the selected page with match reveal, found/not-found, and forward/backward wrapping. It SHALL offer case sensitivity but SHALL NOT offer whole-word, regex, count, or position. Switching tabs SHALL NOT transfer matches; closing a tab SHALL discard its find state. `WKFindConfiguration` offers backwards, case sensitivity, and wrapping; `WKFindResult` only `matchFound`, so external-page find intentionally offers less than in-document find.
 
-The bar SHALL offer case sensitivity. It SHALL NOT offer whole-word or
-regular-expression matching, and SHALL NOT report a match count or position —
-`WKFindConfiguration` exposes only backwards, case sensitivity, and wrapping,
-and `WKFindResult` exposes only `matchFound`. The split browser hosts pages uatu
-does not render, so it offers less than the in-document find rather than
-simulating the difference.
+#### Scenario: Navigate and discard tab-local find state
+- **WHEN** a search is active in the selected browser tab
+- **THEN** forward/backward navigation reveals matches with wrap-around and the bar reports whether a match was found
+- **AND** closing that tab discards its query and match state rather than transferring them to another tab
 
 #### Scenario: Finding in an external page
 
@@ -139,7 +144,16 @@ scrollable. It SHALL do so whether focus is in the find field or the page.
 - **THEN** the bar closes, the match selection clears, and the tab's web view holds focus
 
 ### Requirement: Browser tabs present JavaScript dialogs and the file chooser natively
-A page in a split-browser tab that calls `alert()`, `confirm()`, or `prompt()` SHALL get a native panel attached to the window, and the user's answer SHALL be returned to the page with the same semantics as the embedded uatu WebView: `alert()` returns after dismissal, `confirm()` returns true only on confirmation, `prompt()` returns the entered text or null on Cancel. A page's file input SHALL open the system open panel and return the chosen files. A dialog raised by a tab that is not the selected tab MUST NOT be shown over another tab's page; it is presented when its tab becomes selected, and the page waits until then. The split MUST NOT silently answer a dialog on the page's behalf.
+
+Split-browser `alert()`, `confirm()`, and `prompt()` SHALL use native window-attached panels and return the user's answer. The split MUST NOT silently answer on the page's behalf. File inputs SHALL open the system open panel and return chosen files. A non-selected tab's dialog MUST NOT appear over another page: it waits, with the page, until its tab is selected.
+
+#### Scenario: Return each JavaScript dialog's native response
+- **WHEN** a split-browser tab presents a JavaScript dialog
+- **THEN** alert returns after dismissal, confirm returns true only on confirmation, and prompt returns entered text or null on Cancel, matching the embedded WebView's semantics
+
+#### Scenario: Select files from a browser page
+- **WHEN** a split-browser page activates a file input
+- **THEN** the system open panel returns the files chosen by the user to that page
 
 #### Scenario: A confirmation in a browser tab works
 - **WHEN** a page in the selected browser tab calls `confirm()` before an action
