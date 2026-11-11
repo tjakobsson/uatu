@@ -1767,6 +1767,103 @@ test(`automatic recovery guards native ${carrier === "stored" ? "parent" : carri
   } finally { release(); abort.abort(); await adapter.dispose(); await pump; await events?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
+for (const change of ["staged-cleared", "unchanged", "staged-only", "other-child", "stale-overlap"] as const)
+test(`pending warm child history observes native visibility before installation (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, staged = false, removed = false, childReads = 0, holdLookup = false;
+  let entered!: () => void, release!: () => void, lookupEntered!: () => void, releaseLookup!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const lookupPending = new Promise<void>(resolve => { lookupEntered = resolve; }), lookupHeld = new Promise<void>(resolve => { releaseLookup = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 }; return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      const data = [{ id: "child-prompt", type: "user", text: "Execution", time: { created: 15 } }, ...(!removed ? [{ id: "old-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : [])];
+      if (++childReads === 1) { entered(); await held; } return Response.json({ data, cursor: {} });
+    }
+    if (route === `/api/session/${change === "other-child" ? other : child}`) {
+      const body = await response.json(); if (staged) body.data.revert = { messageID: "old-idle" };
+      if (holdLookup) { holdLookup = false; lookupEntered(); await lookupHeld; } return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), abort = new AbortController();
+  let warm: ReturnType<NonNullable<typeof provider.getReversibleHistoryState>> | undefined, replacement: typeof warm, older: ReturnType<typeof provider.getSession> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Pending warm load without parent consumer")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId; other = fake.launchRequestWorker(parent).childId;
+    pump = adapter.startEventPump(); void pump.catch(() => undefined); await provider.waitForEventStream!(abort.signal);
+    if (change === "stale-overlap") { staged = true; holdLookup = true; older = provider.getSession(child); void older.catch(() => undefined); await lookupPending; staged = false; }
+    warm = provider.getReversibleHistoryState!(child); void warm.catch(() => undefined); await pending;
+    staged = change === "staged-cleared" || change === "staged-only" || change === "other-child";
+    await provider.getSession(change === "other-child" ? other : child);
+    staged = change === "staged-only"; removed = change === "staged-cleared";
+    await provider.getSession(change === "other-child" ? other : child);
+    if (change === "staged-cleared") { replacement = provider.getReversibleHistoryState!(child); void replacement.catch(() => undefined); }
+    release(); await warm; await replacement;
+    if (older) { releaseLookup(); await older; }
+    const history = await adapter.history(parent);
+    const row = history.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    expect(row?.status).toBe(removed || staged ? "running" : "completed");
+    if (removed) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
+    expect(childReads).toBe(removed ? 2 : 1);
+    if (removed) {
+      const evidence = await adapter.workerEvidence(parent);
+      expect(evidence.entries.find(entry => entry.executionId === row?.activity?.executionId)?.dismissible).toBe(false);
+    }
+    const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    if (removed) expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: "running", activity: { kind: "working" } });
+  } finally { release(); releaseLookup(); abort.abort(); await warm?.catch(() => undefined); await replacement?.catch(() => undefined); await older?.catch(() => undefined); await adapter.dispose(); await pump; await fake.stop(); }
+}, 10_000);
+
+for (const change of ["staged-cleared", "unchanged", "staged-only", "other-parent", "append", "stale-response"] as const)
+test(`collecting parent source observes native visibility before first record (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, staged = false, removed = false, appended = false, heldOnce = false, holdLookup = false;
+  let launcherId: string | undefined, entered!: () => void, release!: () => void, lookupEntered!: () => void, releaseLookup!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const lookupPending = new Promise<void>(resolve => { lookupEntered = resolve; }), lookupHeld = new Promise<void>(resolve => { releaseLookup = resolve; });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; launcherId = first.id; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const data = [...(!removed ? [first] : []), ...(appended ? [{ id: "append", type: "user", text: "Independent append", time: { created: 50 } }] : [])];
+      if (!heldOnce) { heldOnce = true; entered(); await held; } return Response.json({ data, cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    if (route === `/api/session/${change === "other-parent" ? other : parent}`) {
+      const body = await response.json(); if (staged) body.data.revert = { messageID: launcherId ?? "old-launcher" };
+      if (holdLookup) { holdLookup = false; lookupEntered(); await lookupHeld; } return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  provider.reconcileBackgroundTasks = async () => { throw new Error("Inventory intentionally unavailable"); };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
+  let reading: ReturnType<typeof adapter.history> | undefined, older: ReturnType<typeof provider.getSession> | undefined;
+  try {
+    parent = (await provider.createSession("First parent response native visibility")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId; other = (await provider.createSession("Unrelated parent")).id;
+    if (change === "stale-response") { staged = true; holdLookup = true; older = provider.getSession(parent); void older.catch(() => undefined); await lookupPending; staged = false; }
+    reading = adapter.history(parent); void reading.catch(() => undefined); await pending;
+    staged = ["staged-cleared", "staged-only", "other-parent"].includes(change); await provider.getSession(change === "other-parent" ? other : parent);
+    staged = change === "staged-only"; removed = change === "staged-cleared"; appended = change === "append";
+    await provider.getSession(change === "other-parent" ? other : parent); release(); const result = await reading;
+    if (older) { releaseLookup(); await older; }
+    if (removed || staged) expect(result.items.some(item => item.type === "background_task" && item.taskId === worker.taskId)).toBe(false);
+    else expect(result.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    if (removed || staged) expect(fresh).toEqual([]); else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+  } finally { release(); releaseLookup(); abort.abort(); await reading?.catch(() => undefined); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
 for (const change of ["staged-only", "staged-cleared", "unchanged", "other-child", "stale-overlap"] as const)
 test(`warm child transcript observes native visibility before parent recovery (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

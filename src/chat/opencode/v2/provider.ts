@@ -76,8 +76,10 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyActivityIntervals?: Map<string, number>;
   historyParentBoundary?: { boundary: string | null; completed: number };
   historyParentVisibilityChanged?: true;
+  historyParentRecordsAfter?: number;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
+type HistoryVisibilityObservation = { recordsAfter: number; visibility?: { boundary: string | null; started: number; completed: number } };
 type PendingOutcomeRead = { started: number; completed: number; reports: readonly { child: string; at?: number; digest: string; observed?: number }[]; overflow?: true; overflowObserved?: number; provisional?: true };
 const parentCounterproofMaxFacts = 256;
 const parentCounterproofMaxBytes = 65_536;
@@ -100,7 +102,8 @@ export function createOpenCodeV2Provider(options: {
 }
 
 export class OpenCodeV2Provider implements ChatProvider {
-  private readonly historyReuse = new HistoryReuse<StoredMessage[]>();
+  private readonly historyReuse = new HistoryReuse<StoredMessage[], HistoryVisibilityObservation>(undefined, undefined,
+    () => ({ recordsAfter: this.sessionRecordClock }));
   // Only verified, workspace-confined parentage is reusable; never session
   // status, cost, timestamps, or failed checks. Match the live worker budget.
   private readonly childParents = new HistoryReuse<readonly [string, string]>(4 * 1024 * 1024, 8_192);
@@ -117,8 +120,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly backgroundVisibilityReads = new Set<{ sessionId: string; invalidated: boolean }>();
   private parentHistoryReadClock = 0;
   private sessionRecordClock = 0;
-  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number;
-    visibility?: { boundary: string | null; completed: number } }>();
+  private readonly historyReadOrders = new WeakMap<StoredMessage[], { started: number; completed: number }>();
   private readonly historyWorkerSources = new Set<HistoryWorkerSource>();
   private readonly historyGuardScopes = new WeakMap<WorkerSourceGuard, { source: HistoryWorkerSource; view: (covered: ReadonlySet<string>) => WorkerSourceGuard }>();
   // Read-side observations are not live-event admission or Stop evidence.
@@ -1462,7 +1464,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private beginWorkerSourceRead(parent: string, caller?: AbortSignal, isCurrent: () => boolean = () => true, pendingText = false) {
-    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityContradicted: new Set(), historyPublishedActivity: new Set(), historyParentChanges: new Set(), historyChildChanges: new Set(), ...(pendingText ? { pendingFingerprint: "" } : {}) };
+    const source: HistoryWorkerSource = { parent, phase: pendingText ? "captured" : "collecting", revision: 0, states: new Map<string, WorkerAssociationState>(), historyActivityContradicted: new Set(), historyPublishedActivity: new Set(), historyParentChanges: new Set(), historyChildChanges: new Set(), ...(pendingText ? { pendingFingerprint: "" } : { historyParentRecordsAfter: this.sessionRecordClock }) };
     const deadline = AbortSignal.any([this.readLifetime.signal, AbortSignal.timeout(25_000)]);
     const initialOwner = new AbortController();
     const initialSignal = AbortSignal.any([deadline, initialOwner.signal, ...(caller ? [caller] : [])]);
@@ -3130,7 +3132,8 @@ export class OpenCodeV2Provider implements ChatProvider {
         // first baseline; later ownerless records supply ordered counterproof.
         const boundary = stringValue(asRecord(info.revert).messageID) ?? null;
         for (const source of this.historyWorkerSources) if (source.parent === subject
-          && (source.historyParentBoundary || observation.owners.includes(source))) {
+          && (source.historyParentBoundary || observation.owners.includes(source)
+            || source.phase === "collecting" && source.historyParentRecordsAfter !== undefined && observation.started > source.historyParentRecordsAfter)) {
           const previous = source.historyParentBoundary;
           if (previous && previous.boundary !== boundary) {
             const targets = observation.started > previous.completed ? [source] : observation.owners;
@@ -3141,18 +3144,18 @@ export class OpenCodeV2Provider implements ChatProvider {
           }
           if (!previous || observation.started > previous.completed) source.historyParentBoundary = { boundary, completed };
         }
-        // Visibility belongs to the qualified warm transcript entry, even
-        // before any parent recovery has registered a child dependency. This
-        // weak metadata cannot retain an evicted entry or introduce new keys.
-        const cached = this.historyReuse.peek(subject, this.streamConnected ? String(this.streamGeneration) : undefined);
-        const order = cached && this.historyReadOrders.get(cached), previous = order?.visibility;
-        if (order && (!previous || observation.started > previous.completed)) {
+        // The qualified load owns visibility from registration, before a value
+        // exists or a parent consumes it. Older native requests cannot claim
+        // this load; invalidation also prevents its late value installation.
+        const order = this.historyReuse.peekObservation(subject, this.streamConnected ? String(this.streamGeneration) : undefined);
+        const previous = order?.visibility;
+        if (order && observation.started > order.recordsAfter && (!previous || observation.started > previous.started)) {
           // Entering a staged boundary filters the same complete raw history;
           // retain it and refresh visibility/cost from the current record.
           // Leaving/changing an existing boundary can commit removed content,
           // so the old raw transcript is no longer safe for reuse.
           if (previous && previous.boundary !== null && previous.boundary !== boundary) this.historyReuse.invalidate(subject);
-          else order.visibility = { boundary, completed };
+          else order.visibility = { boundary, started: observation.started, completed };
         }
       }
       if (foreignWorkspace || requestedId !== undefined && id !== undefined && id !== requestedId) this.revokeKnownSessionOwnership(subject);

@@ -4,15 +4,16 @@ export const HISTORY_REUSE_BYTES = 32 * 1024 * 1024;
 export const HISTORY_REUSE_CONVERSATIONS = 8;
 
 /** Provider-owned LRU. An absent version shares concurrent work only. */
-export class HistoryReuse<T> {
+export class HistoryReuse<T, Observation = never> {
   private readonly shared = new Map<string, { version: string | undefined; controller: AbortController; promise: Promise<T>; users: number; settled: boolean }>();
   private readonly owners = new Set<AbortController>();
-  private readonly retained = new Map<string, { version: string; value: T; bytes: number }>();
-  private readonly pending = new Map<string, { version: string | undefined; promise: Promise<T> }>();
+  private readonly retained = new Map<string, { version: string; value: T; bytes: number; observation?: Observation }>();
+  private readonly pending = new Map<string, { version: string | undefined; promise: Promise<T>; observation?: Observation }>();
   private bytes = 0;
   private disposed = false;
 
-  constructor(private readonly byteLimit = HISTORY_REUSE_BYTES, private readonly countLimit = HISTORY_REUSE_CONVERSATIONS) {}
+  constructor(private readonly byteLimit = HISTORY_REUSE_BYTES, private readonly countLimit = HISTORY_REUSE_CONVERSATIONS,
+    private readonly makeObservation?: () => Observation) {}
 
   get size(): number { return this.retained.size; }
   get retainedBytes(): number { return this.bytes; }
@@ -23,6 +24,14 @@ export class HistoryReuse<T> {
     if (this.disposed || version === undefined) return;
     const cached = this.retained.get(key);
     return cached?.version === version ? cached.value : undefined;
+  }
+
+  /** Metadata belongs to an existing qualified load/value, never a new key.
+   * Invalidation retires it with that owner before a late value can install. */
+  peekObservation(key: string, version: string | undefined): Observation | undefined {
+    if (this.disposed || version === undefined) return;
+    const entry = this.retained.get(key) ?? this.pending.get(key);
+    return entry?.version === version ? entry.observation : undefined;
   }
 
   async read(key: string, version: string | undefined, loader: () => Promise<T>): Promise<T> {
@@ -36,7 +45,7 @@ export class HistoryReuse<T> {
     const flight = this.pending.get(key);
     if (flight && flight.version === version) return flight.promise;
     this.remove(key);
-    const entry = { version, promise: Promise.resolve().then(loader) };
+    const entry = { version, promise: Promise.resolve().then(loader), observation: this.makeObservation?.() };
     this.pending.set(key, entry);
     try {
       const value = await entry.promise;
@@ -46,7 +55,7 @@ export class HistoryReuse<T> {
         const bytes = JSON.stringify(value).length * 2;
         if (bytes <= this.byteLimit && this.countLimit > 0) {
           while (this.retained.size >= this.countLimit || this.bytes + bytes > this.byteLimit) this.remove(this.retained.keys().next().value!);
-          this.retained.set(key, { version, value, bytes });
+          this.retained.set(key, { version, value, bytes, observation: entry.observation });
           this.bytes += bytes;
         }
       }

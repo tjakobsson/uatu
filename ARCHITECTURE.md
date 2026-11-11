@@ -1259,9 +1259,13 @@ reads do not acquire an outcome fence merely by collecting that dependency.
 A newer boundary change also invalidates child-history reuse so a retry cannot
 consume the obsolete held response. Overlapping older ownerless lookups cannot
 replace the newer owned boundary baseline or revoke it on late arrival.
-Before any dependent parent read exists, warm transcript entries also own a
-constant-size native visibility observation in their existing weak read-order
-metadata. Entering a staged boundary retains the complete raw transcript and
+Before any dependent parent read exists, transcript cache entries own a
+constant-size native visibility observation from load registration, before a
+value exists. The metadata transfers to retained values and retires with the
+entry. Native request-start order rejects pre-registration and stale overlapping
+observations. A staged→cleared change retires a pending entry before its obsolete
+response can install or overwrite a replacement. No session keys are added.
+Entering a staged boundary retains the complete raw transcript and
 refreshes native cost/visibility filtering on each fold. Leaving or changing an
 existing boundary can commit removed content and therefore invalidates reuse.
 Unchanged or unrelated observations preserve reuse, and overlapping older

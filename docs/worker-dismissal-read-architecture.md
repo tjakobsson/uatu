@@ -293,8 +293,12 @@ Stop authority or invalidating outcome-free/control reads solely for collection.
 A genuinely newer boundary transition invalidates obsolete child-history reuse;
 ordered native reads, not stale ownerless response arrival, govern that decision.
 Warm child transcripts need no parent dependency to observe native visibility.
-Each qualified cache entry carries one weak, constant-size boundary observation
-beside its existing read order. Entering a staged boundary filters the same
+Each qualified cache entry carries a constant-size boundary observation from
+pending-load registration through retention. Native request-start order rejects
+pre-registration and stale overlapping observations. Invalidation retires the
+pending entry before a late value can install over a replacement; eviction and
+disposal release the same metadata. No independent visibility keys are retained.
+Entering a staged boundary filters the same
 complete raw transcript without reloading it; native cost and visible state
 still refresh. Leaving/changing an existing boundary can remove stored content
 and invalidates reuse. Unchanged, unrelated and stale-overlapping records do not discard a newer valid
