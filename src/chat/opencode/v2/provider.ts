@@ -77,7 +77,7 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyParentBoundary?: { boundary: string | null; completed: number };
   historyParentVisibilityChanged?: true;
   historyParentRecordsAfter?: number;
-  historyChildVisibility?: Map<string, { ownedAfter: number; retainedBoundaries?: ReadonlySet<string> }>;
+  historyChildVisibility?: Map<string, { registered: number; ownedAfter?: number; ownedBaseline?: boolean; pendingBoundary?: string | null; retainedBoundaries?: ReadonlySet<string> }>;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
 type HistoryVisibilityObservation = { recordsAfter: number; visibility?: { boundary: string | null; started: number; completed: number } };
@@ -568,14 +568,25 @@ export class OpenCodeV2Provider implements ChatProvider {
           for (const source of historySources) {
             const dependencies = source.historyChildren ??= new Map();
             dependencies.set(child, (dependencies.get(child) ?? 0) + 1);
+            const visibility = source.historyChildVisibility ??= new Map();
+            if (!visibility.has(child)) visibility.set(child, { registered: this.sessionRecordClock });
             const activity = source.historyActivityChildren ??= new Map();
             if (!activity.has(child)) activity.set(child, undefined);
           }
           const complete = await this.allMessages(child, signal, owner);
+          let provisionalHidden = false;
           for (const source of historySources) {
             const outcomes = (source.historyOutcomeMessages ??= new Map()).get(child) ?? new Set<string>();
             for (const message of complete) if (message.type === "idle") outcomes.add(messageIdentity(message));
             source.historyOutcomeMessages.set(child, outcomes);
+            const provisional = source.historyChildVisibility?.get(child);
+            if (provisional?.pendingBoundary !== undefined) {
+              const index = complete.findIndex(message => messageIdentity(message) === provisional.pendingBoundary);
+              if (index < 0 || complete.some((message, position) => message.type === "idle" && position >= index)) {
+                provisionalHidden = true;
+                source.historyChildChanges.add(child);
+              }
+            }
             // A content snapshot may have arrived while the paginated history
             // was in flight. Only changes to consumed interval/outcome records
             // revoke this source; later assistant output needs no quiet window.
@@ -595,12 +606,16 @@ export class OpenCodeV2Provider implements ChatProvider {
             if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Child history ownership unavailable");
             const { boundaryId, boundaryIndex, visible } = storedHistoryVisibility(complete, lookup.info);
             if (boundaryId && boundaryIndex < 0) throw new Error("Child history visibility unavailable");
-            outcomeHistory = visible;
+            // Recovery captures its lease after folding. A provisional veto
+            // must also withhold the positive outcome itself, not only revise
+            // a source whose newest snapshot could otherwise remain current.
+            outcomeHistory = provisionalHidden ? [] : visible;
             for (const source of historySources) {
               // Older overlapping requests cannot poison this owned view.
               // Later intermediate stages can veto its captured publication.
               const visibility = source.historyChildVisibility ??= new Map();
-              const registration: { ownedAfter: number; retainedBoundaries?: ReadonlySet<string> } = { ownedAfter: this.sessionRecordClock };
+              const registration: NonNullable<ReturnType<typeof visibility.get>> = {
+                registered: visibility.get(child)?.registered ?? this.sessionRecordClock, ownedAfter: this.sessionRecordClock, ownedBaseline: true };
               visibility.set(child, registration);
               const lastOutcome = complete.findLastIndex(message => message.type === "idle");
               const suffix = complete.slice(lastOutcome + 1).map(messageIdentity);
@@ -3215,10 +3230,15 @@ export class OpenCodeV2Provider implements ChatProvider {
               // transcript request is still in flight. Do not let a retry reuse
               // that obsolete response after fencing this consuming source.
               if (observation.started > previous.completed) this.historyReuse.invalidate(subject);
-              const childVisibility = source.historyChildVisibility?.get(subject);
-              const lateIntermediateStage = childVisibility !== undefined
-                && observation.started > childVisibility.ownedAfter && boundary !== null && previous.boundary === null;
-              const targets = observation.started > previous.completed || lateIntermediateStage ? [source] : observation.owners;
+              const childVisibility: ReturnType<NonNullable<HistoryWorkerSource["historyChildVisibility"]>["get"]> = source.historyChildVisibility?.get(subject);
+              const provisionalStage: boolean = childVisibility !== undefined && childVisibility.ownedAfter === undefined
+                && observation.started > childVisibility.registered && !childVisibility.ownedBaseline && boundary !== null && previous.boundary === null;
+              const lateIntermediateStage: boolean = childVisibility !== undefined
+                && childVisibility.ownedAfter !== undefined && observation.started > childVisibility.ownedAfter && boundary !== null && previous.boundary === null;
+              if (provisionalStage && childVisibility) {
+                childVisibility.pendingBoundary = childVisibility.pendingBoundary === undefined || childVisibility.pendingBoundary === boundary ? boundary : null;
+              }
+              const targets: HistoryWorkerSource[] = observation.started > previous.completed || lateIntermediateStage ? [source] : observation.owners;
               for (const target of targets) if (target.historyChildren?.has(subject)) {
                 if (lateIntermediateStage && target.phase === "captured") {
                   if (target.historyChildVisibility?.get(subject)?.retainedBoundaries?.has(boundary!)) continue;
@@ -3235,7 +3255,11 @@ export class OpenCodeV2Provider implements ChatProvider {
             }
             // The first scoped observation is evidence even while the outcome
             // lookup is pending. Overlapping responses cannot replace it.
-            if (!previous || observation.started > previous.completed) boundaries.set(subject, { boundary, completed });
+            if (!previous || observation.started > previous.completed) {
+              boundaries.set(subject, { boundary, completed });
+              const visibility: ReturnType<NonNullable<HistoryWorkerSource["historyChildVisibility"]>["get"]> = source.historyChildVisibility?.get(subject);
+              if (visibility) visibility.ownedBaseline = observation.owners.includes(source);
+            }
           }
         }
       }

@@ -1335,7 +1335,7 @@ test(`scheduler inferred outcome retains native parent visibility through public
   } finally { releaseOlder(); releaseInteractions(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
-for (const change of ["hidden", "unchanged", "other-child", "retained-prefix", "newer-source"] as const)
+for (const change of ["collecting-hidden", "collecting-prefix", "hidden", "unchanged", "other-child", "retained-prefix", "newer-source"] as const)
 test(`scheduler captured child outcome observes late staged native record (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, other: string | undefined, removed = false, captured = false;
@@ -1344,6 +1344,9 @@ test(`scheduler captured child outcome observes late staged native record (${cha
   const returned = new Promise<void>(resolve => { folded = resolve; }), admitted = new Promise<void>(resolve => { finished = resolve; });
   const olderPending = new Promise<void>(resolve => { olderEntered = resolve; }), olderHeld = new Promise<void>(resolve => { releaseOlder = resolve; });
   const olderRead = new AsyncLocalStorage<boolean>();
+  const collecting = change.startsWith("collecting-");
+  let childEntered!: () => void, releaseChild!: () => void, childHeldOnce = false;
+  const childPending = new Promise<void>(resolve => { childEntered = resolve; }), childHeld = new Promise<void>(resolve => { releaseChild = resolve; });
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
     const request = new Request(input, init), route = new URL(request.url).pathname;
     if (route.endsWith("/inbox")) return Response.json({ data: [] });
@@ -1353,13 +1356,17 @@ test(`scheduler captured child outcome observes late staged native record (${cha
       const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
       return Response.json({ data: [first], cursor: {} });
     }
-    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+    if (route === `/api/session/${child}/message`) {
+      const data = [
       ...(!removed ? [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }] : []),
-      { id: "suffix", type: "user", text: "Independent suffix", time: { created: 30 } }], cursor: {} });
+      { id: "suffix", type: "user", text: "Independent suffix", time: { created: 30 } }];
+      if (collecting && !childHeldOnce) { childHeldOnce = true; childEntered(); await childHeld; }
+      return Response.json({ data, cursor: {} });
+    }
     if (route === `/api/session/${child}` || route === `/api/session/${other}`) {
       const body = await response.json();
       if (olderRead.getStore()) {
-        if (change !== "unchanged") body.data.revert = { messageID: change === "retained-prefix" ? "suffix" : "idle" };
+        if (change !== "unchanged") body.data.revert = { messageID: change === "retained-prefix" || change === "collecting-prefix" ? "suffix" : "idle" };
         olderEntered(); await olderHeld;
       }
       return Response.json(body);
@@ -1377,7 +1384,11 @@ test(`scheduler captured child outcome observes late staged native record (${cha
         return source.workerSource.retain(signal);
       } } });
     } });
-    if (id === parent && !captured) { captured = true; expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" })); folded(); }
+    if (id === parent && !captured) {
+      captured = true;
+      if (!collecting) expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" }));
+      folded();
+    }
     return tasks;
   };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
@@ -1386,15 +1397,17 @@ test(`scheduler captured child outcome observes late staged native record (${cha
     parent = (await provider.createSession("Captured child visibility")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
     other = fake.launchRequestWorker(parent).childId;
     await adapter.subscribe(parent, { signal: abort.signal }); void adapter.startEventPump().catch(() => undefined);
-    await returned; await interactions; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
-    const subject = change === "other-child" ? other : child, hidden = change === "hidden" || change === "newer-source";
+    if (collecting) await childPending; else { await returned; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true); }
+    await interactions;
+    const subject = change === "other-child" ? other : child, hidden = change === "hidden" || change === "newer-source" || change === "collecting-hidden";
     older = olderRead.run(true, () => provider.getSession(subject!)); void older.catch(() => undefined); await olderPending;
     removed = hidden; await provider.getSession(subject);
     if (change === "newer-source") await nativeRecovery(parent, { fresh: true, signal: abort.signal,
       onSource: source => newerGuards.push(source.workerSource.retain(abort.signal)) });
     releaseOlder(); await older;
+    if (collecting) { releaseChild(); await returned; }
     release(); await admitted;
-    const row = adapter.projectionForTests(parent).items().find(item => item.type === "background_task" && item.taskId === worker.taskId);
+    const row = adapter.projectionForTests(parent).items().find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
     if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true); expect(row?.status).not.toBe("completed"); }
     else expect(row).toMatchObject({ status: "completed" });
     expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
@@ -1402,7 +1415,7 @@ test(`scheduler captured child outcome observes late staged native record (${cha
     expect(fresh?.status).toBe(hidden ? "running" : "completed");
     if (hidden) {
       expect(fresh?.activity?.kind).toBe("working");
-      expect(fresh?.endedAt).toBeUndefined(); expect(fresh?.resultId).toBeUndefined();
+      expect(fresh?.activity?.endedAt).toBeUndefined(); expect(fresh?.resultId).toBeUndefined();
       expect(fresh?.terminalReportedAt).toBeUndefined();
       const current = (await adapter.history(parent)).items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
       expect(current?.activity?.kind).toBe("working");
@@ -1410,7 +1423,7 @@ test(`scheduler captured child outcome observes late staged native record (${cha
       expect(evidence.entries.find(entry => entry.executionId === current?.activity?.executionId)?.dismissible).toBe(false);
     }
     if (change === "newer-source") { expect(newerGuards.length).toBeGreaterThan(0); expect(newerGuards.every(guard => guard.isCurrent())).toBe(true); }
-  } finally { releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+  } finally { releaseChild(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
 for (const read of ["history", "automatic-recovery"] as const)
@@ -2131,10 +2144,13 @@ test(`warm child transcript observes native visibility before parent recovery ($
 }, 10_000);
 
 for (const read of ["provider", "adapter"] as const)
-for (const change of ["staged-cleared", "unchanged", "append", "other-child"] as const)
+for (const change of ["reverse", "reverse-prefix", "reverse-unchanged", "reverse-other", "staged-cleared", "unchanged", "append", "other-child"] as const)
 test(`${read} retains boundary transitions during the first child transcript (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, staged = false, removed = false, heldOnce = false;
+  const olderRead = new AsyncLocalStorage<boolean>();
+  let olderEntered!: () => void, releaseOlder!: () => void;
+  const olderPending = new Promise<void>(resolve => { olderEntered = resolve; }), olderHeld = new Promise<void>(resolve => { releaseOlder = resolve; });
   let entered!: () => void, release!: () => void;
   const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
@@ -2148,23 +2164,37 @@ test(`${read} retains boundary transitions during the first child transcript (${
     }
     if (route === `/api/session/${child}/message`) {
       const data = [{ id: "child-prompt", type: "user", text: "Current execution", time: { created: 15 } },
-        ...(!removed ? [{ id: "removed-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : [])];
+        ...(!removed ? [{ id: "removed-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : []),
+        { id: "retained-suffix", type: "user", text: "Independent suffix", time: { created: 50 } }];
       if (!heldOnce) { heldOnce = true; entered(); await held; }
       return Response.json({ data, cursor: {} });
     }
-    if (route === `/api/session/${child}`) { const body = await response.json(); if (staged) body.data.revert = { messageID: "removed-idle" }; return Response.json(body); }
+    if (route === `/api/session/${child}` || olderRead.getStore()) {
+      const body = await response.json();
+      if (staged || olderRead.getStore() && change !== "reverse-unchanged") body.data.revert = { messageID: change === "reverse-prefix" ? "retained-suffix" : "removed-idle" };
+      if (olderRead.getStore()) { olderEntered(); await olderHeld; }
+      return Response.json(body);
+    }
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
   const adapter = read === "adapter" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }) : undefined;
   const abort = new AbortController();
   let reading: Promise<import("../../provider").ProviderHistoryPage | import("../../types").ConversationSnapshot> | undefined;
+  let older: ReturnType<typeof provider.getSession> | undefined;
   try {
     parent = (await provider.createSession("First child transcript boundary window")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
     const other = (await provider.createSession("Unrelated boundary owner")).id;
     reading = adapter ? adapter.history(parent) : provider.listMessages(parent, { limit: 100, signal: abort.signal }); void reading.catch(() => undefined); await pending;
-    staged = change === "staged-cleared"; await provider.getSession(change === "other-child" ? other : child);
-    staged = false; removed = change === "staged-cleared"; await provider.getSession(change === "other-child" ? other : child);
+    if (change.startsWith("reverse")) {
+      const subject = change === "reverse-other" ? other : child;
+      older = olderRead.run(true, () => provider.getSession(subject)); void older.catch(() => undefined); await olderPending;
+      removed = change === "reverse"; await provider.getSession(subject);
+      releaseOlder(); await older;
+    } else {
+      staged = change === "staged-cleared"; await provider.getSession(change === "other-child" ? other : child);
+      staged = false; removed = change === "staged-cleared"; await provider.getSession(change === "other-child" ? other : child);
+    }
     if (change === "append") fake.workerReport(child, "Independent model", "high", 0.001);
     release(); const result = await reading;
     if (adapter) expect(result.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: removed ? "running" : "completed" }));
@@ -2172,7 +2202,7 @@ test(`${read} retains boundary transitions during the first child transcript (${
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: removed ? "running" : "completed",
       ...(removed ? { activity: expect.objectContaining({ kind: "working" }) } : {}) });
-  } finally { release(); abort.abort(); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
+  } finally { releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["stale-cleared", "stale-staged", "unchanged", "newer-change"] as const)

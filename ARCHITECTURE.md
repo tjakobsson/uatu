@@ -1274,6 +1274,12 @@ publication. Bounded suffix identities from the consumed child transcript preser
 known retained prefixes independently of cache eviction (at most 256 suffix IDs
 and 16,384 serialized UTF-16 units per child); overflow abstains.
 This does not replace the latest baseline or affect a later child dependency.
+Before the first transcript load, the child dependency registers a provisional
+native-record cutoff. A reversed intermediate stage against an ownerless clear
+is retained as deny-only boundary evidence, never as an owned baseline. The
+returned transcript checks that boundary before granting positive idle outcomes;
+known retained prefixes survive, unknown or conflicting boundaries abstain.
+An intervening owned visibility read shields its newer authority from old replies.
 Before any dependent parent read exists, transcript cache entries own a
 constant-size native visibility observation from load registration, before a
 value exists. The metadata transfers to retained values and retires with the

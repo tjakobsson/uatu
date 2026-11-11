@@ -32,6 +32,10 @@ An intermediate stage requested after the child's consumed owned visibility can 
 veto a captured outcome after a newer clear reply. Bounded consumed suffix IDs
 preserve retained-prefix precision without cache authority, extra IO or Stop
 grants. Later dependencies and the newer native baseline remain separate.
+The first pending child transcript also registers a provisional cutoff. Reversed
+ownerless stage/clear observations retain only a deny boundary, checked against
+the returned transcript before positive outcomes are folded. Prefixes remain
+usable; unknown/conflicting positions abstain without replacing an owned view.
 Session-record reads carry only their explicit consuming fold as an overlapping
 owner. Ordinary getSession/list/create reads cannot claim all collecting folds
 and revoke a page that consumed a newer boundary. Genuine later nonoverlapping
