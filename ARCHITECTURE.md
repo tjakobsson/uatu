@@ -1260,6 +1260,17 @@ retry watch: its already-requested retry must read actual delivered report
 content, not cached settlement plus an empty inbox. Invalidation starts no IO
 and grants no report authority. Unchanged, unrelated and prelaunch observations
 do not enter this changed-signature path.
+An already warmed parent entry also owns a native inbox request cutoff before
+any worker source consumes it. Later relevant report signatures absent from its
+actual stored transcript retire only that entry, without IO or report authority.
+Prelaunch/unrelated reports and exact reports already in the transcript do not
+retire it; requests begun before a newer load cannot claim that load. Overflow
+abstains conservatively within the existing native fact budget.
+Exact terminal replay identities, like starts, remain in the same serialized,
+aggregate-budgeted execution ledger across negative-only retirement. Up to 128
+distinct terminal identities per child are recognized; overflow sets sticky
+recovery-only uncertainty. Replaying an earlier observed terminal after a later
+one cannot revoke a current lease or bind that proof to a new occurrence.
 
 Native child revert-boundary observations begin when the read registers its
 pending child-history dependency, before the response classifies positive
@@ -1278,6 +1289,8 @@ Before the first transcript load, the child dependency registers a provisional
 native-record cutoff. A reversed intermediate stage against an ownerless clear
 is retained as deny-only boundary evidence, never as an owned baseline. The
 returned transcript checks that boundary before granting positive idle outcomes;
+the check runs again after the owned visibility await, before provisional evidence
+is replaced, so a clear reply cannot launder a stage observed during that await.
 known retained prefixes survive, unknown or conflicting boundaries abstain.
 An intervening owned visibility read shields its newer authority from old replies.
 Before any dependent parent read exists, transcript cache entries own a

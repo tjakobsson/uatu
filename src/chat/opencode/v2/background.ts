@@ -766,7 +766,7 @@ export class BackgroundWorkers {
   private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests;
     /** Greatest known distinct-start clock; null means its clock is unknown.
      * Negative evidence only, never a positive execution start/end timestamp. */
-    startCounterproof?: number | null; startClocks?: readonly number[] | null; startKeys?: readonly string[]; undatedEnd?: true }>();
+    startCounterproof?: number | null; startClocks?: readonly number[] | null; startKeys?: readonly string[]; terminalKeys?: readonly string[]; undatedEnd?: true }>();
   private readonly unmatched = new Map<string, { parent: string; worker: string; item: BackgroundTaskItem; correlatable: boolean; published: boolean }>();
   private readonly ended = new Map<string, number[]>();
   private readonly aliases = new Map<string, string>();
@@ -1258,6 +1258,7 @@ export class BackgroundWorkers {
         ...(boundary.startCounterproof === undefined ? {} : { startCounterproof: boundary.startCounterproof }),
         ...(boundary.startClocks === undefined ? {} : { startClocks: boundary.startClocks }),
         ...(boundary.startKeys === undefined ? {} : { startKeys: boundary.startKeys }),
+        ...(boundary.terminalKeys === undefined ? {} : { terminalKeys: boundary.terminalKeys }),
         ...(boundary.undatedEnd ? { undatedEnd: true as const } : {}) });
     }
     // Saturation is sticky: dropping positive state must not certify that
@@ -1295,7 +1296,7 @@ export class BackgroundWorkers {
 
   terminalReplay(child: string, proof?: NativeProof): boolean {
     const previous = this.terminalProofs.get(child);
-    return sameProof(previous?.proof, proof)
+    return !!proof && previous?.terminalKeys?.includes(startProofKey(proof)) === true || sameProof(previous?.proof, proof)
       || [...this.tasks.values()].some(task => task.worker === child && sameProof(task.evidence.executionEnd, proof));
   }
 
@@ -1439,7 +1440,15 @@ export class BackgroundWorkers {
     // A history callback without native proof still needs verified ownership.
     if (this.recoveryOnly || !identity(child) || !this.parents.has(child) && !proof) return;
     if (this.terminalReplay(child, proof)) return;
+    const terminalKeys = [...this.terminalProofs.get(child)?.terminalKeys ?? []];
+    if (proof) {
+      // Replay identities share this ledger's serialized aggregate budget.
+      // Per-child overflow is sticky uncertainty, never silent proof loss.
+      if (terminalKeys.length >= 128) { this.recoveryOnly = true; this.bound(); return; }
+      terminalKeys.push(startProofKey(proof));
+    }
     if (proof) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child), proof, prelaunch: undefined,
+      terminalKeys,
       ...(proof.created === undefined ? { undatedEnd: true as const } : {}),
       occurrences: Object.freeze([...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent").map(task => task.evidence.key)) });
     else {

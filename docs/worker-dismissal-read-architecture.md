@@ -26,6 +26,15 @@ unchanged historical idle outcome usable. Changes to consumed idle records,
 execution boundaries, removals and reverts still fence publication. A fresh
 scoped child record that reveals a changed revert boundary revokes the earlier
 outcome source even before the corresponding native event arrives.
+Warmed parent history has its own scoped native-inbox cutoff even before a
+worker consumer exists. A relevant report not present in that transcript denies
+reuse; actual native report content on the requested reread supplies the result.
+Observation starts no IO, cannot retire newer loads, and grants no Stop proof.
+Earlier terminal proofs remain exact-replay identities after later terminals,
+within the existing serialized execution-ledger budget. Retirement preserves
+only their negative continuity, not occurrence/ownership/Stop bindings. The
+128-terminal per-child ceiling fails closed with sticky recovery-only state;
+changed proof identity, clock or payload still supplies genuine counterproof.
 This observation includes a scoped record arriving while the first visibility
 lookup is pending; a late overlapping response cannot overwrite that boundary.
 An intermediate stage requested after the child's consumed owned visibility can also
@@ -36,6 +45,8 @@ The first pending child transcript also registers a provisional cutoff. Reversed
 ownerless stage/clear observations retain only a deny boundary, checked against
 the returned transcript before positive outcomes are folded. Prefixes remain
 usable; unknown/conflicting positions abstain without replacing an owned view.
+Provisional denial is rechecked after the owned visibility lookup and before its
+slot is replaced; a stage arriving during that await still fences the old idle.
 Session-record reads carry only their explicit consuming fold as an overlapping
 owner. Ordinary getSession/list/create reads cannot claim all collecting folds
 and revoke a page that consumed a newer boundary. Genuine later nonoverlapping

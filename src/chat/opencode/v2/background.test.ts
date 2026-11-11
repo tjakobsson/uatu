@@ -100,6 +100,25 @@ test(`distinct-start vetoes respect the admission interval (${context}/${JSON.st
   expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0); checkBytes(workers);
 });
 
+for (const budget of [{ entries: 8 }, { bytes: 2_000 }])
+test(`earlier terminal replays retain accounted negative identities (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const first = nativeProof({ id: "first-end", created: 20 }, { phase: "ended" })!;
+  const second = nativeProof({ id: "second-end", created: 25 }, { phase: "ended" })!;
+  workers.executionEnded("child", 20, first); workers.executionEnded("child", 25, second);
+  const bytes = retained(workers).bytes;
+  for (let index = 0; index < 100; index++) { workers.executionEnded("child", 20, first); workers.executionEnded("child", 25, second); }
+  expect(retained(workers).bytes).toBe(bytes); checkBytes(workers);
+  workers.retainExecutionCounterproof();
+  expect(workers.terminalReplay("child", first)).toBe(true); expect(workers.terminalReplay("child", second)).toBe(true);
+  expect(workers.terminalReplay("other", first)).toBe(false);
+  expect(workers.terminalReplay("child", nativeProof({ id: "first-end", created: 20 }, { phase: "changed" }))).toBe(false);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  expect(workers.controlWitnesses("task")).toEqual([]); checkBytes(workers);
+  for (let index = 0; index < 130; index++) workers.executionEnded("child", 30 + index, nativeProof({ id: `end-${index}`, created: 30 + index }, { phase: "ended" }));
+  expect(workers.controlEvidenceAvailable).toBe(false); checkBytes(workers);
+});
+
 for (const mode of ["unowned", "new-occurrence", "saturated"] as const)
 test(`retained start replay grants no new occurrence authority (${mode})`, () => {
   const workers = new BackgroundWorkers(mode === "saturated" ? { entries: 1 } : {});

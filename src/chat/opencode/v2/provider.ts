@@ -80,7 +80,7 @@ type HistoryWorkerSource = { parent: string; phase: "collecting" | "captured"; r
   historyChildVisibility?: Map<string, { registered: number; ownedAfter?: number; ownedBaseline?: boolean; pendingBoundary?: string | null; retainedBoundaries?: ReadonlySet<string> }>;
 };
 type SessionRecordRead = { started: number; owners: HistoryWorkerSource[] };
-type HistoryVisibilityObservation = { recordsAfter: number; visibility?: { boundary: string | null; started: number; completed: number } };
+type HistoryVisibilityObservation = { recordsAfter: number; pendingAfter: number; visibility?: { boundary: string | null; started: number; completed: number } };
 type PendingOutcomeRead = { started: number; completed: number; reports: readonly { child: string; at?: number; digest: string; observed?: number }[]; overflow?: true; overflowObserved?: number; provisional?: true };
 const parentCounterproofMaxFacts = 256;
 const parentCounterproofMaxBytes = 65_536;
@@ -104,7 +104,7 @@ export function createOpenCodeV2Provider(options: {
 
 export class OpenCodeV2Provider implements ChatProvider {
   private readonly historyReuse = new HistoryReuse<StoredMessage[], HistoryVisibilityObservation>(undefined, undefined,
-    () => ({ recordsAfter: this.sessionRecordClock }));
+    () => ({ recordsAfter: this.sessionRecordClock, pendingAfter: this.parentHistoryReadClock }));
   // Only verified, workspace-confined parentage is reusable; never session
   // status, cost, timestamps, or failed checks. Match the live worker budget.
   private readonly childParents = new HistoryReuse<readonly [string, string]>(4 * 1024 * 1024, 8_192);
@@ -604,6 +604,19 @@ export class OpenCodeV2Provider implements ChatProvider {
             }
             const lookup = await this.lookupChild(child, signal, owner);
             if (this.agentOwnership(child, sessionId, lookup) !== "confirmed") throw new Error("Child history ownership unavailable");
+            // A staged reply can arrive during the owned visibility await.
+            // Consume its deny-only boundary before replacing the provisional
+            // slot; a newer clear cannot authorize the held old transcript.
+            for (const source of historySources) {
+              const pending = source.historyChildVisibility?.get(child)?.pendingBoundary;
+              if (pending === undefined) continue;
+              const index = complete.findIndex(message => messageIdentity(message) === pending);
+              if (index < 0 || complete.some((message, position) => message.type === "idle" && position >= index)) {
+                provisionalHidden = true;
+                if (!source.historyChildChanges.has(child)) source.revision++;
+                source.historyChildChanges.add(child);
+              }
+            }
             const { boundaryId, boundaryIndex, visible } = storedHistoryVisibility(complete, lookup.info);
             if (boundaryId && boundaryIndex < 0) throw new Error("Child history visibility unavailable");
             // Recovery captures its lease after folding. A provisional veto
@@ -1904,6 +1917,30 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private observePendingOutcomes(parent: string, observation: PendingOutcomeRead, owner?: HistoryWorkerSource, delta = false): void {
+    // The warmed entry owns its native inbox cutoff even before a worker
+    // consumes it. Compare actual stored reports, not retained global facts.
+    const version = this.streamConnected ? String(this.streamGeneration) : undefined;
+    const entry = this.historyReuse.peekObservation(parent, version);
+    const complete = this.historyReuse.peek(parent, version);
+    if (entry && complete && observation.started > entry.pendingAfter && (observation.reports.length || observation.overflow)) {
+      const launches = new Map<string, LauncherEvidence[]>();
+      const reports: PendingOutcomeRead["reports"][number][] = [];
+      for (const message of complete) {
+        const prepared = prepareStoredMessage(message);
+        for (const tool of prepared.tools.values()) if (tool.name === "subagent" && tool.fact.reportedChild) {
+          const child = tool.fact.reportedChild, facts = launches.get(child) ?? [];
+          facts.push(tool.fact); launches.set(child, facts);
+        }
+        const report = prepared.notification;
+        if (report?.source === "subagent" && report.valid && report.status && report.worker) {
+          const at = numberField(asRecord(message.time).created);
+          reports.push({ child: report.worker, at, digest: historyVersion([messageIdentity(message), at, report]) });
+        }
+      }
+      const missing: PendingOutcomeRead = { ...observation, reports: observation.reports.filter(report => !reports.some(cached => cached.digest === report.digest)) };
+      if (observation.overflow || [...launches].some(([child, facts]) =>
+        this.pendingOutcomeSignature(missing, child, facts) !== undefined)) this.historyReuse.invalidate(parent);
+    }
     let conflictingOverlap = false;
     for (const source of this.historyWorkerSources) {
       if (source.parent !== parent || source.pendingFingerprint !== undefined) continue;
