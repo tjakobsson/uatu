@@ -1234,6 +1234,32 @@ a retry across its original parent-read boundary. Stale arrivals, copying facts
 or merging an unrelated newer batch do not renew that report's observation.
 Per-fact timestamps and replacements remain within the existing fact/byte caps;
 overflow stays deny-only and cannot grant report content or control authority.
+Filtering across a parent-read or retry boundary applies to each fact and the
+overflow observation, not the merged snapshot's envelope start: an older reply
+arriving last cannot discard newer counterproof already retained in that slot.
+
+Native child revert-boundary observations begin when the read registers its
+pending child-history dependency, before the response classifies positive
+outcomes. Ordered boundary changes are retained in the existing scoped child
+counterproof set and fence a later dependent outcome; outcome-free and control
+reads do not acquire an outcome fence merely by collecting that dependency.
+A newer boundary change also invalidates child-history reuse so a retry cannot
+consume the obsolete held response. Overlapping older ownerless lookups cannot
+replace the newer owned boundary baseline or revoke it on late arrival.
+
+Stream retirement strips the existing worker ledger down to negative execution
+continuity instead of discarding it. Scoped end boundaries, start-clock vetoes,
+unknown-clock/retention gaps and exact execution replay tombstones survive across
+subscriptions of the same provider. Ownership, births, tasks, invocations,
+requests, outcomes and occurrence/pending bindings do not survive. Replay proof
+identity is deny-only and cannot supply activity, execution timestamps or Stop
+witnesses for a new generation. Current history/inventory can still establish
+unrelated or compatible new-admission cold activity without borrowing live proof.
+The same entry/byte accounting includes the retained control ledger; no second
+counterproof cache is created. Saturation remains fail-closed across reconnect,
+not reset into an assertion that lost negative facts never concerned this child.
+Disconnected reads consult the stripped ledger too. Provider disposal releases
+it; workspace/provider instances never share it.
 
 Cold activity publication has a separate native active-inventory dependency.
 After parent history declares its bounded child scope, recovery starts the

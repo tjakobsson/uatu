@@ -8,6 +8,38 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+for (const mode of ["positive-only", "ended", "unknown-end", "unknown-start", "entry-saturated", "byte-saturated", "aggregate-saturated"] as const)
+test(`subscription retirement retains only accounted negative execution evidence (${mode})`, () => {
+  let external = { entries: 0, bytes: 0 };
+  const budget = mode === "entry-saturated" ? { entries: 1 } : mode === "byte-saturated" ? { bytes: 100 }
+    : { entries: 100, bytes: 20_000, retained: () => external };
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "old", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  workers.verifyChild("child", "parent");
+  workers.launchPrepared("parent", prepareTool({ id: "call", name: "subagent", time: { created: 10, ran: 11, completed: 12 },
+    state: { status: "completed", input: { background: true }, metadata: { sessionID: "child", status: "running" } } }, 12, "snapshot", "message"), 12);
+  const start = nativeProof({ id: "start", created: 11 }, { phase: "started" });
+  workers.executionStarted("child", start);
+  if (mode !== "positive-only") {
+    const end = nativeProof({ id: "end", ...(mode === "unknown-end" ? {} : { created: 20 }) }, { phase: "ended" });
+    workers.executionEnded("child", 20, end);
+    workers.executionStarted("child", nativeProof({ id: "later", ...(mode === "unknown-start" ? {} : { created: 35 }) }, { phase: "started" }));
+  }
+  if (mode === "aggregate-saturated") { external = { entries: 100, bytes: 20_000 }; workers.enforceBudget(); external = { entries: 0, bytes: 0 }; }
+  const saturated = mode.endsWith("saturated");
+  for (let gap = 0; gap < 3; gap++) {
+    workers.retainExecutionCounterproof(); checkBytes(workers);
+    expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+    expect(workers.controlWitnesses(candidate.taskId)).toEqual([]); expect(workers.readbackControlWitnesses(candidate)).toEqual([]);
+    expect(workers.activityEvidence(candidate)).toBeUndefined();
+    expect(workers.controlEvidenceAvailable).toBe(!saturated);
+    expect(workers.coldActivityContradicted(candidate)).toBe(mode !== "positive-only");
+    expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(mode !== "positive-only");
+    if (mode === "positive-only") { expect(workers.startReplay("child", start)).toBe(true); workers.executionStarted("child", start); }
+  }
+});
+
 for (const evidence of ["none", "other-child", "end", "start", "unknown-start"] as const)
 test(`cold activity needs scoped counterproof before requiring admission clocks (${evidence})`, () => {
   const workers = new BackgroundWorkers();

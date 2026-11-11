@@ -122,8 +122,10 @@ export class OpenCodeV2Provider implements ChatProvider {
   // Fixed-size digests and at most 128 timestamps bound this separate cache;
   // eviction loses only a last-seen caption, never an authorization fence.
   private readonly coldActivityObservations = new Map<string, number>();
-  private readonly controls = new BackgroundControls({ changed: () => this.eventMemory?.workers.enforceBudget() });
+  private readonly controls = new BackgroundControls({ changed: () => this.executionWorkers?.enforceBudget() });
   private eventMemory?: ReturnType<typeof createOpenCodeV2Memory>;
+  private streamWorkers?: BackgroundWorkers;
+  private get executionWorkers(): BackgroundWorkers | undefined { return this.eventMemory?.workers ?? this.streamWorkers; }
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
   // How many models the last catalog read offered; null before the first.
   private offeredModels: number | null = null;
@@ -666,8 +668,8 @@ export class OpenCodeV2Provider implements ChatProvider {
           || (fact.completed ?? fact.reportedCompletion)! >= previous))) coldCompetitors.add(occurrence.taskId);
     }
     for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations, {
-      contradicted: (candidate, at) => this.eventMemory?.workers.historyOutcomeContradicted(candidate, at, executionHistory.get(candidate.worker)) ?? false,
-      ends: child => this.eventMemory ? this.eventMemory.workers.observedExecutionEnds(child) : [],
+      contradicted: (candidate, at) => this.executionWorkers?.historyOutcomeContradicted(candidate, at, executionHistory.get(candidate.worker)) ?? false,
+      ends: child => this.executionWorkers ? this.executionWorkers.observedExecutionEnds(child) : [],
     })) if (update.kind === "upsert") {
       const entry = normalized.get(update.item.id);
       if (entry) {
@@ -955,7 +957,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         && !folded.coldCompetitors.has(item.taskId)
         && [...folded.occurrences.values()].filter(other => other.worker === occurrence.worker && other.kind === occurrence.kind
           && runningTaskIds.has(other.taskId)).length === 1;
-      const liveOccurrence = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
+      const liveOccurrence = occurrence && this.executionWorkers?.hasRetainedReference(occurrence);
       const intervalStart = occurrence && folded.workers.historyIntervalStart(occurrence);
       // Enrich an already registered child dependency with the exact cold
       // occurrence, not every launch for that child in the parent transcript.
@@ -965,7 +967,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (intervalStart !== undefined) (source.source.historyActivityIntervals ??= new Map()).set(item.childConversationId, intervalStart);
         this.observeColdInactivity(source.source, item.childConversationId);
       }
-      const coldContradicted = !liveOccurrence && occurrence && (this.eventMemory?.workers.coldActivityContradicted(occurrence, intervalStart)
+      const coldContradicted = !liveOccurrence && occurrence && (this.executionWorkers?.coldActivityContradicted(occurrence, intervalStart)
         || source.source.historyActivityContradicted.has(occurrence.worker));
       // A complete owned agent transcript reconstructs execution intervals
       // independently of the event subscription's generation. Reconnect loses
@@ -1035,7 +1037,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       // Later shell/ownership awaits can overlap a newer child boundary. Keep
       // that independent activity fence as well as the control read guard.
       const occurrence = folded.occurrences.get(item.taskId);
-      const raw = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
+      const raw = occurrence && this.executionWorkers?.hasRetainedReference(occurrence);
       const current = occurrence && this.eventMemory?.workers.activityEvidence(occurrence);
       if (item.activity?.kind === "needs-answer") {
         const request = this.eventMemory?.workers.linkedRequest(item.taskId, occurrence);
@@ -1838,7 +1840,9 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private observeTranscriptPendingOutcome(source: HistoryWorkerSource, observation: PendingOutcomeRead): void {
-    if (source.historyPendingCounterproofAfter !== undefined && observation.started <= source.historyPendingCounterproofAfter) return;
+    // A coalesced snapshot can have an older envelope but newer facts (or
+    // overflow). Filter their native observation order independently.
+    observation = this.pendingFactsAfter(observation, source.historyPendingCounterproofAfter);
     const parent = source.historyParentRead;
     // Positive observations outlive a retry, not the enclosing read. Invalidate
     // transport reuse so a delivered report can be revalidated from native
@@ -1856,11 +1860,10 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
     // A pending read begun before this owned transcript cannot revoke it on
     // late arrival. A newer positive report can veto inference, not admit text.
-    if (observation.started <= parent.started) return;
+    const relevant = this.pendingFactsAfter(observation, parent.started);
     for (const [child, launches] of source.historyParentLaunches) {
-      const signature = this.pendingOutcomeSignature({ ...observation,
-        reports: observation.reports.filter(report => (report.observed ?? observation.started) > parent.started) }, child, launches);
-      if (!observation.overflow && (!signature || signature === parent.reports.get(child))) continue;
+      const signature = this.pendingOutcomeSignature(relevant, child, launches);
+      if (!relevant.overflow && (!signature || signature === parent.reports.get(child))) continue;
       (source.historyPendingOutcomeChanges ??= new Set()).add(child);
     }
   }
@@ -2103,8 +2106,10 @@ export class OpenCodeV2Provider implements ChatProvider {
     const reads = new AbortController();
     this.streamReads = reads;
     const streamReadSignal = this.readSignal(AbortSignal.any([signal, reads.signal]));
-    // Memory scoped to the subscription: one pump, one memory.
-    const memory = createOpenCodeV2Memory({ controls: this.controls });
+    // Positive memory is subscription-scoped. The previous subscription has
+    // stripped its shared worker ledger down to deny-only execution facts.
+    const memory = createOpenCodeV2Memory({ controls: this.controls, workers: this.streamWorkers });
+    this.streamWorkers = memory.workers;
     this.eventMemory = memory;
     // Live only once a frame has arrived: until the subscription's first
     // frame (`server.connected`), a row broadcast may not have reached this
@@ -2355,7 +2360,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       reads.abort();
       if (!this.readLifetime.signal.aborted) this.controls.observationGap();
       this.coldActivityObservations.clear();
-      if (this.eventMemory === memory) this.eventMemory = undefined;
+      if (this.eventMemory === memory) {
+        if (!this.readLifetime.signal.aborted) memory.workers.retainExecutionCounterproof();
+        this.eventMemory = undefined;
+      }
       if (this.streamReads === reads) this.streamReads = undefined;
       this.historyReuse.invalidate();
       this.invalidateChildParents();
@@ -2579,6 +2587,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     await Promise.allSettled(this.backgroundReads.values());
     this.coldActivityObservations.clear();
     this.controls.clear();
+    this.streamWorkers = undefined;
   }
 
   promptIdentity(identity: string): string { return stableProviderId("msg", identity); }
@@ -3107,12 +3116,22 @@ export class OpenCodeV2Provider implements ChatProvider {
           this.observeHistoryWorkerSource(source, subject, ownership);
           // A native record can reveal a staged/cleared boundary before SSE.
           // Ownership staying confirmed does not preserve an older outcome view.
-          if (ownership === "confirmed" && source.historyChildren?.has(subject) && source.historyPositiveChildren?.has(subject)) {
+          if (ownership === "confirmed" && source.historyChildren?.has(subject)) {
             const boundary = stringValue(asRecord(info.revert).messageID) ?? null;
             const boundaries = source.historyBoundaries ??= new Map(), previous = boundaries.get(subject);
             if (previous && previous.boundary !== boundary) {
-              if (observation.started > previous.completed) source.revision++;
-              else for (const owner of observation.owners) if (owner.historyChildren?.has(subject)) owner.revision++;
+              // A committed/cleared boundary can remove an idle while its old
+              // transcript request is still in flight. Do not let a retry reuse
+              // that obsolete response after fencing this consuming source.
+              if (observation.started > previous.completed) this.historyReuse.invalidate(subject);
+              const targets = observation.started > previous.completed ? [source] : observation.owners;
+              for (const target of targets) if (target.historyChildren?.has(subject)) {
+                // Retain scoped counterproof before the pending transcript
+                // classifies outcomes. It becomes a fence only if that fold
+                // depends on history; outcome-free/control reads stay separate.
+                target.historyChildChanges.add(subject);
+                if (dependsOnWorkerHistory(target, subject)) target.revision++;
+              }
             }
             // The first scoped observation is evidence even while the outcome
             // lookup is pending. Overlapping responses cannot replace it.

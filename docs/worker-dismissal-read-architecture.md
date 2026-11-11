@@ -259,6 +259,28 @@ digest. Seeing the same report in a genuinely newer request can cross the
 original parent-read boundary; stale arrival or an unrelated newer batch cannot
 renew an old fact. Copies preserve each fact's order, and duplicate replacement
 is charged against the existing byte cap with sticky deny-only overflow.
+An older snapshot envelope cannot discard newer merged facts: parent/retry
+boundary filtering checks per-fact observation and `overflowObserved` separately.
+This also applies while the first parent transcript and its baseline are pending.
+
+Registered pending child-history dependencies retain native staged/cleared
+boundary changes before an idle is classified as a positive outcome. Existing
+scoped counterproof fences that later outcome without granting ownership or
+Stop authority or invalidating outcome-free/control reads solely for collection.
+A genuinely newer boundary transition invalidates obsolete child-history reuse;
+ordered native reads, not stale ownerless response arrival, govern that decision.
+
+Reconnect does not erase processed execution counterproof. Subscription cleanup
+strips the existing accounted worker ledger to scoped ends, start vetoes,
+unknown/overflow state and replay-only execution proof identity. It removes all
+ownership, births, projected tasks, requests, invocations and occurrence/pending
+bindings. No old proof becomes new-generation activity, a timestamp, outcome or
+Stop witness. Unrelated/compatible cold history can still progress; a vetoed old
+row stays unavailable and dismissible instead of restarting its execution clock.
+The provider's same aggregate entry/byte budget bounds continuity, including
+retained controls. Saturation stays fail-closed through further gaps. The stripped
+ledger also fences reads between subscriptions and is released on disposal;
+there is no workspace-global cache or added history-read phase.
 
 ## Browser consistency and recovery
 

@@ -746,7 +746,8 @@ function identity(value: unknown): value is string {
 
 /** V2 worker facts, separate from the successful tool which launched them.
  * Session parentage is established by a scoped session record, never by text.
- * This projection is disposable; complete provider history reconstructs it.
+ * Positive projection is disposable; complete provider history reconstructs it.
+ * Deny-only execution continuity remains bounded across subscription gaps.
  */
 export class BackgroundWorkers {
   private recoveryOnly = false;
@@ -1235,6 +1236,30 @@ export class BackgroundWorkers {
 
   enforceBudget(): void { this.bound(); }
 
+  /** Subscription retirement keeps deny-only execution continuity in this
+   * same accounted ledger. Replay proofs have no occurrence/pending binding;
+   * no ownership, live activity, request or control witness survives the gap. */
+  retainExecutionCounterproof(): void {
+    for (const collection of [this.parents, this.births, this.tasks, this.notices, this.unmatched, this.aliases, this.invocations, this.userShells]) {
+      if (!this.unlimited) for (const key of collection.keys()) this.account(collection, key, 0);
+      collection.clear();
+    }
+    for (const [child, boundary] of this.terminalProofs) {
+      if (!boundary.proof && !boundary.started && boundary.startCounterproof === undefined && boundary.startClocks === undefined && !boundary.undatedEnd) {
+        this.terminalProofs.delete(child); if (!this.unlimited) this.account(this.terminalProofs, child, 0); continue;
+      }
+      this.set(this.terminalProofs, child, { occurrences: [],
+        ...(boundary.proof ? { proof: boundary.proof } : {}),
+        ...(boundary.started ? { started: { proof: boundary.started.proof } } : {}),
+        ...(boundary.startCounterproof === undefined ? {} : { startCounterproof: boundary.startCounterproof }),
+        ...(boundary.startClocks === undefined ? {} : { startClocks: boundary.startClocks }),
+        ...(boundary.undatedEnd ? { undatedEnd: true as const } : {}) });
+    }
+    // Saturation is sticky: dropping positive state must not certify that
+    // counterproof lost to the aggregate budget never concerned this child.
+    this.bound();
+  }
+
   // Recovery can rebuild presentation after saturation, but cannot prove that
   // a discarded contradiction never referred to the requested old identity.
   get controlEvidenceAvailable(): boolean { return !this.recoveryOnly; }
@@ -1700,7 +1725,8 @@ export class BackgroundWorkers {
     if (entries <= maxEntries && this.bytes <= maxBytes) return;
     // Never evict only an old occurrence or its notice tombstone: the next
     // delayed result could then settle a newer run. On saturation the stream
-    // becomes a trigger for scoped authoritative recovery until reconnect.
+    // becomes a trigger for scoped authoritative recovery. Reconnect cannot
+    // certify that lost counterproof never concerned a recovered identity.
     // No provider mutation or polling is introduced by this fallback.
     collections.forEach(values => values.clear());
     this.sizes.clear();
