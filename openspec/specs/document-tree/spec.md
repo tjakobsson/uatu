@@ -355,7 +355,7 @@ When the Files-pane filter is in the `Changed` state, the path set fed to `@pier
 - **THEN** reduction MUST hand the library a shorter `paths` array via `resetPaths(paths, { initialExpandedPaths })`; uatu MUST NOT mutate, hide, or otherwise modify internal row visibility or DOM
 - **AND** every included ancestor MUST auto-expand so change entries are visible without further clicks
 
-#### Scenario: All and multi-root filtering retain the existing path contract
+#### Scenario: All retains the existing full path set
 - **WHEN** the filter is All
 - **THEN** All MUST supply the full path set unchanged from current behavior
 
@@ -505,7 +505,10 @@ When repository change data is available, the document tree SHALL annotate chang
 - **WHEN** repository change data or known Git-ignore classification arrives
 - **THEN** change annotations SHALL update with repository data and coexist with All/Recent/Changed controls
 - **AND** independent known ignore classification SHALL permit ignored styling without waiting for repository change collection
-- **AND** ignored files SHALL use muted filenames and faded icons without visible ignored-status labels or badges; Recent SHALL use the same treatment
+
+#### Scenario: Displayed files retain ignored styling and usable interaction cues
+- **WHEN** files are displayed in the tree or Recent, whether or not new repository or ignore data arrives
+- **THEN** ignored files SHALL use muted filenames and faded icons without visible ignored-status labels or badges; Recent SHALL use the same treatment
 - **AND** selection, focus, recency cues, and playback actions SHALL remain legible and usable
 
 #### Scenario: Unknown ignore status remains uncertain without a classification update

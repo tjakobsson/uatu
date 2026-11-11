@@ -1069,7 +1069,7 @@ Accepted OSC 52 writes SHALL always be visible: each write SHALL show a transien
 
 ### Requirement: Same-tab navigation preserves workspace terminal state
 
-Same-tab reload, workspace round trips, and history restoration SHALL preserve each workspace's visibility and pane references independently, in browser tabs and installed PWAs. Leaving SHALL release connections without terminating shells or recording user-hidden state. Returning to previously visible, live, unclaimed PTYs SHALL restore the panel and same shells automatically, without takeover or replacement. Hidden terminals SHALL stay hidden. Restoration SHALL NOT steal keyboard focus.
+Same-tab reload, workspace round trips, and history restoration SHALL preserve each workspace's per-tab visibility and pane references independently, in browser tabs and installed PWAs. Leaving SHALL release connections without terminating shells or recording user-hidden state. Returning to previously visible, live, unclaimed PTYs SHALL restore the panel and same shells automatically, without takeover or replacement. Hidden terminals SHALL stay hidden. Restoration SHALL NOT steal keyboard focus.
 
 #### Scenario: Reload restores a running terminal
 - **WHEN** a user reloads a workspace with a visible terminal and a live shell that no other client claims

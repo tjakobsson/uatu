@@ -6,9 +6,13 @@ Lazily render themed Mermaid blocks from Markdown and AsciiDoc with isolated err
 ### Requirement: Render Mermaid diagrams from fenced code blocks
 The preview pane SHALL detect Markdown fenced code blocks whose info string is `mermaid` and AsciiDoc listings declared with either the `[source,mermaid]` style or the bare `[mermaid]` block style, and SHALL render those blocks as Mermaid diagrams in the browser instead of leaving them as plain code blocks.
 
-#### Scenario: Deferred and bare-style diagrams retain the supported rendering contract
-- **WHEN** a supported Mermaid block approaches the viewport
-- **THEN** rendering MAY have been deferred per the lazy-rendering requirement, but its result SHALL be identical to eager rendering
+#### Scenario: Supported Mermaid blocks may defer rendering
+- **WHEN** a supported Mermaid block is available for rendering
+- **THEN** rendering MAY be deferred until it approaches the viewport, per the lazy-rendering requirement
+
+#### Scenario: Every rendered diagram retains eager-rendered results
+- **WHEN** a supported Mermaid block is rendered
+- **THEN** its result SHALL be identical to an eagerly rendered diagram
 
 #### Scenario: AsciiDoc parsing recognizes bare Mermaid styles before viewport eligibility
 - **WHEN** AsciiDoc is parsed
@@ -201,22 +205,25 @@ Mermaid diagram rendering SHALL be deferred until a diagram approaches the viewp
 - **WHEN** multiple diagrams become eligible together
 - **THEN** they SHALL render through one FIFO queue, one diagram per pass, yielding to the browser's paint cycle between passes so the batch never blocks the main thread as one unit
 
-#### Scenario: A single or multiple diagrams remain unrendered
+#### Scenario: Unrendered diagram slots reserve pending placeholders
 - **WHEN** a mounted diagram has not yet rendered
 - **THEN** its slot SHALL reserve a minimum placeholder height to stabilize scroll position and SHALL look like a pending diagram rather than broken content
 
-#### Scenario: Viewport observation is unavailable for any number of diagrams
-- **WHEN** the environment does not support viewport observation, including a document with only one diagram
+#### Scenario: Viewport observation is unavailable
+- **WHEN** the environment does not support viewport observation
 - **THEN** all diagrams SHALL still render through the yielding queue
 
-#### Scenario: Document changes and cache hits avoid stale or redundant rendering
+#### Scenario: Document changes invalidate superseded queued diagrams
 - **WHEN** the previewed document changes
 - **THEN** the queue SHALL be invalidated, abandoning superseded pending diagrams instead of rendering them into the new preview
 
 #### Scenario: Every rendered diagram uses bounded source-and-theme cache reuse
 - **WHEN** a diagram is rendered
 - **THEN** SVGs SHALL be reused from an in-memory, size-bounded cache keyed by source text and active theme inputs; a cache hit MUST NOT invoke the mermaid renderer
-- **AND** failed invalid-source renders MUST NOT be cached, so corrected source re-renders
+
+#### Scenario: Invalid-source render failures are not cached
+- **WHEN** a Mermaid render attempt fails because its source is invalid
+- **THEN** the failed render MUST NOT be cached, so corrected source re-renders
 
 #### Scenario: Off-screen diagrams do not render at mount
 - **WHEN** a document containing many Mermaid diagrams is mounted and most diagrams are far below the viewport

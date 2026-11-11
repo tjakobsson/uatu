@@ -301,7 +301,7 @@ The Hub SHALL accept a bounded explicit set of exact execution identities with i
 
 Dismissal SHALL use a complete current authoritative worker projection without transporting ordinary transcript text, prompts, or tool output. Compact evidence SHALL preserve exact occurrence identities, aliases, launcher reconciliation, and positive-activity semantics across all source pages. Unsafe evidence SHALL fail closed under the rules below.
 
-#### Scenario: Transcript volume grows without making evidence invalid
+#### Scenario: Transcript volume never relaxes evidence safety bounds
 - **WHEN** dismissal evidence is constructed or checked at any transcript volume, including valid evidence
 - **THEN** existing evidence-count, identifier, and storage safety bounds SHALL NOT be relaxed to accommodate transcript volume
 

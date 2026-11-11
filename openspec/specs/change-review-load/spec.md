@@ -102,7 +102,7 @@ The system SHALL provide a bounded recent commit log per detected Git repository
 
 `RepositorySnapshot.gitIgnoredFiles` SHALL be a string array of on-disk watched-root files matched by standard Git ignore rules (`.gitignore`, `core.excludesFile`, `.git/info/exclude`) and present in uatu's tree path set. The server MUST intersect with known tree paths, excluding filtered large hierarchies such as `node_modules`. Changed-file separation and annotation SHALL follow the rules below.
 
-#### Scenario: An ignored known path reaches repository consumers
+#### Scenario: Ignored files stay outside changedFiles regardless of known tree paths
 - **WHEN** a file is Git-ignored, whether or not it appears in the tree's known paths
 - **THEN** it MUST NOT appear in `changedFiles`, which describes Git-detected changes rather than ignored files
 - **AND** consumers MAY annotate exposed ignored paths distinctly; browser UIs' canonical mapping is `git status "!"` to annotation status `"ignored"`

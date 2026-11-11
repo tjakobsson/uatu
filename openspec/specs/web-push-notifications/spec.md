@@ -64,7 +64,7 @@ Hub-served Uatu SHALL offer feature-detected notification opt-in in supported se
 - **AND** stopped workspaces are covered without waiting
 
 ### Requirement: Device preferences select workspaces and event categories
-Each enrolled profile/app SHALL have authenticated-user-associated, device-specific workspace and event-category preferences. Users SHALL be able to toggle needs-answer and successful-turn-completion notifications independently for that device in either workspace mode. All workspaces SHALL be a standing access rule, not a saved inventory snapshot; explicit selections and other devices SHALL remain independent.
+Each enrolled profile/app SHALL have authenticated-user-associated, device-specific preferences. For each device the user SHALL choose one workspace mode: All workspaces or explicit accessible-workspace selection. Users SHALL be able to toggle needs-answer and successful-turn-completion notifications independently for that device in either mode. All workspaces SHALL be a standing access rule, not an inventory snapshot; explicit selections and other devices SHALL remain independent.
 
 #### Scenario: Enrollment defaults and submission record a device's explicit choices
 - **WHEN** the enrollment form opens
@@ -80,9 +80,13 @@ Each enrolled profile/app SHALL have authenticated-user-associated, device-speci
 - **WHEN** All workspaces is saved
 - **THEN** it SHALL stand for every workspace accessible at each event, including later registrations, and SHALL NOT store the then-existing inventory list
 - **WHEN** All workspaces is turned off
-- **THEN** the prior explicit selection SHALL return, or none if absent; explicit mode SHALL NOT automatically subscribe new workspaces
+- **THEN** the prior explicit selection SHALL return, or none if absent
 - **WHEN** notifications are disabled on one device
 - **THEN** future sends SHALL stop there without affecting the user's other devices
+
+#### Scenario: Explicit mode never automatically subscribes new workspaces
+- **WHEN** a new workspace becomes accessible to a device in explicit mode, whether or not its mode has changed
+- **THEN** that workspace SHALL NOT be subscribed automatically
 
 #### Scenario: Phone and desktop have different preferences
 - **WHEN** a user selects two workspaces on their phone and only one on their desktop browser
@@ -225,7 +229,7 @@ Each event/enrollment pair SHALL keep one logical delivery identity. Temporary p
 - **WHEN** repeated frames or replay occur within supported retention
 - **THEN** recorded occurrences SHALL NOT enqueue new notifications
 - **WHEN** a temporary push failure occurs
-- **THEN** retry SHALL be bounded, independently of the five-minute delivery lifetime
+- **THEN** retry SHALL be bounded and SHALL never continue past the five-minute delivery lifetime
 - **WHEN** a delivery lifetime is measured
 - **THEN** it SHALL run from the source event, except a presence-held needs-answer event's lifetime SHALL run from release
 - **WHEN** an ambiguous transport outcome causes duplicate deliveries

@@ -13,8 +13,8 @@ The UI SHALL meet Chromium installability criteria for Edge, Chrome, and Brave, 
 - **THEN** valid manifest and icons allow the native install affordance independently of permission, enrollment, worker registration, or offline support
 
 #### Scenario: Keep Hub notification support push-only
-- **WHEN** a Hub-served app enrolls for notifications or reconciles an existing subscription
-- **THEN** its supported worker handles those push functions and SHALL NOT intercept document/API requests or provide an offline content cache
+- **WHEN** a Hub-served app's push worker is present
+- **THEN** it supports notification enrollment and existing subscription reconciliation and SHALL NOT intercept document/API requests or provide an offline content cache
 
 #### Scenario: Clean legacy registrations without making boot depend on workers
 - **WHEN** the UI boots, including where service workers are unavailable

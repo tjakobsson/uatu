@@ -57,10 +57,13 @@ File additions, writes, renames, and deletions SHALL update Recent from existing
 - **WHEN** any Recent update arrives during a pointer/touch activation
 - **THEN** it MUST NOT cause an activation begun on one file to activate another file
 
-#### Scenario: Updates and view switches do not navigate for the reader
-- **WHEN** Recent updates or the user switches Files views
+#### Scenario: Recent updates do not jump readers to the newest row
+- **WHEN** Recent updates
 - **THEN** a reader below the top MUST NOT be jumped to the newest row
-- **AND** updates and view switches MUST NOT choose a preview, clear intentional deselection, enable Follow, or start media playback
+
+#### Scenario: Updates and view switches preserve deliberate preview and playback choices
+- **WHEN** Recent updates or the user switches Files views
+- **THEN** updates and view switches MUST NOT choose a preview, clear intentional deselection, enable Follow, or start media playback
 
 #### Scenario: A render arrives under a finger
 - **WHEN** a user presses a row and a newer file arrives before the activation finishes

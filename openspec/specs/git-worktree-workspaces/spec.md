@@ -7,10 +7,11 @@ Define provider-neutral Git worktrees as independent Hub workspaces, with explic
 ## Requirements
 
 ### Requirement: Approved worktree UX obligations hold on the real surfaces
-The existing workspace picker SHALL be the primary worktree create/discover/switch entry point, with dashboard entry points secondary. The approved UX SHALL hold on real surfaces, with independent checkout contexts and checks against real product entry points rather than retired prototypes.
+The existing workspace picker SHALL be the primary worktree create/discover/switch entry point, with dashboard secondary. Approved UX SHALL hold on real surfaces as below.
+
+Historical context, not an acceptance precondition: the resettable mock-backed prototype in the actual workspace frontend received explicit UX approval recorded on 2026-09-17 before real Git/backend integration. That prototype and its harnesses are retired.
 
 #### Scenario: Approved prototype obligations are verified on actual product surfaces
-Historical context, not an acceptance precondition: the resettable mock-backed prototype in the actual workspace frontend received explicit UX approval recorded on 2026-09-17 before real Git/backend integration. That prototype and its harnesses are retired.
 - **WHEN** the worktree experience is delivered or tested
 - **THEN** its established obligations SHALL hold on real surfaces; each registered checkout SHALL open its own `/s/<workspace-id>/` with its own files, preview, terminal, and chat
 - **AND** desktop, narrow touch, keyboard/focus/error announcements, light/dark, and desktop WebView titlebar inset SHALL work in the actual frontend, not only Hub cards
@@ -50,8 +51,10 @@ The Hub SHALL create ordinary linked worktrees from explicit new-local, existing
 - **THEN** checked-out targets MUST NOT be forced into another checkout, but a checked-out starting branch SHALL remain valid for a different new branch
 
 #### Scenario: Fetch and combobox interaction preserve exact creation intent
-- **WHEN** branch comboboxes open or adjacent Fetch remote branches is activated
-- **THEN** cached refs SHALL display without automatic network calls, with inline loading/errors; fetch SHALL retain name/query/valid choice, invalidate disappeared refs, and MUST NOT reapply defaults or substitute refs silently
+- **WHEN** either branch combobox is displayed
+- **THEN** it SHALL show cached refs without automatic network calls and an adjacent Fetch remote branches control, with inline loading/errors
+- **WHEN** Fetch remote branches is activated
+- **THEN** fetch SHALL retain name/query/valid choice, invalidate disappeared refs, and MUST NOT reapply defaults or substitute refs silently
 - **WHEN** the user clicks, taps, presses Enter, edits, reopens, or dismisses a list
 - **THEN** click/tap/Enter SHALL commit the exact ref and confirm choice, Enter MUST NOT submit, and touch SHALL commit options and activate footer actions like pointer clicks
 - **AND** edits SHALL clear choice and disable Create; invalid/empty Name or pending operation SHALL disable new Create; reopening SHALL offer all refs
@@ -64,9 +67,20 @@ The Hub SHALL create ordinary linked worktrees from explicit new-local, existing
 #### Scenario: Checkout destinations and branch names remain separate
 - **WHEN** a new checkout is created from the selected repository and explicit branch mode
 - **THEN** it SHALL use a new local branch from the selected starting branch, an existing local branch, or a new local tracking branch from the selected remote ref
-- **AND** destination SHALL be predetermined sibling `<main-folder>.worktrees/<safe-branch-folder>`, while child name SHALL equal the exact current local branch including slashes, not sanitized folder name
-- **AND** no destination/name form or child branch rename SHALL be offered
-- **AND** sanitized collisions SHALL be deterministic without overwrite, refusing if the disambiguated destination remains occupied; occupancy SHALL be repository-identity-scoped, not globally branch-string-scoped
+- **AND** destination SHALL be predetermined sibling `<main-folder>.worktrees/<safe-branch-folder>`
+- **AND** sanitized collisions SHALL be deterministic without overwrite, refusing if the disambiguated destination remains occupied
+
+#### Scenario: Existing child workspace names reflect the current local branch
+- **WHEN** a child workspace exists, including after an external branch switch
+- **THEN** the child workspace name SHALL equal the exact current local branch, including slashes, not its sanitized folder name
+
+#### Scenario: Branch occupancy checks are scoped to repository identity before creation
+- **WHEN** branch occupancy is checked, including before a checkout is created
+- **THEN** branch occupancy SHALL be scoped to repository identity, not globally to the displayed branch string
+
+#### Scenario: Worktree controls do not offer destination forms or child branch rename
+- **WHEN** worktree controls are displayed, including for an existing child outside creation
+- **THEN** no destination/name form or child branch rename SHALL be offered
 
 #### Scenario: Two branches sanitize to the same folder
 - **WHEN** `feature/login` and `feature-login` target the same parent

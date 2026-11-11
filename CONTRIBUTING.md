@@ -58,8 +58,8 @@ the body limit.
 Preserve each clause's scope and strength when moving it: an unconditional
 rule must not acquire a narrower scenario trigger, and examples or rationale
 must not become new obligations. Express scenario acceptance in concrete
-`WHEN`/`THEN` steps rather than leaving an old requirement paragraph after
-generic steps. `tests/openspec-discipline.test.ts` checks for newly stranded
+`WHEN`/`THEN` steps rather than leaving prose before or after the steps.
+`tests/openspec-discipline.test.ts` checks for newly stranded
 scenario prose; semantic preservation still needs a clause-by-clause review.
 
 The generated OpenSpec skills are committed in both `.agents/skills/` and

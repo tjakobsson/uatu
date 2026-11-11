@@ -86,7 +86,7 @@ Native menus SHALL provide New Tab, New Window, positional and sequential tab na
 
 ### Requirement: Web page JavaScript dialogs present natively
 
-The embedded WebView SHALL present `alert()`, `confirm()`, and `prompt()` as native window-attached panels and return the user's answer. File inputs SHALL use the system open panel, honor single-or-multiple selection, and return chosen files or none on cancel; no file-panel attachment rule is added. WKWebView otherwise silently answers false, null, or nothing, disabling dashboard confirmations and private-key selection.
+The embedded WebView SHALL present `alert()`, `confirm()`, and `prompt()` as native window-attached panels and return the user's answer. File inputs SHALL use the system open panel, honor single-or-multiple selection, and return chosen files or none on cancel. WKWebView otherwise silently answers false, null, or nothing, disabling dashboard confirmations and private-key selection.
 
 #### Scenario: Complete a JavaScript dialog
 - **WHEN** any embedded page calls `alert()`, `confirm()`, or `prompt()`

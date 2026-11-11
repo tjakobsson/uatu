@@ -145,7 +145,7 @@ scrollable. It SHALL do so whether focus is in the find field or the page.
 
 ### Requirement: Browser tabs present JavaScript dialogs and the file chooser natively
 
-Split-browser `alert()`, `confirm()`, and `prompt()` SHALL use native window-attached panels and return the user's answer. The split MUST NOT silently answer on the page's behalf. File inputs SHALL open the system open panel and return chosen files. A non-selected tab's dialog MUST NOT appear over another page: it waits, with the page, until its tab is selected. No window-attachment rule is added for file panels.
+Split-browser `alert()`, `confirm()`, and `prompt()` SHALL use native window-attached panels and return the user's answer. The split MUST NOT silently answer on the page's behalf. File inputs SHALL open the system open panel and return chosen files. A non-selected tab's dialog MUST NOT appear over another page: it waits, with the page, until its tab is selected.
 
 #### Scenario: Return each JavaScript dialog's native response
 - **WHEN** a split-browser tab presents a JavaScript dialog

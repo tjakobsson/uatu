@@ -32,7 +32,7 @@ The Hub SHALL use dedicated owner-only runtime locations for every SSH or OpenPG
 - **AND** stale state SHALL be validated and recovered without signaling unrelated processes
 
 #### Scenario: Linux creates a new SSH guardian ownership record
-- **WHEN** new SSH guardian ownership state is created on Linux, including ordinary fresh runtime creation
+- **WHEN** new SSH guardian ownership state is created on Linux
 - **THEN** it SHALL retain enough boot identity to distinguish exact managed artifacts left by an earlier system boot
 
 #### Scenario: Ambient agents remain untouched
@@ -190,7 +190,7 @@ New credentials SHALL have no workspace assignments by default. An authenticated
 - **AND** the selected clone credential SHALL be offered as the default retained assignment but never retained without explicit user choice
 
 #### Scenario: Assignment surfaces disclose shared-UID limits and preserve credential identity
-- **WHEN** any assignment surface or API is used with the local backend, including reads without a new assignment
+- **WHEN** any assignment surface or API is used with the local backend
 - **THEN** every assignment surface and API SHALL identify the workspace boundary as advisory because all workspaces share the daemon OS UID
 - **AND** they SHALL warn that another local workspace may discover or exercise credentials outside its assignments
 

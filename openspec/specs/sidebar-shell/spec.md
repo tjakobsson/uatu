@@ -506,7 +506,7 @@ Without stored pane state, the sidebar SHALL show `Change Overview` and `Files` 
 - **WHEN** Change Overview is displayed, whether or not repository and changed-files data are available
 - **THEN** the sidebar MUST NOT list raw mechanical statistics such as changed-file count, touched-line count, diff-hunk count, or directory spread
 - **AND** the pane MUST NOT render a review-burden score, level, meter, or score explanation; no such concepts exist
-- **AND** at least one untracked entry in the changed-files list MUST produce a categorical presence indicator answering whether untracked files exist, without a count
+- **AND** when the workspace contains at least one untracked entry, the pane MUST render a count-free categorical presence indicator answering the workspace-state question "are there untracked files at all?" over the changed-files list
 - **AND** no untracked entries MUST mean no such indicator is rendered
 
 #### Scenario: Git-backed change has repository data

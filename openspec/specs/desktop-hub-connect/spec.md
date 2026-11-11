@@ -56,7 +56,7 @@ The native app SHALL own the Keychain-held Hub session ID, use bearer transport 
 
 #### Scenario: A signed-out transition permits only one silent recovery
 - **WHEN** either the native API or a hub web view receives a 401
-- **THEN** When either surface receives a 401, the session is dead server-side: the app SHALL attempt at most one silent re-login with the Keychain password per signed-out transition (respecting the hub's login rate limit), then present a sign-in prompt.
+- **THEN** the app SHALL attempt at most one silent re-login with the Keychain password per signed-out transition (respecting the hub's login rate limit), then present a sign-in prompt; the session is dead server-side.
 
 #### Scenario: Web sign-out forgets both stored credentials
 - **WHEN** the native app observes a sign-out navigation in a hub web view, whether or not a 401 was received

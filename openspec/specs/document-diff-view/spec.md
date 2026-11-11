@@ -153,7 +153,7 @@ Diff SHALL initialize at most one Shiki highlighter per browser session and reus
 #### Scenario: Pierre loading follows actual need or explicit prewarm
 - **WHEN** a first Pierre render needs output or an explicit prewarm is invoked because Diff rendering is plausibly imminent
 - **THEN** Pierre SHALL load through dynamic `import()` and its resolved module SHALL be reused for the session without re-import
-- **AND** explicit prewarm may occur at post-boot browser idle where Diff is reachable in a Git workspace, or on hover/focus of the Diff segment
+- **AND** explicit imminent-use prewarm means post-boot browser idle where Diff is reachable in a Git workspace, or hover/focus of the Diff segment
 - **WHEN** `unsupported-no-git`, `unchanged`, `binary`, or lightweight large-diff fallback renders
 - **THEN** it MUST NOT itself trigger import, though independent prewarm MAY already have loaded Pierre
 

@@ -137,8 +137,8 @@ The preview header SHALL display a small chip next to the document title indicat
 - **THEN** Markdown SHALL show `markdown`, and AsciiDoc SHALL show `asciidoc`
 - **AND** other text files SHALL show the mapped highlight.js language identifier (e.g. `yaml`, `python`, `typescript`) when one is mapped
 
-#### Scenario: Any selected file has an unmapped extension
-- **WHEN** the active file's extension does not map to a known language, whether or not the file is text
+#### Scenario: An active text file has an unmapped extension
+- **WHEN** the active non-Markdown, non-AsciiDoc text file's extension does not map to a known language
 - **THEN** the chip SHALL read `text`
 
 #### Scenario: A YAML file shows a `yaml` chip

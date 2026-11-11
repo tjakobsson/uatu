@@ -15,7 +15,7 @@ The system SHALL incrementally detect creations, deletions, renames, and writes 
 #### Scenario: Writes, renames, and snapshot recovery preserve current revisions
 - **WHEN** any indexed path is written or renamed
 - **THEN** classification SHALL be reevaluated
-- **WHEN** a fresh snapshot is applied after a connection gap
+- **WHEN** a fresh snapshot is applied after a gap
 - **THEN** it SHALL reconcile revisions
 
 #### Scenario: Asynchronous work completes during connected navigation or recovery
@@ -404,7 +404,7 @@ Repository snapshots SHALL refresh independently of file indexing and delivery. 
 - **THEN** collection SHALL start promptly
 
 #### Scenario: Sustained repository triggers are coalesced and paced
-- **WHEN** repository triggers continue during sustained edits
+- **WHEN** repository triggers are sustained, with or without document edits
 - **THEN** successive collections SHALL start no closer than a minimum interval; intervening triggers SHALL coalesce into one follow-up reflecting the latest state
 
 #### Scenario: Every repository read is read-only

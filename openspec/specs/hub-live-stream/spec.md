@@ -197,7 +197,7 @@ The stream SHALL deliver `activity` for every workspace accessible to the authen
 - **WHEN** a workspace is running, whether or not any page is open
 - **THEN** the hub SHALL observe its activity throughout its running lifetime so work finishing while nobody watches is recorded
 
-#### Scenario: Chat is viewed or the hub restarts after a finish
+#### Scenario: Viewing chat clears finished for that user on every device
 - **WHEN** a user's session page reports its workspace's chat surface in view
 - **THEN** the acknowledgement SHALL clear finished for that user on every device and MUST NOT affect other users
 

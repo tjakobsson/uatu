@@ -56,7 +56,7 @@ function strandedProse(content: string): StrandedProse[] {
       scenario.hasStep = true;
       continue;
     }
-    if (!scenario.hasStep || !line.trim() || /^[ \t]/.test(line) || /^(?:-{3,}|\*{3,}|_{3,})[ \t]*$/.test(line)) continue;
+    if (!line.trim() || (scenario.hasStep && /^[ \t]/.test(line)) || /^(?:-{3,}|\*{3,}|_{3,})[ \t]*$/.test(line)) continue;
     if (!scenario.lines.length) scenario.firstLine = index + 1;
     scenario.lines.push(line);
   }
@@ -119,6 +119,38 @@ describe("OpenSpec acceptance-step discipline", () => {
       "  without persisting the credential",
       "- **AND** unrelated sessions remain unchanged",
     ].join("\n"))).toEqual([]);
+  });
+
+  test("detects prose before a scenario's first step", () => {
+    expect(strandedProse([
+      "### Requirement: Verify product behavior",
+      "The product SHALL satisfy the approved contract.",
+      "#### Scenario: Inspect the product",
+      "Historical context is not an acceptance precondition.",
+      "- **WHEN** the product is inspected",
+      "- **THEN** the approved controls are available",
+    ].join("\n"))).toEqual([{
+      requirement: "Verify product behavior",
+      scenario: "Inspect the product",
+      line: 4,
+      prose: "Historical context is not an acceptance precondition.",
+    }]);
+  });
+
+  test("indentation cannot hide prose before a scenario's first step", () => {
+    expect(strandedProse([
+      "### Requirement: Verify product behavior",
+      "#### Scenario: Inspect the product",
+      "  Historical context is not an acceptance precondition.",
+      "- **WHEN** the product is inspected",
+      "- **THEN** the approved controls are available",
+      "  with an ordinary step continuation",
+    ].join("\n"))).toEqual([{
+      requirement: "Verify product behavior",
+      scenario: "Inspect the product",
+      line: 3,
+      prose: "Historical context is not an acceptance precondition.",
+    }]);
   });
 
   test("ignores fenced examples rather than parsing their headings as scenarios", () => {

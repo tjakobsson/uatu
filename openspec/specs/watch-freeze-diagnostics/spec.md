@@ -10,7 +10,12 @@ A session child SHALL spawn a sibling watchdog. It MUST be one re-execution of t
 #### Scenario: Start the independent watchdog without another dependency
 - **WHEN** a session child starts
 - **THEN** it spawns a sibling watchdog that MUST be one re-execution of the same uatu binary, with no separate executable or new runtime dependency
-- **AND** the main process MUST refresh heartbeat-file mtime and the watchdog MUST stat it at least once per second
+
+#### Scenario: Maintain periodic heartbeat monitoring
+- **WHEN** the session child is running
+- **THEN** the main process MUST refresh heartbeat-file mtime at least once per second
+- **WHEN** the watchdog is running
+- **THEN** it MUST stat the heartbeat file at least once per second
 
 #### Scenario: Count consecutive observed stale ticks
 - **WHEN** heartbeat mtime fails to advance over watchdog ticks
