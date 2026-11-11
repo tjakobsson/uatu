@@ -68,6 +68,7 @@ export function prepareNotification(payload: unknown): PreparedNotification | un
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const startProofKey = (proof: NativeProof) => createHash("sha256").update(JSON.stringify(proof)).digest("base64url");
 /** Exact native command association, without retaining another command body.
  * No trimming, shell parsing or guessed equivalence supplies missing proof.
  */
@@ -765,7 +766,7 @@ export class BackgroundWorkers {
   private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests;
     /** Greatest known distinct-start clock; null means its clock is unknown.
      * Negative evidence only, never a positive execution start/end timestamp. */
-    startCounterproof?: number | null; startClocks?: readonly number[] | null; undatedEnd?: true }>();
+    startCounterproof?: number | null; startClocks?: readonly number[] | null; startKeys?: readonly string[]; undatedEnd?: true }>();
   private readonly unmatched = new Map<string, { parent: string; worker: string; item: BackgroundTaskItem; correlatable: boolean; published: boolean }>();
   private readonly ended = new Map<string, number[]>();
   private readonly aliases = new Map<string, string>();
@@ -936,8 +937,11 @@ export class BackgroundWorkers {
     const boundary = this.terminalProofs.get(child), start = boundary?.startCounterproof;
     if (start === null || boundary?.startClocks === null) return true;
     const clocks = (boundary?.startClocks ?? []).filter(clock => (previous === undefined || clock > previous) && clock <= at);
-    const first = clocks.length ? Math.min(...clocks) : undefined;
-    return clocks.some(clock => clock !== first && clock > window.end)
+    // Admission is a window, not proof of one execution inside it. Multiple
+    // distinct starts in this candidate interval veto uniqueness even before
+    // acceptance returns. With no enclosing end, prior-admission starts alone
+    // do not compete with a later candidate; retain the conservative scalar.
+    return clocks.filter(clock => previous !== undefined || clock >= window.start).length > 1
       // The old scalar remains conservative where no enclosing interval can
       // exclude a prior execution. It cannot make an interval's first start reuse.
       || previous === undefined && start !== undefined && start <= at && start > window.end;
@@ -1253,6 +1257,7 @@ export class BackgroundWorkers {
         ...(boundary.started ? { started: { proof: boundary.started.proof } } : {}),
         ...(boundary.startCounterproof === undefined ? {} : { startCounterproof: boundary.startCounterproof }),
         ...(boundary.startClocks === undefined ? {} : { startClocks: boundary.startClocks }),
+        ...(boundary.startKeys === undefined ? {} : { startKeys: boundary.startKeys }),
         ...(boundary.undatedEnd ? { undatedEnd: true as const } : {}) });
     }
     // Saturation is sticky: dropping positive state must not certify that
@@ -1295,8 +1300,8 @@ export class BackgroundWorkers {
   }
 
   startReplay(child: string, proof?: NativeProof): boolean {
-    const previous = this.terminalProofs.get(child)?.started;
-    return sameProof(previous?.proof, proof)
+    const boundary = this.terminalProofs.get(child), previous = boundary?.started;
+    return !!proof && boundary?.startKeys?.includes(startProofKey(proof)) === true || sameProof(previous?.proof, proof)
       || [...this.tasks.values()].some(task => task.worker === child && sameProof(task.evidence.executionStart, proof));
   }
 
@@ -1315,19 +1320,20 @@ export class BackgroundWorkers {
       && proof.created >= birth.proof.created && initial.evidence.launches.every(launch => (launch.created === undefined || launch.created <= birth.proof?.created!)
         && (launch.completed ?? launch.reportedCompletion) !== undefined && birth.proof?.created! <= (launch.completed ?? launch.reportedCompletion)!)
       && ![...this.invocations.values()].some(invocation => invocation.fact.requestedChild === child && invocation.occurrence !== initial.evidence.key)) {
-      this.set(this.terminalProofs, child, { occurrences: [], started: { proof, pending: initial.evidence.key }, startClocks: [proof.created] });
+      this.set(this.terminalProofs, child, { occurrences: [], started: { proof, pending: initial.evidence.key }, startClocks: [proof.created], startKeys: [startProofKey(proof)] });
       this.bindInitialStart(initial);
       this.bound();
       return;
     }
     let startCounterproof = previous?.startCounterproof;
-    // Keep distinct native clocks inside the existing byte-budgeted record.
+    // Keep bounded distinct native proof identities and their clocks together.
     // A later maximum cannot erase an intervening start for an older outcome.
     // The earliest start alone is not proof of reuse; exact replays coalesce.
     let startClocks = previous?.startClocks === null ? null : [...previous?.startClocks ?? []];
-    if (startClocks && proof?.created !== undefined && !startClocks.includes(proof.created)) {
-      if (startClocks.length === 128) startClocks = null; // Sticky outcome-only retention gap.
-      else startClocks.push(proof.created);
+    let startKeys = startClocks ? [...previous?.startKeys ?? []] : undefined;
+    if (startClocks && proof) {
+      if (startClocks.length === 128 || proof.created === undefined) { startClocks = null; startKeys = undefined; }
+      else { startClocks.push(proof.created); startKeys!.push(startProofKey(proof)); }
     }
     if (proof && previous && !candidates.length) {
       // Arrival order can regress on an older replay. Preserve the greatest
@@ -1339,6 +1345,7 @@ export class BackgroundWorkers {
     }
     if (proof) this.set(this.terminalProofs, child, { ...(previous ?? { occurrences: [] }), started: { proof },
       startClocks,
+      startKeys,
       ...(startCounterproof === undefined ? {} : { startCounterproof }),
       // A second native execution before launcher admission is reuse, not a
       // newborn's first execution. Do not start another provisional window.

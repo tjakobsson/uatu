@@ -174,10 +174,17 @@ structure or budget is introduced.
 The ledger retains distinct-start counterproof as one greatest observed clock
 (or unknown-clock veto), independent of the latest arrival. Replaying an older
 start cannot revive the previous execution or create a positive timestamp.
-For outcomes, the same byte-budgeted record additionally keeps up to 128 distinct
-start clocks, coalescing replays. A later start cannot erase an intervening start
-before an older outcome. Per-child overflow leaves a sticky outcome-only unknown;
+For outcomes/activity, the same byte-budgeted record keeps up to 128 distinct
+start-proof digests and their clocks, coalescing even nonconsecutive exact replays.
+Different native proof identities at the same clock remain distinct starts.
+A later start cannot erase an intervening start
+before an older outcome. Per-child overflow leaves a sticky attribution-only unknown;
 the earliest start alone remains compatible with a first late admission.
+Multiple distinct starts in the candidate interval veto unique activity/outcome
+attribution even inside admission, before launcher acceptance returns. Prior
+interval starts are excluded using the existing scoped boundary/admission rules.
+These digests add no ownership, result clock or Stop authority and remain
+deny-only through subscription retirement under the same aggregate budget.
 
 Newer inactive inventory also fences already returned cold activity through
 publication. After native parent history declares the bounded child scope, the
@@ -275,8 +282,10 @@ A genuinely newer boundary transition invalidates obsolete child-history reuse;
 ordered native reads, not stale ownerless response arrival, govern that decision.
 Warm child transcripts need no parent dependency to observe native visibility.
 Each qualified cache entry carries one weak, constant-size boundary observation
-beside its existing read order. A newer changed boundary invalidates reuse;
-unchanged, unrelated and stale-overlapping records do not discard a newer valid
+beside its existing read order. Entering a staged boundary filters the same
+complete raw transcript without reloading it; native cost and visible state
+still refresh. Leaving/changing an existing boundary can remove stored content
+and invalidates reuse. Unchanged, unrelated and stale-overlapping records do not discard a newer valid
 entry. No additional retained session map, child read or ownership/Stop proof is
 introduced. Existing cache eviction, generation and disposal limits still apply.
 

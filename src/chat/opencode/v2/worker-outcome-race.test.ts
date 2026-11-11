@@ -729,6 +729,59 @@ test(`cold inventory counterproof respects native ordering and source lifetime (
 }, 10_000);
 
 for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+for (const stage of ["cold", "outcome"] as const)
+for (const scenario of ["within", "same-clock", "single", "exact-replay", "late-first", "new-interval"] as const)
+test(`${read} rejects multiple start proofs inside admission (${scenario}/${stage})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, finished = false, interrupts = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, acknowledge: (() => void) | undefined;
+  const frame = (type: string, data: unknown, created: number, id = `${type}:${created}`) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id, type, data, created, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/interrupt")) interrupts++;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: !finished && child ? { [child]: { status: "running" } } : {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: scenario === "new-interval" ? 30 : 10 };
+      first.content[0].time = scenario === "new-interval" ? { created: 30, ran: 31, completed: 35 } : { created: 10, ran: 11, completed: 15 };
+      return Response.json({ data: [first], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [...(finished ? [{ id: "only-idle", type: "idle", time: { created: scenario === "new-interval" ? 40 : 20 }, outcome: "failed" }] : [])], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  let stream = new AbortController(), pump: Promise<void> | undefined;
+  const owner = new AbortController();
+  const connect = async () => { pump = (async () => { for await (const event of provider.events(stream.signal)) if (event.eventType === "diagnostic.admission-starts") { acknowledge?.(); acknowledge = undefined; } })(); await provider.waitForEventStream!(stream.signal); };
+  try {
+    await connect(); stream.abort(); await pump; stream = new AbortController();
+    parent = (await provider.createSession("Distinct native starts within admission")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    await connect();
+    if (scenario === "new-interval") { frame("session.execution.started", { sessionID: child }, 11, "prior-start"); frame("session.execution.succeeded", { sessionID: child }, 20); }
+    const firstAt = scenario === "single" ? 13 : scenario === "late-first" ? 17 : scenario === "new-interval" ? 33 : 11;
+    frame("session.execution.started", { sessionID: child }, firstAt, "start-A");
+    if (scenario === "within" || scenario === "same-clock" || scenario === "exact-replay") frame("session.execution.started", { sessionID: child }, scenario === "within" ? 13 : firstAt, scenario === "exact-replay" ? "start-A" : "start-B");
+    await new Promise<void>(resolve => { acknowledge = resolve; frame("diagnostic.admission-starts", {}, 50); });
+    const denied = scenario === "within" || scenario === "same-clock";
+    finished = stage === "outcome";
+    const guards: import("../../provider").WorkerSourceGuard[] = [];
+    const recovered = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: owner.signal, onSource: source => guards.push(source.workerSource.retain(owner.signal)) });
+    const page = read === "listMessages" ? await provider.listMessages(parent, { limit: 100, signal: owner.signal }) : undefined;
+    const row = (page?.items ?? recovered).find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    expect(row?.status).toBe(stage === "outcome" && !denied ? "failed" : "running");
+    if (stage === "cold") expect(recovered.find(item => item.taskId === worker.taskId)?.activity?.kind).toBe(denied ? "unavailable" : "working");
+    expect(guards.every(guard => guard.isCurrent())).toBe(true); if (page) expect(page.workerSource?.isCurrent()).toBe(true);
+    expect(row?.resultId).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined(); expect(workerCanStop(row!)).toBe(false);
+    if (denied) { expect(workerExecutionClockRuns(row!)).toBe(false); expect(row?.activity?.endedAt).toBeUndefined(); }
+    await expect(provider.stopTask!(parent, worker.taskId)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" }); expect(interrupts).toBe(0);
+  } finally { owner.abort(); stream.abort(); await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
 for (const scenario of ["delayed-new-interval", "delayed-transcript-interval", "delayed-observed-interval", "delayed-third-start", "delayed-reuse", "aligned-new-interval", "later-outcome", "start-only", "third-start", "third-start-older-replay", "third-start-new-admission", "unique-after-start", "unique-late-after-start", "unique-terminal", "duplicate-idles", "earlier-boundary", "new-admission", "missing-clock", "undated-idle", "undated-end", "other-child", "foreign-workspace", "explicit-report", "explicit-after-undated"] as const)
 for (const stage of scenario.startsWith("delayed-") || scenario === "aligned-new-interval" ? ["cold", "outcome"] as const : ["outcome"] as const)
 test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}${stage === "cold" ? "/cold" : ""})`, async () => {
@@ -815,7 +868,7 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
   } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const change of ["first-delayed-new-interval", "inactive", "unchanged-active", "other-inactive", "distinct-start", "distinct-start-replay", "first-late-start", "exact-start-replay", "replay-storm", "text-noise", "other-child", "foreign-workspace"] as const)
+for (const change of ["within-admission", "same-clock-distinct", "first-delayed-new-interval", "inactive", "unchanged-active", "other-inactive", "distinct-start", "distinct-start-replay", "first-late-start", "exact-start-replay", "replay-storm", "text-noise", "other-child", "foreign-workspace"] as const)
 test(`returned cold activity remains covered through scheduler admission (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, unrelatedChild: string | undefined, armed = false, parentHeldOnce = false, interrupts = 0, inactive = false, otherInactive = false;
@@ -825,7 +878,7 @@ test(`returned cold activity remains covered through scheduler admission (${chan
   const returned = new Promise<import("../../types").BackgroundTaskItem[]>(resolve => { folded = resolve; });
   const interactions = new Promise<void>(resolve => { interactionsEntered = resolve; }), interactionsHeld = new Promise<void>(resolve => { releaseInteractions = resolve; });
   const barriers = new Map<string, () => void>();
-  const frame = (type: string, data: unknown, created: number, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory: location } })}\n\n`));
+  const frame = (type: string, data: unknown, created: number, location = directory, id = `${type}:${created}`) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id, type, data, created, location: { directory: location } })}\n\n`));
   const barrier = (name: string) => new Promise<void>(resolve => { barriers.set(name, resolve); frame(name, {}, 40); });
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
     const request = new Request(input, init), route = new URL(request.url).pathname;
@@ -843,6 +896,7 @@ test(`returned cold activity remains covered through scheduler admission (${chan
     if (route === `/api/session/${parent}/message`) {
       const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
       first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      if (change === "within-admission" || change === "same-clock-distinct") first.content[0].time.completed = 15;
       if (change === "first-delayed-new-interval") { first.time = { created: 30 }; first.content[0].time = { created: 30, ran: 31, completed: 32 }; }
       if (armed && !parentHeldOnce) { parentHeldOnce = true; parentEntered(); await parentHeld; }
       return Response.json({ data: [first], cursor: {} });
@@ -890,11 +944,12 @@ test(`returned cold activity remains covered through scheduler admission (${chan
     else if (change === "unchanged-active") { /* Native inventory is unchanged. */ }
     else if (change === "replay-storm") for (let replay = 0; replay < 300; replay++) frame("session.execution.started", { sessionID: child }, 11);
     else if (change === "text-noise") frame("session.message.content.updated", { sessionID: child, messageID: "later-output", content: [{ type: "text", text: "More output" }] }, 35);
+    else if (change === "within-admission" || change === "same-clock-distinct") frame("session.execution.started", { sessionID: child }, change === "within-admission" ? 13 : 11, directory, "another-start-proof");
     else frame("session.execution.started", { sessionID: change === "other-child" ? unrelatedChild : child }, change === "exact-start-replay" ? 11 : 35,
       change === "foreign-workspace" ? `${directory}/foreign` : directory);
     if (change === "distinct-start-replay") frame("session.execution.started", { sessionID: child }, 11);
     await barrier("diagnostic.returned-cold-start");
-    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal }), denied = change === "inactive" || change === "distinct-start" || change === "distinct-start-replay";
+    const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal }), denied = change === "inactive" || change === "distinct-start" || change === "distinct-start-replay" || change === "within-admission" || change === "same-clock-distinct";
     expect(current.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe(denied ? "unavailable" : "working");
     if (!denied) expect(guards.every(guard => guard.isCurrent())).toBe(true);
     releaseInteractions(); const published = await publication;
@@ -1635,7 +1690,7 @@ test(`automatic recovery guards native ${carrier === "stored" ? "parent" : carri
   } finally { release(); abort.abort(); await adapter.dispose(); await pump; await events?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
-for (const change of ["staged-cleared", "unchanged", "other-child", "stale-overlap"] as const)
+for (const change of ["staged-only", "staged-cleared", "unchanged", "other-child", "stale-overlap"] as const)
 test(`warm child transcript observes native visibility before parent recovery (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, other: string | undefined, staged = false, removed = false, childReads = 0, holdLookup = false;
@@ -1669,15 +1724,15 @@ test(`warm child transcript observes native visibility before parent recovery ($
       staged = true; holdLookup = true; older = provider.getSession(child); void older.catch(() => undefined); await pending;
     }
     staged = change !== "unchanged"; await provider.getSession(change === "other-child" ? other : child);
-    staged = false; removed = change === "staged-cleared" || change === "stale-overlap";
+    staged = change === "staged-only"; removed = change === "staged-cleared" || change === "stale-overlap";
     await provider.getSession(change === "other-child" ? other : child);
     if (change === "stale-overlap") { await provider.getReversibleHistoryState!(child); expect(childReads).toBe(2); release(); await older; }
     const page = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
     expect(page.workerSource?.isCurrent()).toBe(true);
-    expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: removed ? "running" : "completed" }));
+    expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: removed || change === "staged-only" ? "running" : "completed" }));
     expect(childReads).toBe(removed ? 2 : 1);
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
-    expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: removed ? "running" : "completed", ...(removed ? { activity: expect.objectContaining({ kind: "working" }) } : {}) });
+    expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: removed || change === "staged-only" ? "running" : "completed", ...(removed ? { activity: expect.objectContaining({ kind: "working" }) } : {}) });
     // Explicit fresh inventory intentionally invalidates all history reuse.
     expect(childReads).toBe(removed ? 3 : 2);
   } finally { release(); abort.abort(); await older?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }

@@ -1195,14 +1195,19 @@ Distinct-start counterproof keeps the greatest observed native start clock (or
 an unknown-clock veto) in one scalar inside the existing ledger record. An older
 start replay may not erase that negative evidence or revive the old execution;
 the scalar never supplies a positive start, end, outcome or Stop timestamp.
-Outcome attribution also retains up to 128 distinct native start clocks per
-child in that same byte-budgeted record. Replays coalesce; exceeding the cap
-leaves a sticky outcome-only unknown rather than discarding an intervening
+Outcome/activity attribution retains up to 128 distinct native start-proof
+digests with their clocks per child in that same byte-budgeted record. Full
+proof identity includes native ID, clock, durable coordinates and semantic
+fingerprint: equal clocks alone do not make two proofs a replay. Replays coalesce;
+exceeding the cap
+leaves a sticky attribution-only unknown rather than discarding an intervening
 start. A later start beyond an outcome cannot erase an earlier start inside
 its interval. Start comparisons use the candidate admission's preceding scoped
 observed/transcript end, not the globally earliest start. The first start in
 that interval remains compatible with admission, including a delayed first
-start; later distinct starts still veto reuse. Without an enclosing boundary,
+start; multiple distinct starts in the candidate interval veto uniqueness even
+inside the admission window, before launcher acceptance returns. Without an
+enclosing boundary, starts before this admission alone do not compete with it;
 the existing scalar remains conservative. Unknown clocks and caps fail closed.
 Transcript interval context is veto-only: it never enters live execution,
 ownership or Stop ledgers. Cold read leases retain only one interval lower-bound
@@ -1217,9 +1222,11 @@ inference and actually inferred outcomes remain fenced, as do transcript,
 message-removal and revert changes. Aggregate ledger saturation still
 withholds inferred outcomes, not independently covered control/history recovery.
 
-Exact retained start proofs, like terminal proofs, coalesce even without a live
+Exact retained start proofs, including nonconsecutive replays, coalesce without a live
 occurrence or pending binding. Changed identity, clock or payload is not replay;
-deduplication grants no ownership, new occurrence or Stop authority.
+deduplication grants no ownership, new occurrence or Stop authority. Capped
+proof digests remain deny-only through ledger retirement; no native proof bodies
+or additional event log are retained for multiplicity.
 
 Cold Working also requires absence of competing unclassified same-child agent
 invocations in the complete parent history, including hidden calls. Requested
@@ -1254,8 +1261,10 @@ consume the obsolete held response. Overlapping older ownerless lookups cannot
 replace the newer owned boundary baseline or revoke it on late arrival.
 Before any dependent parent read exists, warm transcript entries also own a
 constant-size native visibility observation in their existing weak read-order
-metadata. A newer staged/cleared boundary transition invalidates that entry;
-unchanged or unrelated observations preserve reuse, and overlapping older
+metadata. Entering a staged boundary retains the complete raw transcript and
+refreshes native cost/visibility filtering on each fold. Leaving or changing an
+existing boundary can commit removed content and therefore invalidates reuse.
+Unchanged or unrelated observations preserve reuse, and overlapping older
 records cannot replace a newer baseline. The weak metadata adds no retained
 session keys, global visibility map, ownership or read phase. Eviction,
 generation invalidation and disposal release the cache entry as before.

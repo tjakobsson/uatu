@@ -3116,7 +3116,11 @@ export class OpenCodeV2Provider implements ChatProvider {
         const order = cached && this.historyReadOrders.get(cached), previous = order?.visibility;
         const boundary = stringValue(asRecord(info.revert).messageID) ?? null;
         if (order && (!previous || observation.started > previous.completed)) {
-          if (previous && previous.boundary !== boundary) this.historyReuse.invalidate(subject);
+          // Entering a staged boundary filters the same complete raw history;
+          // retain it and refresh visibility/cost from the current record.
+          // Leaving/changing an existing boundary can commit removed content,
+          // so the old raw transcript is no longer safe for reuse.
+          if (previous && previous.boundary !== null && previous.boundary !== boundary) this.historyReuse.invalidate(subject);
           else order.visibility = { boundary, completed };
         }
       }

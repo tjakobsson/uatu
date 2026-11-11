@@ -8,6 +8,29 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+for (const sameClock of [false, true])
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`within-admission proof multiplicity is bounded and replay precise (${sameClock}/${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 15 }] };
+  const first = nativeProof({ id: "first", created: 11 }, { phase: "started" });
+  const second = nativeProof({ id: "second", created: sameClock ? 11 : 13 }, { phase: "started" });
+  workers.executionStarted("child", first); expect(workers.coldActivityContradicted(candidate)).toBe(false);
+  workers.executionStarted("child", second);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true); expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true);
+  const bytes = retained(workers).bytes;
+  for (let replay = 0; replay < 300; replay++) { workers.executionStarted("child", first); workers.executionStarted("child", second); }
+  expect(retained(workers).bytes).toBe(bytes); expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  workers.retainExecutionCounterproof(); expect(workers.startReplay("child", first)).toBe(true); expect(workers.startReplay("child", second)).toBe(true);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true); expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true); checkBytes(workers);
+  for (let index = 0; index < 130; index++) workers.executionStarted("child", nativeProof({ id: `proof-${index}`, created: 11 }, { phase: "started" }));
+  expect(workers.controlEvidenceAvailable).toBe(budget.bytes === undefined);
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true); workers.retainExecutionCounterproof();
+  expect(workers.coldActivityContradicted(candidate)).toBe(true); checkBytes(workers);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+});
+
 for (const mode of ["positive-only", "ended", "unknown-end", "unknown-start", "entry-saturated", "byte-saturated", "aggregate-saturated"] as const)
 test(`subscription retirement retains only accounted negative execution evidence (${mode})`, () => {
   let external = { entries: 0, bytes: 0 };
