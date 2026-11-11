@@ -654,6 +654,17 @@ export class OpenCodeV2Provider implements ChatProvider {
       const child = counterproofChild(fact);
       return fact.workerType === "agent" && fact.background !== true && child !== undefined && verified.has(child);
     });
+    // Requested-child calls need not produce a worker occurrence. They still
+    // compete for cold activity in the current child execution interval, using
+    // the same complete (including hidden) native invocation scope as outcomes.
+    const coldCompetitors = new Set<string>();
+    for (const occurrence of workers.evidenceSnapshot().values()) if (occurrence.kind === "agent") {
+      const previous = workers.historyIntervalStart(occurrence);
+      if (counterInvocations.some(fact => counterproofChild(fact) === occurrence.worker
+        && !occurrence.launches.some(own => own.call === fact.call && own.message === fact.message)
+        && (previous === undefined || (fact.completed ?? fact.reportedCompletion) === undefined
+          || (fact.completed ?? fact.reportedCompletion)! >= previous))) coldCompetitors.add(occurrence.taskId);
+    }
     for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations, {
       contradicted: (candidate, at) => this.eventMemory?.workers.historyOutcomeContradicted(candidate, at, executionHistory.get(candidate.worker)) ?? false,
       ends: child => this.eventMemory ? this.eventMemory.workers.observedExecutionEnds(child) : [],
@@ -689,7 +700,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (overlay) for (const [id, entry] of normalized) if (entry.item.type === "background_task") normalized.set(id, { ...entry,
       item: this.controls.project(entry.item, workers.occurrence(entry.item.taskId), controlRead, workers.controlWitnesses(entry.item.taskId)) });
     this.eventMemory?.workers.enforceBudget();
-    return Object.assign(normalized, { occurrences: workers.evidenceSnapshot(), workers, origins,
+    return Object.assign(normalized, { occurrences: workers.evidenceSnapshot(), workers, origins, coldCompetitors,
       descendantsIncomplete: unavailableOwnership.size > 0,
       unverifiedChildren: new Set([...children].filter(child => !verified.has(child))), contradictedChildren });
   }
@@ -941,6 +952,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       // Missing child history, intervening boundaries and live contradictions
       // keep this path closed; historical running metadata alone never opens it.
       const unique = occurrence && !occurrence.uncertain && !item.stateUncertain
+        && !folded.coldCompetitors.has(item.taskId)
         && [...folded.occurrences.values()].filter(other => other.worker === occurrence.worker && other.kind === occurrence.kind
           && runningTaskIds.has(other.taskId)).length === 1;
       const liveOccurrence = occurrence && this.eventMemory?.workers.hasRetainedReference(occurrence);
@@ -1487,7 +1499,7 @@ export class OpenCodeV2Provider implements ChatProvider {
             if (!scope || scope.source.parent !== parent) throw new Error("Pending worker counterproof source unavailable");
             const incoming = scope.source.historyPendingRead && this.pendingFactsAfter(scope.source.historyPendingRead, watch.source.historyPendingCounterproofAfter);
             if (incoming) watch.source.historyPendingRead = watch.source.historyPendingRead
-              ? this.mergePendingOutcome(watch.source.historyPendingRead, incoming, true) : incoming;
+              ? this.mergePendingOutcome(watch.source.historyPendingRead, incoming) : incoming;
             const facts = watch.source.historyPendingRead;
             if (!facts) return next;
             const covered = new Set<string>();
@@ -1802,18 +1814,25 @@ export class OpenCodeV2Provider implements ChatProvider {
       overflowObserved: read.overflow && overflowObserved > started ? overflowObserved : undefined };
   }
 
-  private mergePendingOutcome(previous: PendingOutcomeRead, observation: PendingOutcomeRead, stamp = false): PendingOutcomeRead {
-    const reports: Array<PendingOutcomeRead["reports"][number]> = [], seen = new Set<string>();
+  private mergePendingOutcome(previous: PendingOutcomeRead, observation: PendingOutcomeRead): PendingOutcomeRead {
+    const reports: Array<PendingOutcomeRead["reports"][number]> = [], seen = new Map<string, number>();
     let bytes = 0, overflow = previous.overflow ?? observation.overflow;
     let overflowObserved = Math.max(previous.overflow ? previous.overflowObserved ?? previous.started : -Infinity,
       observation.overflow ? observation.overflowObserved ?? observation.started : -Infinity);
-    for (const read of [previous, observation]) for (const value of read.reports) if (!seen.has(value.digest)) {
-      const report = stamp ? { ...value, observed: value.observed ?? read.started } : value;
+    for (const read of [previous, observation]) for (const value of read.reports) {
+      // Preserve each fact's native request order through copies/merges. Only
+      // an actual newer observation of this digest can advance its timestamp.
+      const report = { ...value, observed: value.observed ?? read.started };
+      const index = seen.get(value.digest), retained = index === undefined ? undefined : reports[index];
+      if (retained && retained.observed! >= report.observed) continue;
       const size = JSON.stringify(report).length * 2;
-      if (reports.length >= parentCounterproofMaxFacts || bytes + size > parentCounterproofMaxBytes) {
+      const replacedSize = retained ? JSON.stringify(retained).length * 2 : 0;
+      if ((!retained && reports.length >= parentCounterproofMaxFacts) || bytes + size - replacedSize > parentCounterproofMaxBytes) {
         overflow = true; overflowObserved = Math.max(overflowObserved, report.observed ?? read.started); break;
       }
-      reports.push(report); seen.add(report.digest); bytes += size;
+      if (index === undefined) { seen.set(report.digest, reports.length); reports.push(report); }
+      else reports[index] = report;
+      bytes += size - replacedSize;
     }
     return { ...observation, reports, ...(overflow ? { overflow, overflowObserved } : {}) };
   }
@@ -1826,7 +1845,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     // storage; no request or report projection is started here.
     if (observation.reports.length || observation.overflow) {
       const previous = source.historyPendingRead;
-      source.historyPendingRead = previous ? this.mergePendingOutcome(previous, observation, true) : observation;
+      source.historyPendingRead = previous ? this.mergePendingOutcome(previous, observation) : observation;
       this.historyReuse.invalidate(source.parent);
     }
     if (!parent || !source.historyParentLaunches) {
@@ -1860,7 +1879,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         // One bounded deny-only snapshot for a pending consumer, including an
         // empty inbox. It grants no child read, result admission or Stop proof.
         if (!previous || incoming.started > previous.started) source.historyPendingRead = {
-          ...(previous ? this.mergePendingOutcome(previous, incoming, true) : incoming), provisional: true };
+          ...(previous ? this.mergePendingOutcome(previous, incoming) : incoming), provisional: true };
         continue;
       }
       if (!previous || previous.provisional && source === owner && observation.started >= previous.started) continue;

@@ -6,11 +6,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { workerCanStop, workerExecutionClockRuns } from "../../worker-state";
 import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
 
-for (const mode of ["older-seed", "older-merge", "older-merge-with-newer-unrelated", "older-overflow-seed", "cancelled", "reconnect", "unknown-guard", "original-deadline", "unrelated-cohort", "older-report", "current-report"] as const)
+for (const mode of ["newer-duplicate-seed", "older-seed", "older-merge", "older-merge-with-newer-unrelated", "older-overflow-seed", "cancelled", "reconnect", "unknown-guard", "original-deadline", "unrelated-cohort", "older-report", "current-report"] as const)
 test(`covered pending watch preserves native order and original ownership (${mode})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, observing = false, storedAt: number | undefined, inboxReads = 0;
-  const olderObservation = mode === "older-seed" || mode === "older-merge" || mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed";
+  const olderObservation = mode === "newer-duplicate-seed" || mode === "older-seed" || mode === "older-merge" || mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed";
   let entered!: () => void, release!: () => void;
   const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
@@ -55,12 +55,13 @@ test(`covered pending watch preserves native order and original ownership (${mod
     const rows = page.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
     expect(page.workerSource?.isCurrent()).toBe(true);
     const longOwner = AbortSignal.any([lifetime.signal, stream.signal, realTimeout(60_000)]);
-    let watch = mode === "older-seed" || mode === "older-overflow-seed" ? undefined : page.workerSource!.retainPendingCounterproof!(longOwner);
+    let watch = mode === "newer-duplicate-seed" || mode === "older-seed" || mode === "older-overflow-seed" ? undefined : page.workerSource!.retainPendingCounterproof!(longOwner);
     if (olderObservation) {
       release(); await inbox; expect(page.workerSource?.isCurrent()).toBe(true);
-      if (mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed") await provider.listPendingInbox!(parent, { signal: owner.signal });
+      if (mode === "newer-duplicate-seed" || mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed") await provider.listPendingInbox!(parent, { signal: owner.signal });
       watch ??= page.workerSource!.retainPendingCounterproof!(longOwner);
-      if (mode === "older-overflow-seed") {
+      if (mode === "newer-duplicate-seed" || mode === "older-overflow-seed") {
+        if (mode === "newer-duplicate-seed") expect(page.workerSource?.isCurrent()).toBe(false);
         const retry = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
         expect(retry.workerSource?.isCurrent()).toBe(true);
         expect(watch.applyTo(retry.workerSource!, retry.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task")).isCurrent()).toBe(false);
@@ -193,6 +194,77 @@ test(`covered history keeps pending counterproof across failed-inventory retries
       if (mode === "delivered") expect(parentReads).toBeGreaterThan(1);
     }
   } finally { released = true; release(); abort.abort(); await history?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+}, 10_000);
+
+for (const pageKind of ["newest", "older"] as const)
+for (const delivered of [false, true])
+test(`paginated adapter retains newer duplicate pending observation (delivered=${delivered}/${pageKind})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, inboxReads = 0, attempts = 0, stored = false;
+  let entered!: () => void, release!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const explicitObservation = new AsyncLocalStorage<boolean>();
+  let armed = pageKind === "newest";
+  const report = { id: "duplicate-failure", type: "synthetic", time: { created: 45 }, payload: { text: "Actual duplicate failure",
+    metadata: { source: "subagent", childID: "", state: "error" } } };
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) {
+      if (route !== `/api/session/${parent}/inbox` || !explicitObservation.getStore()) return Response.json({ data: [] });
+      if (++inboxReads === 1) { entered(); await held; }
+      return Response.json({ data: [report] });
+    }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [{ id: "older-text", type: "user", text: "Older pagination boundary", time: { created: 1 } },
+        { id: "earlier-text", type: "user", text: "Earlier pagination boundary", time: { created: 2 } }, first,
+        ...(stored ? [{ ...report.payload, id: report.id, type: report.type, time: report.time }] : []),
+        ...(pageKind === "older" ? [{ id: "newest-page", type: "user", text: "Newest page", time: { created: 60 } }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeHistory = provider.listMessages.bind(provider), abort = new AbortController();
+  let older: ReturnType<NonNullable<typeof provider.listPendingInbox>> | undefined;
+  provider.listMessages = async (id, options) => {
+    const page = await nativeHistory(id, options);
+    if (id === parent && armed && ++attempts === 1) {
+      expect(page.nextCursor).toBeDefined(); expect(page.workerSource?.isCurrent()).toBe(true);
+      release(); await older; expect(page.workerSource?.isCurrent()).toBe(true);
+      await explicitObservation.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal }));
+      expect(page.workerSource?.isCurrent()).toBe(false);
+      stored = delivered;
+    }
+    return page;
+  };
+  provider.reconcileBackgroundTasks = async () => { throw new Error("Inventory intentionally unavailable"); };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 400 });
+  try {
+    parent = (await provider.createSession("Duplicate observation pagination")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId; report.payload.metadata.childID = child;
+    older = explicitObservation.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal })); void older.catch(() => undefined); await pending;
+    const newest = pageKind === "older" ? await adapter.history(parent, { limit: 1 }) : undefined;
+    if (newest) expect(newest.olderCursor).toBeDefined();
+    armed = true;
+    let result = await adapter.history(parent, { limit: 2, ...(newest ? { cursor: newest.olderCursor } : {}) }).then(value => ({ value }), error => ({ error }));
+    if (pageKind === "older" && delivered) {
+      // Delivery changes the native history version. The old cursor must not
+      // publish; canonical stored content is obtained by a new public read.
+      expect(result).toHaveProperty("error");
+      result = await adapter.history(parent, { limit: 100 }).then(value => ({ value }), error => ({ error }));
+    }
+    expect(attempts).toBeGreaterThan(1);
+    if (!delivered) {
+      if ("value" in result) expect(result.value.items).not.toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+      expect(result).toHaveProperty("error");
+    }
+    else {
+      expect(result).toHaveProperty("value");
+      if ("value" in result) expect(result.value.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "failed",
+        resultId: report.id, summary: report.payload.text, terminalReportedAt: 45 }));
+    }
+  } finally { release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
 for (const boundary of ["terminal", "start"] as const)
@@ -789,16 +861,19 @@ test(`pending cold activity rechecks execution starts before return (${change})`
   } finally { release(); firstAbort.abort(); abort.abort(); await recovery?.catch(() => undefined); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
-for (const boundary of ["succeed-revert-start", "history-only-child", "history-only-terminal", "terminal-only", "no-boundary", "initial-start", "initial-late-start", "initial-start-replay", "newer-start-only", "older-start-replay", "first-late-start-replay", "pre-admission-starts", "earlier-boundary", "other-child", "foreign-workspace"] as const)
+for (const boundary of ["requested-tie", "accepted-tie", "requested-unrelated", "requested-earlier", "requested-replay", "reported-other", "succeed-revert-start", "history-only-child", "history-only-terminal", "terminal-only", "no-boundary", "initial-start", "initial-late-start", "initial-start-replay", "newer-start-only", "older-start-replay", "first-late-start-replay", "pre-admission-starts", "earlier-boundary", "other-child", "foreign-workspace"] as const)
 test(`cold generation-2 activity respects processed execution boundaries (${boundary})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, interrupts = 0;
+  const invocation = boundary.startsWith("requested-") || boundary === "accepted-tie" || boundary === "reported-other";
+  const childReads: string[] = [];
   let wire!: ReadableStreamDefaultController<Uint8Array>, applied!: () => void;
   let observed = new Promise<void>(resolve => { applied = resolve; });
   const frame = (type: string, data: unknown, created: number, location = directory) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory: location } })}\n\n`));
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
     const request = new Request(input, init), route = new URL(request.url).pathname;
     if (route.endsWith("/interrupt")) interrupts++;
+    if (route.startsWith("/api/session/") && !route.endsWith("/inbox")) childReads.push(route);
     if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
       wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
     } }), { headers: { "content-type": "text/event-stream" } });
@@ -808,9 +883,14 @@ test(`cold generation-2 activity respects processed execution boundaries (${boun
     if (route === `/api/session/${parent}/message`) {
       const body = await response.json(), first = body.data[0]; first.time = { created: 10 };
       first.content[0].time = { created: 10, ran: 11, completed: 12 };
-      return Response.json({ data: [first], cursor: {} });
+      const competitor = structuredClone(first); competitor.id = "unclassified-message"; competitor.content[0].id = "unclassified-call";
+      competitor.content[0].state.input = { sessionID: boundary === "requested-unrelated" ? "unrelated-request" : child, prompt: "Another invocation" };
+      if (boundary !== "accepted-tie" && boundary !== "reported-other") { competitor.content[0].state.status = "running"; competitor.content[0].state.metadata = {}; }
+      if (boundary === "reported-other") competitor.content[0].state.metadata.sessionID = "reported-other-child";
+      if (boundary === "requested-earlier") competitor.content[0].time = { created: 0, ran: 1, completed: 2 };
+      return Response.json({ data: [first, ...(invocation ? [boundary === "requested-replay" ? structuredClone(first) : competitor] : [])], cursor: {} });
     }
-    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "new-prompt", type: "user", text: "Current child prompt", time: { created: 35 } }], cursor: {} });
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [...(boundary === "requested-earlier" ? [{ id: "prior-end", type: "idle", time: { created: 5 } }] : []), { id: "new-prompt", type: "user", text: "Current child prompt", time: { created: 35 } }], cursor: {} });
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
@@ -829,7 +909,7 @@ test(`cold generation-2 activity respects processed execution boundaries (${boun
     const location = boundary === "foreign-workspace" ? `${directory}/foreign` : directory;
     // Ownership/birth is observed, but no launcher is streamed or recovered
     // until after all native execution counterproof has been processed.
-    if (boundary !== "history-only-child" && boundary !== "history-only-terminal")
+    if (!invocation && boundary !== "history-only-child" && boundary !== "history-only-terminal")
       frame("session.created", { sessionID: subject, parentID: subject === child ? parent : unrelated, location: { directory } }, boundary === "earlier-boundary" || boundary === "pre-admission-starts" ? 3 : 11);
     if (boundary === "initial-start" || boundary === "initial-late-start" || boundary === "initial-start-replay" || boundary === "first-late-start-replay") {
       const start = boundary === "initial-late-start" || boundary === "first-late-start-replay" ? 20 : 11;
@@ -856,19 +936,23 @@ test(`cold generation-2 activity respects processed execution boundaries (${boun
       frame("session.revert.committed", { sessionID: child, to: "old-idle" }, 30);
       if (boundary === "history-only-child") frame("session.execution.started", { sessionID: child }, 35);
     }
-    else if (boundary !== "no-boundary") {
+    else if (!invocation && boundary !== "no-boundary") {
       frame("session.execution.started", { sessionID: subject }, boundary === "earlier-boundary" ? 4 : 11, location);
       frame("session.execution.succeeded", { sessionID: subject }, boundary === "earlier-boundary" ? 5 : 20, location);
       frame("session.revert.committed", { sessionID: subject, to: "old-idle" }, 30, location);
       if (boundary !== "terminal-only") frame("session.execution.started", { sessionID: subject }, boundary === "earlier-boundary" ? 11 : 35, location);
     }
     frame("diagnostic.cold-boundaries-applied", {}, 40); await observed;
-    const [row] = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    const rows = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    const row = rows.find(item => item.taskId === worker.taskId);
     const denied = boundary === "succeed-revert-start" || boundary === "history-only-child" || boundary === "history-only-terminal" || boundary === "terminal-only" || boundary === "newer-start-only" || boundary === "older-start-replay";
     expect(row).toBeDefined();
     expect(row?.status).toBe("running");
-    expect(row?.activity?.kind).toBe(denied ? "unavailable" : "working");
-    expect(workerExecutionClockRuns(row!)).toBe(!denied);
+    const competing = boundary === "requested-tie" || boundary === "accepted-tie";
+    expect(row?.activity?.kind).toBe(denied ? "unavailable" : competing ? "session-active" : "working");
+    expect(workerExecutionClockRuns(row!)).toBe(!denied && !competing);
+    if (invocation && boundary !== "accepted-tie" && boundary !== "reported-other") expect(rows).toHaveLength(1);
+    expect(childReads.some(route => route.includes("unrelated-request"))).toBe(false);
     expect(workerDismissalEvidence(row)?.dismissible).toBe(denied);
     expect(row?.activity?.endedAt).toBeUndefined();
     expect(row?.resultId).toBeUndefined(); expect(row?.summary).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();

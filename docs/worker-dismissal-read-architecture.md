@@ -220,11 +220,22 @@ start after that boundary is not reuse; later distinct starts still veto the
 old admission. Transcript context supplies only a read-owned lower-bound scalar,
 not execution timestamps, outcomes, ownership or Stop proof. Unknown clocks,
 retention caps and intervals without a known prior boundary remain conservative.
+Missing admission clocks alone are not negative activity evidence. Without a
+scoped observed start/end to compare, fresh owned history plus active inventory
+can establish cold Working independently of Stop readiness. Once counterproof
+exists, missing clocks cannot discharge it; unknown starts and retention gaps
+remain fail-closed. This also avoids manufacturing unresolved/checking updates
+for unchanged cold workers before a failed inventory retry.
 Reading a prior typed idle alone does not revoke a returned new-interval Working
 lease on its first start. Pending inference and actual inferred outcomes retain
 their execution fence; transcript/revert/message counterproof remains required.
 Exact retained unbound start replays preserve source leases just as exact
 terminal replays do. Changed proofs still fence; replay adds no control authority.
+Unclassified same-child subagent invocations also compete with cold Working,
+even without another worker occurrence. Complete parent scope includes hidden
+calls; reported child wins over requested child. Requested identity supplies
+only a veto, not another row, child read, ownership or Stop capability. Calls
+bounded before the preceding child end and exact launcher replays do not compete.
 Outcome-free child observations remain watched through prepublication awaits
 too. Native idle counterproof is retained for the eventual activity handoff
 without invalidating unrelated output or prepublication Stop reads merely
@@ -243,6 +254,11 @@ The handoff deadline starts at native source capture, not queue/ownership IO.
 Cancellation releases authority without increasing concurrency over an old
 transport still draining. Identical pending-notice replays preserve authority;
 payload changes and delivery/removal still revoke it.
+Coalesced pending outcome facts retain the newest native request-start order per
+digest. Seeing the same report in a genuinely newer request can cross the
+original parent-read boundary; stale arrival or an unrelated newer batch cannot
+renew an old fact. Copies preserve each fact's order, and duplicate replacement
+is charged against the existing byte cap with sticky deny-only overflow.
 
 ## Browser consistency and recovery
 

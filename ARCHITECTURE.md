@@ -1206,7 +1206,12 @@ start; later distinct starts still veto reuse. Without an enclosing boundary,
 the existing scalar remains conservative. Unknown clocks and caps fail closed.
 Transcript interval context is veto-only: it never enters live execution,
 ownership or Stop ledgers. Cold read leases retain only one interval lower-bound
-scalar per scoped child. A captured source that merely read a prior typed idle
+scalar per scoped child. Admission clocks are required to compare scoped observed
+start/end counterproof, not as an additional positive activity prerequisite when
+no such counterproof exists. Fresh owned history plus active inventory can still
+establish cold activity in that case; it does not establish Stop readiness.
+Unknown observed starts and retention gaps remain conservative.
+A captured source that merely read a prior typed idle
 does not gain a blanket execution-event fence for the new admission; pending
 inference and actually inferred outcomes remain fenced, as do transcript,
 message-removal and revert changes. Aggregate ledger saturation still
@@ -1215,6 +1220,20 @@ withholds inferred outcomes, not independently covered control/history recovery.
 Exact retained start proofs, like terminal proofs, coalesce even without a live
 occurrence or pending binding. Changed identity, clock or payload is not replay;
 deduplication grants no ownership, new occurrence or Stop authority.
+
+Cold Working also requires absence of competing unclassified same-child agent
+invocations in the complete parent history, including hidden calls. Requested
+child identity is deny-only and never authorizes child IO, a worker row or Stop;
+reported child identity takes precedence. Calls disjoint before the candidate's
+preceding child end do not compete. Exact launcher restatement is not another
+invocation. An ambiguous active child can remain session-active, not Working.
+
+Pending-report deduplication retains the newest native request-start observation
+for each digest. A later request observing the same report can therefore fence
+a retry across its original parent-read boundary. Stale arrivals, copying facts
+or merging an unrelated newer batch do not renew that report's observation.
+Per-fact timestamps and replacements remain within the existing fact/byte caps;
+overflow stays deny-only and cannot grant report content or control authority.
 
 Cold activity publication has a separate native active-inventory dependency.
 After parent history declares its bounded child scope, recovery starts the

@@ -8,6 +8,18 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+for (const evidence of ["none", "other-child", "end", "start", "unknown-start"] as const)
+test(`cold activity needs scoped counterproof before requiring admission clocks (${evidence})`, () => {
+  const workers = new BackgroundWorkers();
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child" }] };
+  if (evidence === "end") workers.executionEnded("child", 20, nativeProof({ id: "end", created: 20 }, { child: "child", phase: "ended" }));
+  if (evidence === "start" || evidence === "unknown-start" || evidence === "other-child")
+    workers.executionStarted(evidence === "other-child" ? "other" : "child", nativeProof({ id: "start", ...(evidence === "unknown-start" ? {} : { created: 11 }) }, { phase: "started" }));
+  expect(workers.coldActivityContradicted(candidate)).toBe(!["none", "other-child"].includes(evidence));
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0); checkBytes(workers);
+});
+
 for (const context of ["observed", "transcript"] as const)
 for (const budget of [{ entries: 8 }, { bytes: 2_000 }])
 test(`distinct-start vetoes respect the admission interval (${context}/${JSON.stringify(budget)})`, () => {

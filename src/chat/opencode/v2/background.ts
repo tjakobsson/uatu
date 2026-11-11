@@ -907,6 +907,11 @@ export class BackgroundWorkers {
       return !window || end >= window.start;
     }))) return true;
     if (this.recoveryOnly || boundary?.startClocks === null) return true;
+    // Missing admission clocks cannot contradict activity by themselves.
+    // Require scoped observed start evidence before comparing its interval;
+    // fresh owned history + active inventory supplies activity independently.
+    // Unknown starts, retention gaps and observed ends still fail closed.
+    if (!boundary?.started && !boundary?.startClocks?.length && boundary?.startCounterproof === undefined) return false;
     const previous = this.historyIntervalStart(candidate, intervalStart === undefined ? [] : [intervalStart]);
     return candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
