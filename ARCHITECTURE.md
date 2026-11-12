@@ -1108,6 +1108,22 @@ Reading geometry excludes descendants hidden by closed disclosure groups, even
 when content-visibility supplies nonzero placeholder boxes. A closed row's own
 summary remains eligible; offscreen retained rows are not discarded merely
 because the browser skips their rendering work.
+Loaded ordinary assistant messages use normal layout, so already available text
+keeps real geometry as it enters the viewport. Activity rows/groups retain
+content-visibility skipping, and closed tool bodies remain deferred. There is no
+scripted nearby-row warmup or size cache. This trades some initial layout work
+for stable long-history text; browser regressions measure body readiness and
+same-word offsets, not physical-device pixel paint.
+For a freshly installed parent or child view without a saved reading anchor,
+the UI renders the transcript before letting its existing scroll owner perform
+initial instant placement on the following animation frame. This avoids the
+observed startup rollback after same-frame placement; it is one cancellable
+placement, not a retry. Reader input, hiding and navigation can preempt it.
+Snapshot replacement cancels stale callbacks while retaining the owner's
+unconsumed instant-placement intent; replacement geometry determines the target.
+Ordinary cancellation and reader pause still clear that intent.
+Saved reading-anchor restoration and ordinary updates keep their same-frame
+render/correction transaction; focused answer holds retain their existing owner.
 When browser hit testing is usable, geometry resolves the first viewport row,
 the retained row and any explicitly activated row directly instead of measuring
 all loaded history. Unavailable or unusable hit testing retains the full-scan
@@ -1134,7 +1150,7 @@ bun test src/chat/anchor.test.ts src/chat/coordinated-scroll.test.ts \
   src/chat/ui.test.ts src/chat/shell-output.test.ts src/chat/shell-output-window.test.ts
 bun run test:e2e:perf -- tests/e2e/chat-scroll-contract.e2e.ts \
   tests/e2e/chat-history-scroll.e2e.ts tests/e2e/chat-follow-stability.e2e.ts \
-  tests/e2e/chat-sync-scroll.e2e.ts
+  tests/e2e/chat-sync-scroll.e2e.ts tests/e2e/chat-text-preparation.e2e.ts
 ```
 
 The contract suite measures actual intermediate positions,

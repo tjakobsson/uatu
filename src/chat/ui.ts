@@ -1979,8 +1979,14 @@ export function initChat(api = new ChatApiClient()): void {
       renderFrame = null;
       const content = pendingNewContent;
       pendingNewContent = false;
+      // Fresh loaded text needs a layout boundary before its sole initial
+      // placement. Retire callbacks queued against the previous DOM; renderNow
+      // requests the existing cancellable owner for the following frame.
+      // Saved reading anchors and ordinary updates still settle atomically.
+      const initialPlacement = parentPositionRestore === null;
+      if (initialPlacement) cancelForSnapshot(parentScroll);
       renderNow(content);
-      parentScroll.flush(timestamp);
+      if (!initialPlacement) parentScroll.flush(timestamp);
     });
   };
 
@@ -4256,8 +4262,10 @@ export function initChat(api = new ChatApiClient()): void {
       const content = childNewContent;
       childNewContent = false;
       childRenderDirty = false;
+      const initialPlacement = childPositionRestore === null;
+      if (initialPlacement && childScroll) cancelForSnapshot(childScroll);
       renderChildNow(content);
-      childScroll?.flush(timestamp);
+      if (!initialPlacement) childScroll?.flush(timestamp);
     });
   };
 
@@ -4711,7 +4719,7 @@ export function initChat(api = new ChatApiClient()): void {
     const restore = field && owner.isHolding(field);
     // cancel restores the hold's original follow intent without scheduling;
     // the replacement hold must inherit that rather than a reveal's pause.
-    owner.cancel();
+    owner.cancel({ preserveInstantPlacement: true });
     if (restore && field.isConnected && document.activeElement === field && chatSurfaceActive()) {
       holdInOwningTimeline(field);
     }

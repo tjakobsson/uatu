@@ -468,6 +468,50 @@ describe("coordinated scrolling", () => {
     expect(f.anchor.isPinned()).toBe(false);
     expect(f.frames.size).toBe(0);
   });
+  test("snapshot cancellation retains only an unconsumed instant placement across replacements", () => {
+    const f = fixture(() => "smooth");
+    f.move(0); f.owner.latest({ motion: "instant" });
+    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.cancel({ preserveInstantPlacement: true });
+    expect(f.frames.size).toBe(0);
+    expect(f.writes).toEqual([]);
+    f.grow(900); f.owner.request(); f.flush(0);
+    expect(f.element.scrollTop).toBe(600);
+    expect(f.writes).toEqual([600]);
+    // Once consumed, replacement cancellation must not invent another instant
+    // placement: ordinary subsequent output still follows smoothly.
+    f.grow(1200); f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(600);
+    expect(f.element.scrollTop).toBeLessThan(900);
+  });
+  test("ordinary cancellation clears an unconsumed instant placement", () => {
+    const f = fixture(() => "smooth");
+    f.move(0); f.owner.latest({ motion: "instant" }); f.owner.cancel();
+    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.request(); f.flush(0); f.flush(32);
+    expect(f.element.scrollTop).toBeGreaterThan(0);
+    expect(f.element.scrollTop).toBeLessThan(300);
+  });
+  test("reader pause cancels initial placement and snapshot cancellation cannot repin it", () => {
+    const f = fixture(() => "smooth");
+    f.move(100); f.owner.latest({ motion: "instant" }); f.owner.pause();
+    f.owner.cancel({ preserveInstantPlacement: true });
+    f.grow(900); f.owner.request(true); f.flush(0); f.flush(32);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.element.scrollTop).toBe(100);
+    expect(f.writes).toEqual([]);
+  });
+  test("snapshot cancellation without pending placement does not invent instant following", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(900);
+    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    expect(f.element.scrollTop).toBeLessThan(600);
+  });
   test("a held control interrupts smooth following with one immediate write", () => {
     const f = fixture(() => "smooth");
     stubRect(f.element, () => ({ top: 0, bottom: 300 }));

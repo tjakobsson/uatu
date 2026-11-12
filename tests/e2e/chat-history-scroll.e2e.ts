@@ -2,6 +2,8 @@ import { test as baseTest, expect } from "./fixtures";
 import { withEngineBrowsers } from "./page-diagnostics";
 import { openChatPanel, openChatWorkers } from "./chat-helpers";
 import { control, frames, settleScroll } from "./chat-shell-helpers";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 const test = withEngineBrowsers(baseTest);
 const rowCount = 500;
@@ -12,6 +14,19 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
     test.slow();
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1100, height: 844 } });
+    const persist = async () => {
+      try {
+        const data = await page.evaluate(() => {
+          const trace = Reflect.get(window, "__historyWork");
+          return trace ? { samples: trace.samples, firstWord: trace.firstWord, words: trace.words,
+            maxDrift: trace.maxDrift, sameText: trace.sameText, dropped: trace.dropped } : null;
+        });
+        const body = JSON.stringify({ engine, child, rowCount, data }, null, 2);
+        const path = testInfo.outputPath("history-word-evidence.json");
+        await mkdir(dirname(path), { recursive: true }); await writeFile(path, body);
+        await testInfo.attach("history-word-evidence", { body, contentType: "application/json" });
+      } catch { /* Diagnostic collection must preserve the original failure. */ }
+    };
     try {
       await request.post("/__e2e/reset");
       const snapshot = await control(request, { action: "seed", child, items: Array.from({ length: rowCount }, (_, i) => ({
@@ -67,6 +82,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
           previousTop = el.scrollTop;
         });
       });
+      await timeline.evaluate(installFirstReadyWordProbe);
       for (const delta of [-180, 80]) {
         const before = await timeline.evaluate(el => el.scrollTop);
         await page.mouse.wheel(0, delta);
@@ -76,6 +92,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
       // Put the reading edge halfway into a real inter-row margin. This must
       // not turn an ordinary history callback into a full 500-row fallback.
       await timeline.evaluate(el => {
+        const trace = Reflect.get(window, "__historyWork"); trace.wordPhase = "gap";
         const row = el.querySelectorAll<HTMLElement>("[data-chat-item-id]")[250]!;
         const margin = Number.parseFloat(getComputedStyle(row).marginBottom);
         if (!(margin > 0)) throw new Error("History fixture has no inter-row gap");
@@ -86,6 +103,27 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
         const trace = Reflect.get(window, "__historyWork"); trace.armed = false;
         return trace.samples as ScrollSample[];
       });
+      // Observe the FIRST ready word, not a new baseline taken after settling.
+      // Keep this append distinct from the later post-touch regression.
+      await page.evaluate(() => { Reflect.get(window, "__historyWork").wordPhase = "append"; });
+      await control(request, { action: "item", conversationId: snapshot.conversation.id, item: {
+        id: "history:word-append", type: "assistant_message", createdAt: rowCount + 1, markdown: "Word-anchor output below the reader.",
+      } });
+      await expect(timeline.locator("[data-chat-item-id]")).toHaveCount(rowCount + 1);
+      await expect(timeline.locator('[data-chat-item-id="history:word-append"]')).toContainText("Word-anchor output below the reader.");
+      await settleScroll(timeline); await frames(page);
+      const word = await page.evaluate(() => {
+        const trace = Reflect.get(window, "__historyWork"); trace.wordActive = false;
+        return { first: trace.firstWord, samples: trace.words, maxDrift: trace.maxDrift, sameText: trace.sameText };
+      });
+      await persist();
+      expect(word.first, "first browser-ready visible word after reposition").not.toBeNull();
+      expect(word.samples.length).toBeGreaterThan(1);
+      expect(word.samples.some((sample: { phase: string }) => sample.phase === "gap")).toBe(true);
+      expect(word.samples.some((sample: { phase: string }) => sample.phase === "append")).toBe(true);
+      expect(word.sameText).toBe(true);
+      expect(word.maxDrift, "first-ready word survives settling and unseen append").toBeLessThanOrEqual(2);
+      await expect(latest).toBeVisible();
       expect(samples.length).toBeGreaterThan(0);
       expect(samples.every(sample => sample.trusted)).toBe(true);
       expect(samples.some(sample => sample.top !== sample.before && sample.reads > 0)).toBe(true);
@@ -137,9 +175,10 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
       // Appending below the reader must retain the fresh manual position,
       // rather than the older position where touch intent was first captured.
       await control(request, { action: "item", conversationId: snapshot.conversation.id, item: {
-        id: "history:append", type: "assistant_message", createdAt: rowCount + 1, markdown: "New content below the reader.",
+        id: "history:append", type: "assistant_message", createdAt: rowCount + 2, markdown: "New content below the reader.",
       } });
-      await expect(timeline.locator("[data-chat-item-id]")).toHaveCount(rowCount + 1);
+      await expect(timeline.locator("[data-chat-item-id]")).toHaveCount(rowCount + 2);
+      await expect(timeline.locator('[data-chat-item-id="history:append"]')).toContainText("New content below the reader.");
       await expect(latest).toBeVisible();
       await settleScroll(timeline);
       expect(Math.abs(await timeline.evaluate(el => el.scrollTop) - touch.top)).toBeLessThanOrEqual(2);
@@ -161,13 +200,70 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
       // Latest cleared the unseen flag even though upward intent cancelled its
       // positioning. A subsequent append makes the reader's button available again.
       await control(request, { action: "item", conversationId: snapshot.conversation.id, item: {
-        id: "history:second-append", type: "assistant_message", createdAt: rowCount + 2, markdown: "More new content below the reader.",
+        id: "history:second-append", type: "assistant_message", createdAt: rowCount + 3, markdown: "More new content below the reader.",
       } });
-      await expect(timeline.locator("[data-chat-item-id]")).toHaveCount(rowCount + 2);
+      await expect(timeline.locator("[data-chat-item-id]")).toHaveCount(rowCount + 3);
+      await expect(timeline.locator('[data-chat-item-id="history:second-append"]')).toContainText("More new content below the reader.");
       await expect(latest).toBeVisible();
       await latest.click();
       await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
       await testInfo.attach("history-work-counts.json", { contentType: "application/json", body: JSON.stringify({ rowCount, samples, touch, stopped }) });
-    } finally { await browser.close(); }
+    } finally {
+      try { await page.evaluate(() => { const trace = Reflect.get(window, "__historyWork"); if (trace) trace.wordActive = false; }); } catch { /* preserve original failure */ }
+      await persist(); await browser.close();
+    }
   });
+}
+
+/** Frame-only public DOM probe. No owner hooks or private state; its point
+ * queries occur outside native event handlers and do not inflate their deltas.
+ * A ready-gated caret captures the first available word after the gap jump;
+ * the same immutable UTF16 range is then measured through settling/append. */
+function installFirstReadyWordProbe(scroller: HTMLElement): void {
+  const trace = Reflect.get(window, "__historyWork") as any;
+  Object.assign(trace, { wordActive: true, wordPhase: "native", firstWord: null, words: [], maxDrift: 0, sameText: true, dropped: 0 });
+  const rows = Array.from(scroller.querySelectorAll<HTMLElement>("[data-chat-item-id]"));
+  const ordinals = new Map(rows.map((row, i) => [row, i]));
+  const bounds = scroller.getBoundingClientRect(), x = bounds.left + bounds.width / 2;
+  const doc = scroller.ownerDocument as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+  let word: { node: Text; start: number; end: number; value: string; row: HTMLElement } | null = null;
+  const sample = (timestamp: number) => {
+    if (!trace.wordActive) return;
+    if (trace.wordPhase !== "native") {
+      let capturedOffset: number | null = null;
+      if (!word) for (const fraction of [.02, .2, .5]) {
+        const y = bounds.top + bounds.height * fraction, row = doc.elementFromPoint(x, y)?.closest<HTMLElement>("[data-chat-item-id]");
+        const body = row?.querySelector<HTMLElement>(".chat-assistant-content");
+        if (!row || !ordinals.has(row) || !body?.checkVisibility({ contentVisibilityAuto: true })) continue;
+        const caret = doc.caretPositionFromPoint?.(x, y), fallback = caret ? null : doc.caretRangeFromPoint?.(x, y);
+        const node = caret?.offsetNode ?? fallback?.startContainer, offset = caret?.offset ?? fallback?.startOffset;
+        if (node?.nodeType !== Node.TEXT_NODE || offset === undefined || !body.contains(node)) continue;
+        const text = node as Text; let start = Math.min(offset, text.length - 1); if (start < 0) continue;
+        while (start < text.length && /\s/.test(text.data[start])) start++; if (start >= text.length) continue;
+        let end = start + 1; while (start > 0 && /\S/.test(text.data[start - 1])) start--;
+        while (end < text.length && /\S/.test(text.data[end])) end++;
+        const range = doc.createRange(); range.setStart(text, start); range.setEnd(text, end);
+        const candidateOffset = range.getBoundingClientRect().top - bounds.top;
+        if (candidateOffset < 0 || candidateOffset >= bounds.height) continue;
+        capturedOffset = candidateOffset;
+        word = { node: text, start, end, value: text.data.slice(start, end), row }; break;
+      }
+      if (word) {
+        const ready = word.node.isConnected && !!word.row.querySelector<HTMLElement>(".chat-assistant-content")?.checkVisibility({ contentVisibilityAuto: true });
+        let offset: number | null = null;
+        if (ready) {
+          if (capturedOffset !== null) offset = capturedOffset;
+          else { const range = doc.createRange(); range.setStart(word.node, word.start); range.setEnd(word.node, word.end); offset = range.getBoundingClientRect().top - bounds.top; }
+        }
+        const position = { time: performance.now(), timestamp, phase: trace.wordPhase, ordinal: ordinals.get(word.row),
+          startUTF16: word.start, endUTF16: word.end, offset, sameText: ready && word.node.data.slice(word.start, word.end) === word.value };
+        trace.sameText &&= position.sameText;
+        if (!trace.firstWord && offset !== null && offset >= 0 && offset < bounds.height) trace.firstWord = position;
+        if (trace.firstWord && offset !== null) trace.maxDrift = Math.max(trace.maxDrift, Math.abs(offset - trace.firstWord.offset));
+        if (trace.words.length < 1024) trace.words.push(position); else trace.dropped++;
+      }
+    }
+    requestAnimationFrame(sample);
+  };
+  requestAnimationFrame(sample);
 }

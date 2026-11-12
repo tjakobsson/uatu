@@ -344,12 +344,15 @@ export class CoordinatedScrollOwner {
     this.options.onChange?.();
   }
 
-  /** Cancel pending work and transient input, retaining the anchor's follow choice. */
-  cancel(): void {
+  /** Cancel work and transient input, retaining the anchor's follow choice.
+   * Snapshot replacement may retain an already owed, unconsumed instant
+   * placement; this neither schedules work nor creates a new follow choice.
+   */
+  cancel(options?: { preserveInstantPlacement?: boolean }): void {
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
     this.motion = null;
-    this.instantNext = false;
+    if (!options?.preserveInstantPlacement) this.instantNext = false;
     this.newContent = false;
     this.upwardPending = false;
     this.revealTarget = null;

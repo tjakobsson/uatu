@@ -542,6 +542,125 @@ describe("chat reversible-history composer", () => {
     }
   });
 
+  for (const target of ["parent", "child"] as const) for (const action of ["place", "wheel", "touch", "hide", "leave", "resync"] as const) test(`${target} initial placement crosses layout and respects ${action} before correction`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>(target === "parent" ? "#chat-timeline" : "#chat-drilldown-timeline")!;
+    let height = 2000, top = 0;
+    const writes: number[] = [];
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: () => timeline.querySelector('[data-chat-item-id="message:initial"]') ? height : 400 },
+      scrollTop: { configurable: true, get: () => top, set: (value: number) => { top = value; writes.push(value); } },
+    });
+    timeline.getBoundingClientRect = () => ({ top: 0, bottom: 400, height: 400 }) as DOMRect;
+    const prototype = window.HTMLElement.prototype, originalBounds = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function () {
+      return this.getAttribute("data-chat-item-id") === "message:initial"
+        ? ({ top: 600 - top, bottom: 1000 - top, height: 400 }) as DOMRect : originalBounds.call(this);
+    };
+    const tool = { id: "tool:initial", type: "tool", createdAt: 1, name: "task", status: "completed",
+      input: JSON.stringify({ description: "Initial child", subagent_type: "explore", prompt: "go" }), childConversationId: "child" };
+    const api = questionApi(document, { conversations: ["one", "two"], capabilities: ["subagents"],
+      items: id => target === "child" && id === "one" ? [tool] : [{ id: "message:initial", type: "user_message", createdAt: 1, text: "Initial reading row" }] });
+    let streamCount = 0;
+    const targetId = target === "parent" ? "one" : "child";
+    const snapshotNow = api.snapshot.bind(api);
+    api.snapshot = (id, ...args) => id === "two" ? new Promise(() => {}) : snapshotNow(id, ...args).then(snapshot =>
+      id === targetId && streamCount > 0 ? { ...snapshot, items: [{ id: "message:initial", type: "user_message", createdAt: 1, text: "Resynced reading row" }] } : snapshot);
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    api.stream = (id, _cursor, handlers) => { if (id === targetId) { stream = handlers; streamCount++; } return { close() {} }; };
+    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0, timestamp = performance.now();
+    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const frame = () => {
+      timestamp += 20;
+      for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
+    };
+    const drain = () => { for (let n = 0; n < 30 && frames.size; n++) frame(); };
+    const click = (selector: string) => document.querySelector(selector)!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const { initChat } = await import(`./ui.ts?initial-layout=${target}-${action}-${Date.now()}`);
+    initChat(api);
+    try {
+      await waitUntil(() => target === "child" ? !!document.querySelector("#chat-conversation-select option[value=one]") : !!stream);
+      if (target === "child") {
+        await waitUntil(() => { frame(); return !!document.querySelector('[data-worker-item="tool:initial"]'); });
+        click('[data-worker-item="tool:initial"]');
+        await waitUntil(() => !!stream);
+      }
+      await waitUntil(() => { frame(); return !!timeline.querySelector('[data-chat-item-id="message:initial"]'); });
+      expect(timeline.scrollTop, "content renders before initial placement").toBe(0);
+      expect(writes).toEqual([]);
+      if (action === "resync") {
+        // Replace the snapshot in the gap AFTER its first visible render but
+        // BEFORE the queued placement. The new extent must be used instantly,
+        // without either an old-snapshot write or intermediate catch-up tops.
+        stream!.resync();
+        await waitUntil(() => streamCount === 2);
+        height = 2400;
+        expect(timeline.textContent).toContain("Initial reading row");
+        expect(writes).toEqual([]);
+        frame();
+        expect(timeline.textContent).toContain("Resynced reading row");
+        expect(timeline.scrollTop, "resync retains the owed instant placement").toBe(2000);
+        drain();
+        expect(writes).toEqual([2000]);
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        timeline.scrollTop = 650;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        height = 2800;
+        stream!.event({ type: "item.upsert", conversationId: targetId, generation: "g", sequence: 1,
+          item: { id: "message:later", type: "user_message", createdAt: 2, text: "Later output" } }, "resynced-initial-later");
+        await waitUntil(() => { drain(); return timeline.textContent!.includes("Later output"); });
+        expect(timeline.scrollTop).toBe(650);
+        expect(writes).toEqual([2000, 650]);
+      } else if (action === "place") {
+        frame();
+        expect(timeline.scrollTop).toBe(1600);
+        drain();
+        expect(writes, "one initial placement, not a retry").toEqual([1600]);
+      } else if (action === "wheel" || action === "touch") {
+        if (action === "wheel") timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        else for (const [name, y] of [["touchstart", 100], ["touchmove", 600]] as const) {
+          timeline.dispatchEvent(Object.assign(new window.Event(name, { bubbles: true }), { touches: [{ clientY: y }] }));
+        }
+        timeline.scrollTop = 650;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        if (action === "touch") timeline.dispatchEvent(new window.Event("touchend"));
+        drain();
+        expect(timeline.scrollTop).toBe(650);
+        height = 2400;
+        stream!.event({ type: "item.upsert", conversationId: target === "parent" ? "one" : "child", generation: "g", sequence: 1,
+          item: { id: "message:later", type: "user_message", createdAt: 2, text: "Later output" } }, "initial-layout-later");
+        await waitUntil(() => { drain(); return timeline.textContent!.includes("Later output"); });
+        expect(timeline.scrollTop, "later output must not revive the initial placement").toBe(650);
+        expect(writes).toEqual([650]);
+      } else {
+        if (action === "hide") document.documentElement.setAttribute("data-chat-panel", "collapsed");
+        else if (target === "child") click("#chat-drilldown-back");
+        else {
+          const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+          select.value = "two"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+        }
+        await Promise.resolve();
+        drain();
+        expect(timeline.scrollTop).toBe(0);
+        expect(writes, "hidden or departed transcript has no stale initial write").toEqual([]);
+      }
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      globalThis.requestAnimationFrame = requestFrame;
+      globalThis.cancelAnimationFrame = cancelFrame;
+      prototype.getBoundingClientRect = originalBounds;
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
   test("a child resync before its first visible paint preserves pending immediate placement", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

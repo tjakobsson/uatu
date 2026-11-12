@@ -1114,9 +1114,29 @@ Following SHALL be smooth and stable in both parent and child outer timelines an
 
 When following is paused, layout changes elsewhere SHALL preserve the unchanged visible reading anchor within a 2px tolerance in controlled regression fixtures, rather than merely preserving a raw scroll offset. Explicitly activated expanding or collapsing controls SHALL remain stable and visible where the available viewport permits.
 
+Already loaded ordinary assistant text SHALL retain real layout geometry rather than skipped-body placeholder heights as it enters a parent or child reading viewport. This SHALL NOT require fetching additional history, materializing closed tool bodies, or changing independent shell scrolling. Deferred activity SHALL retain its existing presentation policy. Scrolling and subsequent unseen output SHALL preserve the same visible word and paused follow intent.
+
+#### Scenario: Loaded text remains ready and anchored during history reading
+
+- **GIVEN** a long parent or child timeline whose ordinary assistant message bodies are already loaded
+- **WHEN** the reader scrolls upward and then pauses
+- **THEN** those message bodies are browser-layout-ready as they occupy the viewport
+- **AND** the same visible word retains its offset within 2px through settling and later unseen output
+- **AND** preparation does not countersteer toward later text or resume following
+- **AND** closed tools remain deferred and their shell viewports keep independent scrolling
+
 #### Scenario: Active reader follows streaming output
 - **WHEN** the user is at the end of the timeline as assistant content streams
 - **THEN** new content remains visible without repeated manual scrolling
+
+#### Scenario: Fresh loaded text keeps its initial bottom placement
+- **GIVEN** a parent or child view opens without a saved reading anchor
+- **WHEN** its loaded transcript is first rendered
+- **THEN** initial instant placement occurs after the rendering layout boundary and remains at the bottom through subsequent layout
+- **AND** a snapshot replacement before placement retains the owed instant placement using the replacement's current geometry rather than animating from an unrelated position
+- **AND** upward reader input before placement cancels that automatic movement and later output preserves the chosen reading position
+- **AND** hiding or leaving the view prevents stale placement work
+- **AND** saved reading-anchor restoration and ordinary updates retain their existing atomic correction behavior
 
 #### Scenario: Reading older content is not interrupted
 - **WHEN** the user scrolls above the end while content continues streaming
