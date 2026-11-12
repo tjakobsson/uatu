@@ -7,6 +7,27 @@ const geometry = (scrollTop: number, scrollHeight = 600, tops = [0, 100, 200]): 
 });
 
 describe("semantic timeline anchoring", () => {
+  test("position capture distinguishes following, semantic reading and an unanchored pause", () => {
+    const controller = new TimelineAnchorController();
+    expect(controller.capturePosition(300)).toEqual({ kind: "following" });
+    controller.pause(geometry(100, 700, [-20, 80, 180]));
+    expect(controller.capturePosition(100)).toEqual({ kind: "anchor", anchor: { itemId: "i0", offset: -20 } });
+    controller.pause({ ...geometry(0), items: [] });
+    const saved = controller.capturePosition(0);
+    expect(saved).toEqual({ kind: "paused", top: 0 });
+    controller.restorePosition(saved);
+    expect(controller.afterMutation(geometry(300), true)).toBe(0);
+    expect(controller.isPinned()).toBe(false);
+    expect(controller.hasUnseen()).toBe(true);
+    controller.observe(geometry(0, 600, [600]), "up");
+    controller.observe(geometry(20, 600, [580]), "down");
+    expect(controller.afterMutation(geometry(20, 700, [580]))).toBe(20);
+    controller.restorePosition({ kind: "following" });
+    expect(controller.afterMutation(geometry(20, 700))).toBe(400);
+    controller.restorePosition({ kind: "anchor", anchor: { itemId: "i0", offset: -20 } });
+    expect(controller.afterMutation(geometry(100, 700, [30, 130, 230]))).toBe(150);
+  });
+
   test("captures only the item box when every visible block key is ambiguous", () => {
     const controller = new TimelineAnchorController();
     controller.pause({

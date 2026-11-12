@@ -1,4 +1,4 @@
-import type { TimelineAnchorController, AnchorGeometry } from "./anchor";
+import type { TimelineAnchorController, AnchorGeometry, TimelinePosition } from "./anchor";
 
 /** Shell line anchors can supply the same operations without depending on DOM rows. */
 export type CoordinatedScrollAnchor = Pick<TimelineAnchorController,
@@ -6,13 +6,13 @@ export type CoordinatedScrollAnchor = Pick<TimelineAnchorController,
 
 export interface CoordinatedScrollOptions {
   anchor: CoordinatedScrollAnchor;
+  /** Timeline lifecycle capability; shell adapters keep their own positions. */
+  position?: Pick<TimelineAnchorController, "capturePosition" | "restorePosition">;
   /** Include semantic items when requested, even if pinned. Preserve the
    * retained reading location by default; false captures fresh reader intent. */
   measure: (includeItems: boolean, preserveAnchor?: boolean, preferredItemId?: string) => AnchorGeometry;
   active?: () => boolean;
   onChange?: () => void;
-  /** Deliberate pause input or native upward reading, never a layout correction. */
-  onReaderPause?: () => void;
   /** Defaults to instant. Read each frame so reduced-motion changes finish an in-flight follow. */
   followMotion?: () => "smooth" | "instant";
   requestFrame?: (callback: FrameRequestCallback) => number;
@@ -52,6 +52,8 @@ export class CoordinatedScrollOwner {
   private heldOptions: RevealOptions | undefined;
   private heldTop: number | null = null;
   private resumeFollowing = false;
+  private heldPosition: TimelinePosition | undefined;
+  private pendingPosition: { position: TimelinePosition; reader: boolean } | undefined;
   private disposed = false;
   private previous: AnchorGeometry;
   private touchY: number | null = null;
@@ -91,6 +93,30 @@ export class CoordinatedScrollOwner {
     return this.options.measure(!this.options.anchor.isPinned(), undefined, preferredItemId);
   }
 
+  /** Durable intent, independent of loading geometry and temporary answer placement. */
+  capturePosition(): TimelinePosition {
+    if (!this.options.position) throw new Error("Timeline position adapter required");
+    return this.pendingPosition?.position ?? this.heldPosition
+      ?? this.options.position.capturePosition(this.scroller.scrollTop);
+  }
+
+  /** Stage navigation, without treating programmatic restoration as reader input. */
+  restorePosition(position: TimelinePosition): void {
+    if (!this.options.position) throw new Error("Timeline position adapter required");
+    this.cancel();
+    this.pendingPosition = { position, reader: false };
+    this.options.position.restorePosition(position);
+  }
+
+  private readerChose(): void {
+    if (!this.pendingPosition || !this.options.position) return;
+    // Until the incoming transcript renders, its semantic items are unavailable.
+    // A genuine pause still chooses this offset, not an outgoing view's row.
+    const position = this.options.position.capturePosition(this.scroller.scrollTop);
+    this.pendingPosition = { reader: true, position: position.kind === "following" ? position
+      : { kind: "paused", top: this.scroller.scrollTop } };
+  }
+
   /** Coalesces render, resize, toggle and viewport work. Reads geometry at execution. */
   request(hasNewContent = false): void {
     if (!this.active()) return;
@@ -106,9 +132,27 @@ export class CoordinatedScrollOwner {
   /** Finish a render in its existing rAF, using that callback's timestamp.
    * All callers in the same browser frame share a single correction budget.
    */
-  flush(timestamp: number): void {
+  flush(timestamp: number, options?: { rendered?: boolean }): void {
     if (!this.active()) { this.cancel(); return; }
     this.touchPaused = false;
+    // Consume the actual-render handshake before the write-budget guard: an
+    // earlier correction in this frame must not lose the incoming position.
+    if (options?.rendered && this.pendingPosition) {
+      const pending = this.pendingPosition;
+      this.pendingPosition = undefined;
+      this.options.position!.restorePosition(pending.position);
+      if (!pending.reader && pending.position.kind === "following") {
+        // Retire old callbacks, then cross the rendering layout boundary using
+        // this same cancellable owner. Saved reading positions remain atomic.
+        if (this.frame !== null) this.cancelFrame(this.frame);
+        this.frame = null;
+        this.motion = null;
+        this.instantNext = true;
+        this.request();
+        return;
+      }
+    }
+    if (this.pendingPosition) return;
     if (this.lastCorrectionFrame === timestamp) { this.request(); return; }
     // Retire stale DOM ownership before the anchor chooses this frame's top.
     if (this.heldTarget && !this.scroller.contains(this.heldTarget)) this.release();
@@ -215,7 +259,10 @@ export class CoordinatedScrollOwner {
    */
   hold(element: HTMLElement, options?: RevealOptions): void {
     if (!this.active()) return;
-    if (!this.heldTarget) this.resumeFollowing = this.options.anchor.isPinned();
+    if (!this.heldTarget) {
+      this.resumeFollowing = this.options.anchor.isPinned();
+      if (this.options.position) this.heldPosition = this.capturePosition();
+    }
     this.heldTarget = element;
     // A hold ends at the bottom of the band unless its caller says otherwise:
     // a held control is one the reader is typing into under a keyboard, and
@@ -249,6 +296,7 @@ export class CoordinatedScrollOwner {
 
   private clearHold(): void {
     this.resumeFollowing = false;
+    this.heldPosition = undefined;
     this.heldTarget = null;
     this.heldOptions = undefined;
     this.heldTop = null;
@@ -323,6 +371,7 @@ export class CoordinatedScrollOwner {
   }
 
   beforeMutation(preferredItemId?: string): void {
+    if (this.pendingPosition) return;
     if (this.active() && !this.options.anchor.isPinned()) {
       this.touchPaused = false;
       // Do not overwrite the pre-mutation anchor while a correction is waiting.
@@ -342,6 +391,7 @@ export class CoordinatedScrollOwner {
     this.revealTarget = null;
     this.revealOptions = undefined;
     this.options.anchor.jumpToLatest(this.options.measure(false));
+    this.readerChose();
     this.request();
     this.options.onChange?.();
   }
@@ -364,19 +414,21 @@ export class CoordinatedScrollOwner {
     // Cancelling a temporary hold restores its follow choice, but schedules
     // nothing. pause() immediately replaces that choice with explicit intent.
     const resume = this.resumeFollowing;
+    const held = this.heldPosition;
     this.clearHold();
-    if (resume) this.options.anchor.jumpToLatest(this.options.measure(false));
+    if (held) this.options.position!.restorePosition(held);
+    else if (resume) this.options.anchor.jumpToLatest(this.options.measure(false));
     this.touchY = null;
   }
 
   pause(): void {
     if (!this.active()) return;
     this.cancel();
-    const geometry = this.options.measure(true, false);
+    const geometry = this.options.measure(!this.pendingPosition, false);
     this.options.anchor.pause(geometry);
     this.upwardPending = true;
     this.previous = geometry;
-    this.options.onReaderPause?.();
+    this.readerChose();
     this.options.onChange?.();
   }
 
@@ -419,9 +471,13 @@ export class CoordinatedScrollOwner {
       // It must not turn a later maximize/layout clamp into a new anchor.
       this.upwardPending = false;
       this.request();
-    } else if (this.upwardPending && movement !== "none") {
+    } else if (this.upwardPending && (movement !== "none"
+      // A not-yet-rendered child can still expose its outgoing raw offset
+      // outside an empty extent. Explicit pause input owns this progress too.
+      || (this.pendingPosition?.reader && !changedExtent && Math.abs(geometry.scrollTop - previous.scrollTop) > 1e-6))) {
       this.upwardPending = false;
-      this.options.anchor.pause(this.options.measure(true, false));
+      this.options.anchor.pause(this.options.measure(!this.pendingPosition, false));
+      this.readerChose();
     } else if (geometry.clientHeight !== previous.clientHeight && this.options.anchor.isPinned()) {
       // Native caret positioning can move a pinned transcript upward when
       // composer/dock chrome resizes its viewport. That is layout, not reader
@@ -432,6 +488,7 @@ export class CoordinatedScrollOwner {
       // Preserve follow intent during catch-up, but let adapters observe other
       // axes (shell horizontal scrolling) before the next correction restores them.
       this.options.anchor.observe(geometry, "none");
+      if (!changedExtent) this.readerChose();
       // Catch-up leaves room for a reader to move toward latest themselves.
       // Only upward intent pauses following; rebase from their new position
       // so an older animation curve cannot pull their forward progress back.
@@ -448,8 +505,11 @@ export class CoordinatedScrollOwner {
       // own assignments already updated `previous` in flush().
       this.request();
     } else {
-      this.options.anchor.observe(movement !== "none" ? this.options.measure(true, false) : this.measure(), movement);
-      if (movement === "up" && !this.options.anchor.isPinned()) this.options.onReaderPause?.();
+      if (!this.pendingPosition || movement !== "none") {
+        this.options.anchor.observe(this.pendingPosition ? geometry
+          : movement !== "none" ? this.options.measure(true, false) : this.measure(), movement);
+        if (movement !== "none") this.readerChose();
+      }
       if (this.options.anchor.isPinned()) this.request();
     }
     this.previous = geometry;

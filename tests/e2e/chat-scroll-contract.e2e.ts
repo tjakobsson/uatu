@@ -697,13 +697,135 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     }
   });
 
-  test(`${engine} ${touch ? "touch" : "desktop"} sending preserves the paused reading anchor`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
+  if (!touch) for (const child of [false, true]) test(`${engine} desktop ${child ? "child" : "parent"} diagonal shell input retains horizontal progress during following`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
+    try {
+      const shape = child ? "bash" : "command";
+      const fixture = await bootShell(page, request, { child, shape, output: log(100, true),
+        extra: Array.from({ length: 20 }, (_, i) => ({ id: `shell-context:${i}`, type: "assistant_message" as const,
+          createdAt: i + 2, markdown: `History ${i}\n\n${"Earlier conversation. ".repeat(20)}` })) });
+      const { viewport, timeline } = fixture;
+      // Hover may navigate to the scrollport. Establish reader baselines afterward.
+      await viewport.hover();
+      await expect.poll(() => viewport.evaluate(el => el.scrollWidth - el.clientWidth)).toBeGreaterThan(180);
+      await expect.poll(() => viewport.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
+      await timeline.evaluate(el => {
+        el.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -4 }));
+        el.scrollTop -= 4;
+      });
+      await frames(page);
+      const viewportElement = await viewport.elementHandle();
+      const horizontal = await page.evaluateHandle(el => {
+        const outer = el.closest<HTMLElement>(".chat-timeline")!;
+        const rowId = el.closest<HTMLElement>("[data-chat-item-id]")!.dataset.chatItemId!;
+        const offset = () => {
+          const row = outer.querySelector<HTMLElement>(`[data-chat-item-id="${CSS.escape(rowId)}"]`);
+          return row ? row.getBoundingClientRect().top - outer.getBoundingClientRect().top : Number.NaN;
+        };
+        const state = { active: true, calibrating: true,
+          initialLeft: el.scrollLeft, outerTop: outer.scrollTop, outerOffset: offset(), appendStart: -1,
+          inputs: [] as Array<{ trusted: boolean; x: number; y: number; beforeLeft: number; maxLeft: number; connected: boolean; cancelled?: boolean }>,
+          scrolls: [] as Array<{ trusted: boolean; left: number; top: number; time: number }>,
+          writes: [] as Array<{ beforeLeft: number; left: number; top: number; time: number; calibration: boolean }>,
+          verticalWrites: [] as Array<{ beforeTop: number; top: number; time: number }>,
+          samples: [] as Array<{ left: number; outerTop: number; outerOffset: number }>,
+          markAppend() { this.appendStart = this.samples.length; },
+          stop() {
+            this.active = false; el.removeEventListener("wheel", input, true); el.removeEventListener("scroll", scroll, true);
+            Reflect.deleteProperty(el, "scrollLeft"); Reflect.deleteProperty(el, "scrollTop");
+          },
+          snapshot() { return { initialLeft: this.initialLeft, outerTop: this.outerTop, outerOffset: this.outerOffset,
+            appendStart: this.appendStart,
+            inputs: this.inputs, scrolls: this.scrolls, writes: this.writes, verticalWrites: this.verticalWrites, samples: this.samples }; } };
+        const input = (event: WheelEvent) => {
+          const observation = { trusted: event.isTrusted, x: event.deltaX, y: event.deltaY, beforeLeft: el.scrollLeft,
+            maxLeft: el.scrollWidth - el.clientWidth, connected: el.isConnected, cancelled: false };
+          state.inputs.push(observation);
+          queueMicrotask(() => { observation.cancelled = event.defaultPrevented; });
+        };
+        const scroll = (event: Event) => state.scrolls.push({ trusted: event.isTrusted,
+          left: el.scrollLeft, top: el.scrollTop, time: performance.now() });
+        const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollLeft")!;
+        Object.defineProperty(el, "scrollLeft", { configurable: true,
+          get() { return descriptor.get!.call(this); },
+          set(left: number) {
+            state.writes.push({ beforeLeft: descriptor.get!.call(this), left, top: el.scrollTop, time: performance.now(), calibration: state.calibrating });
+            descriptor.set!.call(this, left);
+          } });
+        const topDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
+        Object.defineProperty(el, "scrollTop", { configurable: true,
+          get() { return topDescriptor.get!.call(this); },
+          set(top: number) {
+            state.verticalWrites.push({ beforeTop: topDescriptor.get!.call(this), top, time: performance.now() });
+            topDescriptor.set!.call(this, top);
+          } });
+        el.addEventListener("wheel", input, { capture: true, passive: true });
+        el.addEventListener("scroll", scroll, { capture: true, passive: true });
+        const sample = () => {
+          if (!state.active) return;
+          state.samples.push({ left: el.scrollLeft, outerTop: outer.scrollTop, outerOffset: offset() });
+          requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+        return state;
+      }, viewportElement!);
+      const vertical = await recordFollowing(viewport);
+      try {
+        // Verify the observer sees the application's main-world property writes.
+        // A same-value calibration delegates to the native setter without input.
+        await page.evaluate(el => { el.scrollLeft = el.scrollLeft; }, viewportElement!);
+        expect(await horizontal.evaluate(state => state.writes.some(write => write.calibration && write.beforeLeft === write.left)),
+          "horizontal-write observation must be calibrated in the application world").toBe(true);
+        await horizontal.evaluate(state => { state.calibrating = false; });
+        await frames(page);
+        const from = await viewport.evaluate(el => el.scrollTop);
+        await inputDuringMotion(viewport, from, "Shell never exposed in-flight following",
+          () => fixture.update(shell(shape, log(140, true))), () => page.mouse.wheel(60, 60));
+        await expect(viewport.locator(".chat-shell-lines > span")).toHaveCount(140);
+        await frames(page, 24);
+        const retained = await viewport.evaluate(el => el.scrollLeft);
+        await horizontal.evaluate(state => state.markAppend());
+        await fixture.update(shell(shape, log(160, true)));
+        await expect(viewport.locator(".chat-shell-lines > span")).toHaveCount(160);
+        await frames(page, 24);
+        const observed = await horizontal.evaluate(state => state.snapshot());
+        const samples = await vertical.evaluate(state => { state.active = false; return state.samples; });
+        expect(observed.inputs.some(event => event.trusted && event.x > 0 && event.y > 0), "native diagonal wheel must reach the shell").toBe(true);
+        expect(observed.inputs.every(event => event.connected && event.maxLeft > 180 && !event.cancelled), "native input needs an attached, overflowing, uncancelled shell").toBe(true);
+        expect(retained - observed.initialLeft, "horizontal reader progress must survive the next correction").toBeGreaterThan(2);
+        const firstProgress = observed.samples.findIndex(sample => sample.left > observed.initialLeft + 2);
+        expect(firstProgress, "observe actual horizontal movement, not only requested input").toBeGreaterThanOrEqual(0);
+        const progress = observed.samples.slice(firstProgress);
+        expect(progress.slice(1).filter((sample, i) => sample.left < progress[i]!.left - 2), "following must not snap horizontal progress backward").toEqual([]);
+        const afterAppend = observed.samples.slice(observed.appendStart);
+        expect(afterAppend.length).toBeGreaterThan(0);
+        expect(Math.max(...afterAppend.map(sample => Math.abs(sample.left - retained))), "later output must retain the chosen column").toBeLessThanOrEqual(2);
+        expect(Math.abs(await viewport.evaluate(el => el.scrollLeft) - retained)).toBeLessThanOrEqual(2);
+        expect(Math.max(...observed.samples.map(sample => Math.abs(sample.outerTop - observed.outerTop))), "inner input must not move outer scrollTop").toBeLessThanOrEqual(2);
+        expect(observed.samples.every(sample => Number.isFinite(sample.outerOffset)), "the outer reading row must survive every sampled frame").toBe(true);
+        expect(Math.max(...observed.samples.map(sample => Math.abs(sample.outerOffset - observed.outerOffset))), "inner input must not move the outer reading anchor").toBeLessThanOrEqual(2);
+        expectSmoothFollowing(samples, "diagonal shell");
+      } finally {
+        try {
+          const horizontalEvidence = await horizontal.evaluate(state => { state.stop(); return state.snapshot(); });
+          const verticalEvidence = await vertical.evaluate(state => { state.active = false; return state.samples; });
+          await testInfo.attach("diagonal-shell-frames.json", { body: JSON.stringify({ horizontal: horizontalEvidence, vertical: verticalEvidence }), contentType: "application/json" });
+        } catch { /* evidence must not replace the original failure */ }
+        await horizontal.dispose(); await vertical.dispose(); await viewportElement?.dispose();
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  test(`${engine} ${touch ? "touch" : "desktop"} sending preserves the paused reading anchor through the streamed reply`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
     try {
       await request.post("/__e2e/reset");
-      await seed(request);
+      const { conversation } = await seed(request);
       const timeline = await open(page, request, touch);
       await pause(page, timeline, touch);
       const anchor = await timeline.evaluate(el => {
@@ -730,13 +852,42 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         else await input.press("Enter");
         await expect(page.locator("#chat-items")).toContainText("Send without losing my place");
         await frames(page, 24);
+        const { token } = await request.get("/__e2e/terminal-token").then(response => response.json());
+        let sent: { id: string; createdAt: number } | undefined;
+        await expect.poll(async () => {
+          const response = await request.get(`/api/chat/conversations/${encodeURIComponent(conversation.id)}?t=${encodeURIComponent(token)}`);
+          expect(response.ok()).toBe(true);
+          const snapshot = await response.json();
+          sent = snapshot.items.find((item: { type: string; text?: string }) =>
+            item.type === "user_message" && item.text === "Send without losing my place");
+          return !!sent;
+        }).toBe(true);
+        const replyId = "contract:paused-send-reply";
+        await control(request, { action: "item", conversationId: conversation.id,
+          item: { id: replyId, type: "assistant_message", createdAt: sent!.createdAt + 1,
+            markdown: "Reply after the submitted message." } });
+        await expect(timeline).toContainText("Reply after the submitted message.");
+        const latest = page.locator("#chat-latest");
+        for (let chunk = 0; chunk < 2; chunk++) {
+          await control(request, { action: "delta", conversationId: conversation.id, itemId: replyId,
+            delta: `\n\nReply chunk ${chunk}. ${"Subsequent assistant output. ".repeat(40)}` });
+          await expect(timeline).toContainText(`Reply chunk ${chunk}.`);
+          await frames(page, 24);
+          await expect(latest).toBeVisible();
+        }
+        const rows = await timeline.locator("[data-chat-item-id]").evaluateAll(nodes =>
+          nodes.map(node => (node as HTMLElement).dataset.chatItemId));
+        const sentIndex = rows.indexOf(sent!.id);
+        expect(sentIndex, "fixture must contain the accepted submitted message").toBeGreaterThanOrEqual(0);
+        expect(rows.indexOf(replyId), "the streamed reply must follow the submitted message").toBeGreaterThan(sentIndex);
         const offsets = await trace.evaluate(state => { state.active = false; return state.offsets; });
         await testInfo.attach("paused-send-anchor.json", { body: JSON.stringify({ anchor, offsets }), contentType: "application/json" });
         expect(offsets.length).toBeGreaterThan(0);
-        expect(offsets, "the reading anchor must survive submission rendering").not.toContain(null);
+        expect(offsets, "the reading anchor must survive submission and reply rendering").not.toContain(null);
         const drift = Math.max(...offsets.map(offset => Math.abs(offset! - anchor.offset)));
-        expect(drift, "sending must not pull a paused reader to latest, even transiently").toBeLessThanOrEqual(2);
-        await expect(page.locator("#chat-latest")).toBeVisible();
+        expect(drift, "sending and its streamed reply must not pull a paused reader to latest, even transiently").toBeLessThanOrEqual(2);
+        expect(await timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(2);
+        await expect(latest).toBeVisible();
       } finally {
         await trace.evaluate(state => { state.active = false; });
         await trace.dispose();

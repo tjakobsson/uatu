@@ -160,9 +160,21 @@ Chat timelines and shell viewports SHALL preserve reading anchors and independen
 
 #### Scenario: Newer input outranks pending snapshot placement
 - **GIVEN** a parent or child snapshot is installed but its first render has not occurred
-- **WHEN** the reader deliberately scrolls upward before that render
-- **THEN** the newer paused intent and reading position survive first render and later updates
+- **WHEN** the reader deliberately scrolls upward or activates Latest before that render
+- **THEN** the newer paused reading position or explicit following choice survives first render and later updates
 - **AND** the pending navigation restore or initial latest placement does not overwrite that intent
+
+#### Scenario: Navigation retains intent beneath temporary answer positioning
+- **GIVEN** a parent or child view temporarily positions a focused answer field
+- **WHEN** the reader leaves and later reopens that view
+- **THEN** the view restores its durable reading position and follow intent rather than persisting the temporary answer-field position
+- **AND** header Back and browser Back preserve the same intent
+
+#### Scenario: Departure before a loading transcript arrives preserves saved intent
+- **GIVEN** a view has a saved reading position and its reopened transcript is still loading
+- **WHEN** the surface changes layout and the reader leaves before the snapshot arrives
+- **THEN** the next reopening retains the saved reading position rather than replacing it with empty or outgoing geometry
+- **AND** a newer deliberate paused or following choice supersedes that saved intent
 
 #### Scenario: Loading child restoration survives visibility and layout changes
 - **GIVEN** a child transcript snapshot is still loading

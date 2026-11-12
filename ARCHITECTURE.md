@@ -1140,10 +1140,16 @@ placement, not a retry. Reader input, hiding and navigation can preempt it.
 Snapshot replacement cancels stale callbacks while retaining the owner's
 unconsumed instant-placement intent; replacement geometry determines the target.
 Ordinary cancellation and reader pause still clear that intent.
-Newer paused reader intent also retires snapshot restoration owed before first render.
-That notification comes from the owner's input classification, not a layout-only
-change callback. Empty child-loading renders retain pending placement until a
-transcript projection exists, including hide/reopen and resize during the read.
+The owner stages navigation restoration until an actual transcript render.
+Its existing input classification makes newer reader choices, including Latest,
+supersede that restoration; layout-only callbacks cannot manufacture a choice.
+Durable capture prefers pending placement over incidental live geometry and
+preserves the original reading intent beneath a temporary answer hold. UI keeps
+per-view identity and storage, not a second pending-placement state machine.
+Empty loading renders retain placement through hide/reopen, resize and departure
+before a read completes. Header Back and browser Back share the finishing capture
+path. Legacy stored anchors retain their shape; a finite-offset variant preserves
+unanchored pauses without confusing them with following.
 Saved reading-anchor restoration and ordinary updates keep their same-frame
 render/correction transaction; focused answer holds retain their existing owner.
 When browser hit testing is usable, geometry resolves the first viewport row,

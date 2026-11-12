@@ -4,6 +4,11 @@ export type TimelineAnchor = {
   /** Opaque stable block key, never raw message text. Offsets are viewport-relative. */
   content?: { key: string; offset: number };
 };
+/** A paused view can have no measurable item yet; that is not following. */
+export type TimelinePosition =
+  | { kind: "following" }
+  | { kind: "anchor"; anchor: TimelineAnchor }
+  | { kind: "paused"; top: number };
 /** Which way a scroll event moved the viewport, judged against the previous event. */
 export type ScrollMovement = "up" | "down" | "none";
 export type AnchorGeometry = {
@@ -26,6 +31,7 @@ export class TimelineAnchorController {
   private expected: number | null = null;
   private previous: AnchorGeometry | null = null;
   private restoring = false;
+  private fallbackTop: number | null = null;
 
   constructor(private readonly endThreshold = 48) {}
 
@@ -47,6 +53,7 @@ export class TimelineAnchorController {
    * treated the same way: only a downward movement is an arrival.
    */
   observe(geometry: AnchorGeometry, movement: ScrollMovement = "down"): void {
+    this.fallbackTop = null;
     const expected = this.expected;
     const maximum = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
     // A nearby but distinct position can be a genuine fractional reader step.
@@ -70,6 +77,7 @@ export class TimelineAnchorController {
 
   /** Input intent arrives before the browser's scroll event or default action. */
   pause(geometry: AnchorGeometry): void {
+    this.fallbackTop = null;
     this.expected = null;
     this.previous = geometry;
     this.pinned = false;
@@ -86,7 +94,11 @@ export class TimelineAnchorController {
   afterMutation(geometry: AnchorGeometry, hasNewContent = false): number {
     if (this.pinned) return this.handOut(Math.max(0, geometry.scrollHeight - geometry.clientHeight));
     if (hasNewContent) this.unseen = true;
-    if (!this.anchor) return this.handOut(geometry.scrollTop);
+    if (!this.anchor) {
+      const top = this.fallbackTop ?? geometry.scrollTop;
+      this.fallbackTop = null;
+      return this.handOut(top);
+    }
     // Nothing measured means nothing rendered or laid out yet — a render
     // that ran before the surface had its size, a resize of a still-empty
     // timeline. That says nothing about whether the anchored item exists,
@@ -115,6 +127,7 @@ export class TimelineAnchorController {
   }
 
   jumpToLatest(geometry: AnchorGeometry): number {
+    this.fallbackTop = null;
     this.pinned = true;
     this.unseen = false;
     this.restoring = false;
@@ -130,7 +143,21 @@ export class TimelineAnchorController {
   isPinned(): boolean { return this.pinned; }
   hasUnseen(): boolean { return this.unseen; }
   currentAnchor(): TimelineAnchor | null { return this.anchor; }
+  capturePosition(scrollTop: number): TimelinePosition {
+    if (this.pinned) return { kind: "following" };
+    if (this.anchor) return { kind: "anchor", anchor: this.anchor };
+    return { kind: "paused", top: this.fallbackTop ?? (Number.isFinite(scrollTop) ? scrollTop : 0) };
+  }
+  restorePosition(position: TimelinePosition): void {
+    if (position.kind === "paused" && !Number.isFinite(position.top)) return;
+    this.restore(position.kind === "anchor" ? position.anchor : null);
+    if (position.kind === "paused") {
+      this.pinned = false;
+      this.fallbackTop = position.top;
+    }
+  }
   restore(anchor: TimelineAnchor | null): void {
+    this.fallbackTop = null;
     this.restoring = anchor !== null;
     this.anchor = anchor;
     this.pinned = anchor === null;

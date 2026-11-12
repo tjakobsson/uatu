@@ -6,7 +6,7 @@ import { CoordinatedScrollOwner } from "./coordinated-scroll";
 const disposals: Array<() => void> = [];
 afterEach(() => { for (const dispose of disposals.splice(0).reverse()) dispose(); });
 
-function fixture(followMotion?: () => "smooth" | "instant", endThreshold?: number) {
+function fixture(followMotion?: () => "smooth" | "instant", endThreshold?: number, positions = true) {
   const { document, window } = parseHTML("<html><body><div></div></body></html>");
   const element = document.querySelector("div")! as unknown as HTMLElement;
   const frames = new Map<number, FrameRequestCallback>();
@@ -24,7 +24,7 @@ function fixture(followMotion?: () => "smooth" | "instant", endThreshold?: numbe
   const anchor = new TimelineAnchorController(endThreshold);
   const options = {
     followMotion,
-    anchor, active: () => active,
+    anchor, position: positions ? anchor : undefined, active: () => active,
     measure: (includeItems: boolean, _preserveAnchor?: boolean) => ({ scrollTop: top, scrollHeight: extent, clientHeight: viewport,
       items: includeItems ? [{ id: "line", top: itemTop - top, bottom: itemTop - top + 1000 }] : [] }),
     requestFrame: (callback: FrameRequestCallback) => { frames.set(++sequence, callback); return sequence; },
@@ -64,38 +64,180 @@ function withVisibleBand(band: { height: number; offsetTop: number }, run: () =>
 }
 
 describe("coordinated scrolling", () => {
-  test("reader-pause notification excludes layout, clamps and correction echoes", () => {
+  test("pending position capture survives empty layout, cancellation and hide until an actual render", () => {
     const f = fixture();
-    let pauses = 0;
-    Object.assign(f.options, { onReaderPause: () => { pauses++; } });
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -100 } };
+    f.owner.restorePosition(saved);
+    f.owner.beforeMutation();
+    f.owner.request(); f.flush(0);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    expect(f.writes).toEqual([]);
+    f.owner.cancel(); f.hide(); f.owner.flush(20, { rendered: true });
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.show(); f.shift(50);
+    f.owner.flush(40, { rendered: true });
+    expect(f.element.scrollTop).toBe(150);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.writes).toEqual([150]);
+  });
+
+  test("layout, clamps and correction echoes cannot supersede pending intent but a real pause can", () => {
+    const f = fixture();
     f.owner.request(); f.flush(0);
     f.move(200); f.anchor.pause(f.options.measure(true));
     f.shift(20); f.owner.request(); f.flush(20);
     f.event("scroll");
-    expect(pauses).toBe(0);
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -120 } };
+    f.owner.restorePosition(saved);
+    f.event("scroll");
+    expect(f.owner.capturePosition()).toEqual(saved);
     f.grow(450); f.event("scroll"); f.flush(40);
-    expect(pauses).toBe(0);
+    expect(f.owner.capturePosition()).toEqual(saved);
     f.event("wheel", { deltaY: -1 });
-    expect(pauses).toBe(1);
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 150 });
     f.owner.request(); f.flush(60);
-    expect(pauses).toBe(1);
-    f.hide(); f.event("wheel", { deltaY: -1 });
-    expect(pauses).toBe(1);
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 150 });
+    f.hide(); f.move(100); f.event("wheel", { deltaY: -1 });
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 150 });
+    f.show(); f.owner.flush(80, { rendered: true });
+    expect(f.element.scrollTop).toBe(150);
+    expect(f.anchor.isPinned()).toBe(false);
   });
 
-  test("reader-pause notification uses the owner's native, key and touch input classification", () => {
+  test("native, key and touch reader pauses supersede restoration without capturing outgoing rows", () => {
+    for (const input of ["native", "key", "touch"] as const) {
+      const f = fixture();
+      f.owner.restorePosition({ kind: "anchor", anchor: { itemId: "incoming", offset: -20 } });
+      if (input === "native") { f.move(250); f.event("scroll"); }
+      else if (input === "key") f.event("keydown", { key: "ArrowUp" });
+      else {
+        f.event("touchstart", { touches: [{ clientY: 100 }] });
+        f.event("touchmove", { touches: [{ clientY: 110 }] });
+      }
+      const top = input === "native" ? 250 : 300;
+      expect(f.owner.capturePosition()).toEqual({ kind: "paused", top });
+      f.event("scroll");
+      expect(f.owner.capturePosition()).toEqual({ kind: "paused", top });
+      f.owner.flush(20, { rendered: true });
+      f.grow(900); f.owner.request(true); f.flush(40);
+      expect(f.element.scrollTop).toBe(top);
+      expect(f.anchor.isPinned()).toBe(false);
+    }
+  });
+
+  test("Latest and native downward arrival supersede pending saved restoration", () => {
+    for (const input of ["latest", "native"] as const) {
+      const f = fixture(() => "smooth");
+      f.move(200);
+      f.owner.restorePosition({ kind: "anchor", anchor: { itemId: "incoming", offset: -20 } });
+      f.event("wheel", { deltaY: -1 });
+      if (input === "latest") f.owner.latest();
+      else { f.move(199); f.event("scroll"); f.move(252); f.event("scroll"); }
+      expect(f.owner.capturePosition()).toEqual({ kind: "following" });
+      f.owner.flush(20, { rendered: true });
+      f.grow(900); f.owner.request(true);
+      for (let timestamp = 40; timestamp <= 400; timestamp += 20) f.flush(timestamp);
+      expect(f.element.scrollTop).toBe(600);
+      expect(f.anchor.isPinned()).toBe(true);
+    }
+  });
+
+  test("a pending pause captures native progress even when the empty outgoing extent masks movement", () => {
     const f = fixture();
-    let pauses = 0;
-    Object.assign(f.options, { onReaderPause: () => { pauses++; } });
-    f.move(250); f.event("scroll");
-    expect(pauses).toBe(1);
-    f.event("scroll");
-    expect(pauses).toBe(1);
-    f.event("keydown", { key: "ArrowUp" });
-    expect(pauses).toBe(2);
-    f.event("touchstart", { touches: [{ clientY: 100 }] });
-    f.event("touchmove", { touches: [{ clientY: 110 }] });
-    expect(pauses).toBe(3);
+    f.grow(300); f.move(700);
+    f.owner.restorePosition({ kind: "anchor", anchor: { itemId: "incoming", offset: -20 } });
+    f.event("wheel", { deltaY: -1 });
+    f.move(650); f.event("scroll");
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 650 });
+    f.grow(2000); f.owner.flush(20, { rendered: true });
+    expect(f.element.scrollTop).toBe(650);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("an actual-render handshake survives an earlier same-frame write and retires queued placement", () => {
+    for (const kind of ["following", "anchor"] as const) {
+      const f = fixture(() => "smooth");
+      f.grow(1000); f.owner.request(); f.flush(20);
+      expect(f.writes).toEqual([700]);
+      f.owner.restorePosition(kind === "following" ? { kind } : { kind, anchor: { itemId: "line", offset: -100 } });
+      f.grow(1200); f.owner.request(); f.flush(20);
+      f.owner.flush(20, { rendered: true });
+      expect(f.writes).toEqual([700]);
+      f.flush(40);
+      expect(f.writes).toEqual([700, kind === "following" ? 900 : 100]);
+      expect(f.frames.size).toBe(0);
+    }
+  });
+
+  test("extent-driven downward placement does not impersonate Latest before initial rendering", () => {
+    const f = fixture();
+    f.owner.restorePosition({ kind: "following" });
+    f.grow(900); f.move(600); f.event("scroll");
+    // The incoming render starts at its own origin, not the loading layout's end.
+    f.move(0);
+    f.owner.flush(20, { rendered: true });
+    expect(f.writes).toEqual([]);
+    f.flush(40);
+    expect(f.writes).toEqual([600]);
+  });
+
+  test("durable capture excludes an answer hold while a later real pause replaces it", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.owner.capturePosition()).toEqual({ kind: "following" });
+    f.owner.cancel();
+    expect(f.owner.capturePosition()).toEqual({ kind: "following" });
+    f.owner.hold(field as unknown as HTMLElement); f.flush(40);
+    f.event("wheel", { deltaY: -1 });
+    expect(f.owner.capturePosition()).toEqual({ kind: "anchor", anchor: { itemId: "line", offset: -140 } });
+    expect(f.owner.isHolding(field as unknown as HTMLElement)).toBe(false);
+  });
+
+  test("adapters without timeline positions retain their original hold release and cancellation behavior", () => {
+    for (const following of [false, true]) for (const ending of ["release", "cancel"] as const) {
+      const f = fixture(undefined, undefined, false);
+      stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+      const field = f.document.createElement("input");
+      f.element.append(field);
+      stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+      f.owner.request(); f.flush(0);
+      if (!following) { f.move(200); f.owner.pause(); }
+      f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+      expect(f.element.scrollTop).toBe(140);
+      const writes = [...f.writes];
+      f.owner[ending]();
+      expect(f.writes).toEqual(writes);
+      expect(f.anchor.isPinned()).toBe(following);
+      f.owner.request(); f.flush(40);
+      expect(f.element.scrollTop).toBe(following ? 300 : 140);
+    }
+  });
+
+  test("cancelling a paused answer hold retains its original semantic position without writing", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.move(200); f.owner.pause();
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -200 } };
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    const writes = [...f.writes];
+    f.owner.cancel();
+    expect(f.writes).toEqual(writes);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.owner.request(); f.flush(40);
+    expect(f.element.scrollTop).toBe(200);
+    expect(f.anchor.isPinned()).toBe(false);
   });
 
   test("native downward timeline arrival respects the 48px boundary", () => {
