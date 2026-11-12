@@ -580,6 +580,9 @@ export class OpenCodeV2Provider implements ChatProvider {
             for (const message of complete) if (message.type === "idle") outcomes.add(messageIdentity(message));
             source.historyOutcomeMessages.set(child, outcomes);
             const provisional = source.historyChildVisibility?.get(child);
+            // Shared/warm consumption can register after a staged request
+            // began. Deny against the actual raw load, not its later consumer.
+            if (provisional) provisional.transcriptAfter = this.historyReadOrders.get(complete)!.recordsAfter;
             if (provisional?.pendingBoundary !== undefined) {
               const index = complete.findIndex(message => messageIdentity(message) === provisional.pendingBoundary);
               if (index < 0 || complete.some((message, position) => message.type === "idle" && position >= index)) {
@@ -1927,7 +1930,6 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (observation.reports.length || observation.overflow) {
       const previous = source.historyPendingRead;
       source.historyPendingRead = previous ? this.mergePendingOutcome(previous, observation) : observation;
-      this.historyReuse.invalidate(source.parent);
     }
     if (!parent || !source.historyParentLaunches) {
       // No inbox baseline was consumed. Retain only an actual positive
@@ -1941,6 +1943,9 @@ export class OpenCodeV2Provider implements ChatProvider {
     for (const [child, launches] of source.historyParentLaunches) {
       const signature = this.pendingOutcomeSignature(relevant, child, launches);
       if (!relevant.overflow && (!signature || signature === parent.reports.get(child))) continue;
+      // This source's older baseline can remain vetoed after a newer cache
+      // entry absorbed the actual report. Cache retirement belongs to the
+      // load-owned check in observePendingOutcomes, not this source's epoch.
       (source.historyPendingOutcomeChanges ??= new Set()).add(child);
     }
   }
@@ -2079,7 +2084,10 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (previous?.pending && order.started > previous.started) continue;
         if (!previous || previous.signature === observation.signature) continue;
         if (order.started <= previous.completed) conflictingOverlap = true;
-        for (const target of order.started > previous.completed ? [source] : childOwners) {
+        // A later-started overlapping raw read can contradict this consumed
+        // outcome even when ownerless. This is denial only: the completion
+        // fence below still prevents it from replacing a newer baseline.
+        for (const target of order.started > previous.started ? [source] : childOwners) {
           target.historyChildChanges.add(sessionId);
           if (dependsOnWorkerHistory(target, sessionId)) target.revision++;
         }
@@ -3328,7 +3336,8 @@ export class OpenCodeV2Provider implements ChatProvider {
               if (observation.started > previous.completed) this.historyReuse.invalidate(subject);
               const childVisibility: ReturnType<NonNullable<HistoryWorkerSource["historyChildVisibility"]>["get"]> = source.historyChildVisibility?.get(subject);
               const provisionalStage: boolean = childVisibility !== undefined && childVisibility.ownedAfter === undefined
-                && observation.started > childVisibility.registered && !childVisibility.ownedBaseline && boundary !== null && previous.boundary === null;
+                && observation.started > (childVisibility.transcriptAfter ?? childVisibility.registered)
+                && !childVisibility.ownedBaseline && boundary !== null && previous.boundary === null;
               const lateIntermediateStage: boolean = childVisibility !== undefined
                 && childVisibility.ownedAfter !== undefined && observation.started > (childVisibility.transcriptAfter ?? childVisibility.ownedAfter)
                 // Matching a boundary ID is not replay identity: a distinct

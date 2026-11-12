@@ -1258,6 +1258,18 @@ A positive inbox request begun after the consumed owned
 request started can deny its empty view even when the requests overlap. Only
 new, relevant positive facts/overflow acquire that veto; older requests, empty
 snapshots and exact digests cannot replace the owned baseline or grant authority.
+Consumed transcript sources compare positive facts against their own native
+baseline to veto inference. Cache retirement instead uses the current load's
+cutoff and actual raw reports: a stale source cannot repeatedly evict a newer
+entry that already contains the report. Unrelated, pre-launch and exact consumed
+report replays retain the paged value.
+Covered same-execution Ended activity without a result also withdraws an older
+report-free inferred outcome. It preserves the native end clock and legitimate
+dismissibility, without creating a result, running clock or Stop authority.
+Child raw-history counterproof compares actual loaded-array request starts:
+a later-started overlapping ownerless read can deny a consumed idle, even after
+cache ownership replacement. Overlap cannot install a replacement baseline;
+older replies cannot veto a source that consumed a newer request.
 Native pending facts that veto a scoped inventory source also invalidate only
 that parent's reusable transcript. Automatic recovery has no covered-history
 retry watch: its already-requested retry must read actual delivered report
@@ -1295,6 +1307,11 @@ publication. Bounded suffix identities from the consumed child transcript preser
 known retained prefixes independently of cache eviction (at most 256 suffix IDs
 and 16,384 serialized UTF-16 units per child); overflow abstains.
 This does not replace the latest baseline or affect a later child dependency.
+Once a child array is consumed, provisional stage denial uses that raw load's
+native request cutoff. A later consumer of a shared or warm old array must not
+exclude an overlapping stage merely because its own dependency registered later.
+This cutoff is deny-only; owned visibility still supplies positive authority.
+
 Before the first transcript load, the child dependency registers a provisional
 native-record cutoff. A reversed intermediate stage against an ownerless clear
 is retained as deny-only boundary evidence, never as an owned baseline. The

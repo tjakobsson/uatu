@@ -133,15 +133,16 @@ function replacesHistoryOnlyOutcome(current: ConversationItem | undefined, sourc
   const executionIds = (item: ConversationItem | undefined) => item?.type === "background_task"
     ? [...(item.activity?.executionAliases ?? []), ...(item.activity?.executionId ? [item.activity.executionId] : [])] : [];
   const knownExecutions = new Set(executionIds(current));
-  // Working evidence is independent of Stop proof: control projection may
-  // mark the row uncertain without withdrawing its covered native activity.
+  // Covered activity is independent of outcome/Stop proof. A retained native
+  // end can survive removal of the idle that formerly justified an outcome.
   return current?.type === "background_task" && current.status !== "running" && !current.resultId
     && current.summary === undefined && current.terminalReportedAt === undefined
     && source?.type === "background_task" && source.status === "running"
     && source.id === current.id && source.taskId === current.taskId && source.taskType === current.taskType
     && source.childConversationId !== undefined && source.childConversationId === current.childConversationId
     && (source.activity?.kind === "unavailable" && source.stateUncertain === true
-      || source.activity?.kind === "working" || source.activity?.kind === "needs-answer" || source.activity?.kind === "session-active")
+      || source.activity?.kind === "working" || source.activity?.kind === "needs-answer" || source.activity?.kind === "session-active"
+      || source.activity?.kind === "ended" && !source.resultId && source.summary === undefined && source.terminalReportedAt === undefined)
     && executionIds(source).some(id => knownExecutions.has(id));
 }
 

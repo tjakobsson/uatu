@@ -152,6 +152,10 @@ first pending consumers. Unchanged/ordinary-text, earlier-execution and
 other-child reports leave independent outcomes current. Aborted observations
 cannot revoke evidence; released leases retire the snapshot. Saturation is
 deny-only and cannot grant ownership, result text or Stop authority.
+Raw child-history contradictions use the consumed array's native request start
+for denial, including later-started overlapping ownerless reads. Their response
+arrival and replacement cache entry do not redate the consumed array. Existing
+completion fences still prevent overlapping replies from replacing baselines.
 Streamed subagent enqueues feed the same bounded slot before ownership awaits,
 without a native inbox reread. They add facts rather than replacing the inbox
 baseline, and exact replays coalesce. Their shared read-order clock fences older
@@ -160,7 +164,12 @@ Transcript-only outcome sources are fenced too when inventory recovery fails.
 They compare actual newer positive reports with their native parent-read order,
 declared child/admission scope and consumed report digests; no empty inbox
 baseline is assigned. Empty/text, unrelated, pre-launch and unchanged consumed
-reports leave them current. Positive pending facts share the existing bounded
+reports leave them current. Source denial and cache retirement have separate
+baselines: only the current cache load's cutoff and actual raw reports qualify
+its retirement, so an older vetoed source cannot evict an already updated value.
+Covered same-execution Ended activity without a report withdraws an unsupported
+inferred outcome, while retaining its native end clock and valid dismissibility;
+it grants no result or Stop authority. Positive pending facts share the existing bounded
 slot and source lifetime. Before baseline installation, native snapshots and
 streamed deltas both merge positive facts, preserving each fact's observation
 order. Later delivery/absence cannot erase a veto. Sticky overflow retains the
