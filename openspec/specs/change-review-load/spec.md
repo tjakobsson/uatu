@@ -3,7 +3,11 @@
 Define git-backed repository context for watched workspaces: repository metadata, the changed-files context measured against a resolved compare base, the bounded commit log, and gitignored-file exposure.
 ## Requirements
 ### Requirement: Detect git repository context for watched roots
-The system SHALL determine whether each watched root belongs to a git repository and SHALL expose repository context separately from the build identifier of the running `uatu` process. Repository context MUST include the repository root path, current branch name or detached commit, current commit short SHA, dirty worktree status, and whether the repository metadata is available. If a watched root is not inside a git repository or git metadata cannot be read, the system MUST keep the watch session usable and report an explicit non-git or unavailable state.
+The system SHALL determine Git membership for each watched root and expose repository context separately from the running `uatu` build identifier. Context MUST include repository root path, branch name or detached commit, current short SHA, dirty status, and metadata availability. Unavailable context MUST preserve usability as below.
+
+#### Scenario: A root has no readable repository metadata
+- **WHEN** a root is outside Git or its metadata cannot be read
+- **THEN** the system MUST keep the watch session usable and report explicit non-git or unavailable state
 
 #### Scenario: Watched root is inside a git repository
 - **WHEN** a session child is started with `.` inside a git repository
@@ -26,7 +30,11 @@ The system SHALL determine whether each watched root belongs to a git repository
 - **AND** the browser UI can render the updated branch, commit, and dirty status
 
 ### Requirement: Provide bounded git commit log context
-The system SHALL provide a bounded recent commit log for each detected git repository. Each commit entry MUST include at minimum the short SHA, subject, full commit message and commit time, plus the author when available. The commit time SHALL be an absolute timestamp so that clients can show a commit's age that stays current. Entries SHALL keep carrying the relative-time text for compatibility with older clients; current clients SHALL derive displayed ages from the commit time. The log MUST be contextual information only and MUST NOT alter the changed-files context.
+The system SHALL provide a bounded recent commit log per detected Git repository. Entries MUST include at least short SHA, subject, full message, commit time, and author when available. Commit time SHALL be absolute so clients can keep age current. The log MUST remain contextual and MUST NOT alter changed-files context; age compatibility SHALL follow the rule below.
+
+#### Scenario: Current and older clients consume a commit entry
+- **WHEN** a commit entry is delivered
+- **THEN** it SHALL retain relative-time text for older-client compatibility, while current clients SHALL derive displayed ages from absolute commit time
 
 #### Scenario: Repository has recent commits
 - **WHEN** a watched repository has git commits
@@ -45,7 +53,14 @@ The system SHALL provide a bounded recent commit log for each detected git repos
 
 ### Requirement: Expose changed-file categories through a distinct status letter
 
-The system SHALL emit a `ChangedFileSummary.status` value whose first character identifies the category of change. The supported first-character values MUST be `"?"` for untracked files, `"A"` for files newly added by a tracked commit or staged add, `"M"` for files modified in place, `"D"` for files deleted, and `"R"` for renames (which MAY append rename-similarity digits as in `git diff --name-status -M`). Untracked files (those reported by `git ls-files --others --exclude-standard`) MUST NOT be reported with `"A"`. Tracked-added files MUST NOT be reported with `"M"` or `"?"`. The full set of files contributing to the changed-files list MUST NOT change as a result of this requirement; only the category label changes. Downstream consumers that case-match on the first character of the status field MUST be able to use `"?"`, `"A"`, `"M"`, `"D"`, and `"R"` to identify the corresponding category without consulting any other field.
+`ChangedFileSummary.status` SHALL identify change category by its first character: `"?"` untracked, `"A"` tracked-commit or staged additions, `"M"` in-place modifications, `"D"` deletions, and `"R"` renames. Renames MAY append similarity digits as in `git diff --name-status -M`. Status assignment and downstream interpretation MUST preserve the rules below.
+
+#### Scenario: Changed-file categories are assigned and consumed
+- **WHEN** a changed-files list is emitted
+- **THEN** supported first-character values MUST be `"?"` for untracked, `"A"` for tracked-commit or staged additions, `"M"` for in-place modifications, `"D"` for deletions, and `"R"` for renames
+- **AND** files from `git ls-files --others --exclude-standard` MUST NOT use `"A"`, and tracked-added files MUST NOT use `"M"` or `"?"`
+- **AND** the contributing file set MUST NOT change because of this requirement; only category labels change
+- **AND** downstream consumers MUST be able to identify all five categories by case-matching the first character alone without consulting another field
 
 #### Scenario: An untracked file is reported with the untracked status
 
@@ -85,7 +100,12 @@ The system SHALL emit a `ChangedFileSummary.status` value whose first character 
 
 ### Requirement: Expose gitignored files visible in the tree as a distinct category
 
-The system SHALL expose files that exist on disk in a watched root AND are matched by git's standard ignore rules (`.gitignore`, `core.excludesFile`, `.git/info/exclude`) AND appear in uatu's tree path set, as a string array on `RepositorySnapshot.gitIgnoredFiles`. The set MUST be intersected against the tree's known paths server-side so the wire payload does not include large ignored hierarchies (e.g. `node_modules`) that the tree filtered out anyway. Gitignored files MUST NOT appear in `changedFiles` (that list describes git-detected changes; gitignored files are by definition not changes). Consumers MAY display these paths with a distinct annotation; the canonical mapping for browser UIs is `git status "!"` → annotation status `"ignored"`.
+`RepositorySnapshot.gitIgnoredFiles` SHALL be a string array of on-disk watched-root files matched by standard Git ignore rules (`.gitignore`, `core.excludesFile`, `.git/info/exclude`) and present in uatu's tree path set. The server MUST intersect with known tree paths, excluding filtered large hierarchies such as `node_modules`. Changed-file separation and annotation SHALL follow the rules below.
+
+#### Scenario: Ignored files stay outside changedFiles regardless of known tree paths
+- **WHEN** a file is Git-ignored, whether or not it appears in the tree's known paths
+- **THEN** it MUST NOT appear in `changedFiles`, which describes Git-detected changes rather than ignored files
+- **AND** consumers MAY annotate exposed ignored paths distinctly; browser UIs' canonical mapping is `git status "!"` to annotation status `"ignored"`
 
 #### Scenario: A file matched by `.gitignore` is exposed on `gitIgnoredFiles`
 
@@ -103,7 +123,16 @@ The system SHALL expose files that exist on disk in a watched root AND are match
 
 ### Requirement: Select the compare target
 
-The system SHALL expose a user-selectable compare target for the Change Overview. Supported targets MUST be `base` and `last-commit` with their existing diff meanings. The selected target SHALL apply uniformly to every watched repository in that client's view, SHALL persist as personal workspace state, and SHALL default to `base` when no saved value exists. Changing it MUST recompute and refresh only that client's changed-files context and diff requests without restarting the watch session, changing `.uatu.json`, altering the resolved base ref, or forcing another client to adopt the target. The watch child SHALL accept compare target as request/subscription context rather than retaining one mutable session-global selection. The control's accessible name SHALL describe comparison ("Compare against"), not review burden.
+Change Overview SHALL expose a user-selectable compare target. Supported targets MUST be `base` and `last-commit` with existing diff meanings. The target SHALL apply uniformly to all repositories in that client's view, persist as personal workspace state, and default to `base` without a saved value. The control's accessible name SHALL describe comparison ("Compare against"), not review burden. Changes SHALL follow the isolation rules below.
+
+#### Scenario: A client changes its compare target
+- **WHEN** a user chooses a target
+- **THEN** only that client's changed-files context and diff requests MUST recompute/refresh without restarting the watch session, changing `.uatu.json`, altering resolved base ref, or forcing another client's target
+- **AND** the watch child SHALL accept target as request/subscription context rather than a mutable session-global selection
+
+#### Scenario: Initial compare context is client-specific before any target change
+- **WHEN** the watch child receives an initial request or subscription with a compare target
+- **THEN** it SHALL accept that target as caller context rather than retaining one mutable session-global selection
 
 #### Scenario: Default compare target is the resolved base
 - **WHEN** a user has no saved compare target
@@ -135,7 +164,11 @@ The system SHALL expose a user-selectable compare target for the Change Overview
 
 ### Requirement: Anchor the changed-files context to a precise portable ref
 
-The system SHALL report, alongside the changed-files context, a precise anchor identifying the ref the comparison was actually computed against, so the displayed change set is unambiguous when read away from the compare-target control. For the `base` target the anchor SHALL name the actually resolved base ref (for example `origin/main` or `origin/master`). For the `last-commit` target the anchor SHALL be `HEAD`. The anchor MUST reflect what was actually resolved and computed, not the literal label of the selected control. The compare-target control itself MUST express intent in stable plain language ("Since base" / "Since last commit") and MUST NOT display raw refs, so its labels do not shift with repository configuration.
+Changed-files context SHALL include a precise comparison anchor. The anchor MUST name the actually resolved/computed ref, not the selected control's literal label. For `base` it SHALL name the resolved base (for example `origin/main` or `origin/master`); for `last-commit` it SHALL be `HEAD`, keeping context unambiguous away from the control. Control labels MUST follow the stable-intent rule below.
+
+#### Scenario: Repository configuration changes the resolved comparison ref
+- **WHEN** the compare-target control is displayed
+- **THEN** it MUST use stable plain-language intent ("Since base" / "Since last commit") and MUST NOT display raw refs or shift labels with repository configuration
 
 #### Scenario: Base anchor names the resolved ref
 - **WHEN** the compare target is `base` and the resolved base ref is `origin/main`
@@ -149,4 +182,3 @@ The system SHALL report, alongside the changed-files context, a precise anchor i
 - **WHEN** the compare-target control is rendered for any repository configuration
 - **THEN** its options read as plain intent ("Since base" / "Since last commit")
 - **AND** the options do not display raw ref names
-

@@ -58,7 +58,7 @@ beforeAll(async () => {
   first = path.join(directory, "project"); second = path.join(directory, "other");
   for (const root of [first, second]) {
     await mkdir(path.join(root, "build/renders"), { recursive: true });
-    await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { include: ["build/renders"], exclude: ["private.wav"] } }));
+    await writeFile(path.join(root, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["private.wav", "build/objects/"] } }));
     await writeFile(path.join(root, ".gitignore"), "build/\n");
     await writeFile(path.join(root, "private.wav"), "must not cross Hub");
     await writeFile(path.join(root, ".env.wav"), "secret fixture");
@@ -71,6 +71,9 @@ beforeAll(async () => {
   await generatedFile(path.join(first, "build/renders/larger.wav"), 512 * MiB);
   watch = createWatchSession([{ kind: "dir", absolutePath: first }, { kind: "dir", absolutePath: second }], false, { metrics });
   await watch.start();
+  // The first root ignores build/: its existing renders are read once listed.
+  expect((await watch.listFolder(first, "build")).status).toBe("listed");
+  expect((await watch.listFolder(first, "build/renders")).status).toBe("listed");
   await waitFor(() => [path.join(first, "build/renders/larger.wav"), path.join(first, "build/renders/large.wav"),
     ...[first, second].map(root => path.join(root, "build/renders/same.wav"))].every(file => !!watch.findDocument(file)), "media discovery");
   const assets: RouteAssets = {
@@ -183,7 +186,11 @@ describe("authenticated Hub media delivery", () => {
     // Browsing visibility is not an exposure restriction.
     const hidden = mediaUrl(doc(first)); hidden.searchParams.set("showIgnored", "0");
     const allowed = await get(hidden); expect(allowed.status).toBe(200); await allowed.body?.cancel();
-    for (const denied of ["private.wav", ".env.wav", "build/objects/no.wav", "../other/build/renders/same.wav"]) {
+    // Secret-like names are ordinary files now; only explicit exclusions refuse.
+    const envDoc = watch.findDocument(path.join(first, ".env.wav"));
+    if (!envDoc) throw new Error("secret-like fixture was not indexed");
+    const secretLike = await get(mediaUrl(envDoc)); expect(secretLike.status).toBe(200); await secretLike.body?.cancel();
+    for (const denied of ["private.wav", "build/objects/no.wav", "../other/build/renders/same.wav"]) {
       const target = mediaUrl(doc(first)); target.searchParams.set("path", denied);
       const refused = await get(target); expect(refused.status).toBeGreaterThanOrEqual(400); await refused.body?.cancel();
     }

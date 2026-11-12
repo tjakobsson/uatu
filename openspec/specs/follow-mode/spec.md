@@ -8,7 +8,13 @@ Define the single-mode Follow behavior in the uatu SPA: a sidebar-header chip ba
 
 ### Requirement: Follow toggle exposes a single session-level boolean
 
-The browser UI SHALL expose a Follow toggle that controls one piece of session state — a boolean `followEnabled`. The toggle has two mutually exclusive presentations: the "Follow chip" in the expanded sidebar header, and an icon control in the collapsed sidebar rail. Exactly one presentation is visible at a time (matching the sidebar's collapsed state), and whichever is visible MUST reflect `followEnabled` exactly via its `aria-pressed` attribute: `"true"` when Follow is on, `"false"` when off. Beyond these two presentations there SHALL be no other UI-visible representation of Follow's state. The toggle MUST be reachable by mouse, touch, and keyboard following the existing chip-control conventions in both presentations.
+The browser UI SHALL expose a Follow toggle that controls one piece of session state — a boolean `followEnabled`. Its only presentations SHALL be the expanded sidebar's Follow chip and the collapsed sidebar rail's icon control, with exactly one visible according to sidebar state.
+
+#### Scenario: Both Follow presentations expose the same accessible state
+- **WHEN** the sidebar shows the Follow chip or its collapsed-rail counterpart
+- **THEN** the visible control MUST reflect `followEnabled` exactly via `aria-pressed`: `"true"` when on and `"false"` when off
+- **AND** beyond these two presentations there SHALL be no other UI-visible representation of Follow's state
+- **AND** both presentations MUST be reachable by mouse, touch, and keyboard following existing chip-control conventions
 
 #### Scenario: Chip aria-pressed mirrors the session state
 - **WHEN** the SPA boots and `followEnabled` is `true`
@@ -31,13 +37,55 @@ The browser UI SHALL expose a Follow toggle that controls one piece of session s
 
 The system SHALL implement exactly four behavioral rules linking Follow to selection and file events. No other code path SHALL change `appState.followEnabled` or `appState.selectedDocument` in response to a file event, native tree-row interaction, or the Follow chip click.
 
-**Rule A (user explicitly navigates through the tree):** Activating a file SHALL select that document and set `followEnabled` to `false`, including when the file is already selected. Manually collapsing any ancestor of the active file SHALL instead clear the document selection and preview, establish intentional-empty selection, and set `followEnabled` to `false`. Reopening the directory SHALL NOT restore the document. Opening a folder, collapsing an unrelated folder, moving focus without an ancestor collapse, or collapsing with no active document SHALL leave the active document and Follow unchanged. Both Rule A outcomes MUST fire only for genuine user interactions, including pointer, touch, and supported keyboard activation/collapse; programmatic or library-driven callbacks during mount, refresh, reset, or filter reconciliation MUST NOT trigger them (see "Tree-mount user-click guard" below).
+#### Scenario: Rule A applies only to genuine tree navigation
+- **WHEN** a user activates a file or operates a tree folder
+- **THEN** activating a file SHALL select that document and set `followEnabled` to `false`, including when already selected
+- **AND** manually collapsing any active-file ancestor SHALL instead clear selection and preview, establish intentional-empty selection, and set `followEnabled` to `false`; reopening SHALL NOT restore the document
+- **AND** opening a folder, collapsing an unrelated folder, moving focus without ancestor collapse, or collapsing without an active document SHALL leave the document and Follow unchanged
+- **AND** both Rule A outcomes MUST fire only for genuine pointer, touch, or supported keyboard activation/collapse; programmatic or library-driven callbacks during mount, refresh, reset, or filter reconciliation MUST NOT trigger them (see "Tree-mount user-click guard" below)
 
-**Rule B (user clicks the Follow chip):** `followEnabled` MUST be flipped. When the flip is `false → true`, intentional-empty selection SHALL be cleared and the selection MUST jump to the newest-mtime non-binary document in the current session if that document differs from the current selection. Images are not candidates for this catch-up: their modification times often reflect a checkout rather than an edit, so Follow switches to an image only when it changes (Rule C).
+#### Scenario: Programmatic callbacks never impersonate Rule A navigation
+- **WHEN** mount, refresh, reset, or filter reconciliation produces a programmatic or library-driven tree callback without a genuine user activation or collapse
+- **THEN** it MUST NOT trigger either Rule A outcome
 
-**Rule C (file changes on disk, Follow on):** Selection MUST move to the changed file when the preview can show it: a Markdown, AsciiDoc, or text document, or an image the preview renders inline. A change to any other binary file MUST NOT change the selection. The exception is an image embedded in the document the preview currently shows: its change MUST NOT move the selection, and the embedded image refreshes in place instead. Which images a document embeds SHALL be determined from the document's rendered content, not from what the preview currently displays, so the exception holds whether the document is shown Rendered, as Source, as a Diff, or in a split layout. Until the images the shown document's current revision embeds are known, an image change MUST NOT move the selection; the decision SHALL wait for them and then apply this rule, provided Follow is still on, the same document is still selected at the same revision, and no later file change, selection, or Follow switch has decided the selection meanwhile. If they cannot be determined (the lookup fails or goes unanswered for 10 seconds), the image SHALL be followed. A document change arriving meanwhile is followed at once and the waiting image decision is dropped.
+#### Scenario: Rule B catches up when the Follow chip enables Follow
+- **WHEN** the user clicks the Follow chip
+- **THEN** `followEnabled` MUST be flipped
+- **AND** a `false → true` flip SHALL clear intentional-empty selection and MUST jump to the current session's newest-mtime non-binary document Git does not ignore, if different from the current selection
+- **AND** images SHALL NOT be catch-up candidates because their modification times often reflect checkout rather than editing; Follow switches to an image only on change (Rule C)
 
-**Rule D (file changes on disk, Follow off):** Selection MUST NOT change. If the changed document equals the current selection, the preview MUST reload its content in place. If the changed document differs from the current selection, no preview reload occurs but the tree MUST still refresh its row set. Intentional-empty selection SHALL remain empty: a file event MUST NOT choose a default document or restore a previously closed document.
+#### Scenario: Rule C follows eligible changes after resolving Git-ignore status
+- **GIVEN** Follow is on
+- **WHEN** a file changes on disk
+- **THEN** selection MUST move to a changed Markdown, AsciiDoc, or text document or inline-previewable image, subject to the embedded-image exception below
+- **AND** changes to other binaries MUST NOT change selection
+- **AND** changes to files Git ignores MUST NOT change selection regardless of type or ignored-file visibility
+- **AND** while ignore status is being determined the decision SHALL wait; if it cannot be determined the file SHALL be treated as not ignored
+
+#### Scenario: Rule C refreshes embedded images without leaving the shown document
+- **GIVEN** Follow is on and an image changes
+- **WHEN** the image is embedded by the shown document's rendered content
+- **THEN** its change MUST NOT move selection and the embedded image SHALL refresh in place instead
+- **AND** embedded images SHALL be determined from rendered content, not the current display, so the exception holds in Rendered, Source, Diff, and split layouts
+
+#### Scenario: Embedding decisions use rendered document content in every layout
+- **GIVEN** Follow is on
+- **WHEN** the shown document's embedded images must be determined for a Follow decision
+- **THEN** they SHALL be determined from the document's rendered content, not the current display, whether shown Rendered, Source, Diff, or split
+
+#### Scenario: Rule C defers unresolved image decisions without overriding newer intent
+- **GIVEN** Follow is on and the shown document's current-revision embedded images are not yet known
+- **WHEN** an image changes
+- **THEN** it MUST NOT move selection until the images are known; the decision SHALL wait and then apply Rule C only if Follow remains on, the same document and revision remain selected, and no later file change, selection, or Follow switch has decided selection meanwhile
+- **AND** if lookup fails or goes unanswered for 10 seconds, the image SHALL be followed
+- **AND** a document change arriving meanwhile SHALL be followed at once and the waiting image decision SHALL be dropped
+
+#### Scenario: Rule D refreshes rows and current content without changing selection
+- **GIVEN** Follow is off
+- **WHEN** a file changes on disk
+- **THEN** selection MUST NOT change
+- **AND** a change to the selected document MUST reload its content in place; another document's change SHALL NOT reload the preview but MUST still refresh the tree's row set
+- **AND** intentional-empty selection SHALL remain empty: a file event MUST NOT choose a default document or restore a previously closed document
 
 #### Scenario: Rule A — clicking a row turns Follow off
 - **WHEN** Follow is on and the user clicks `guides/setup.md` in the tree
@@ -130,6 +178,28 @@ The system SHALL implement exactly four behavioral rules linking Follow to selec
 - **AND** the user clicks the Follow chip
 - **THEN** the selection moves to `guides/setup.md`
 
+#### Scenario: Rule C — a change to an ignored file is not followed
+- **WHEN** Follow is on, the selection is `README.md`, Show ignored files is on, Git ignores `build/`, and a watcher event reports that `build/renders/take-3.wav` or `build/report.md` changed
+- **THEN** the selection remains `README.md`
+- **AND** the changed file still appears and updates in the Files views
+
+#### Scenario: Rule C — a batch mixing ignored output and a document follows the document
+- **WHEN** Follow is on and one batch contains an edit to `guides/setup.md` followed by writes under an ignored `dist/`
+- **THEN** the selection moves to `guides/setup.md`
+
+#### Scenario: Rule C — a tracked file inside an output folder is followed
+- **WHEN** Follow is on, Git tracks `dist/index.html`, and it changes
+- **THEN** the selection moves to `dist/index.html`
+
+#### Scenario: Rule C — an opened ignored file still refreshes
+- **WHEN** the user has opened the ignored `build/report.md` and a rebuild rewrites it
+- **THEN** the selection remains `build/report.md` and its preview shows the new content
+
+#### Scenario: Rule B — turning Follow on skips newer ignored files
+- **WHEN** Follow is off, the newest-mtime non-binary file in the session is the ignored `build/report.md`, and the newest-mtime document Git does not ignore is `guides/setup.md`
+- **AND** the user clicks the Follow chip
+- **THEN** the selection moves to `guides/setup.md`
+
 #### Scenario: Rule D — file change with Follow off reloads the current document in place
 - **WHEN** Follow is off, the selection is `README.md`, and a watcher event reports that `README.md` changed
 - **THEN** the selection remains `README.md`
@@ -149,7 +219,12 @@ The system SHALL implement exactly four behavioral rules linking Follow to selec
 
 ### Requirement: Tree-mount user-click guard
 
-The `TreeView` wrapper around `@pierre/trees` SHALL distinguish genuine user-initiated file activation and ancestor collapse from library-driven or programmatic selection and expansion changes. Rule A's document-selection and deselection outcomes MUST execute only for the corresponding real user action. Every code path that programmatically reconciles tree selection or expansion — including initial mount with a pre-selected document, file-event refresh, route-driven re-selection, change-overview navigation, path resets, filter transitions, and expansion restoration — MUST suppress Rule A's selection-clearing and Follow-off effects for that programmatic operation. This guard MUST NOT swallow subsequent genuine user input or prevent the library's keyboard navigation.
+The `TreeView` wrapper around `@pierre/trees` SHALL distinguish genuine user-initiated file activation and ancestor collapse from library-driven or programmatic selection and expansion changes. Rule A's document-selection and deselection outcomes MUST execute only for the corresponding real user action.
+
+#### Scenario: Every programmatic reconciliation suppresses Rule A only for that operation
+- **WHEN** tree selection or expansion is programmatically reconciled, including initial mount with a preselected document, file-event refresh, route-driven re-selection, change-overview navigation, path resets, filter transitions, or expansion restoration
+- **THEN** every such code path MUST suppress Rule A's selection-clearing and Follow-off effects for that operation
+- **AND** the guard MUST NOT swallow subsequent genuine user input or prevent library keyboard navigation
 
 #### Scenario: Initial mount does not flip Follow off
 - **WHEN** the SPA boots with `followEnabled = true` (server default) and a pre-selected document
@@ -182,7 +257,12 @@ The `TreeView` wrapper around `@pierre/trees` SHALL distinguish genuine user-ini
 
 ### Requirement: Follow defaults to ON; URL direct links force OFF on boot
 
-The system SHALL restore `followEnabled` from the current user's personal workspace state when the SPA boots at the workspace root. If no saved Follow value exists, it SHALL use the server-provided `initialFollow` value, whose default is `true` and which the CLI `--no-follow` flag sets to `false`. When an explicit document or preview URL is opened, the system MUST set Follow off for that client regardless of saved or server defaults. User changes to Follow SHALL be persisted for future root arrivals but SHALL NOT change Follow in another already-open client.
+The system SHALL restore `followEnabled` from the current user's personal workspace state when the SPA boots at the workspace root. If no saved Follow value exists, it SHALL use the server-provided `initialFollow` value, whose default is `true` and which the CLI `--no-follow` flag sets to `false`.
+
+#### Scenario: Direct arrivals and saved changes remain client-local
+- **WHEN** an explicit document or preview URL opens, or a user changes Follow
+- **THEN** an explicit URL MUST set Follow off for that client regardless of saved or server defaults
+- **AND** user changes SHALL persist for future root arrivals but SHALL NOT change Follow in another already-open client
 
 #### Scenario: Root arrival restores saved Follow
 - **WHEN** personal workspace state contains `follow=false`
@@ -229,7 +309,13 @@ working context.
 
 ### Requirement: Manual selection survives background reconciliation
 
-While Follow is off and a file is selected, filesystem updates, index reconciliation, reconnects, page resume, and programmatic tree updates SHALL preserve that file's identity and browser URL. This applies to every selectable file, including text, Markdown, images, and files with an unavailable-preview presentation. A change in file classification MUST NOT select a different file. Existing explicit navigation and enabling Follow remain intentional ways to change selection. An update to the selected file SHALL refresh its available content in place without moving focus or the active touch tab.
+While Follow is off and a file is selected, filesystem updates, index reconciliation, reconnects, page resume, and programmatic tree updates SHALL preserve that file's identity and browser URL.
+
+#### Scenario: Background reconciliation preserves all selectable file kinds
+- **GIVEN** Follow is off and any selectable file is selected, including text, Markdown, images, or unavailable-preview files
+- **WHEN** background reconciliation or a selected-file update occurs
+- **THEN** a classification change MUST NOT select another file; explicit navigation and enabling Follow remain intentional ways to change selection
+- **AND** an update to the selected file SHALL refresh available content in place without moving focus or the active touch tab
 
 #### Scenario: Text selection survives unrelated edits
 - **WHEN** Follow is off, the user is viewing a Markdown or source file, and another file changes repeatedly
@@ -247,7 +333,15 @@ While Follow is off and a file is selected, filesystem updates, index reconcilia
 
 ### Requirement: Unavailable manual selections retain their destination
 
-With Follow off, a selected file that disappears from the allowed index SHALL remain the selected destination and SHALL display a named unavailable state instead of a different file. Its previous contents MUST NOT be presented as current contents. The destination SHALL survive an empty index and a classification change. If the same file path becomes available again, its preview SHALL recover automatically only while that destination is still selected. Index removal caused by ignore or exposure rules MUST NOT be bypassed to read a retained destination. A renamed file SHALL be treated as an unavailable old path until explicit navigation chooses its new path.
+With Follow off, a selected file that disappears from the allowed index SHALL remain the selected destination and SHALL display a named unavailable state instead of a different file. Its previous contents MUST NOT be presented as current contents.
+
+#### Scenario: Retained unavailable destinations recover only within current selection and exposure rules
+- **GIVEN** Follow is off and the selected destination becomes unavailable
+- **WHEN** the unavailable destination is retained, refreshed, reclassified, or becomes available again
+- **THEN** the destination SHALL survive an empty index and classification change
+- **AND** preview SHALL recover automatically on same-path return only while that destination remains selected
+- **AND** removal by ignore or exposure rules MUST NOT be bypassed to read the retained destination
+- **AND** a renamed file SHALL remain an unavailable old path until explicit navigation chooses the new path
 
 #### Scenario: File is replaced during an edit
 - **WHEN** the selected file is absent from one snapshot and returns in a later snapshot while Follow remains off
@@ -282,12 +376,25 @@ Only work belonging to the current selection and preview mode SHALL update the p
 
 ### Requirement: Discovery does not impersonate file edits
 
-Initial discovery SHALL populate the file tree without causing Follow to visit each discovered file. On completion, an untouched initial session SHALL use the existing newest-mtime non-binary default selection. Explicit navigation, restored selection, direct links, deliberate emptiness, and newer live-event selection SHALL take precedence over that default. Discovery SHALL NOT move keyboard focus, change the active surface, or enable Follow. Catch-up requested while indexing is incomplete SHALL finish once the inventory is ready only if no newer user action or live-event selection has superseded it.
+Initial discovery SHALL populate the file tree without causing Follow to visit each discovered file. On completion, an untouched initial session SHALL use the existing newest-mtime non-binary default selection, excluding files Git ignores.
+
+#### Scenario: Discovery completion respects prior intent and current working context
+- **WHEN** discovery completes or a catch-up requested during incomplete indexing becomes ready
+- **THEN** explicit navigation, restored selection, direct links, deliberate emptiness, and newer live-event selection SHALL take precedence over the default
+- **AND** deferred catch-up SHALL finish only if no newer user action or live-event selection superseded it
+
+#### Scenario: Ongoing and completed discovery preserve interaction state
+- **WHEN** discovery makes progress or completes
+- **THEN** it SHALL NOT move keyboard focus, change the active surface, or enable Follow
 
 #### Scenario: Follow is on during discovery
 - **WHEN** many existing files are discovered before the inventory is complete
 - **THEN** the tree fills without a preview load for every discovered file
 - **AND** an otherwise untouched session selects the newest eligible file once discovery completes
+
+#### Scenario: Discovery finds a newer ignored file than any document
+- **WHEN** the newest non-binary file discovered is Gitignored and Follow is on in an untouched session
+- **THEN** discovery completion selects the newest non-binary file Git does not ignore
 
 #### Scenario: The user navigates before discovery finishes
 - **WHEN** the user selects a file or deliberately clears selection during indexing
@@ -300,7 +407,30 @@ Initial discovery SHALL populate the file tree without causing Follow to visit e
 
 ### Requirement: Batch follow selection and active-file freshness are independent
 
-For each applied live file batch, Follow SHALL select the last observed eligible create or modification in the client's scope that remains present after the batch. Eligible changes are those Rule C follows: documents and images the preview renders inline. A later event for another binary, a directory, or a removal MUST NOT erase an earlier eligible candidate. With Follow off, the selected destination SHALL remain unchanged, and an update to that destination SHALL reload current content even when another path is the batch's Follow candidate. With Follow on and the target already selected, its update SHALL still reload current content. No refresh SHALL reuse a preview cache invalidated by the batch. Source, Rendered, split, Diff, and image presentations SHALL invalidate affected representations; historical commit previews SHALL remain historical. Selection changes SHALL preserve existing URL replacement, focus, active-surface, and programmatic-tree guards.
+For each applied live file batch, Follow SHALL select the last observed eligible create or modification in the client's scope that remains present after the batch. Eligible changes are those Rule C follows: documents and images the preview renders inline. Batch selection and active-file freshness SHALL remain independent.
+
+#### Scenario: Later ineligible events cannot erase an eligible Follow candidate
+- **WHEN** a batch has an eligible candidate followed by another binary, a directory, or a removal
+- **THEN** that later event MUST NOT erase the earlier eligible candidate
+
+#### Scenario: Every batch-driven selection change retains navigation guards
+- **WHEN** a live batch changes selection, including a batch containing only eligible events
+- **THEN** it SHALL preserve existing URL replacement, focus, active-surface, and programmatic-tree guards
+
+#### Scenario: Current-file invalidation does not depend on the batch's Follow candidate
+- **WHEN** a batch updates the currently selected destination
+- **THEN** with Follow off the destination SHALL remain unchanged and reload current content even if another path is the Follow candidate
+- **AND** with Follow on and the target already selected its update SHALL still reload current content
+
+#### Scenario: Every applied batch invalidates affected current representations
+- **WHEN** a live file batch is applied, whether or not it updates the selected destination
+- **THEN** Source, Rendered, split, Diff, and image presentations SHALL invalidate affected representations, while historical commit previews SHALL remain historical
+- **AND** no refresh SHALL reuse a preview cache invalidated by the batch
+
+#### Scenario: Follow-off selection survives a batch affecting only other paths
+- **GIVEN** Follow is off
+- **WHEN** any live file batch is applied, including one that does not update the selected destination
+- **THEN** the selected destination SHALL remain unchanged
 
 #### Scenario: A binary event follows a text edit
 - **WHEN** Follow is on and a batch contains a text edit followed by an edit to a binary the preview cannot show

@@ -1,17 +1,60 @@
 ## MODIFIED Requirements
 
 ### Requirement: Timeline position remains stable under streaming and navigation
-The Chat timeline SHALL follow the latest content until the reader deliberately scrolls upward. Following SHALL resume when deliberate downward reader movement returns within 48 CSS pixels of the bottom, including the boundary, or the reader activates the accessible latest-content affordance. Once following is paused, streaming, message submission, tool updates, image or code layout, and activity expansion MUST NOT steal the reading position; the latest-content affordance SHALL indicate unseen updates and return to the end. Prepending older history SHALL preserve the same visible content and offset. During a client session, each conversation and task view SHALL retain its own reading anchor and follow state across navigation: paused views restore their reading position, following views catch up to latest, and first-time views open at latest. Existing client-local restoration across reloads remains supported where possible.
 
-Each shell viewport SHALL have a follow state independent of the outer timeline and other shell items. It SHALL initially follow the bottom. Any upward reader scroll SHALL stop following, including a movement smaller than a near-bottom threshold. Returning to the bottom or activating the viewport's accessible latest-output control SHALL resume following. Incoming output while following SHALL keep the bottom visible without resetting the horizontal offset. While following is paused, incoming output SHALL preserve the visible rendered content and its vertical offset, and the latest-output control SHALL indicate unseen output.
+Chat timelines and shell viewports SHALL preserve reading anchors and independent follow intent through streaming, navigation, layout, and command lifecycle changes. Latest controls SHALL resume stable following; manual upward scrolling SHALL immediately pause it without moving unrelated views.
 
-Output updates, layout resize, inline height adjustment, Pop out, Maximize, Restore size, Return to chat, changes between desktop and touch presentation, and completion or failure SHALL preserve the shell item's horizontal position, vertical reading anchor, chosen inline height, and follow state. Position and applied size SHALL be clamped only where the available content or layout cannot accommodate them. A layout change that clamps position to the bottom MUST NOT itself resume paused following. Resizing or popping out shell output SHALL preserve the outer timeline's reading anchor, and returning inline SHALL preserve its current reading anchor, including any deliberate outer scrolling while the nonmodal window was open. Shell scrolling and its latest-output control MUST NOT independently move the outer timeline to its end. Long shell output SHALL preserve long-chat responsiveness, text selection, copying, and find over available rendered output.
+#### Scenario: Content streams, older history is prepended, activity expands, or a conversation opens
+- **WHEN** the reader scrolls, submits a message, receives streaming content, prepends older history, expands activity, opens or navigates between conversation and task views, or reloads the client
+- **THEN** The Chat timeline SHALL follow the latest content until the reader deliberately scrolls upward.
+- **AND** Following SHALL resume when deliberate downward reader movement returns within 48 CSS pixels of the bottom, including the boundary, or the reader activates the accessible latest-content affordance.
+- **AND** Once following is paused, streaming, message submission, tool updates, image or code layout, and activity expansion MUST NOT steal the reading position; the latest-content affordance SHALL indicate unseen updates and return to the end.
+- **AND** Prepending older history SHALL preserve the same visible content and offset.
+- **AND** During a client session, each conversation and task view SHALL retain its own reading anchor and follow state across navigation: paused views restore their reading position, following views catch up to latest, and first-time views open at latest.
+- **AND** Existing client-local restoration across reloads remains supported where possible.
 
-Following SHALL be smooth and stable in both parent and child outer timelines and in each shell output viewport, whether inline or popped out. Brief catch-up behind incoming content is permitted; repeated updates MUST NOT restart native smooth scrolling or introduce competing position writers. While following during passive append-only updates, automatic movement MUST NOT alternate upward and downward when the scroll extent is not shrinking. In controlled regression fixtures, following SHALL settle within 300ms after the final layout update. The reduced-motion preference SHALL disable follow animation. Initial presentation and reading-position restoration SHALL place content directly rather than animate from an unrelated position. Activating the relevant latest-content or latest-output control during streaming SHALL settle at the current bottom and continue following without oscillation between smooth movement and snapping. Any upward manual scroll SHALL interrupt automatic movement immediately and pause following, even during movement initiated by a latest control. Resize effects and programmatic scroll echoes MUST NOT change the reader's follow intent. A shrinking layout or content extent MAY cause a legitimate position clamp without being treated as follow jitter or resuming paused following.
+#### Scenario: The reader scrolls a shell viewport upward, returns to its bottom, or activates latest output
+- **WHEN** a shell viewport first shows or receives output, the reader scrolls it upward, returns to its bottom, or activates latest output
+- **THEN** Each shell viewport SHALL have a follow state independent of the outer timeline and other shell items.
+- **AND** It SHALL initially follow the bottom.
+- **AND** Any upward reader scroll SHALL stop following, including a movement smaller than a near-bottom threshold.
+- **AND** Returning to the bottom or activating the viewport's accessible latest-output control SHALL resume following.
+- **AND** Incoming output while following SHALL keep the bottom visible without resetting the horizontal offset.
+- **AND** While following is paused, incoming output SHALL preserve the visible rendered content and its vertical offset, and the latest-output control SHALL indicate unseen output.
 
-When following is paused, layout changes elsewhere SHALL preserve the unchanged visible reading anchor within a 2px tolerance in controlled regression fixtures, rather than merely preserving a raw scroll offset. Explicitly activated expanding or collapsing controls SHALL remain stable and visible where the available viewport permits.
+#### Scenario: Shell output or layout changes, its presentation changes, or its command completes or fails
+- **WHEN** shell output or layout changes, its presentation changes, or its command completes or fails
+- **THEN** Output updates, layout resize, inline height adjustment, Pop out, Maximize, Restore size, Return to chat, changes between desktop and touch presentation, and completion or failure SHALL preserve the shell item's horizontal position, vertical reading anchor, chosen inline height, and follow state.
+- **AND** Position and applied size SHALL be clamped only where the available content or layout cannot accommodate them.
+- **AND** A layout change that clamps position to the bottom MUST NOT itself resume paused following.
+- **AND** Resizing or popping out shell output SHALL preserve the outer timeline's reading anchor, and returning inline SHALL preserve its current reading anchor, including any deliberate outer scrolling while the nonmodal window was open.
+- **AND** Shell scrolling and its latest-output control MUST NOT independently move the outer timeline to its end.
+- **AND** Long shell output SHALL preserve long-chat responsiveness, text selection, copying, and find over available rendered output.
 
-Already loaded ordinary assistant text SHALL retain real layout geometry rather than skipped-body placeholder heights as it enters a parent or child reading viewport. This SHALL NOT require fetching additional history, materializing closed tool bodies, or changing independent shell scrolling. Deferred activity SHALL retain its existing presentation policy. Scrolling and subsequent unseen output SHALL preserve the same visible word and paused follow intent.
+#### Scenario: Parent or child timelines or shell viewports follow append-only streaming or latest-control movement
+- **WHEN** parent or child timelines or shell viewports follow incoming content or latest-control movement, initially present or restore a reading position, resize, change motion preference, or receive manual upward input
+- **THEN** Following SHALL be smooth and stable in both parent and child outer timelines and in each shell output viewport, whether inline or popped out.
+- **AND** Brief catch-up behind incoming content is permitted; repeated updates MUST NOT restart native smooth scrolling or introduce competing position writers.
+- **AND** While following during passive append-only updates, automatic movement MUST NOT alternate upward and downward when the scroll extent is not shrinking.
+- **AND** In controlled regression fixtures, following SHALL settle within 300ms after the final layout update.
+- **AND** The reduced-motion preference SHALL disable follow animation.
+- **AND** Initial presentation and reading-position restoration SHALL place content directly rather than animate from an unrelated position.
+- **AND** Activating the relevant latest-content or latest-output control during streaming SHALL settle at the current bottom and continue following without oscillation between smooth movement and snapping.
+- **AND** Any upward manual scroll SHALL interrupt automatic movement immediately and pause following, even during movement initiated by a latest control.
+- **AND** Resize effects and programmatic scroll echoes MUST NOT change the reader's follow intent.
+- **AND** A shrinking layout or content extent MAY cause a legitimate position clamp without being treated as follow jitter or resuming paused following.
+
+#### Scenario: Paused reading or activated controls encounter layout changes
+- **WHEN** following is paused and layout changes elsewhere, or the reader explicitly activates an expanding or collapsing control
+- **THEN** while following is paused, layout changes elsewhere SHALL preserve the unchanged visible reading anchor within a 2px tolerance in controlled regression fixtures, rather than merely preserving a raw scroll offset
+- **AND** explicitly activated expanding or collapsing controls SHALL remain stable and visible where the available viewport permits
+
+#### Scenario: Already loaded ordinary assistant text enters a reading viewport
+- **WHEN** already loaded ordinary assistant text enters a parent or child reading viewport, the reader scrolls, or subsequent unseen output arrives
+- **THEN** that text SHALL retain real layout geometry rather than skipped-body placeholder heights
+- **AND** this SHALL NOT require fetching additional history, materializing closed tool bodies, or changing independent shell scrolling
+- **AND** deferred activity SHALL retain its existing presentation policy
+- **AND** scrolling and subsequent unseen output SHALL preserve the same visible word and paused follow intent
 
 #### Scenario: Loaded text remains ready and anchored during history reading
 
@@ -186,30 +229,89 @@ Already loaded ordinary assistant text SHALL retain real layout geometry rather 
 - **AND** upward reader input can cancel queued and in-flight movement
 
 ### Requirement: OpenCode 2.x conversations can steer the running turn
-An agent that can deliver a message into its running turn at the next safe step boundary, and can withdraw or switch a message before then, SHALL declare the `steering` capability. The OpenCode 2.x agent SHALL declare it. The OpenCode 1.x agent and the Claude Code agent SHALL NOT declare it.
 
-While a conversation whose agent declares `steering` is running or has pending messages, the composer SHALL offer two deliveries through fixed actions. Tap Send and desktop Enter SHALL steer. Touch Enter SHALL insert a newline, idle or busy, including while a command candidate is shown; Ctrl/Command+Enter SHALL explicitly steer. ⌥Enter (Option/Alt+Enter) SHALL queue where the choice is offered. Steer SHALL be the fixed keyboard default, not a per-device setting; legacy saved delivery choices SHALL be ignored without deleting browser settings. There SHALL be no delivery-default Settings path, Send dropdown, replacement selector or added layout height. The existing Send hold SHALL arm for 500ms, count down for two seconds and queue once at 2500ms; release during the armed countdown SHALL cancel. Commands and attachment-bearing drafts SHALL retain mandatory queue semantics, and idle submission SHALL retain immediate delivery. Explicit HTTP delivery and dock delivery actions, capability gates and unsupported agents' queued follow-ups SHALL remain unchanged.
+OpenCode 2.x SHALL declare steering and support fixed steer/queue actions, safe withdrawal and uncertainty handling, paused-batch resume, and agent-owned pending reconciliation. The dock SHALL retain ordered user entries and accessible, bounded, responsive pending controls without changing unsupported-agent semantics.
 
-A steer SHALL be handed to the agent at once and kept pending by the agent until the agent delivers it. Steers SHALL be delivered before any held message. The expanded dock SHALL list the user's pending steers, from any client of the conversation, labelled "Steer", and SHALL NOT list the agent's own internal inbox entries. A steer SHALL NOT appear in the timeline until the agent reports it delivered, at which point it SHALL appear as an ordinary user message. Outside compact keyboard/short-landscape mode, pending steers SHALL carry the dock note that they run with the conversation's model and mode as they stand when they are delivered.
+#### Scenario: An agent declares whether it can deliver, withdraw, or switch input at a running turn's safe step boundary
+- **WHEN** an agent declares whether it can deliver, withdraw, or switch input at a running turn's safe step boundary
+- **THEN** An agent that can deliver a message into its running turn at the next safe step boundary, and can withdraw or switch a message before then, SHALL declare the `steering` capability.
+- **AND** The OpenCode 2.x agent SHALL declare it.
+- **AND** The OpenCode 1.x agent and the Claude Code agent SHALL NOT declare it.
 
-For each pending entry, the user SHALL be able to:
-- switch a queued message to steer, which hands it to the agent as a steer at once; on a dormant queue or an idle conversation this is how a held message is sent now;
-- switch a steer back to queue, which withdraws it from the agent and holds it in the workspace's queue in its submission order;
-- edit or remove a steer, which withdraws it from the agent.
+#### Scenario: A steering conversation is running or has pending input and the user chooses Send, keyboard delivery, or hold-to-queue
+- **WHEN** a steering conversation is running or has pending input and the user chooses Send, keyboard delivery, or hold-to-queue
+- **THEN** While a conversation whose agent declares `steering` is running or has pending messages, the composer SHALL offer two deliveries through fixed actions.
+- **AND** Tap Send and desktop Enter SHALL steer.
+- **AND** Touch Enter SHALL insert a newline, idle or busy, including while a command candidate is shown; Ctrl/Command+Enter SHALL explicitly steer. ⌥Enter (Option/Alt+Enter) SHALL queue where the choice is offered.
+- **AND** Steer SHALL be the fixed keyboard default, not a per-device setting; legacy saved delivery choices SHALL be ignored without deleting browser settings.
+- **AND** There SHALL be no delivery-default Settings path, Send dropdown, replacement selector or added layout height.
+- **AND** The existing Send hold SHALL arm for 500ms, count down for two seconds and queue once at 2500ms; release during the armed countdown SHALL cancel.
+- **AND** Commands and attachment-bearing drafts SHALL retain mandatory queue semantics, and idle submission SHALL retain immediate delivery.
+- **AND** Explicit HTTP delivery and dock delivery actions, capability gates and unsupported agents' queued follow-ups SHALL remain unchanged.
 
-Withdrawing a steer SHALL complete only when the agent confirms the withdrawal. If the agent delivers the steer first, the withdrawal SHALL fail, the message SHALL stay delivered, and the user SHALL be told it was already delivered. A message SHALL never be delivered twice.
+#### Scenario: A steer is admitted, remains pending with the agent, or is delivered into the timeline
+- **WHEN** a steer is admitted, remains pending with the agent, or is delivered into the timeline
+- **THEN** A steer SHALL be handed to the agent at once and kept pending by the agent until the agent delivers it.
+- **AND** Steers SHALL be delivered before any held message.
+- **AND** The expanded dock SHALL list the user's pending steers, from any client of the conversation, labelled "Steer", and SHALL NOT list the agent's own internal inbox entries.
+- **AND** A steer SHALL NOT appear in the timeline until the agent reports it delivered, at which point it SHALL appear as an ordinary user message.
+- **AND** Outside compact keyboard/short-landscape mode, pending steers SHALL carry the dock note that they run with the conversation's model and mode as they stand when they are delivered.
 
-An unconfirmed withdrawal SHALL keep the pending entry and private draft visible. Absence from a passive inbox/history snapshot SHALL NOT by itself confirm cancellation. A client with withdrawal-specific uncertainty SHALL offer **Retry withdrawal**, which explicitly repeats only native cancellation of the same inbox ID. It SHALL NOT edit, convert, resubmit the original input, automatically retry any mutation, or allow concurrent actions on that entry. Admission/resume uncertainty SHALL NOT grant withdrawal retry. Resume uncertainty SHALL remain read-only; settled unknown admission MAY offer only the token-fenced local discard defined below.
+#### Scenario: The user switches, edits, or removes a pending steer or queued entry
+- **WHEN** the user switches, edits, or removes a pending steer or queued entry
+- **THEN** For each pending entry, the user SHALL be able to:
+  - switch a queued message to steer, which hands it to the agent as a steer at once; on a dormant queue or an idle conversation this is how a held message is sent now;
+  - switch a steer back to queue, which withdraws it from the agent and holds it in the workspace's queue in its submission order;
+  - edit or remove a steer, which withdraws it from the agent.
 
-Skills, slash commands, and `/reload` in the queue SHALL NOT offer the switch to steer.
+#### Scenario: Withdrawal races native delivery and the agent confirms or refuses cancellation
+- **WHEN** a steer withdrawal is requested and the agent confirms or refuses it, including a race with native delivery
+- **THEN** Withdrawing a steer SHALL complete only when the agent confirms the withdrawal.
+- **AND** If the agent delivers the steer first, the withdrawal SHALL fail, the message SHALL stay delivered, and the user SHALL be told it was already delivered.
+- **AND** A message SHALL never be delivered twice.
 
-Cancelling the turn SHALL leave pending steers with the agent and SHALL present them as paused. A steer is paused when it was pending before the conversation last became idle. The dock SHALL offer one action labelled `Send N paused steers now`, which resumes the agent so that it delivers every pending steer. Submitting a new steer SHALL also resume delivery of paused steers.
+#### Scenario: Native withdrawal is unconfirmed or the client retries withdrawal-specific uncertainty
+- **WHEN** native withdrawal is unconfirmed or the client retries withdrawal-specific uncertainty
+- **THEN** An unconfirmed withdrawal SHALL keep the pending entry and private draft visible.
+- **AND** Absence from a passive inbox/history snapshot SHALL NOT by itself confirm cancellation.
+- **AND** A client with withdrawal-specific uncertainty SHALL offer **Retry withdrawal**, which explicitly repeats only native cancellation of the same inbox ID.
+- **AND** It SHALL NOT edit, convert, resubmit the original input, automatically retry any mutation, or allow concurrent actions on that entry.
+- **AND** Admission/resume uncertainty SHALL NOT grant withdrawal retry.
+- **AND** Resume uncertainty SHALL remain read-only; settled unknown admission MAY offer only the token-fenced local discard defined below.
 
-The pending card SHALL have an always-visible count header outside its own contained content scrollport. Worker and pending cards SHALL share only a height budget, never an aggregate scroller, as specified by Desktop work shares measured panel space. With both cards collapsed, desktop normally uses 40% of measured panel height capped at 25rem; touch normally uses 35% of visual height, 25% at tablet widths from 48rem, or 24% during hardware editing. With either expanded, the measured expanded-card policy in Desktop work shares measured panel space SHALL supersede these caps and the earlier 40% phone/35% tablet transcript reserves. The pending list SHALL show a bottom fade only while content remains below. Entries SHALL retain distinct Steer/Queue badges, Paused chips and existing timing labels. Pending actions SHALL retain the approved compact 32px touch / 36px desktop targets, independent 8px gaps, visible focus outlines and contextual accessible names. Successful mutations SHALL not add confirmation notices; refusals and unknown receipts SHALL retain operation-scoped feedback without duplicate red errors.
+#### Scenario: A skill, slash command, or /reload is pending in the queue
+- **WHEN** a skill, slash command, or /reload is pending in the queue
+- **THEN** Skills, slash commands, and `/reload` in the queue SHALL NOT offer the switch to steer.
 
-When pending messages exist, software-keyboard mode or short touch landscape SHALL collapse the work dock to a pending-count summary rather than hide it. Any paused-steer batch Send action SHALL retain a 44px target, and the count-only replacement warning SHALL remain readable while typing or editing a pending entry. Entry details and the routine model-at-delivery note MAY be hidden in this compact state; the replacement warning SHALL NOT be hidden. Dock growth SHALL reserve its final bounded layout height before a visual reveal, respect reduced motion, and preserve a remote-update reading anchor and deliberate bottom pinning. Sending a prompt SHALL preserve the current reading position and follow intent: paused readers remain paused, while readers already following continue to follow latest content.
+#### Scenario: Turn cancellation pauses pending steers and the reader resumes the paused batch or submits a new steer
+- **WHEN** turn cancellation pauses pending steers and the reader resumes the paused batch or submits a new steer
+- **THEN** Cancelling the turn SHALL leave pending steers with the agent and SHALL present them as paused.
+- **AND** A steer is paused when it was pending before the conversation last became idle.
+- **AND** The dock SHALL offer one action labelled `Send N paused steers now`, which resumes the agent so that it delivers every pending steer.
+- **AND** Submitting a new steer SHALL also resume delivery of paused steers.
 
-When the workspace attaches to a conversation, or reconnects to the agent, it SHALL reconcile the pending steers with the agent's own list, so the dock shows steers raised while the stream was interrupted or by another client.
+#### Scenario: Worker and pending cards share constrained desktop or touch dock space
+- **WHEN** worker and pending cards share constrained desktop or touch dock space
+- **THEN** The pending card SHALL have an always-visible count header outside its own contained content scrollport.
+- **AND** Worker and pending cards SHALL share only a height budget, never an aggregate scroller, as specified by Desktop work shares measured panel space.
+- **AND** With both cards collapsed, desktop normally uses 40% of measured panel height capped at 25rem; touch normally uses 35% of visual height, 25% at tablet widths from 48rem, or 24% during hardware editing.
+- **AND** With either expanded, the measured expanded-card policy in Desktop work shares measured panel space SHALL supersede these caps and the earlier 40% phone/35% tablet transcript reserves.
+- **AND** The pending list SHALL show a bottom fade only while content remains below.
+- **AND** Entries SHALL retain distinct Steer/Queue badges, Paused chips and existing timing labels.
+- **AND** Pending actions SHALL retain the approved compact 32px touch / 36px desktop targets, independent 8px gaps, visible focus outlines and contextual accessible names.
+- **AND** Successful mutations SHALL not add confirmation notices; refusals and unknown receipts SHALL retain operation-scoped feedback without duplicate red errors.
+
+#### Scenario: Pending messages coexist with software-keyboard mode, short touch landscape, or growing dock content
+- **WHEN** pending messages coexist with software-keyboard mode, short touch landscape, or growing dock content
+- **THEN** software-keyboard mode or short touch landscape SHALL collapse the work dock to a pending-count summary rather than hide it when pending messages exist
+- **AND** Any paused-steer batch Send action SHALL retain a 44px target, and the count-only replacement warning SHALL remain readable while typing or editing a pending entry.
+- **AND** Entry details and the routine model-at-delivery note MAY be hidden in this compact state; the replacement warning SHALL NOT be hidden.
+- **AND** Dock growth SHALL reserve its final bounded layout height before a visual reveal, respect reduced motion, and preserve a remote-update reading anchor and deliberate bottom pinning.
+- **AND** Sending a prompt SHALL preserve the current reading position and follow intent: paused readers remain paused, while readers already following continue to follow latest content.
+
+#### Scenario: The workspace attaches to a conversation or reconnects to the owning agent
+- **WHEN** the workspace attaches to a conversation or reconnects to the owning agent
+- **THEN** the workspace SHALL reconcile the pending steers with the agent's own list, so the dock shows steers raised while the stream was interrupted or by another client
 
 #### Scenario: Hidden delivery does not erase an uncertain withdrawal
 - **WHEN** a withdrawal is unconfirmed and a later inbox read is empty while V2 history hides reverted messages

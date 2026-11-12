@@ -11,8 +11,10 @@ import {
   type RecordValue,
   array,
   createProviderEventMemory,
+  completionTime,
   errorMessage,
   isLoginError,
+  finishedTime,
   normalizeCanonicalEvent,
   normalizeEventWith,
   normalizeEventEnvelopeWith,
@@ -32,6 +34,8 @@ import type { ConversationItem, MessageAttachment, MessageDelivery, StructuredQu
 import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
 import type { InboxDelta, PendingInboxEntry } from "../../provider";
 import { BackgroundWorkers, nativeProof, prepareNotification, prepareTool, shellBirthIdentity, shellCommandFingerprint, type ShellBirthIdentity, type BackgroundControls, type LauncherEvidence, type NativeProof, type PreparedTool, type PreparedNotification } from "./background";
+import { nativeVisualMessageIdentity } from "../../visual-identity";
+import { OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END } from "../normalization-types";
 
 export type { NormalizedProviderEvent };
 
@@ -566,7 +570,7 @@ export function assistantContentUpdates(messageId: string, content: unknown[], c
     if (part.type === "text") {
       const identity = `${messageId}:text:${ordinals.text++}`;
       const itemId = `part:${identity}`;
-      const item: ConversationItem = { id: itemId, type: "assistant_message", createdAt, markdown: text(part.text) };
+      const item: ConversationItem = { id: itemId, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId) };
       return [{ kind: "text", itemId, identity, mode: "cumulative", text: text(part.text), item }];
     }
     if (part.type === "reasoning") {
@@ -716,6 +720,26 @@ import { CHAT_ATTACHMENTS_PER_MESSAGE } from "../../types";
 import type { StoredMessageAccounting } from "../../provider";
 import { boundReplayedName, contractImageMime, errorMessage as storedErrorMessage } from "../normalization";
 
+/** Fold the complete, ordered native history before visibility/pagination.
+ * An idle record ends an execution, including failed/interrupted executions.
+ * User rows (including delivered steers), API completion and finish reasons
+ * are not execution boundaries. The suffix is live only while session status
+ * also says the execution is running. This contract is specific to 2.x;
+ * classic/1.x histories have no persisted equivalent and retain the fallback. */
+export function storedExecutionLiveness(messages: readonly unknown[]): ReadonlyMap<string, boolean> {
+  const liveness = new Map<string, boolean>();
+  let ended = false;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = record(messages[index]);
+    if (message.type === "idle") ended = true;
+    else if (message.type === "assistant") {
+      const id = optionalString(message.id);
+      if (id) liveness.set(id, !ended);
+    }
+  }
+  return liveness;
+}
+
 /**
  * One stored 2.x message as timeline items. Assistant content goes through
  * the same reader the live restatement uses, so a conversation reads back
@@ -723,7 +747,7 @@ import { boundReplayedName, contractImageMime, errorMessage as storedErrorMessag
  * carrier, as on 1.x. Idle markers and agent/model/location switches carry
  * nothing for the timeline.
  */
-export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, background?: { workers: BackgroundWorkers; parent: string }, prepared = prepareStoredMessage(value)): ConversationItem[] {
+export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, background?: { workers: BackgroundWorkers; parent: string }, prepared = prepareStoredMessage(value), executionLive?: boolean): ConversationItem[] {
   const { message, createdAt } = prepared;
   const id = string(message.id, "message id");
   switch (message.type) {
@@ -733,10 +757,14 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
     }
     case "assistant": {
       const tools = prepared.tools;
+      const completed = completionTime(finishedTime(message.time));
+      // Stored V2 text parts carry no independent completion clock. The API
+      // message's validated completion seals their Markdown syntax, not the
+      // execution: a following tool may still create a missing image file.
+      const textEnd = completed.completedAt === undefined ? {} : { [OPENCODE_TEXT_END]: true as const };
       const items = assistantContentUpdates(id, array(message.content), createdAt, undefined, tools).flatMap(update => {
-        if (update.kind === "upsert") return [update.item];
-        if (update.kind === "text" && update.item) return [update.item];
-        return [];
+        const item = update.kind === "upsert" || update.kind === "text" ? update.item : undefined;
+        return item ? [item.type === "assistant_message" ? { ...item, ...completed, ...textEnd } : item] : [];
       });
       if (background) for (const tool of tools.values()) items.push(...background.workers.launchPrepared(background.parent, tool, createdAt).flatMap(update => update.kind === "upsert" ? [update.item] : []));
       const usage = tokensToUsage(message.tokens, message.cost);
@@ -753,7 +781,8 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, 
       for (const file of stringArray(record(message.snapshot).files)) {
         items.push({ id: `file:${id}:${file}`, type: "file_change", createdAt, path: file, operation: "update" });
       }
-      return items;
+      return executionLive === undefined ? items : items.map(item => item.type === "assistant_message"
+        ? { ...item, [OPENCODE_EXECUTION_LIVE]: executionLive } : item);
     }
     case "shell": {
       const exit = number(message.exit);

@@ -15,19 +15,44 @@ Recent rows show the filename, containing path, and relative write age, with
 the exact timestamp available in file details. The tree retains its alphabetical
 hierarchy and manual expansion while showing quiet recent-write cues.
 
-## Ignored files and output folders
+## What Uatu hides, and ignored folders
+
+Uatu follows VS Code. The only files hidden by default are the ones VS Code's
+`files.exclude` hides: `.git`, `.svn`, `.hg`, `.jj`, `.DS_Store` and
+`Thumbs.db`. Dependency folders, build output, caches, virtual environments,
+editor temporary files and secret-like files (`.env`, private keys, credential
+files) are ordinary files. To keep something out of Uatu, list it in the
+watched root's `.uatu.json`:
+
+```json
+{
+  "ignore": {
+    "exclude": [".env*", "*.pem", "id_*", "node_modules/"]
+  }
+}
+```
+
+Excluded paths are not indexed, listed, searched, followed or served, whatever
+the visibility setting. Secret-like files are visible to anyone signed in to the
+Hub, as they are to anyone with the workspace open in VS Code; an authenticated
+user can already read them through the terminal. Uatu never edits your project
+configuration. `ignore.include` from earlier builds no longer has an effect and
+produces a warning.
+
+### Ignored files
 
 **Files options → Show ignored files** controls this browser's tree, Recent,
-filename/path results, project content search, and document/image Follow
-candidates. It starts enabled unless a saved preference or explicit legacy
-default says otherwise. Turning it off preserves an open preview and does not
-change another open browser's view. Ignored filenames and icons are muted;
-unknown Git classification stays visible without an ignored/clean assertion.
+filename/path results and project content search. It starts enabled unless a
+saved preference or explicit legacy default says otherwise. Turning it off
+keeps an open preview and does not change another open browser's view. Ignored
+filenames, folders and icons are muted; unknown Git classification stays
+visible without an ignored/clean assertion. Hiding ignored files does not deny
+authenticated direct access.
 
-Git-ignore rules no longer prevent authenticated direct file access. They are
-browsing visibility. Use the watched root's `.uatu.json` `ignore.exclude` for
-files that Uatu must not index or deliver. Mandatory secret, dependency, VCS,
-and containment rules still apply. Uatu never edits your project configuration.
+Follow never jumps to a file Git ignores, shown or not, so a build or render
+cannot take over the preview. A file you open inside an ignored folder still
+refreshes when it is rewritten. A tracked file inside an output folder, such as
+a committed `dist/index.html`, is followed like any other file.
 
 Initial visibility resolves in this order:
 
@@ -38,30 +63,36 @@ Initial visibility resolves in this order:
    does not override this fallback.
 4. Otherwise: show, including when legacy values are absent or invalid.
 
-Conflicting root defaults do not prevent startup. Root/policy recovery
-recomputes this fallback; an open client's personal visibility remains its own.
+Uatu negations such as `!debug.log` or `!build/renders/**` keep matching
+Gitignored files visible while other ignored rows are hidden. Use the `/**`
+form for a folder: `!build/renders/` alone does not match the files inside it.
 
-These legacy controls supply initial visibility, not exposure policy. Existing
-Uatu negations such as `!debug.log` can reveal individual Gitignored files while
-other ignored rows remain hidden. Exposure exclusions are evaluated separately.
+### Folders read on demand
 
-Build/dist remain excluded by default. To browse generated output, admit a
-literal directory subtree in the watched root's `.uatu.json`:
+A folder Git ignores as a whole, such as `node_modules/` or `build/`, appears as
+one muted row and is not read when the session starts. Expanding it reads that
+level: its files and subfolders appear, the file count grows, and the level
+stays current for everyone with the workspace open. Deeper folders are read when
+you expand them in turn. If reading a folder fails, the row says so; expand it
+again or choose **Retry listing** from its menu.
 
-```json
-{
-  "ignore": {
-    "include": ["build/renders", "dist/previews"],
-    "exclude": ["build/renders/private/**"]
-  }
-}
-```
+Files written inside an ignored folder while the session runs appear in Recent,
+the tree and the Audio/Video filters without expanding anything, so a fresh
+render can be played at once. Uatu keeps the newest 2,000 such files per watched
+root; older ones come back when you expand their folder, and a file you have
+opened stays available. Files written before the session started appear once
+their folder is expanded.
 
-Only those subtrees and their necessary traversal ancestors are opened; sibling
-outputs remain excluded. Missing directories are valid future output locations.
-Absolute paths, parent traversal, globs, and existing file targets are invalid.
-Includes do not bypass explicit exclusions, mandatory denied paths, or symlink
-containment. Runtime configuration edits reconcile discovery and watch coverage.
+Updates from ignored folders are sent in batches, at most once a second while a
+build or install is writing, so they never delay an ordinary edit.
+
+Limits:
+
+- Outside a Git repository nothing is ignored, so every folder is read at
+  startup. Use `ignore.exclude` to keep a large `node_modules/` out.
+- In polling mode (`--poll`), files written inside a folder nobody has expanded
+  are not seen until the folder is expanded, and a folder Git starts ignoring
+  after startup is read like any other.
 
 ## Audio and video
 

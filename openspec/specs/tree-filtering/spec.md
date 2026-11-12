@@ -5,36 +5,44 @@ Apply built-in, `.gitignore`, and validated `.uatu.json` exclusion rules consist
 
 ## Requirements
 
-### Requirement: Apply built-in defaults that hide common build/dependency directories
-The system SHALL maintain source-defined built-in exclusions at any depth for at least node_modules, .git, dist, build, .next, .turbo, .cache, coverage, and .DS_Store. These defaults SHALL apply when project configuration is absent. A root's validated `ignore.include` SHALL permit narrowly named output subtrees beneath build/dist and traversal of only their necessary ancestors. This exception MUST NOT open dependency, VCS, secret, or other mandatory denied paths and MUST NOT override explicit positive Uatu exclusions. A user visibility preference SHALL NOT bypass these exposure rules.
-
-#### Scenario: `node_modules/` is hidden in a project with no `.uatu.json`
-- **WHEN** a watch root contains node_modules and no `.uatu.json`
-- **THEN** no files beneath node_modules are indexed, listed, or served
-
-#### Scenario: A nested `.git/` directory is hidden
-- **WHEN** the root contains `tools/repos/example/.git/`
-- **THEN** the nested Git directory is not traversed, indexed, listed, or served
-
-#### Scenario: Defaults still apply when `.uatu.json` is silent on excludes
-- **WHEN** project configuration contains no output include
-- **THEN** build, dist, dependency directories, and other built-in exclusions remain excluded
-
-#### Scenario: One generated-output subtree is included
-- **WHEN** `ignore.include` contains `build/renders` and the root contains `build/renders/test.wav` and `build/objects/test.o`
-- **THEN** the render can be discovered, watched, listed, and served
-- **AND** `build/objects` remains excluded
-
 ### Requirement: Apply user-provided patterns from `.uatu.json ignore.exclude`
-The system SHALL read each directory watch root's `.uatu.json ignore.exclude` as a string array of gitignore-compatible patterns, supporting negation and applying them in order. Explicit positive Uatu exclusions SHALL remove files from discovery, watching, browsing, Follow, static serving, and media delivery, regardless of Show ignored files or output includes. Negations SHALL retain their existing ability to reveal specific Gitignored paths when ignored visibility is off, but MUST NOT bypass mandatory denied paths. Root-level configuration SHALL be reread when changed, including repair of watch coverage where necessary. Single-file roots SHALL not consult this configuration, and nested `.uatu.json` files SHALL not be read. Invalid shape SHALL produce one configuration warning and apply no user exclusions.
+The system SHALL read each directory watch root's `.uatu.json ignore.exclude` as a string array of gitignore-compatible patterns, supporting negation and applying them in order. Explicit exclusions SHALL govern exposure independently of Show ignored files; configuration scope, reload, and warning behavior SHALL follow the scenarios below.
+
+#### Scenario: Exclusions and negations preserve exposure boundaries
+- **WHEN** directory-root exclusion patterns are applied
+- **THEN** explicit positive Uatu exclusions SHALL remove files and folders from discovery, watching, on-demand listing, browsing, Follow, static serving, and media delivery, regardless of Show ignored files
+- **AND** negations SHALL retain their existing ability to reveal specific Gitignored paths when ignored visibility is off, but MUST NOT bypass built-in exclusions
+
+#### Scenario: Root configuration changes or contains invalid and retired settings
+- **WHEN** root configuration is read or changes
+- **THEN** root-level configuration SHALL be reread when changed, repairing watch coverage where necessary
+- **AND** invalid shape SHALL produce one configuration warning and apply no user exclusions
+- **AND** a root `.uatu.json` still containing `ignore.include` SHALL produce one configuration warning saying the key has no effect, and the key SHALL NOT change exposure or visibility
+
+#### Scenario: Configuration reads exclude single-file roots and nested files
+- **WHEN** configuration sources are selected for any watch root
+- **THEN** single-file roots SHALL not consult this configuration, and nested `.uatu.json` files SHALL not be read
 
 #### Scenario: An `ignore.exclude` pattern hides a file from the tree
 - **WHEN** `ignore.exclude` contains `bun.lock`
 - **THEN** that file is not listed, followed, or served even with Show ignored files enabled
 
+#### Scenario: A project hides its environment files
+- **WHEN** `ignore.exclude` contains `.env*` and `*.pem`
+- **THEN** matching files are not listed, previewed, searched, or served
+
 #### Scenario: An `ignore.exclude` negation un-excludes something `.gitignore` excluded
 - **WHEN** Git ignores `*.log`, `ignore.exclude` contains `!debug.log`, and ignored visibility is off
 - **THEN** `debug.log` remains visible while other ignored logs are hidden
+
+#### Scenario: A negation keeps one render folder visible
+- **WHEN** Git ignores `/build*/`, `ignore.exclude` contains `!build/renders/**`, and ignored visibility is off
+- **THEN** known files under `build/renders/` are listed while the rest of `build/` is hidden
+
+#### Scenario: A leftover `ignore.include` key is reported
+- **WHEN** `.uatu.json` contains `"include": ["build/renders"]` in its ignore block
+- **THEN** one configuration warning says `ignore.include` has no effect
+- **AND** what is listed and served is the same as without the key
 
 #### Scenario: Single-file watch roots ignore `ignore.exclude`
 - **WHEN** the child is launched for a single allowed file
@@ -57,21 +65,22 @@ The system SHALL read each directory watch root's `.uatu.json ignore.exclude` as
 - **THEN** it does not affect current defaults or the ignored-visibility preference
 
 ### Requirement: Surface `.uatu.json` configuration warnings in the session
-The session SHALL surface every `.uatu.json` configuration warning — read
-failures other than the file being absent, JSON parse failures, and the
-`ignore` shape-validation warnings — in the repository snapshot's config
-warnings, where the Change Overview displays them. Warnings SHALL be read
-from each directory watch root's `.uatu.json` — the file that controls
-filtering — not from the repository top level; when a watch root sits below
-the repository top level, its warnings SHALL be prefixed with the root's
-repository-relative path so multiple roots stay distinguishable. Watched
-roots outside a git repository SHALL surface their warnings the same way.
-Single-file watch roots read no ignore configuration and SHALL produce no
-config warnings. A `.uatu.json` that exists but is empty (zero-byte or
-whitespace-only) SHALL be treated as malformed JSON and produce the parse
-warning rather than being silently accepted as valid. One underlying problem
-SHALL be reported as one warning, even though more than one subsystem reads
-the file.
+The session SHALL surface every `.uatu.json` configuration warning — read failures other than the file being absent, JSON parse failures, and `ignore` shape-validation warnings — in the repository snapshot's config warnings, where the Change Overview displays them.
+
+#### Scenario: Warning collection follows watch-root configuration scope
+- **WHEN** configuration warnings are collected for watched roots
+- **THEN** warnings SHALL be read from each directory watch root's `.uatu.json`, which controls filtering, not from the repository top level
+- **AND** a root below the repository top level SHALL prefix its warnings with its repository-relative path so multiple roots stay distinguishable
+- **AND** roots outside a git repository SHALL surface warnings the same way
+- **AND** single-file watch roots read no ignore configuration and SHALL produce no config warnings
+
+#### Scenario: Empty configuration is one malformed-JSON problem
+- **WHEN** a `.uatu.json` exists but is zero-byte or whitespace-only
+- **THEN** an empty file SHALL be treated as malformed JSON and produce the parse warning rather than being silently accepted as valid
+
+#### Scenario: Every underlying configuration problem produces one warning
+- **WHEN** an underlying configuration problem is reported
+- **THEN** it SHALL be reported as one warning, even when more than one subsystem reads the file
 
 #### Scenario: Empty `.uatu.json` produces a parse warning
 - **WHEN** the watch root's `.uatu.json` exists but is zero bytes or contains only whitespace
@@ -104,7 +113,27 @@ the file.
 - **THEN** the session's config warnings contain exactly one parse warning for it, even though both the warning collector and the ignore engine read the file
 
 ### Requirement: Git-ignore visibility is personal and defaults to show
-The system SHALL discover and observe permitted files independently of Git-ignore status and provide per-client Show ignored files across All, Recent, filename/path results, and Follow candidates. Known ignored classification SHALL follow Git's standard ignore sources and tracked-file semantics; unavailable classification SHALL remain unknown rather than a false ignored/clean claim. Missing personal visibility SHALL default to show unless explicit legacy defaults select otherwise. A saved personal preference SHALL win; otherwise explicit --no-gitignore SHALL select show, explicit `ignore.respectGitignore` SHALL select its inverse, and an omitted/invalid setting SHALL select show. Invalid legacy-setting shape SHALL still produce a configuration warning. Toggling visibility SHALL neither reconstruct shared watchers nor command another client, select a preview, clear deliberate deselection, stop playback, or enable Follow. Explicitly open files hidden by that browsing preference SHALL remain open without being injected back into results. Visibility alone SHALL NOT deny otherwise permitted direct authenticated access.
+The system SHALL discover and observe permitted files independently of Git-ignore status and provide per-client Show ignored files across All, Recent, filename/path results, and Follow candidates. Personal visibility SHALL default to show unless explicit legacy defaults select otherwise, without changing exposure permissions or another client's state.
+
+#### Scenario: Classification uses Git semantics without inventing certainty
+- **WHEN** files are classified for ignored visibility
+- **THEN** known ignored classification SHALL follow Git's standard ignore sources and tracked-file semantics
+- **AND** unavailable classification SHALL remain unknown rather than a false ignored/clean claim
+
+#### Scenario: Initial ignored visibility respects saved and legacy choices
+- **WHEN** initial personal visibility is resolved
+- **THEN** a saved personal preference SHALL win; otherwise explicit --no-gitignore SHALL select show, explicit `ignore.respectGitignore` SHALL select its inverse, and an omitted/invalid setting SHALL select show
+- **AND** invalid legacy-setting shape SHALL still produce a configuration warning
+
+#### Scenario: A visibility toggle affects browsing only
+- **WHEN** a client toggles Show ignored files
+- **THEN** it SHALL neither reconstruct shared watchers nor command another client, select a preview, clear deliberate deselection, stop playback, or enable Follow
+
+#### Scenario: Hidden open files and direct access remain independent of toggles
+- **WHEN** the current browsing preference hides an explicitly open file
+- **THEN** that file SHALL remain open without being injected back into results
+- **WHEN** otherwise permitted direct authenticated access is requested
+- **THEN** visibility alone SHALL NOT deny that access
 
 #### Scenario: An unconfigured workspace shows ignored exports
 - **WHEN** no personal visibility or explicit legacy default exists and Git ignores `renders/`
@@ -146,21 +175,37 @@ The system SHALL discover and observe permitted files independently of Git-ignor
 - **WHEN** an already tracked file matches a Git-ignore pattern
 - **THEN** it is not falsely treated as an ignored untracked export
 
-### Requirement: Generated-output includes are narrow validated configuration
-Directory roots SHALL accept `ignore.include` as an array of literal root-relative directory paths. It SHALL open only the named build/dist output subtrees and necessary traversal ancestors, subject to all higher-priority exposure exclusions. Absolute paths, parent traversal, malformed values, globs, and existing non-directory targets SHALL be rejected with configuration warnings. A missing directory SHALL be accepted as a future output location. Runtime edits SHALL reconcile discovery and watch coverage without restarting the session. Nested configuration and single-file roots SHALL retain their existing rules.
+### Requirement: Built-in exclusions match VS Code's defaults
+The system SHALL hide only the names VS Code's `files.exclude` hides by default, at any depth: the VCS metadata directories `.git`, `.svn`, `.hg`, and `.jj`, and the OS files `.DS_Store` and `Thumbs.db`. These SHALL be the only built-in exclusions and SHALL be encoded in source.
 
-#### Scenario: A future render folder is configured
-- **WHEN** `build/renders` is included before that directory exists and a renderer later creates it
-- **THEN** its permitted files are discovered and subsequent writes reach clients
+#### Scenario: Built-in policy cannot be weakened or silently expanded
+- **WHEN** default exclusions are applied, with or without project configuration
+- **THEN** they SHALL be encoded in source and SHALL apply whether or not project configuration exists
+- **AND** they SHALL NOT be bypassed by a visibility preference or by a negation in project configuration
+- **AND** no other directory name, file name, suffix, or secret-like pattern SHALL be excluded by default
+- **AND** dependency, build, cache, virtual-environment, editor-temporary, and secret-like paths SHALL be governed by Git-ignore visibility and explicit project exclusions like any other path
 
-#### Scenario: An include attempts to escape
-- **WHEN** an include contains an absolute path or `..` traversal
-- **THEN** it is rejected with a configuration warning and does not broaden access
+#### Scenario: A nested `.git/` directory is hidden
+- **WHEN** the root contains `tools/repos/example/.git/`
+- **THEN** the nested Git directory is not traversed, indexed, listed, or served
 
-#### Scenario: Explicit exclusion wins over an include
-- **WHEN** `build/renders` is included and `build/renders/private/**` is explicitly excluded
-- **THEN** permitted siblings are available but private descendants remain unindexed and unserved
+#### Scenario: OS litter is hidden
+- **WHEN** a folder contains `.DS_Store` or `Thumbs.db`
+- **THEN** neither file is indexed, listed, or served
 
-#### Scenario: An include is removed at runtime
-- **WHEN** a project removes its only include for `dist/previews`
-- **THEN** those files leave discovery/watch coverage and new direct/media requests are refused
+#### Scenario: Generated audio under `build/` is browsable without configuration
+- **WHEN** an unconfigured Git root ignores `/build*/` and contains `build/renders/test.wav`
+- **THEN** `build/` is listed as a muted ignored folder
+- **AND** expanding down to `build/renders/` lists `test.wav`, which can be previewed and played
+
+#### Scenario: `node_modules/` is shown like VS Code shows it
+- **WHEN** a Git root ignores `node_modules/` and has no `.uatu.json`
+- **THEN** `node_modules/` is listed as a muted ignored folder whose contents are read only when it is expanded
+
+#### Scenario: Former default names are no longer special
+- **WHEN** a root contains tracked files under `coverage/`, `.cache/`, or `dist/`
+- **THEN** they are indexed, listed, and served as ordinary tracked files
+
+#### Scenario: A project hides a folder explicitly
+- **WHEN** `ignore.exclude` contains `node_modules/`
+- **THEN** no files under any `node_modules` directory are listed, followed, or served, even with Show ignored files on

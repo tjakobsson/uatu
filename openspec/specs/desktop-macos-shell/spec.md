@@ -18,7 +18,22 @@ Each UatuCode Desktop tab SHALL be a native macOS window grouped by AppKit rathe
 - **AND** reopening the hub from the splash reconnects to the same session
 
 ### Requirement: Menu bar exposes window and navigation commands
-The app SHALL provide a native "New Tab" command (Command-T) that opens a splash window as a tab in the focused window's macOS tab group. If no window is focused, the command SHALL open a standalone splash window. The standard "New Window" command (Command-N) SHALL remain available and SHALL create a separate window. The app SHALL provide Safari-like tab navigation: Command-1 through Command-8 SHALL select the corresponding positional tab when present, Command-9 SHALL select the last tab, and Control-Tab / Control-Shift-Tab SHALL select the next / previous tab using native AppKit ordering. The Window menu SHALL list each visible native tab group or standalone window once rather than exposing every tab's backing window as a separate window. The app SHALL also provide menu commands targeting the focused window: reload page (Command-R), open the current page in the default browser (Shift-Command-O), and toggle the split browser pane (Shift-Command-B). Commands whose destination is unavailable MUST be disabled.
+
+Native menus SHALL provide New Tab, New Window, positional and sequential tab navigation, and focused-window reload, external opening, and split-browser commands with the shortcuts below. The Window menu SHALL list each visible native tab group or standalone window once, not each tab's backing window. Commands with unavailable destinations MUST be disabled.
+
+#### Scenario: Create windows and select native tabs by shortcut
+- **WHEN** Command-T is invoked
+- **THEN** a splash opens in the focused window's native tab group, or standalone if no window is focused
+- **AND** Command-N remains available to create a separate window
+
+#### Scenario: Use positional and sequential tab shortcuts
+- **WHEN** Command-1 through Command-8 select a position that exists
+- **THEN** the corresponding native tab is selected
+- **AND** Command-9 selects the last tab; Control-Tab / Control-Shift-Tab select next / previous in native AppKit order
+
+#### Scenario: Invoke a focused-window page command
+- **WHEN** an available page command is invoked by menu or shortcut
+- **THEN** Command-R reloads the focused page, Shift-Command-O opens it in the default browser, and Shift-Command-B toggles its split browser pane
 
 #### Scenario: New Tab joins the focused window
 - **WHEN** the user invokes "New Tab" while a UatuCode window is focused
@@ -70,7 +85,17 @@ The app SHALL provide a native "New Tab" command (Command-T) that opens a splash
 - **THEN** "Reload Page", "Open in Browser", and "Toggle Split Browser" are disabled
 
 ### Requirement: Web page JavaScript dialogs present natively
-JavaScript `alert()`, `confirm()`, and `prompt()` raised by pages in the embedded WebView SHALL present as native panels attached to the window and return the user's answer to the page: `alert()` returns after dismissal, `confirm()` returns true only when the user confirms, and `prompt()` returns the entered text on OK (with the page's default text prefilled) and null on Cancel. A page's file input (`<input type="file">`) SHALL open the system open panel, honouring the input's single-or-multiple setting, and return the chosen files to the page; cancelling returns no files. WKWebView shows no JS dialogs or file chooser without app-provided implementations — it silently answers false, null, or nothing — which would turn the hub dashboard's confirmation-gated actions (stop, initialize-and-serve) into dead controls and leave its private-key file input unable to pick a file.
+
+The embedded WebView SHALL present `alert()`, `confirm()`, and `prompt()` as native window-attached panels and return the user's answer. File inputs SHALL use the system open panel, honor single-or-multiple selection, and return chosen files or none on cancel. WKWebView otherwise silently answers false, null, or nothing, disabling dashboard confirmations and private-key selection.
+
+#### Scenario: Complete a JavaScript dialog
+- **WHEN** any embedded page calls `alert()`, `confirm()`, or `prompt()`
+- **THEN** alert returns after dismissal, confirm returns true only on confirmation, and prompt returns entered text on OK or null on Cancel
+- **AND** the prompt field is prefilled with the page's default text
+
+#### Scenario: Choose multiple files when the input permits them
+- **WHEN** an embedded page activates `<input type="file">`
+- **THEN** the system picker permits one or multiple files according to that input and returns the selected files; cancellation returns none
 
 #### Scenario: Dashboard confirmations work in the desktop
 - **WHEN** a hub page calls `confirm()` (e.g. the dashboard's stop confirmation)
@@ -88,7 +113,13 @@ JavaScript `alert()`, `confirm()`, and `prompt()` raised by pages in the embedde
 - **AND** choosing a file populates the input, and cancelling leaves it empty
 
 ### Requirement: External links open outside the embedded WebView
-The app SHALL route link activations that target a new browsing context (`target="_blank"` anchors, `window.open()` calls, terminal OSC 8 hyperlink activation) out of the embedded WebView. By default, `http(s)` URLs open in the window's split browser pane (per the `desktop-split-browser` capability); when the "Open external links in system browser" setting is enabled, or the user `⌘`-clicks, they open in the user's default browser instead. Other schemes are always handed to their registered system handler. The WebView MUST NOT silently drop such activations.
+
+New-browsing-context link activations SHALL leave the embedded WebView. Web URLs SHALL use the split pane by default (per `desktop-split-browser`) or the system browser when configured or explicitly requested; other schemes SHALL use their registered handlers. The WebView MUST NOT silently drop these activations.
+
+#### Scenario: Route every supported new-context activation
+- **WHEN** a `target="_blank"` anchor, `window.open()` call, or terminal OSC 8 hyperlink is activated
+- **THEN** `http(s)` opens in the window's split pane by default, or in the default browser if "Open external links in system browser" is enabled or the user `⌘`-clicks
+- **AND** other schemes go to their registered system handler; the WebView MUST NOT silently drop the activation
 
 #### Scenario: External link in a rendered document
 
@@ -116,7 +147,17 @@ The app SHALL route link activations that target a new browsing context (`target
 - **THEN** the system's registered mail handler opens
 
 ### Requirement: Window chrome exposes Back and Forward for the embedded SPA
-The app SHALL provide Back and Forward controls — menu commands with `⌘[` and `⌘]` shortcuts and window-toolbar buttons — that navigate the embedded page's back-forward history. Controls MUST be disabled when the corresponding direction has no history entry or no server is running. While the split browser pane has keyboard focus, the `⌘[`/`⌘]` shortcuts SHALL act on the focused browser tab's history instead (see `desktop-split-browser`); the menu items and toolbar buttons continue to reflect the embedded page's history.
+
+Window menus and toolbar controls SHALL expose embedded-page Back and Forward navigation with appropriate disabled states. Back/Forward shortcuts SHALL instead target the focused split-browser tab while that pane has keyboard focus (see `desktop-split-browser`).
+
+#### Scenario: Inspect native history controls and shortcuts
+- **WHEN** the window exposes its menu and toolbar navigation
+- **THEN** Back and Forward are available as menu commands with `⌘[` and `⌘]` and as toolbar buttons for embedded-page history
+- **AND** each control MUST be disabled if its direction has no history entry or no server is running
+
+#### Scenario: Split-browser focus changes only the shortcut target
+- **WHEN** the split-browser pane has keyboard focus
+- **THEN** `⌘[` and `⌘]` navigate the focused browser tab, while menu items and toolbar buttons still reflect embedded-page history
 
 #### Scenario: Shortcuts follow the focused browser tab
 
@@ -134,16 +175,17 @@ The app SHALL provide Back and Forward controls — menu commands with `⌘[` an
 - **THEN** both Back and Forward controls are disabled
 
 ### Requirement: Windows use a transparent full-height content layout
-Content windows SHALL use a full-size content layout: the hosted web view
-SHALL span the full window frame including the titlebar region, the titlebar
-SHALL be transparent with the window title hidden, and the toolbar controls
-(back/forward navigation, split-browser toggle) SHALL float over the content
-as system glass material so the page is visible beneath them. Window dragging
-via the titlebar region and toolbar interaction MUST keep working at every
-horizontal position across the window — over the SPA web view (including a
-right-docked terminal column) and over the split-browser pane alike; page
-content in the covered strip is visible but not interactive, matching
-system-browser behavior.
+
+Content windows SHALL place the WebView across the full frame beneath transparent native chrome and floating system-glass toolbar controls. Titlebar dragging and toolbar interaction MUST remain usable across the window width.
+
+#### Scenario: Render full-height content beneath native glass
+- **WHEN** a content window is displayed
+- **THEN** its WebView spans the whole frame including the titlebar; the titlebar is transparent and the window title hidden
+- **AND** back/forward and split-browser toolbar controls float as system glass with page content visible beneath
+
+#### Scenario: Native chrome covers any horizontal window region
+- **WHEN** a drag or toolbar interaction occurs anywhere across the titlebar, above the SPA, right-docked terminal, or split browser
+- **THEN** window dragging and toolbar interaction MUST work there, while covered page content remains visible but non-interactive
 
 #### Scenario: Page content reaches the top window edge
 - **WHEN** a folder is being served and the SPA is loaded in a window
@@ -226,7 +268,13 @@ last rebuilt.
 - **THEN** find opens over the split browser, not the SPA
 
 ### Requirement: Launcher presents the hub splash for configured hubs
-When a window has no open page, the app SHALL show a splash with the app identity and one card per configured hub. Each card SHALL show the hub's name or host and SHALL reflect live state — reachable with a running-session summary and the hub's version, sign-in required, or unreachable — refreshed while the splash is visible. The splash is for choosing and configuring hubs only: it MUST NOT list individual workspaces or sessions — each hub's own dashboard is the single workspace listing and management surface, so dashboard improvements reach desktop users without native duplication. Activating a card SHALL open that hub's dashboard in the window. When no hub is configured, the splash SHALL present the add-hub flow and SHALL explain that uatu runs as a hub the app connects to (with `uatu hub` named as the way to run one).
+
+A window with no open page SHALL show the app identity and one live card per configured Hub, opening that Hub's dashboard on activation. The splash MUST NOT list individual workspaces or sessions; the Hub dashboard remains their management surface. With no configured Hub, the splash SHALL offer add-Hub and explain the connect-only model, naming `uatu hub` as the way to run a Hub.
+
+#### Scenario: Keep every configured Hub card current
+- **WHEN** the splash is visible
+- **THEN** each card shows its Hub name or host and refreshes its reachable, sign-in-required, or unreachable state
+- **AND** reachable cards include a running-session summary and Hub version without listing individual workspaces or sessions
 
 #### Scenario: Splash shows hub cards with live state
 - **WHEN** the user opens a new window while one hub is signed in and another is unreachable
@@ -253,4 +301,3 @@ Each window SHALL present distinct states for: no page open (splash), page openi
 - **WHEN** a workspace session fails to start through the hub
 - **THEN** the window shows the failure state with the hub's reported error
 - **AND** offers retry and back-to-splash actions
-

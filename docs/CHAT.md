@@ -907,6 +907,151 @@ each agent's own storage and is available when the workspace starts
 again. Closing a browser, PWA, or UatuCode Desktop window does not stop a
 hub workspace.
 
+## Images And SVG In Replies
+
+Agents can show PNG, JPEG, and SVG directly in their replies using ordinary
+Markdown image syntax:
+
+```markdown
+![Screenshot of the result](images/result.png)
+![Architecture diagram](images/architecture.svg)
+```
+
+Reference-style images and images inside Markdown tables use the same capture
+rules. Sanitized raw HTML image tags also use this path; they cannot bypass
+capture by supplying a remote URL. Raw HTML SVG code examples remain code—use
+a Markdown `svg` fence for a preview.
+
+Paths are relative to the agent's workspace, not the document currently open
+in Preview. The image must be in a location permitted by Uatu's existing
+file-serving policy; exposure-excluded, denied, and outside-workspace files are
+not imported. Built-in exclusions follow VS Code's file-exclusion defaults;
+build output and secret-like filenames are not excluded by name alone.
+A Git ignore rule alone does not exclude a file from exposure;
+use Uatu's `ignore.exclude` policy for that. Symlinked workspace roots work,
+but symlinks below a watched root cannot bypass these checks. Additional watched
+roots do not expand the agent workspace's capture boundary. A named-file watch
+authorizes only that file and uses the static-file policy's single-file ignore
+scope. Each directory watch applies its own exclusions; a separately watched
+nested directory can authorize an image excluded by its parent watch.
+Finish writing a file before embedding it. Image content
+returned only inside a tool result is not automatically displayed.
+
+A fenced code block labelled `svg` also becomes an inline preview. **Source**
+shows the original SVG, and **Copy source** copies it without changing it,
+including a leading UTF-8 BOM and CRLF line endings.
+For stored captures, open **Source** first; copying becomes available once the
+source has loaded, so the copy click retains browser clipboard permission.
+SVG files embedded with Markdown have the same controls. Previews use the
+browser's image renderer, not active SVG markup in the chat page. Scripts,
+embedded HTML, and external resources are not supported.
+SVGs can use a `viewBox` without explicit `width` or `height` attributes.
+Side answers, plan previews, and Agent reports without captured snapshots keep
+SVG fences as visible, copyable code and images as inert references rather than
+showing unavailable preview widgets. Streaming updates preserve keyboard focus on
+retained visual controls. Valid XML comments remain inert in previews; malformed
+comments cannot repair otherwise invalid SVG markup.
+
+Visuals appear during streaming. An unfinished SVG fence shows
+"Generating image…" until its closing-fence line ends or native text completion
+confirms it. An apparent closing fence at the current streamed text end can
+still become ordinary SVG text in the next update. Images fit the message
+width without cropping; tall diagrams scroll with the conversation. Select
+an image to open the full-size viewer.
+Selecting Source while an SVG is generating keeps that tab and its focused
+control across text updates, while the displayed source continues to grow.
+
+The first successful capture of each image occurrence is stored in Uatu's
+workspace state. Editing or deleting its original file does not change that
+image in chat, including after a reload or workspace restart. To share a new
+version, add a new image occurrence. Files deleted before their first
+successful capture cannot be recovered. Captures are limited to **10 MiB
+per image and eight visuals per message**; user-upload formats are unchanged.
+The first eight observed occurrences keep their slots, including unavailable
+ones. Removing an occurrence, resolving an earlier reference, or changing
+rendered order does not make room for a ninth capture. Text parts belonging to
+the same native assistant message share that budget for both agents.
+Small metadata and raw-byte sidecars avoid parsing large base64 records on
+subsequent history and image reads. Existing canonical records stay untouched;
+their first access may still read the legacy record to derive those sidecars.
+If sidecars cannot be stored, reads fall back to the canonical record. This
+optimization uses additional app-state disk space, not additional captures.
+
+Admission choices from intermediate unreleased test builds are not migrated.
+Their stored files, IDs, and bytes remain untouched and resolvable, but an old
+test conversation may show a different set of up to eight previews after
+upgrading. The permanent limit begins on first processing by the new implementation.
+
+External image URLs are never loaded automatically, even with Markdown image
+syntax. Their references remain available as links. Ordinary URLs stay
+links rather than becoming previews. Unsupported image URL schemes remain
+escaped, non-clickable reference text. Invalid or unavailable visuals show an
+explanation and preserve the reference or SVG source. A local file missing
+during streaming is retried once when the reply finishes.
+Raw HTML keeps its container context until sanitization. Script bodies follow
+the sanitizer's strip policy; image-like text inside inert containers or quoted
+attributes is not imported as a separate visual.
+Reference-style image destinations on an unfinished definition line remain
+provisional until the line ends or the reply completes.
+Steering does not finish the current reply or consume its completion retry;
+reloading or opening another client while it continues preserves pending visuals.
+OpenCode 2.x history uses stored execution boundaries to keep current-execution
+tool-call messages pending and older executions terminal, including across pages.
+API-message completion alone does not end that execution. Classic OpenCode 1.x
+cold/restarted history lacks those boundaries: completed tool-call messages are
+conservatively finalized and may refuse an image that a later tool creates.
+Live 1.x streams retain source-local status evidence before deduplication to
+identify witnessed delayed idle aliases. Idle payloads without that evidence,
+including after a same-source busy/retry, remain ambiguous and use the normal
+completion fallback; universal stale-alias rejection is not guaranteed.
+Completed stored V2 text still finalizes image syntax immediately: existing
+files can be captured before another tool changes them, while missing files
+keep their execution-end retry.
+Syntax-only completion also preserves a history-seeded reply's start time;
+the first delta observed after reconnect is not authoritative creation evidence.
+Claude uses native turn-end records rather than text-block completion: completed
+turns stay terminal, while a live turn retains its pending visuals across history
+pages. Pending visuals loaded after the live subscription starts also receive
+the turn-completion retry; they do not require a manual history reload.
+Claude snapshot turn liveness is frozen with its native text and cursor before
+the asynchronous handoff, so later completion cannot prematurely finalize an
+unfinished SVG prefix in that snapshot.
+Retained projection rows follow ordered turn-completion events rather than
+producer-token lookahead, so queued closing frames cannot seal an earlier prefix.
+Streaming shorthand references can preview once their already-terminated
+reference definition resolves and following syntax or a native text end makes
+the interpretation unambiguous. A trailing `![label]` remains provisional while
+the next streamed text could still add an inline destination. Native OpenCode
+text end can flush that preview before a tool finishes without consuming the
+missing-file retry reserved for turn completion.
+Claude's native text-block completion likewise finalizes image syntax without
+finishing the turn or consuming a genuinely missing file's completion retry.
+OpenCode step failures that can retry also leave pending visuals live; only the
+actual execution end consumes that retry. Failure messages still appear normally.
+Hub reconnects also reconcile visual updates missed at a terminal cursor. If a
+replay's promised update never arrives, bounded recovery requests a fresh
+snapshot rather than leaving the image pending indefinitely.
+This includes recovered subscriptions deferred by the stream URL limit when
+both the browser and Hub have been updated to the Hub revision 15 contract;
+older Hubs may ignore that intent. A caught-up reconnect without a matching
+visual-resync trailer stays ready without refetching the conversation snapshot.
+
+If a captured image cannot decode or its preview cannot load, chat shows an
+explanation and retains its reference. SVG Source and Copy source remain
+available. Browser preview failures do not recapture the workspace file.
+
+On touch devices, tapping Latest while drafting returns to the newest
+messages without changing your draft or dismissing composer focus.
+
+Uatu supplies brief presentation guidance to its managed agent sessions
+through native instruction mechanisms. This does not rewrite your prompts,
+edit repository instructions or global configuration, or change tool
+permissions. Agents still choose when a visual is useful.
+OpenCode hints are best-effort: an unmergeable inline configuration or unwritable
+guidance state logs a sanitized warning and leaves native startup/configuration
+validation to OpenCode. Startup also performs bounded cleanup of guidance owned
+by processes proven absent; live and unknown owners are retained.
+
 ## Access And Authority
 
 Users authenticate to the hub. Behind it, each workspace child requires

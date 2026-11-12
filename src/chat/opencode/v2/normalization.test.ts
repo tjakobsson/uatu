@@ -4,11 +4,70 @@ import path from "node:path";
 import type { ShellExited } from "@opencode/client";
 
 import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, storedAccounting, type OpenCodeV2Memory } from "./normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, prepareStoredMessage, storedAccounting, storedExecutionLiveness, type OpenCodeV2Memory } from "./normalization";
 import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
+import type { AssistantMessageItem } from "../../types";
 import { compactWorkers } from "../../compact-work";
 import { BackgroundControls, BackgroundWorkers, prepareTool } from "./background";
+import { visualAdmissionIdentity } from "../../visual-identity";
+import { isVisualTurnLive, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextIdentity } from "../normalization-types";
+import { ConversationProjection } from "../../adapter";
+import { ConversationReplay, decodeReplayCursor } from "../../replay";
+import { applyChatEvent, prependSnapshot, projectionFromSnapshot } from "../../projection";
+
+test.each([
+  { entry: "seed", visual: false }, { entry: "seed", visual: true },
+  { entry: "recover", visual: false }, { entry: "recover", visual: true },
+] as const)("fresh V2 normalization after history $entry preserves an established text start through delta and syntax end (visual=$visual)", ({ entry, visual }) => {
+  const initial = visual ? "![shot][ref]\n\n[ref]: result.p" : "Answer", delta = visual ? "ng" : " continued", final = initial + delta;
+  const projection = new ConversationProjection(new ConversationReplay("g", "s", 100_000));
+  const history = normalizeStoredMessage({ id: "reply", type: "assistant", time: { created: 10 }, content: [{ type: "text", text: initial }] });
+  history.push(...normalizeStoredMessage({ id: "steer", type: "user", time: { created: 20 }, text: "Keep going" }));
+  if (entry === "seed") projection.seed(history);
+  else expect(projection.recover(history.map(item => ({ kind: "upsert" as const, item })))).toBe(true);
+  projection.status = "running";
+  const snapshot = () => ({ conversation: { id: "s", title: "s", createdAt: 1, updatedAt: 1, status: "running" as const }, configuration: {}, generation: "g", cursor: projection.replay.latestCursor(), items: projection.items() });
+  let browser = projectionFromSnapshot(snapshot());
+  const normalize = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  const emit = (type: "session.text.delta" | "session.text.ended", created: number, data: Record<string, unknown>) => normalize({ id: `event-${created}`, type, created, location: { directory: "/workspace" }, data: { sessionID: "s", assistantMessageID: "reply", ordinal: 0, ...data } }, memory).updates.flatMap(update => { const event = projection.apply(update); return event ? [event] : []; });
+  const beforeSequence = decodeReplayCursor(projection.replay.latestCursor())!.sequence;
+  const streamed = emit("session.text.delta", 25, { delta });
+  expect(streamed).toHaveLength(1);
+  expect(streamed[0]).toMatchObject({ type: "item.text_delta", itemId: "part:reply:text:0", delta, sequence: beforeSequence + 1 });
+  for (const event of streamed) browser = applyChatEvent(browser, event).projection;
+  expect(projection.get("part:reply:text:0")).toMatchObject({ createdAt: 10, markdown: final });
+  const ended = emit("session.text.ended", 30, { text: final });
+  expect(ended).toHaveLength(1); // Unchanged nonempty text still carries its real syntax boundary.
+  expect(ended[0]).toMatchObject({ type: "item.upsert", sequence: beforeSequence + 2, item: { id: "part:reply:text:0", createdAt: 10, markdown: final } });
+  expect((projection.get("part:reply:text:0") as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+  expect(projection.get("part:reply:text:0")).not.toHaveProperty("completedAt");
+  for (const event of ended) browser = applyChatEvent(browser, event).projection;
+  const order = [["part:reply:text:0", 10], ["message:steer", 20]];
+  expect(projection.items().map(item => [item.id, item.createdAt])).toEqual(order);
+  expect(browser.items.map(item => [item.id, item.createdAt])).toEqual(order);
+  expect(prependSnapshot(browser, snapshot()).items.map(item => [item.id, item.createdAt])).toEqual(order);
+});
+
+test.each([
+  { history: false, start: undefined, expected: 25 }, { history: true, start: undefined, expected: 10 },
+  { history: false, start: 12, expected: 12 }, { history: true, start: 12, expected: 12 },
+] as const)("V2 text start uses actual part evidence, not an earlier usage-only step (history=$history, start=$start)", ({ history, start, expected }) => {
+  const normalize = createOpenCodeV2Normalizer("/workspace"), memory = createOpenCodeV2Memory();
+  const projection = new ConversationProjection(new ConversationReplay("g", "s", 100_000));
+  const emit = (type: string, created: number, data: Record<string, unknown>) => {
+    const normalized = normalize({ id: `event-${created}`, type, created, location: { directory: "/workspace" }, data: { sessionID: "s", assistantMessageID: "reply", ...data } }, memory);
+    for (const update of normalized.updates) projection.apply(update);
+  };
+  emit("session.step.started", 3, { started: 3, agent: "build", model: { providerID: "fixture", id: "model" } });
+  emit("session.step.ended", 4, { finish: "tool-calls", cost: 0, tokens: { input: 100, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } });
+  if (history) projection.seed(normalizeStoredMessage({ id: "reply", type: "assistant", time: { created: 10 }, content: [{ type: "text", text: "Answer" }] }));
+  if (start !== undefined) emit("session.text.started", start, { ordinal: 0 });
+  emit("session.text.delta", 25, { ordinal: 0, delta: history ? " continued" : "Answer" });
+  emit("session.text.ended", 30, { ordinal: 0, text: "Answer continued" });
+  expect(projection.get("part:reply:text:0")).toMatchObject({ createdAt: expected, markdown: "Answer continued" });
+  expect((projection.get("part:reply:text:0") as AssistantMessageItem & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+});
 
 test("native shell exit evidence uses the typed identity and terminal process status", () => {
   const normalize = createOpenCodeV2Normalizer("/ws");
@@ -58,6 +117,95 @@ const FIXTURES = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../..
   storedMessages: { data: Array<Record<string, unknown>> };
 };
 const WORKSPACE = "/tmp/oc-v2-ws";
+
+test("captured API tool/stop completions do not end execution; the stored idle does, immutably", () => {
+  const stored = FIXTURES.storedMessages.data;
+  const idle = stored.findIndex(message => message.type === "idle");
+  expect(idle).toBeGreaterThan(0);
+  const prefix = stored.slice(0, idle);
+  expect(prefix.some(message => message.type === "assistant" && message.finish === "tool-calls")).toBe(true);
+  expect(prefix.some(message => message.type === "assistant" && message.finish === "stop")).toBe(true);
+  const normalize = (messages: readonly Record<string, unknown>[]) => {
+    const membership = storedExecutionLiveness(messages);
+    return messages.flatMap(message => normalizeStoredMessage(message, true, undefined, prepareStoredMessage(message), membership.get(message.id as string)))
+      .filter(item => item.type === "assistant_message");
+  };
+  const running = normalize(prefix);
+  expect(running.length).toBeGreaterThan(0);
+  expect(running.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true)).toBe(true);
+  const sealed = normalize(stored);
+  expect(sealed.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === false)).toBe(true);
+  expect(JSON.stringify(running)).toBe(JSON.stringify(sealed)); // No new public fields.
+  expect(running.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === true)).toBe(true);
+  for (const message of prefix.filter(message => message.type === "assistant")) {
+    const unannotated = normalizeStoredMessage(message);
+    expect(unannotated.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+  }
+});
+
+test.each(["succeeded", "failed", "interrupted"] as const)("stored %s idle separates executions without mistaking a delivered steer for an end", outcome => {
+  const assistant = (id: string, created: number) => ({ id, type: "assistant", time: { created, completed: created + 1 }, finish: "tool-calls", content: [{ type: "text", text: "![Image](later.png)" }] });
+  const old = assistant("old", 1), current = assistant("current", 4);
+  const history = [old, { id: "end", type: "idle", time: { created: 3 }, outcome }, current,
+    { id: "steer", type: "user", time: { created: 6 }, text: "Change the image" }, assistant("next-step", 7)];
+  expect([...storedExecutionLiveness(history)]).toEqual([["next-step", true], ["current", true], ["old", false]]);
+});
+
+test("text phases, content restatement and stored messages supply the same non-wire native admission identity", () => {
+  const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+  const messageId = "native:api:id";
+  const events = ["started", "delta", "ended"].map(phase => normalize({ id: `e-${phase}`, created: 10, type: `session.text.${phase}`, location: { directory: WORKSPACE }, data: { sessionID: "s", assistantMessageID: messageId, ordinal: 1, text: "text", delta: "text" } }));
+  events.push(normalize({ id: "restated", created: 10, type: "session.message.content.updated", location: { directory: WORKSPACE }, data: { sessionID: "s", messageID: messageId, content: [{ type: "text", text: "first" }, { type: "text", text: "text" }] } }));
+  const live = events.flatMap(event => event.updates.flatMap(update => update.kind === "upsert" ? [update.item] : update.kind === "text" && update.item ? [update.item] : []));
+  expect(live).toHaveLength(5);
+  const history = normalizeStoredMessage({ id: messageId, type: "assistant", time: { created: 10 }, content: [{ type: "text", text: "first" }, { type: "text", text: "text" }] });
+  expect(history).toHaveLength(2);
+  for (const item of [...live, ...history]) {
+    expect(item.id).toMatch(/^part:native:api:id:text:[01]$/);
+    expect(visualAdmissionIdentity({ ...item })).toBe("opencode:message:native:api:id");
+    const json = JSON.parse(JSON.stringify(item));
+    expect(Object.keys(json).sort()).toEqual(["createdAt", "id", "markdown", "type"]);
+    expect(parseConversationItem(json)).toEqual(json);
+  }
+});
+
+test("stored V2 parent completion seals text syntax independently of execution, not from classic part clocks", () => {
+  for (const completed of [undefined, 40]) {
+    const [item] = normalizeStoredMessage({ id: "m", type: "assistant", time: { created: 10, ...(completed === undefined ? {} : { completed }) }, content: [{ type: "text", text: "![shot][ref]\n\n[ref]: result.png", time: { start: 11, end: 20 } }] });
+    expect(item?.type).toBe("assistant_message");
+    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(completed === undefined ? undefined : true);
+    if (completed === undefined) expect(item).not.toHaveProperty("completedAt");
+    else expect(item).toHaveProperty("completedAt", completed);
+    expect(parseConversationItem(JSON.parse(JSON.stringify(item)))).toMatchObject({ id: "part:m:text:0", type: "assistant_message" });
+  }
+});
+
+test.each([undefined, null, "40", -1, NaN, Infinity, -Infinity, 0, 40])("stored V2 text end uses the existing finite nonnegative completion semantics (%s)", completed => {
+  const captured = FIXTURES.storedMessages.data.find(message => message.type === "assistant" && message.finish === "tool-calls")!;
+  const native = { ...captured, id: captured.id as string, time: { created: 0, completed }, content: [
+    { type: "text", text: "![shot][ref]\n\n[ref]: result.png" },
+    { type: "reasoning", text: "Still no independent text clock", time: { created: 0 } },
+    { type: "text", text: "Second text part" },
+  ] };
+  const valid = typeof completed === "number" && Number.isFinite(completed) && completed >= 0;
+  const membership = storedExecutionLiveness([native]);
+  const items = normalizeStoredMessage(native, true, undefined, prepareStoredMessage(native), membership.get(native.id));
+  const texts = items.filter((item): item is AssistantMessageItem => item.type === "assistant_message" && item.markdown !== "");
+  expect(texts).toHaveLength(2);
+  for (const item of texts) {
+    expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(valid ? true : undefined);
+    expect((item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE]).toBe(true);
+    if (valid) expect(item.completedAt).toBe(completed as number);
+    else expect(item.completedAt).toBeUndefined();
+    const json = JSON.parse(JSON.stringify(item));
+    expect(Object.getOwnPropertySymbols(json)).toEqual([]);
+    expect(parseConversationItem(json)).toEqual(json);
+  }
+  // Message completion is not a synthesized reasoning/tool end, nor does the
+  // usage-only carrier need a text-syntax marker.
+  for (const item of items.filter(item => !texts.some(text => text === item))) expect((item as typeof item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBeUndefined();
+  expect(items.find(item => item.type === "reasoning")).toMatchObject({ status: "running" });
+});
 
 function run(events: Array<Record<string, unknown>>, memory: OpenCodeV2Memory = createOpenCodeV2Memory()) {
   const normalize = createOpenCodeV2Normalizer(WORKSPACE);
@@ -523,7 +671,11 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     const reasoning = new Set(identities("session.reasoning.delta"));
     expect(identities("session.text.delta").some(identity => reasoning.has(identity))).toBe(false);
     const [textEnded] = byType("session.text.ended");
-    expect(textEnded!.updates[0]).toMatchObject({ kind: "text", mode: "cumulative", text: "`##`" });
+    expect(textEnded!.updates[0]).toMatchObject({ kind: "upsert", item: { type: "assistant_message", markdown: "`##`" } });
+    const endedUpdate = textEnded!.updates[0]!;
+    if (endedUpdate.kind !== "upsert") throw new Error("expected authoritative text-end upsert");
+    expect((endedUpdate.item as typeof endedUpdate.item & OpenCodeTextIdentity)[OPENCODE_TEXT_END]).toBe(true);
+    expect(endedUpdate.item).not.toHaveProperty("completedAt");
   });
 
   test("a tool call is named from its input announcement and settles with its output", () => {
@@ -826,12 +978,24 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     const base = { created: 5, location: { directory: WORKSPACE } };
     const at = (type: string, data: Record<string, unknown>) => normalize({ ...base, id: `e_${type}`, type, data: { sessionID: "ses_r", ...data } }, memory);
     at("session.execution.started", {});
-    expect(at("session.step.failed", { assistantMessageID: "msg_r", error: { type: "rate-limit", message: "Rate limited" } }).updates).toContainEqual({ kind: "status", status: "failed", message: "Rate limited" });
+    const failed = at("session.step.failed", { assistantMessageID: "msg_r", error: { type: "rate-limit", message: "Rate limited" } });
+    const expectedFailedStatus: Extract<NormalizedProviderUpdate, { kind: "status" }> & OpenCodeStepStatus = {
+      kind: "status", status: "failed", message: "Rate limited", [OPENCODE_STEP_LIVE]: true,
+    };
+    expect(failed.updates).toContainEqual(expectedFailedStatus);
+    const failedStatus = failed.updates.find(update => update.kind === "status");
+    if (failedStatus?.kind !== "status") throw new Error("expected failed step status");
+    expect(isVisualTurnLive(failedStatus as typeof failedStatus & OpenCodeStepStatus)).toBe(true);
     const retry = at("session.retry.scheduled", { message: "Retrying in 3s" });
     expect(retry.updates).toEqual([
       { kind: "upsert", item: expect.objectContaining({ type: "notice", level: "warning", message: "Retrying in 3s" }) },
       { kind: "status", status: "retrying" },
     ]);
+    const terminal = at("session.execution.failed", { error: { message: "Rate limited" } }).updates.find(update => update.kind === "status");
+    if (terminal?.kind !== "status") throw new Error("expected execution failure");
+    expect(terminal).toEqual({ kind: "status", status: "failed", message: "Rate limited" });
+    expect(isVisualTurnLive(terminal)).toBe(false);
+    expect((failedStatus as typeof failedStatus & OpenCodeStepStatus)[OPENCODE_STEP_LIVE]).toBe(true);
   });
 
   test("a stored assistant record ended by a Stop carries no failure notice; a real error still does", () => {

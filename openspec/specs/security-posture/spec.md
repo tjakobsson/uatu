@@ -4,7 +4,13 @@
 Define the repository's OpenSSF-aligned security floor: a published vulnerability disclosure policy with a working private reporting channel, an enforced ruleset protecting the main branch, continuous posture measurement via OpenSSF Scorecard, and static analysis (CodeQL) over the TypeScript codebase.
 ## Requirements
 ### Requirement: The repository publishes a vulnerability disclosure policy
-The repository SHALL provide a root `SECURITY.md` that states which versions receive security fixes, directs reporters to GitHub private vulnerability reporting, states an acknowledgement expectation, and describes what is in scope for a local-first tool (terminal authentication, render/sanitization pipeline, file-serving path handling, release-artifact integrity) versus out of scope. GitHub private vulnerability reporting MUST be enabled on the repository so the documented reporting channel works.
+
+The repository SHALL publish root SECURITY.md with supported versions, scope, acknowledgement expectations, and a working GitHub private vulnerability reporting channel.
+
+#### Scenario: The disclosure policy and reporting channel are inspectable
+- **WHEN** the checked-out security policy and repository reporting settings are inspected
+- **THEN** The repository SHALL provide a root `SECURITY.md` that states which versions receive security fixes, directs reporters to GitHub private vulnerability reporting, states an acknowledgement expectation, and describes what is in scope for a local-first tool (terminal authentication, render/sanitization pipeline, file-serving path handling, release-artifact integrity) versus out of scope.
+- **AND** GitHub private vulnerability reporting MUST be enabled on the repository so the documented reporting channel works.
 
 #### Scenario: A researcher reports a vulnerability privately
 - **WHEN** a security researcher opens `SECURITY.md`
@@ -16,7 +22,15 @@ The repository SHALL provide a root `SECURITY.md` that states which versions rec
 - **THEN** it finds a security policy file at a standard location
 
 ### Requirement: The main branch is protected by an enforced ruleset
-The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires every status check that gates a published artifact to pass before merging, and blocks force pushes and branch deletion. The required checks MUST include the CI `validate` and `validate-specs` checks and the contract checks `contract-fast` and `contract-integration`, so a commit whose API contract fails structural, compatibility, or integration validation cannot reach `main` and therefore cannot be published. The ruleset MUST additionally require branches to be up to date before merging (a strict required-status-checks policy), because publication builds `main` without waiting for `main`'s own check run: only an up-to-date branch guarantees that the tree those checks passed against is the tree the squash commit lands. The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
+
+An enforced main ruleset SHALL require up-to-date pull requests and all artifact-gating checks, block force pushes and deletion, and have no standing bypass actors. Required approving reviews MAY remain zero for a single maintainer.
+
+#### Scenario: A pull request attempts to merge into main or an actor attempts a direct push, force push, or branch deletion
+- **WHEN** a pull request attempts to merge into main or an actor attempts a direct push, force push, or branch deletion
+- **THEN** The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires every status check that gates a published artifact to pass before merging, and blocks force pushes and branch deletion.
+- **AND** The required checks MUST include the CI `validate` and `validate-specs` checks and the contract checks `contract-fast` and `contract-integration`, so a commit whose API contract fails structural, compatibility, or integration validation cannot reach `main` and therefore cannot be published.
+- **AND** The ruleset MUST additionally require branches to be up to date before merging (a strict required-status-checks policy), because publication builds `main` without waiting for `main`'s own check run: only an up-to-date branch guarantees that the tree those checks passed against is the tree the squash commit lands.
+- **AND** The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
 
 #### Scenario: A direct push to main is rejected
 - **WHEN** any actor attempts to push a commit directly to `main`
@@ -80,7 +94,14 @@ Every GitHub Actions workflow SHALL declare an explicit workflow-level `permissi
 - **THEN** it inherits the workflow-level grant of none (or read-only) rather than any write scope
 
 ### Requirement: Workflows do not check out event-derived refs under privileged triggers
-The repository SHALL NOT define a GitHub Actions workflow that checks out a Git ref taken from event payload data — such as `github.event.workflow_run.head_sha`, `github.event.workflow_run.head_branch`, or `github.event.pull_request.head.sha` — under the `workflow_run` or `pull_request_target` triggers. Work that needs elevated permissions after another workflow's validation MUST instead run as a job inside the workflow that produced the validation, or on a trusted trigger that checks out a fixed ref. Job-level `if` guards on the originating repository or branch are not a substitute: they are invisible to external supply-chain analysis, so a guarded checkout still reports as an untrusted code checkout.
+
+Privileged workflow_run and pull_request_target workflows MUST NOT check out event-derived refs. Elevated post-validation work MUST run inside its validating workflow or from a trusted trigger with a fixed checkout ref. Repository or branch guards are not a substitute: external supply-chain analysis cannot see them.
+
+#### Scenario: Workflow automation needs elevated permissions after validation and chooses a trigger and checkout ref
+- **WHEN** workflow automation needs elevated permissions after validation and chooses a trigger and checkout ref
+- **THEN** The repository SHALL NOT define a GitHub Actions workflow that checks out a Git ref taken from event payload data — such as `github.event.workflow_run.head_sha`, `github.event.workflow_run.head_branch`, or `github.event.pull_request.head.sha` — under the `workflow_run` or `pull_request_target` triggers.
+- **AND** Work that needs elevated permissions after another workflow's validation MUST instead run as a job inside the workflow that produced the validation, or on a trusted trigger that checks out a fixed ref.
+- **AND** Job-level `if` guards on the originating repository or branch are not a substitute: they are invisible to external supply-chain analysis, so a guarded checkout still reports as an untrusted code checkout.
 
 #### Scenario: Automation needs elevated permissions after validation
 - **WHEN** a workflow needs `pages: write`, `contents: write`, or another write scope to act on validated output
@@ -96,7 +117,13 @@ The repository SHALL NOT define a GitHub Actions workflow that checks out a Git 
 - **THEN** the repository's workflow shape tests fail
 
 ### Requirement: Input-handling code is property-based tested
-The repository SHALL include property-based tests, using the `fast-check` library under the standard unit-test runner, for units that parse, transform, or emit untrusted input: HTML escaping, Markdown rendering, Mermaid sanitization, and the ignore engine. These tests MUST assert security invariants over generated arbitrary inputs — at minimum that rendering never throws, that escaped or sanitized output cannot carry script-capable markup (script elements, event-handler attributes, `javascript:` URLs), and that ignore decisions are deterministic. Property tests MUST run as part of the standard unit suite with bounded run counts so suite runtime stays practical.
+
+The standard unit suite SHALL run bounded `fast-check` property tests for HTML escaping, Markdown rendering, Mermaid sanitization and the ignore engine. Generated arbitrary inputs MUST check at least that rendering never throws, escaped/sanitized output cannot carry script elements, event-handler attributes or `javascript:` URLs, and ignore decisions are deterministic.
+
+#### Scenario: The standard suite includes bounded arbitrary-input safety tests
+- **WHEN** the standard unit suite runs
+- **THEN** bounded `fast-check` cases exercise HTML escaping, Markdown rendering, Mermaid sanitization and the ignore engine
+- **AND** they assert rendering does not throw, escaped/sanitized output contains no script-capable script elements, event-handler attributes or `javascript:` URLs, and ignore decisions are deterministic
 
 #### Scenario: Arbitrary input cannot smuggle active markup through escaping
 - **WHEN** the property suite feeds arbitrary strings through HTML escaping

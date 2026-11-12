@@ -15,14 +15,17 @@ The tag-triggered release workflow SHALL include a macOS job that builds the des
 When Developer ID signing secrets are configured, the release job MUST codesign
 the app bundle (hardened runtime; there is no embedded binary to nested-sign),
 submit for notarization, staple the ticket, attach the signed archives to
-the GitHub release, and include them in the published checksums. It SHALL also
-generate a GitHub build-provenance attestation for each signed archive and
-attach the archive's Sigstore bundle (retrieved from the attestation store) to
-the release as `<archive>.sigstore.json`, matching the bundle assets the four
-`uatu-*` archives already ship. When the secrets
-are absent, the job MUST still build ad-hoc-signed apps and upload them as
-workflow artifacts with a visible warning, and MUST NOT attach unsigned apps to
-the GitHub release.
+the GitHub release, and include them in the published checksums.
+
+#### Scenario: Signed desktop archives carry release provenance
+- **WHEN** the release job produces signed app archives
+- **THEN** it SHALL generate a GitHub build-provenance attestation for each signed archive
+- **AND** it SHALL attach the archive's Sigstore bundle, retrieved from the attestation store, to the release as `<archive>.sigstore.json`, matching the bundle assets the four `uatu-*` archives already ship
+
+#### Scenario: Missing credentials restrict apps to workflow artifacts
+- **WHEN** Developer ID signing secrets are absent
+- **THEN** the job MUST still build ad-hoc-signed apps and upload them as workflow artifacts with a visible warning
+- **AND** it MUST NOT attach unsigned apps to the GitHub release
 
 #### Scenario: Secrets absent (pre-enrollment)
 - **WHEN** the release workflow runs without signing secrets configured
@@ -69,7 +72,16 @@ otherwise.
 - **THEN** the desktop build job does not run
 
 ### Requirement: A nightly edge workflow builds signed desktop apps from main
-A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build, from `main`, both the UatuCode Desktop apps — using the same embed/sign/notarize/staple pipeline as releases — and the four cross-compiled uatu CLI archives under the stable release naming contract, and SHALL exit early without building when `main` has not moved since the last fully published edge build — "fully published" meaning the `edge` tag points at `main`'s HEAD AND the release carries the complete asset set (desktop app archives, CLI archives, every archive's provenance bundle, SHA256SUMS, VERSION). Before anything publishes, the CLI binary the runner can execute SHALL pass the smoke test (`bun run smoke` against the freshly compiled host-platform binary), mirroring the stable release's pre-publication gate. When Developer ID signing secrets are unavailable the workflow MUST fail without publishing anything — unsigned edge builds are never distributed, and the failure is loud so a bad secret rotation cannot silently stop the channel.
+A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build, from `main`, both UatuCode Desktop apps using the same embed/sign/notarize/staple pipeline as releases and the four cross-compiled uatu CLI archives under the stable release naming contract. It SHALL skip fully published unchanged builds and gate publication on smoke testing and signing credentials.
+
+#### Scenario: Unchanged main is skipped only after complete publication
+- **WHEN** the nightly workflow checks whether `main` has moved since the last fully published edge build
+- **THEN** it SHALL exit early without building only when the `edge` tag points at `main`'s HEAD AND the release carries the complete asset set: desktop app archives, CLI archives, every archive's provenance bundle, SHA256SUMS, and VERSION
+
+#### Scenario: Smoke testing and signing gate every edge publication
+- **WHEN** an edge run prepares to publish
+- **THEN** the freshly compiled host-platform CLI binary the runner can execute SHALL first pass `bun run smoke`, mirroring the stable release's pre-publication gate
+- **AND** unavailable Developer ID signing secrets MUST fail the workflow loudly without publishing anything; unsigned edge builds are never distributed, so bad secret rotation cannot silently stop the channel
 
 #### Scenario: main moved overnight
 
@@ -92,7 +104,23 @@ A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build,
 - **THEN** the run fails and neither CLI nor desktop assets publish — the previous night's assets remain in place
 
 ### Requirement: Edge builds publish to a rolling prerelease with monotonic versions
-Edge builds SHALL publish to a single GitHub prerelease with the fixed tag `edge`: the tag moves to the built commit, assets (`UatuCode-Desktop-arm64.zip`, `UatuCode-Desktop-x64.zip`, `uatu-darwin-arm64.zip`, `uatu-darwin-x64.zip`, `uatu-linux-x64.tar.gz`, `uatu-linux-arm64.tar.gz`, each archive's `<archive>.sigstore.json` Sigstore provenance bundle, `SHA256SUMS`, and `VERSION`) are replaced in place, and the release records the source commit. The CLI archives SHALL follow the stable release asset contract — zip for darwin, tar.gz for linux, each holding a single `uatu` binary at archive root — and SHA256SUMS SHALL cover every archive, desktop and CLI alike. Each archive SHALL carry a GitHub build-provenance attestation (via `actions/attest-build-provenance`), and its Sigstore bundle SHALL be retrieved from the attestation store (`gh attestation download`) and uploaded as a sibling release asset, mirroring the versioned-release contract, so edge provenance is discoverable from the release page and verifiable without GitHub-specific tooling. The workflow's "already fully published" check SHALL count the CLI archives and all provenance bundles among the required assets, so a run that uploaded archives but failed before attaching bundles is completed by the next run rather than skipped. The stamped version SHALL be `<base>-edge.<utc-timestamp>.<shortsha>` (base from `package.json`, timestamp with second precision) so successive edge builds — including several on the same day — compare as increasing versions and the next stable release compares higher than any of its edge builds.
+Edge builds SHALL publish to a single GitHub prerelease with the fixed tag `edge`, moving the tag to the built commit, replacing the complete asset set in place, and recording the source commit. Archives SHALL follow the stable packaging and provenance contracts, with monotonic edge versions below the next stable release.
+
+#### Scenario: An edge publish replaces the complete named asset set
+- **WHEN** an edge build publishes
+- **THEN** it SHALL replace `UatuCode-Desktop-arm64.zip`, `UatuCode-Desktop-x64.zip`, `uatu-darwin-arm64.zip`, `uatu-darwin-x64.zip`, `uatu-linux-x64.tar.gz`, `uatu-linux-arm64.tar.gz`, each archive's `<archive>.sigstore.json` Sigstore provenance bundle, `SHA256SUMS`, and `VERSION` in place
+- **AND** CLI archives SHALL be zip for darwin and tar.gz for linux, each holding a single `uatu` binary at archive root, and SHA256SUMS SHALL cover every archive, desktop and CLI alike
+
+#### Scenario: Edge provenance survives interrupted publication
+- **WHEN** the workflow prepares archives or checks whether an edge build is already fully published
+- **THEN** each archive SHALL carry a GitHub build-provenance attestation via `actions/attest-build-provenance`
+- **AND** its Sigstore bundle SHALL be retrieved from the attestation store with `gh attestation download` and uploaded as a sibling release asset, mirroring the versioned-release contract so provenance is discoverable from the release page and verifiable without GitHub-specific tooling
+- **AND** the completeness check SHALL require CLI archives and all provenance bundles, so a run that uploaded archives but failed before attaching bundles is completed by the next run rather than skipped
+
+#### Scenario: Successive edge builds receive increasing versions
+- **WHEN** an edge version is stamped
+- **THEN** it SHALL be `<base>-edge.<utc-timestamp>.<shortsha>`, with base from `package.json` and timestamp with second precision
+- **AND** successive builds, including several on the same day, SHALL compare as increasing versions, while the next stable release compares higher than any of its edge builds
 
 #### Scenario: Assets replaced in place
 
@@ -115,7 +143,15 @@ Edge builds SHALL publish to a single GitHub prerelease with the fixed tag `edge
 - **THEN** the stable version compares higher and the upgrade proceeds
 
 ### Requirement: The tap offers an opt-in uatu-desktop@edge cask
-The tap automation SHALL generate `Casks/uatu-desktop@edge.rb` in `tjakobsson/homebrew-tap` from the edge release's SHA256SUMS, pointing at the `edge` tag's assets with the edge version string. It SHALL run on every successful workflow run — including runs whose build was skipped — reconciling the cask with the currently published release so a transiently failed tap update self-heals without a rebuild. The edge cask SHALL declare a conflict with the stable `uatu-desktop` cask, and the stable cask MUST remain unaffected by edge publishing.
+The tap automation SHALL generate `Casks/uatu-desktop@edge.rb` in `tjakobsson/homebrew-tap` from the edge release's SHA256SUMS, pointing at the `edge` tag's assets with the edge version string. The edge cask SHALL conflict with stable `uatu-desktop`; edge publishing MUST leave the stable cask unaffected. Every successful workflow run, including a skipped build, SHALL reconcile the edge cask with the published release.
+
+#### Scenario: Every successful edge run reconciles the opt-in cask
+- **WHEN** a workflow run succeeds, including when its build was skipped
+- **THEN** tap automation SHALL run and reconcile the cask with the currently published release so a transient tap-update failure self-heals without a rebuild
+
+#### Scenario: The generated cask declares its install conflict
+- **WHEN** the published `Casks/uatu-desktop@edge.rb` is inspected independently of a workflow run
+- **THEN** it declares a conflict with the stable `uatu-desktop` cask
 
 #### Scenario: Opting into edge
 
@@ -151,4 +187,3 @@ The UatuCode Desktop Xcode project and Swift sources SHALL live in the uatu repo
 #### Scenario: Local development build
 - **WHEN** a developer builds the Xcode project without having run `bun run build`
 - **THEN** the build succeeds and the resulting app bundle contains no `uatu` binary
-

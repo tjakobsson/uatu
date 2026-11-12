@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   DocumentStateIndex, normalizeDocumentContext, projectDocumentPatch, projectDocumentSnapshot, unseenSnapshotChange,
-  type DocumentPatch, type DocumentSnapshot, type RevisionedDocument,
+  type DocumentPatch, type DocumentSnapshot, type RevisionedDocument, type RevisionedFolder,
 } from "./document-updates";
 import { DEFAULT_WATCH_CONTEXT } from "./watch-context";
 import { BUILD_SUMMARY } from "../server/watch-session";
@@ -26,6 +26,54 @@ function patch(revision: number, values: Partial<DocumentPatch> = {}): DocumentP
     upserts: [], removals: [], changedId: null, ...values,
   };
 }
+
+function folder(relativePath: string, listed = false, revision = 0, rootId = "/docs"): RevisionedFolder {
+  return { id: `${rootId}/${relativePath.replace(/\/$/, "")}`, rootId, relativePath, listed, revision };
+}
+
+describe("ignored folder entries", () => {
+  test("snapshots and patches carry folder entries without touching the search corpus", () => {
+    const index = new DocumentStateIndex();
+    const base = snapshot();
+    base.roots[0]!.folders = [folder("node_modules/"), folder("build/")];
+    expect(index.apply(base)).toBe("applied");
+    const corpus = index.corpusVersion, tree = index.folderVersion;
+    expect(index.view()!.roots[0]!.folders!.map(entry => entry.relativePath).sort()).toEqual(["build/", "node_modules/"]);
+    expect(index.apply(patch(1, { folderUpserts: [folder("build/", true, 1), folder("build/renders/", false, 1)] }))).toBe("applied");
+    expect(index.folderVersion).not.toBe(tree);
+    expect(index.corpusVersion).toBe(corpus);
+    expect(index.snapshot()!.roots[0]!.folders).toEqual([folder("build/", true, 1), folder("build/renders/", false, 1), folder("node_modules/")]);
+    expect(index.apply(patch(2, { folderRemovals: [{ rootId: "/docs", id: "/docs/node_modules" }] }))).toBe("applied");
+    expect(index.snapshot()!.roots[0]!.folders!.map(entry => entry.relativePath)).toEqual(["build/", "build/renders/"]);
+    // A replay of the materialized snapshot round-trips the folder entries.
+    const replay = new DocumentStateIndex();
+    expect(replay.apply(JSON.parse(JSON.stringify(index.snapshot())))).toBe("applied");
+    expect(replay.snapshot()!.roots[0]!.folders).toEqual(index.snapshot()!.roots[0]!.folders);
+  });
+
+  test.each<[string, Partial<DocumentPatch>]>([
+    ["unknown root", { folderUpserts: [folder("x/", false, 1, "/elsewhere")] }],
+    ["future revision", { folderUpserts: [folder("x/", false, 9)] }],
+    ["file-shaped path", { folderUpserts: [{ ...folder("x/", false, 1), relativePath: "x" }] }],
+    ["duplicate", { folderUpserts: [folder("x/", false, 1), folder("x/", true, 1)] }],
+    ["upsert and removal together", { folderUpserts: [folder("x/", false, 1)], folderRemovals: [{ rootId: "/docs", id: "/docs/x" }] }],
+    ["removal for unknown root", { folderRemovals: [{ rootId: "/elsewhere", id: "/elsewhere/x" }] }],
+  ])("a malformed folder batch resyncs without partial application: %s", (_label, values) => {
+    const index = new DocumentStateIndex(); index.apply(snapshot());
+    expect(index.apply(patch(1, { upserts: [doc("/docs/b.md", 1)], ...values }))).toBe("resync");
+    expect(index.find("/docs/b.md")).toBeUndefined();
+  });
+
+  test("file-scoped projections carry no folder entries", () => {
+    const base = snapshot();
+    base.roots[0]!.folders = [folder("build/")];
+    const context = { ...DEFAULT_WATCH_CONTEXT, scope: { kind: "file" as const, documentId: "/docs/a.md" } };
+    expect(projectDocumentSnapshot(base, context).roots[0]).not.toHaveProperty("folders");
+    const projected = projectDocumentPatch(patch(1, { folderUpserts: [folder("build/", true, 1)], folderRemovals: [] }), context);
+    expect(projected).not.toHaveProperty("folderUpserts");
+    expect(projected).not.toHaveProperty("folderRemovals");
+  });
+});
 
 describe("document update protocol", () => {
   test("corpus ownership survives repository/discovery patches and replacement snapshots", () => {

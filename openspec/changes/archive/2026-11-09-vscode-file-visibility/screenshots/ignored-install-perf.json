@@ -1,0 +1,15 @@
+{
+  "fixture": {
+    "ignoredFiles": 40000,
+    "installWrites": 80000
+  },
+  "discoveryMs": 4382,
+  "treeMountMs": 303,
+  "installMs": 3992,
+  "editVisibleMs": 2004,
+  "editPatchMs": 1867,
+  "installDocsAfter": 2000,
+  "lanePatches": 7,
+  "largestLanePatch": 1024,
+  "lanePatchEntries": 6546
+}

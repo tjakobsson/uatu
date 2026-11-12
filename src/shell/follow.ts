@@ -18,7 +18,7 @@ import { appState } from "./state";
 import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId, getSelectionGeneration, getSelectionActivation } from "./selection";
 import { persistPersonalWorkspaceState } from "./personal-state";
 import { revealPreviewSurface } from "./tab-bar";
-import { isDocumentVisible } from "../shared/file-visibility";
+import { isFollowEligible } from "../shared/file-visibility";
 
 export { chooseSelectionForFileEvent };
 let pendingCatchUp: { generation: number; activation: number } | null = null;
@@ -91,7 +91,8 @@ export function applyChipClick(): void {
       setPreviewMode({ kind: "document" });
       return;
     }
-    const eligibleRoots = appState.roots.map(root => ({ ...root, docs: root.docs.filter(doc => isDocumentVisible(doc, appState.showIgnored)) }));
+    // Ignored files are never a catch-up target, shown or not.
+    const eligibleRoots = appState.roots.map(root => ({ ...root, docs: root.docs.filter(isFollowEligible) }));
     const jumpTo = selectionForChipTurnOn(eligibleRoots, appState.selectedId);
     if (jumpTo) {
       setSelectedId(jumpTo);

@@ -47,7 +47,23 @@ The Files pane SHALL provide a filename/path query that works in All, Recent, an
 - **AND** clearing the query restores the unqueried tree
 
 ### Requirement: Live Recent updates preserve activation and reading position
-File additions, writes, renames, and deletions SHALL update Recent from existing indexed state. An update MUST NOT cause a pointer/touch activation begun on one file to activate another file. Structural updates SHALL wait until an in-progress activation settles, then preserve the surviving scroll anchor and file-keyed keyboard focus. A reader below the top MUST NOT be jumped to the newest row. Updates and view switches MUST NOT choose a preview, clear intentional deselection, enable Follow, or start media playback.
+File additions, writes, renames, and deletions SHALL update Recent from existing indexed state while preserving activation, reading position, and deliberate selection.
+
+#### Scenario: Structural updates respect an activation in progress
+- **WHEN** a structural Recent update arrives, with or without an activation in progress
+- **THEN** it SHALL wait for any in-progress activation to settle, then preserve the surviving scroll anchor and file-keyed keyboard focus
+
+#### Scenario: Any Recent update preserves an activation's file identity
+- **WHEN** any Recent update arrives during a pointer/touch activation
+- **THEN** it MUST NOT cause an activation begun on one file to activate another file
+
+#### Scenario: Recent updates do not jump readers to the newest row
+- **WHEN** Recent updates
+- **THEN** a reader below the top MUST NOT be jumped to the newest row
+
+#### Scenario: Updates and view switches preserve deliberate preview and playback choices
+- **WHEN** Recent updates or the user switches Files views
+- **THEN** updates and view switches MUST NOT choose a preview, clear intentional deselection, enable Follow, or start media playback
 
 #### Scenario: A render arrives under a finger
 - **WHEN** a user presses a row and a newer file arrives before the activation finishes
@@ -74,3 +90,14 @@ The hierarchical file views SHALL keep their existing stable hierarchy while off
 #### Scenario: A label ages out
 - **WHEN** a file's write age passes 24 hours
 - **THEN** its recent-age label is removed without a corpus refetch or tree expansion reset
+
+### Requirement: Recent covers known files in ignored folders
+Recent SHALL include files inside Git-ignored folders that are known to the index: files in listed levels and files captured by the live-write window. Recent SHALL NOT read unlisted ignored folders to find older writes. A file inside an unlisted ignored folder that was written before the session started SHALL appear in Recent once its level is listed.
+
+#### Scenario: A render written during the session is in Recent
+- **WHEN** Show ignored files is on and a script writes `build/renders/take-5.wav` inside an unlisted ignored `build/`
+- **THEN** `take-5.wav` appears at the top of Recent and under the Audio filter
+
+#### Scenario: Yesterday's render appears after expansion
+- **WHEN** `build/renders/take-0.wav` was written before the session started and `build/renders/` has not been listed
+- **THEN** it is absent from Recent until a client expands `build/renders/`, after which it is ordered by its write time

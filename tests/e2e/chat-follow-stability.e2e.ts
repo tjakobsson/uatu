@@ -333,12 +333,6 @@ for (const browserName of ["chromium", "webkit"] as const) {
           childConversationId: snapshot.conversation.id }] } });
         const { token } = await request.get("/__e2e/terminal-token").then(r => r.json());
         await page.goto(`/?t=${encodeURIComponent(token)}`);
-        if (touch) await page.locator("#touch-tab-chat").click();
-        else await openChatPanel(page);
-        if (child) {
-          await page.locator("#chat-compact-workers summary").click();
-          await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Follow fixture$/ }) }).click();
-        }
         const selector = child ? "#chat-drilldown-timeline" : "#chat-timeline";
         const latest = child ? "#chat-drilldown-latest" : "#chat-latest";
         const scroller = page.locator(selector);
@@ -350,12 +344,11 @@ for (const browserName of ["chromium", "webkit"] as const) {
         const bottom = () => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
         const following = () => page.evaluate(index => window.__followControllers[index]!.isPinned(), child ? 1 : 0);
         const phase = (name: string) => page.evaluate(value => { window.__followTrace.phase = value; }, name);
-        await expect(page.locator('[data-chat-item-id="follow:39"]')).toBeVisible();
-        await expect.poll(bottom).toBeLessThan(2);
-        await frames();
         expect(instrumented).toBe(true);
+        // Start before activating the surface: an initial follow failure must
+        // retain the writes and geometry that led to it, not an empty trace.
         await scroller.evaluate((el, isChild) => {
-          const state: Trace = { frame: 0, phase: "passive", reader: false, frames: [], writes: [] };
+          const state: Trace = { frame: 0, phase: "startup", reader: false, frames: [], writes: [] };
           window.__followTrace = state;
           const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
           Object.defineProperty(el, "scrollTop", { configurable: true, get() { return descriptor.get!.call(this); }, set(top: number) {
@@ -371,12 +364,23 @@ for (const browserName of ["chromium", "webkit"] as const) {
           }) as typeof el.scrollTo;
           const sample = () => {
             state.frame++;
-            state.frames.push({ frame: state.frame, phase: state.phase, top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight,
-              following: window.__followControllers[isChild ? 1 : 0]!.isPinned() });
+            const controller = window.__followControllers?.[isChild ? 1 : 0];
+            if (controller) state.frames.push({ frame: state.frame, phase: state.phase, top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight,
+              following: controller.isPinned() });
             if (el.isConnected) requestAnimationFrame(sample);
           };
           requestAnimationFrame(sample);
         }, child);
+        if (touch) await page.locator("#touch-tab-chat").click();
+        else await openChatPanel(page);
+        if (child) {
+          await page.locator("#chat-compact-workers summary").click();
+          await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Follow fixture$/ }) }).click();
+        }
+        await expect(page.locator('[data-chat-item-id="follow:39"]')).toBeVisible();
+        await expect.poll(bottom).toBeLessThan(2);
+        await frames();
+        await phase("passive");
         const append = async (i: number) => {
           const response = await request.post("/__e2e/chat", { data: { action: "item", conversationId: snapshot.conversation.id,
             item: { id: `append:${i}`, type: "assistant_message", createdAt: 100 + i, markdown: `Append ${i}\n\n${"Streaming text. ".repeat(25)}` } } });
@@ -499,6 +503,52 @@ for (const browserName of ["chromium", "webkit"] as const) {
       } finally {
         const trace = await page.evaluate(() => window.__followTrace).catch(() => undefined);
         if (trace) await testInfo.attach("follow-frames.json", { body: JSON.stringify(trace, null, 2), contentType: "application/json" });
+        const geometry = await page.evaluate(isChild => {
+          const el = document.querySelector<HTMLElement>(isChild ? "#chat-drilldown-timeline" : "#chat-timeline");
+          if (!el) return null;
+          const style = getComputedStyle(el);
+          const rows = el.querySelectorAll<HTMLElement>("[data-chat-item-id]");
+          const row = (node: HTMLElement | undefined) => node ? { id: node.dataset.chatItemId, rect: node.getBoundingClientRect().toJSON(),
+            marginBottom: getComputedStyle(node).marginBottom, contentVisibility: getComputedStyle(node).contentVisibility } : null;
+          return {
+            phase: window.__followTrace?.phase, top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight,
+            bottom: el.scrollHeight - el.clientHeight - el.scrollTop, rect: el.getBoundingClientRect().toJSON(),
+            paddingTop: style.paddingTop, paddingBottom: style.paddingBottom,
+            scrollPaddingTop: style.scrollPaddingTop, scrollPaddingBottom: style.scrollPaddingBottom,
+            font: style.font, fontsStatus: document.fonts.status, first: row(rows[0]), last: row(rows[rows.length - 1]),
+            activeElement: { tag: document.activeElement?.tagName, id: document.activeElement?.id },
+            controllers: (window.__followControllers ?? []).map(controller => ({ following: controller.isPinned(),
+              ...Object.fromEntries(["anchor", "previous", "expected", "restoring"].map(key => [key, Reflect.get(controller, key)])) })),
+          };
+        }, child).catch(() => undefined);
+        if (geometry) {
+          const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
+          const fixtureId = (value: unknown) => typeof value === "string" && /^(?:follow:\d+|append:\d+|follow:command)$/.test(value) ? value : null;
+          // Actions logs must suffice for diagnosis without artifact downloads.
+          // Keep this whitelist separate from the richer attachment: no DOM,
+          // URLs, active-control names, transcript text or provider payloads.
+          console.log(`[chat-follow-diagnostic] ${JSON.stringify({
+            engine: browserName, touch, child, phase: geometry.phase,
+            top: geometry.top, extent: geometry.extent, height: geometry.height, bottom: geometry.bottom, rect: geometry.rect,
+            paddingTop: number(parseFloat(geometry.paddingTop)), paddingBottom: number(parseFloat(geometry.paddingBottom)),
+            scrollPaddingTop: number(parseFloat(geometry.scrollPaddingTop)), scrollPaddingBottom: number(parseFloat(geometry.scrollPaddingBottom)),
+            fontsStatus: geometry.fontsStatus,
+            first: geometry.first ? { id: fixtureId(geometry.first.id), rect: geometry.first.rect } : null,
+            last: geometry.last ? { id: fixtureId(geometry.last.id), rect: geometry.last.rect } : null,
+            controllers: geometry.controllers.map(controller => {
+              const anchor = Reflect.get(controller, "anchor");
+              const previous = Reflect.get(controller, "previous");
+              const restoring = Reflect.get(controller, "restoring");
+              return {
+                following: controller.following, expected: number(Reflect.get(controller, "expected")),
+                restoring: typeof restoring === "boolean" ? restoring : null,
+                anchor: anchor ? { itemId: fixtureId(anchor.itemId), offset: number(anchor.offset) } : null,
+                previous: previous ? { top: number(previous.scrollTop), extent: number(previous.scrollHeight), height: number(previous.clientHeight) } : null,
+              };
+            }),
+          })}`);
+          await testInfo.attach("follow-final-geometry.json", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+        }
         await browser.close();
       }
     });

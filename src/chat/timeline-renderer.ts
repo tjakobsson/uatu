@@ -8,6 +8,7 @@ import { loginActionMarkup, type LoginAction } from "./login-action";
 import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
+import { decorateChatVisuals, reconcileChatVisuals } from "./visual-ui";
 import { retainShellSelection, ShellOutputController, type ShellMutationHooks, type ShellOutputMetadata, type ShellPresentation } from "./shell-output";
 import { measureChatWork } from "./performance";
 import { resolveWorkspaceFileReference } from "./file-references";
@@ -255,6 +256,7 @@ export class TimelineRenderer {
           deferredBodies.delete(node);
           decorateFileLinks(node);
           decorateAttachmentImages(node);
+          decorateChatVisuals(node);
         };
         deferredBodies.set(node, materialize);
         node.addEventListener("toggle", () => { if (node.hasAttribute("open")) materialize(); });
@@ -423,6 +425,7 @@ export class TimelineRenderer {
     for (const node of dirty) {
       const shell = this.shells.get(node.dataset.chatItemId ?? "");
       if (shell) shell.attach(node);
+      decorateChatVisuals(node);
     }
     return dirty;
   }
@@ -1008,7 +1011,15 @@ function patchInPlace(entry: RenderedEntry, item: ConversationItem, completedAss
   if (item.type === "assistant_message" && current.type === "assistant_message") {
     const content = entry.node.querySelector<HTMLElement>(".chat-assistant-content");
     if (!content) return false;
-    if (current.markdown !== item.markdown) content.innerHTML = renderChatMarkdown(item.markdown);
+    if (current.markdown !== item.markdown || current.visuals !== item.visuals || entry.node.dataset.complete !== String(completedAssistant)) {
+      const next = document.createElement("div");
+      next.innerHTML = renderChatMarkdown(item.markdown, { streaming: !completedAssistant, visuals: item.visuals });
+      const focused = reconcileChatVisuals(content, next);
+      content.replaceChildren(...Array.from(next.childNodes));
+      // Moving/replacing a visual through the staging tree blurs its control.
+      // Restore only the matched occurrence/control, never autofocus or scroll.
+      if (focused && content.contains(focused)) focused.focus({ preventScroll: true });
+    }
     entry.node.dataset.complete = String(completedAssistant);
     if (completedAssistant) decorateAssistantCopyActions(entry.node);
     else entry.node.querySelectorAll("[data-chat-copy]").forEach(control => control.remove());
@@ -1546,7 +1557,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
       : "";
     return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}>${renderMessageAttachments(item.attachments)}${item.text ? `<div>${escapeHtml(item.text)}</div>` : ""}${action}</article>`;
   }
-  if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown)}</div></article>`;
+  if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown, { streaming: !completedAssistant, visuals: item.visuals })}</div></article>`;
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);
     return `<footer class="chat-item chat-turn-status is-${item.status}" data-chat-item-id="${id}"${stamp} role="status">${escapeHtml(statusLabel(item.status))}${item.message ? `: ${escapeHtml(item.message)}` : ""}${worked ? ` <span class="chat-turn-worked">· worked ${worked}</span>` : ""}</footer>`;
@@ -1637,6 +1648,7 @@ export function decorateAssistantCopyActions(container: HTMLElement): void {
   const content = article.querySelector<HTMLElement>(".chat-assistant-content");
   if (!content) return;
   for (const pre of content.querySelectorAll<HTMLPreElement>("pre")) {
+    if (pre.closest(".chat-visual")) continue;
     if (!pre.querySelector(":scope > code") || pre.querySelector(":scope > [data-chat-copy='code']")) continue;
     const copy = document.createElement("button");
     copy.type = "button";

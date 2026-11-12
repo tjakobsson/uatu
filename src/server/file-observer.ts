@@ -9,14 +9,24 @@ import chokidar from "chokidar";
 import type { WatchEntry } from "./roots";
 import type { createWatchPolicy } from "./watch-policy";
 
-export type FileObserver = EventEmitter & { close(): Promise<void> };
+// `reveal` starts reading a directory that was unlisted until now; `track`
+// starts observing one file inside such a directory.
+export type FileObserver = EventEmitter & { close(): Promise<void>; reveal?(directory: string): void; track?(file: string): void };
 type Options = {
   ignored: ReturnType<typeof createWatchPolicy>["ignored"];
+  // An ignored folder level nobody has listed: known, never read or walked.
+  unlisted?: (directory: string) => boolean;
+  // A directory that appeared after discovery: true if it is ignored as a
+  // whole (it then becomes unlisted) — decided before it is read.
+  classifyNew?: (directory: string) => Promise<boolean>;
+  // Paths inside Git-ignored folders: inspected after every other queued
+  // path, so an install's burst never delays an ordinary edit.
+  background?: (file: string) => boolean;
   usePolling?: boolean;
   renew?: boolean;
   // Controlled native notifications with real filesystem reads in tests.
   watch?: typeof watch;
-  onWork?: (kind: "watch" | "stat" | "directory") => void;
+  onWork?: (kind: "watch" | "stat" | "directory", file?: string) => void;
 };
 type NativeSubscription = { watcher: FSWatcher; listeners: Set<(event: string, file: string | null) => void> };
 const subscriptions = new Map<string, NativeSubscription>();
@@ -78,15 +88,24 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
       if (!["ERR_FEATURE_UNAVAILABLE_ON_PLATFORM", "ERR_INVALID_ARG_VALUE", "ENOSYS", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
     }
   }
+  // Chokidar cannot defer a decision, so a folder Git starts ignoring after
+  // discovery is still walked in this mode. A known unlisted folder is
+  // watched itself (so a new one gets its row) but nothing inside it is.
+  // Files a client opened inside an unlisted folder are tracked individually.
+  const tracked = new Set<string>();
+  const ignored: Options["ignored"] = (file, stats) => options.ignored(file, stats)
+    || !tracked.has(file) && options.unlisted?.(path.dirname(file)) === true;
   const watcher = chokidar.watch(entry.absolutePath, {
-    ignored: options.ignored, usePolling: polling, interval: 100,
+    ignored, usePolling: polling, interval: 100,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
   });
-  return polling
-    ? new PolledBaselineCheck(watcher, options.ignored, {
-      root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
-    })
-    : watcher;
+  const track = (file: string) => { tracked.add(file); watcher.add(file); };
+  if (!polling) return Object.assign(watcher, { reveal: (directory: string) => { watcher.add(directory); }, track });
+  const observer = new PolledBaselineCheck(watcher, ignored, {
+    root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
+  });
+  observer.track = track;
+  return observer;
 }
 
 // Chokidar polls each file and directory with fs.watchFile, which (in Bun, as
@@ -160,6 +179,14 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     watcher.on("raw", (...args: unknown[]) => this.emit("raw", ...args));
     watcher.on("ready", () => this.emit("ready"));
     watcher.on("error", (error: unknown) => this.emit("error", error));
+  }
+
+  reveal(directory: string): void {
+    if (!this.closed) this.watcher.add(directory);
+  }
+
+  track(file: string): void {
+    if (!this.closed) this.watcher.add(file);
   }
 
   async close(): Promise<void> {
@@ -347,6 +374,11 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
   private known = new Map<string, Stats>();
   private children = new Map<string, Set<string>>();
   private pending = new Map<string, boolean>();
+  private backgroundPending = new Map<string, boolean>();
+  private classifyWaiting: [string, Stats][] = [];
+  // Directories awaiting Git: not read until it answers.
+  private classifying = new Set<string>();
+  private classifyActive = 0;
   private activePaths = new Set<string>();
   private deleted = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
@@ -385,11 +417,33 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
     queueMicrotask(() => this.enqueue(entry.absolutePath, true));
   }
 
+  reveal(directory: string): void {
+    this.enqueue(directory, true);
+  }
+
+  // Registers one file inside an unlisted folder, with the folders above it
+  // (known, not read), so a removal of any of them is noticed.
+  track(file: string): void {
+    this.registerAncestors(file);
+    if (!this.known.has(file)) this.enqueue(file, false);
+  }
+
+  private registerAncestors(file: string): void {
+    if (this.entry.kind !== "dir") return;
+    const root = this.entry.absolutePath;
+    for (let directory = path.dirname(file); directory !== root && contained(root, directory); directory = path.dirname(directory)) {
+      if (!this.known.has(directory)) this.enqueue(directory, false);
+    }
+  }
+
   async close(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
     this.release();
     this.pending.clear();
+    this.backgroundPending.clear();
+    this.classifyWaiting = [];
+    this.classifying.clear();
     for (const timer of this.deleted.values()) clearTimeout(timer);
     this.deleted.clear();
     this.known.clear();
@@ -399,7 +453,8 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
 
   private enqueue(file: string, discover: boolean): void {
     if (this.stopped) return;
-    this.pending.set(file, (this.pending.get(file) ?? false) || discover);
+    const queue = this.options.background?.(file) ? this.backgroundPending : this.pending;
+    queue.set(file, (queue.get(file) ?? false) || discover);
     if (this.scheduled) return;
     this.scheduled = true;
     queueMicrotask(() => { this.scheduled = false; this.pump(); });
@@ -407,23 +462,28 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
 
   private pump(): void {
     if (this.stopped) return;
-    for (const [file, discover] of this.pending) {
-      if (this.activePaths.size >= 16) break;
-      if (this.activePaths.has(file)) continue;
-      this.pending.delete(file);
-      this.activePaths.add(file);
-      void this.inspect(file, discover).catch(error => {
-        if (!this.stopped) { this.failed = true; this.emit("error", error); }
-      }).finally(() => {
-        this.activePaths.delete(file);
-        this.pump();
-      });
+    for (const queue of [this.pending, this.backgroundPending]) {
+      for (const [file, discover] of queue) {
+        if (this.activePaths.size >= 16) break;
+        if (this.activePaths.has(file)) continue;
+        queue.delete(file);
+        this.activePaths.add(file);
+        void this.inspect(file, discover).catch(error => {
+          if (!this.stopped) { this.failed = true; this.emit("error", error); }
+        }).finally(() => {
+          this.activePaths.delete(file);
+          this.pump();
+        });
+      }
+      // Background paths wait while any ordinary path is queued.
+      if (queue === this.pending && queue.size) break;
     }
-    if (!this.ready && !this.failed && !this.pending.size && !this.activePaths.size) {
+    const queued = this.pending.size + this.backgroundPending.size;
+    if (!this.ready && !this.failed && !queued && !this.activePaths.size) {
       this.ready = true;
       this.emit("ready");
     }
-    if (!this.pending.size && !this.activePaths.size) this.emit("idle");
+    if (!queued && !this.activePaths.size) this.emit("idle");
   }
 
   private async inspect(file: string, discover: boolean): Promise<void> {
@@ -450,11 +510,34 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       let children = this.children.get(parent);
       if (!children) this.children.set(parent, children = new Set());
       children.add(file);
+      // A file reported inside a folder never read (an unlisted ignored
+      // folder): register the folders above it, so removing one is noticed.
+      if (!previous && !this.known.has(parent)) this.registerAncestors(file);
     }
     if (directory) {
+      if (this.classifying.has(file)) return;
+      const unlisted = file !== this.entry.absolutePath && this.options.unlisted?.(file) === true;
+      if (!unlisted && !previous && this.ready && file !== this.entry.absolutePath && this.options.classifyNew) {
+        // Git answers outside the shared inspection slots, so a build's new
+        // folders never hold up an ordinary edit; the folder is reported
+        // and read (or not) once it does.
+        this.classifying.add(file);
+        this.classifyWaiting.push([file, stats]);
+        this.drainClassification();
+        return;
+      }
       if (!previous) this.emit("all", "addDir", file, stats);
+      if (unlisted) {
+        // An ambiguous rename inside it can name only a temporary source,
+        // and a replaced folder (new inode) can carry new copies of what is
+        // tracked below it: recheck the tracked chain, subfolders included,
+        // without reading the rest.
+        const replaced = previous?.isDirectory() === true && previous.ino !== stats.ino;
+        if (discover || replaced) for (const child of this.children.get(file) ?? []) this.enqueue(child, this.known.get(child)?.isDirectory() === true);
+        return;
+      }
       if (!discover && previous?.isDirectory() && previous.mtimeMs === stats.mtimeMs && previous.ino === stats.ino) return;
-      this.options.onWork?.("directory");
+      this.options.onWork?.("directory", file);
       const entries = await readdir(file, { withFileTypes: true }).catch(error => {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
         throw error;
@@ -479,6 +562,22 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       const changed = !previous || previous.mtimeMs !== stats.mtimeMs || previous.ctimeMs !== stats.ctimeMs
         || previous.size !== stats.size || previous.ino !== stats.ino;
       if (changed) this.emit("all", previous?.isFile() ? "change" : "add", file, stats);
+    }
+  }
+
+  private drainClassification(): void {
+    while (!this.stopped && this.classifyActive < 4 && this.classifyWaiting.length) {
+      const [file, stats] = this.classifyWaiting.shift()!;
+      this.classifyActive++;
+      void this.options.classifyNew!(file).catch(() => false).then(ignored => {
+        this.classifyActive--;
+        this.classifying.delete(file);
+        if (!this.stopped && this.known.has(file)) {
+          this.emit("all", "addDir", file, stats);
+          if (!ignored) this.enqueue(file, true);
+        }
+        this.drainClassification();
+      });
     }
   }
 

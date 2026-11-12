@@ -2,6 +2,8 @@ import { boundedSet } from "../../shared/bounded-map";
 import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-store";
 import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, LOGIN_FAILED_NOTICE_CODE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
 import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
+import { nativeVisualMessageIdentity } from "../visual-identity";
+import { OPENCODE_STEP_LIVE, OPENCODE_TEXT_END, OPENCODE_TEXT_START_FALLBACK, type OpenCodeStepStatus } from "./normalization-types";
 
 /**
  * The normalization core both OpenCode generations share.
@@ -29,12 +31,15 @@ export type ProviderEvent = Record<string, unknown>;
 export type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle };
 
 export type RecordValue = Record<string, unknown>;
+type TextStart = Readonly<{ createdAt: number; authoritative: boolean }>;
 
 export type ProviderEventMemory = {
   roles: Map<string, string>;
   // The newest user message seen per session: the prompt an assistant message
   // answers when the event does not name it (the v2 record has no `parentID`).
   prompts: Map<string, string>;
+  // Bounded text-part start times, shared by native and classic text paths.
+  textStarts?: Map<string, TextStart>;
 };
 
 export function createProviderEventMemory(): ProviderEventMemory {
@@ -301,10 +306,20 @@ export function normalizeEventEnvelopeWith<Memory extends ProviderEventMemory>(e
       const canonical = mapper.toCanonical(eventType, data, event);
       if (canonical) {
         canonicalType = canonical.type;
-        matched = normalizeCanonicalEvent(canonical.type, canonical.data, eventContext(event, canonical.data));
+        matched = normalizeCanonicalEvent(canonical.type, canonical.data, eventContext(event, canonical.data), memory);
       }
     }
-    if (matched) return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle || matched.revertLifecycle ? "handled" : "ignored", eventType };
+    if (matched) {
+      // The classic session-level error aliases the step reader, but unlike
+      // an actual native step failure it is a terminal session failure.
+      if (eventType === "session.error") matched = { ...matched, updates: matched.updates.map(update => {
+        if (update.kind !== "status") return update;
+        const { [OPENCODE_STEP_LIVE]: _step, ...terminal } = update as typeof update & OpenCodeStepStatus;
+        return terminal;
+      }) };
+      matched = preserveClassicTextStarts(matched, eventType, data, context, memory);
+      return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle || matched.revertLifecycle ? "handled" : "ignored", eventType };
+    }
     return {
       conversationId: conversationIdOf(event),
       updates: [],
@@ -316,6 +331,33 @@ export function normalizeEventEnvelopeWith<Memory extends ProviderEventMemory>(e
     // never rethrown: the caller must keep consuming the stream.
     return { conversationId: conversationIdOf(event), updates: [], outcome: "unparseable", eventType };
   }
+}
+
+function preserveClassicTextStarts(matched: KnownEvent, type: string, data: RecordValue, context: EventContext, memory?: ProviderEventMemory): KnownEvent {
+  const part = record(data.part);
+  if (type !== "message.part.updated" || part.type !== "text") return matched;
+  const partId = optionalString(part.id);
+  if (!partId) return matched;
+  const sessionId = context.conversationId ?? optionalString(part.sessionID);
+  const starts = memory ? memory.textStarts ??= new Map<string, TextStart>() : undefined;
+  const key = JSON.stringify([sessionId, partId]);
+  const messageTime = record(data.message).time;
+  const messageStart = completionTime(record(messageTime).created).completedAt ?? completionTime(messageTime).completedAt;
+  return { ...matched, updates: matched.updates.map<NormalizedProviderUpdate>(update => {
+    if (update.kind !== "text" && update.kind !== "upsert") return update;
+    const item = update.item;
+    if (!item || item.type !== "assistant_message" || item.id !== `part:${partId}`) return update;
+    // Creation explicitly attached to this part's frame is authoritative.
+    // A separate message/usage carrier's creation is not this part's start:
+    // otherwise usage arriving first would backdate and reorder every part.
+    // Retain the first part start, including a native stream for this same ID.
+    // A first-seen completed part can use its own genuine start, but never
+    // invent an earlier timestamp when no creation evidence exists.
+    const known = starts?.get(key), partStart = completionTime(record(part.time).start).completedAt;
+    const createdAt = messageStart ?? known?.createdAt ?? partStart ?? item.createdAt;
+    if (starts) remember(starts, key, { createdAt, authoritative: messageStart !== undefined || (known ? known.authoritative : partStart !== undefined) });
+    return { ...update, item: { ...item, createdAt } };
+  }) };
 }
 
 function conversationIdOf(value: unknown): string | undefined {
@@ -331,7 +373,7 @@ function conversationIdOf(value: unknown): string | undefined {
 // The shared cases, by canonical (2.x) name over the canonical payload shape.
 // 1.x reaches them by renaming `session.next.X`; 2.x by reshaping its typed
 // payloads onto the same fields.
-export function normalizeCanonicalEvent(type: string, data: RecordValue, context: EventContext): KnownEvent | undefined {
+export function normalizeCanonicalEvent(type: string, data: RecordValue, context: EventContext, memory?: ProviderEventMemory): KnownEvent | undefined {
   const { conversationId, eventId, createdAt } = context;
   switch (type) {
     case "session.created": {
@@ -378,11 +420,11 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
         message: text(data.text) || "Context updated",
       } }] };
     case "session.text.started":
-      return textUpdate(data, eventId, createdAt, "cumulative", "");
+      return textUpdate(data, eventId, createdAt, "cumulative", "", memory, false, true);
     case "session.text.delta":
-      return textUpdate(data, eventId, createdAt, "incremental", text(data.delta ?? data.text));
+      return textUpdate(data, eventId, createdAt, "incremental", text(data.delta ?? data.text), memory);
     case "session.text.ended":
-      return textUpdate(data, eventId, createdAt, "cumulative", text(data.text));
+      return textUpdate(data, eventId, createdAt, "cumulative", text(data.text), memory, true);
     case "session.reasoning.started":
     case "session.reasoning.delta":
     case "session.reasoning.ended": {
@@ -506,13 +548,12 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
       const message = errorMessage(data.error) || text(data.message) || "The turn failed";
       return { conversationId, updates: [
         { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message, ...(isLoginError(data.error) ? { code: LOGIN_FAILED_NOTICE_CODE } : {}) } },
-        { kind: "status", status: "failed", message },
+        { kind: "status", status: "failed", message, ...{ [OPENCODE_STEP_LIVE]: true as const } },
       ] };
     }
     case "session.retry.scheduled":
-      // The failed step that precedes this ended the turn as failed; the
-      // retry means it is still live, and a live turn holds prompts and
-      // stays in the workspace's activity.
+      // Preserve the public failed -> retrying transition. A native step
+      // failure is not itself the authoritative execution end for capture.
       return { conversationId, updates: [
         { kind: "upsert", item: {
           id: `notice:${eventId}`,
@@ -655,16 +696,19 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, cost: info.cost, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model, agent: info.agent ?? info.mode }, id, createdAt, mintUsageCarrier);
+    return normalizeAssistant({ content: parts, time: info.time, error: info.error, snapshot: info.snapshot, tokens: info.tokens, cost: info.cost, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model, agent: info.agent ?? info.mode }, id, createdAt, mintUsageCarrier);
   }
   return [];
 }
 
 export function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number, mintUsageCarrier: boolean): ConversationItem[] {
-  const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt)).flatMap(update => {
-    if (update.kind === "upsert") return [update.item];
-    if (update.kind === "text" && update.item) return [update.item];
-    return [];
+  // Preserve API-message completion independently of execution membership.
+  // Where native execution evidence is unavailable (notably 1.x/classic),
+  // visual history retains this conservative completion fallback.
+  const completed = completionTime(finishedTime(message.time));
+  const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt, undefined, messageId)).flatMap(update => {
+    const item = update.kind === "upsert" || update.kind === "text" ? update.item : undefined;
+    return item ? [item.type === "assistant_message" ? { ...item, ...completed } : item] : [];
   });
   // What the turn spent, on the message's own carrier — the same item id the
   // live path uses, so a conversation reads back exactly as it streamed. This
@@ -695,10 +739,15 @@ export const IGNORED_PARTS: ReadonlySet<string> = new Set(["step-start", "step-f
 
 // `skipped` collects the type of a part no case reads, so a caller on the
 // live path can report it the way an unrecognized event is reported.
-export function normalizePart(part: RecordValue, createdAt: number, skipped?: string[]): NormalizedProviderUpdate[] {
+export function normalizePart(part: RecordValue, createdAt: number, skipped?: string[], messageId?: string): NormalizedProviderUpdate[] {
   const id = string(part.id, "part id");
   if (part.type === "text") {
-    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text) };
+    const ended = completionTime(record(part.time).end).completedAt !== undefined;
+    const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text), ...nativeVisualMessageIdentity("opencode", messageId ?? optionalString(part.messageID)), ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
+    // Classic part completion is a genuine syntax boundary, even when its
+    // cumulative text is unchanged. It is not parent-message completion:
+    // keep missing-file captures live until the ordered turn/message end.
+    if (ended) return [{ kind: "upsert", item }];
     return [{ kind: "text", itemId: item.id, identity: id, mode: "cumulative", text: text(part.text), item }];
   }
   if (part.type === "reasoning") {
@@ -817,18 +866,32 @@ function normalizeDiffs(data: RecordValue, createdAt: number): NormalizedProvide
   });
 }
 
-export function textUpdate(data: RecordValue, fallbackId: string, createdAt: number, mode: "cumulative" | "incremental", value: string): KnownEvent {
+export function textUpdate(data: RecordValue, fallbackId: string, createdAt: number, mode: "cumulative" | "incremental", value: string, memory?: ProviderEventMemory, ended = false, started = false): KnownEvent {
   const partId = optionalString(data.textID) ?? optionalString(data.partID) ?? optionalString(data.id) ?? fallbackId;
   const itemId = `part:${partId}`;
+  const nativeStart = started ? completionTime(data.timestamp ?? data.timeCreated).completedAt : undefined;
+  let start: TextStart = { createdAt: nativeStart ?? createdAt, authoritative: nativeStart !== undefined };
+  if (memory) {
+    const starts = memory.textStarts ??= new Map<string, TextStart>();
+    const key = JSON.stringify([optionalString(data.sessionID), partId]);
+    const known = starts.get(key);
+    if (known && (known.authoritative || nativeStart === undefined)) start = known;
+    else remember(starts, key, start);
+  }
+  const item = { id: itemId, type: "assistant_message" as const, createdAt: start.createdAt, markdown: ended ? value : "", ...nativeVisualMessageIdentity("opencode", optionalString(data.messageID) ?? optionalString(data.assistantMessageID)),
+    [OPENCODE_TEXT_START_FALLBACK]: !start.authoritative, ...(ended ? { [OPENCODE_TEXT_END]: true as const } : {}) };
   return {
     conversationId: optionalString(data.sessionID),
-    updates: [{
+    // A real ended frame must reach projection even when its cumulative text
+    // is unchanged. One ordinary upsert carries the private syntax boundary;
+    // completedAt remains reserved for authoritative parent completion.
+    updates: ended ? [{ kind: "upsert", item }] : [{
       kind: "text" as const,
       itemId,
       identity: partId,
       mode,
       text: value,
-      item: { id: itemId, type: "assistant_message" as const, createdAt, markdown: "" },
+      item,
     }],
   };
 }

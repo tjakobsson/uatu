@@ -4,7 +4,13 @@
 Define documented, reproducible, secure repository workflows for contribution, validation, dependency maintenance, testing, and releases without adding test tooling to the shipped runtime.
 ## Requirements
 ### Requirement: Repository README documents project usage and validation
-The repository SHALL provide a root `README.md` that explains what `uatu` is, how users install and run the application, and where contributors can find the canonical contribution guide. Detailed branch, OpenSpec, validation, and release procedures MUST live in `CONTRIBUTING.md` and `docs/RELEASING.md` rather than expanding the user-facing README. The README SHALL carry a generated block, placed with the feature description rather than among the repository's build and quality badges, that states what the coverage badges measure and shows, per supported agent, a coverage badge linked to that agent's coverage matrix; the block's content is owned by the coverage generator and MUST NOT be edited by hand.
+
+The root README SHALL explain uatu, installation, usage, and where to find canonical contribution guidance. Detailed branch, OpenSpec, validation, and release procedures MUST live in `CONTRIBUTING.md` and `docs/RELEASING.md`, not expand the README. A generated feature-description block SHALL explain coverage badges and link one per supported agent to its matrix, separate from build/quality badges. Its generator-owned content MUST NOT be hand-edited.
+
+#### Scenario: Locate procedures and coverage without duplicating their owners
+- **WHEN** the root README is inspected
+- **THEN** detailed branch, OpenSpec, validation, and release procedures remain in the canonical contribution and release guides
+- **AND** the coverage generator's block appears with feature descriptions, explains its measurements, and provides each supported agent's linked matrix badge rather than joining build/quality badges
 
 #### Scenario: A user opens the repository homepage
 - **WHEN** a user views the root `README.md`
@@ -18,7 +24,18 @@ The repository SHALL provide a root `README.md` that explains what `uatu` is, ho
 - **AND** activating the badge opens that agent's coverage matrix
 
 ### Requirement: Repository documents contributor and maintainer workflows
-The repository SHALL provide a root `CONTRIBUTING.md` as the canonical guide for development setup, branch and pull-request practices, Conventional Commit expectations, OpenSpec change management, and required validation — including the project's test policy: changes that add or change functionality MUST include tests. The repository SHALL additionally provide `docs/RELEASING.md` as the canonical maintainer runbook for version semantics, release-note inclusion, the Release Please lifecycle, required repository configuration, release verification, reruns, and failure recovery. The documents MUST describe the actual automated workflow and MUST link to each other where responsibilities cross.
+
+Root `CONTRIBUTING.md` SHALL be the canonical development and contribution guide. Changes that add or change functionality MUST include tests. `docs/RELEASING.md` SHALL be the canonical maintainer runbook. Both documents MUST reflect actual automation and cross-link where their responsibilities meet.
+
+#### Scenario: Find the complete contribution contract
+- **WHEN** root `CONTRIBUTING.md` is read
+- **THEN** it is the canonical guide to development setup, branch and PR practices, Conventional Commits, OpenSpec changes, and required validation
+- **AND** its test policy requires tests for changes that add or change functionality
+
+#### Scenario: Find the complete maintainer runbook
+- **WHEN** `docs/RELEASING.md` is read
+- **THEN** it covers version semantics, release-note inclusion, Release Please lifecycle, repository configuration, release verification, reruns, and failure recovery
+- **AND** both guides MUST describe actual automation and cross-link where their responsibilities cross
 
 #### Scenario: A contributor prepares a change
 - **WHEN** a contributor opens `CONTRIBUTING.md`
@@ -36,7 +53,21 @@ The repository SHALL provide a root `CONTRIBUTING.md` as the canonical guide for
 - **AND** they can find verification and recovery steps for failed artifact publication or tap updates
 
 ### Requirement: GitHub Actions validate the repository on GitHub
-The repository SHALL define GitHub Actions workflows that run the core validation checks on GitHub for the project. At minimum, the automated workflows MUST run a TypeScript type check (`tsc --noEmit` invoked through a package script, with the TypeScript compiler pinned as a devDependency in the lockfile), unit tests, the license audit, a dependency vulnerability audit, the standalone build, the Playwright end-to-end suite, and OpenSpec spec validation in strict mode (`openspec validate --all --strict` or an equivalent invocation that validates every active spec and in-flight change). The dependency vulnerability audit MUST run the project package manager's audit command (`bun audit` or equivalent) and MUST fail the workflow when a new advisory is reported against the installed dependency tree. Validation workflows MUST use a pinned Bun runtime version and MUST use pinned GitHub Action references so validation behavior is reproducible between intentional updates. The OpenSpec CLI used by spec validation MUST be installed via the project's package manifest (so its version is captured in the lockfile and tracked by the repository's tooling-update automation) rather than referenced as a floating tag in the workflow file.
+
+GitHub Actions SHALL run the project's core type, test, security, license, build, browser, and strict OpenSpec checks using pinned runtime and action references. OpenSpec MUST come from the locked project dependency, and dependency advisories MUST be handled by the required package-manager audit gate.
+
+#### Scenario: Execute the complete minimum GitHub validation set
+- **WHEN** GitHub validation workflows run
+- **THEN** they MUST execute `tsc --noEmit` through a package script, unit tests, license audit, dependency vulnerability audit, standalone build, Playwright E2E, and strict OpenSpec validation
+- **AND** the compiler is pinned as a lockfile devDependency; `openspec validate --all --strict` or equivalent validates every active spec and in-flight change
+
+#### Scenario: Fail validation on a dependency advisory
+- **WHEN** the installed dependency tree reports a new advisory through the package manager's `bun audit` or equivalent command
+- **THEN** the vulnerability-audit step MUST fail the workflow
+
+#### Scenario: Resolve validation tools reproducibly
+- **WHEN** validation tooling is configured
+- **THEN** Bun and GitHub Action references MUST be pinned, and OpenSpec MUST be installed through the project manifest with its version captured in the lockfile and tracked by tooling-update automation, not a floating workflow tag
 
 #### Scenario: A GitHub workflow validates the repository
 - **WHEN** the validation workflow runs on GitHub
@@ -91,7 +122,21 @@ The repository SHALL organize its GitHub validation workflows so that their stat
 - **THEN** that status can be derived from the GitHub Actions workflow state rather than a separate custom reporting system
 
 ### Requirement: Repository tooling versions are kept current
-The repository SHALL use GitHub-native automation to check for updates to npm dependencies, Bun/runtime versions, and GitHub Actions references so that repository tooling does not silently age behind current releases. Update automation MUST remain compatible with pinned action and runtime versions. The update automation MUST additionally surface published security advisories, including advisories affecting transitive (indirect) dependencies and advisories whose fixed version is already satisfied by an existing manifest version range. To achieve this the automation MUST be configured to refresh the dependency lockfile so in-range and transitive fixes are pulled in, and MUST be configured with a vulnerability-alert data source that does not depend on a separate GitHub feature being enabled out-of-band. Because manifest-driven vulnerability alerting only covers direct dependencies, the repository MUST ALSO run a scheduled, PR-independent audit that scans the full installed dependency tree (including transitive packages) and surfaces advisories through GitHub-native workflow status, so a transitive advisory published between pull requests does not go unsurfaced. Every package whose declarations feed the agent coverage report — each agent SDK, and the API SDK whose content-block types an agent SDK refers to — MUST be pinned to an exact version in the manifest, so the version the report names is the version the code runs against and an update arrives as a reviewable pull request that carries the regenerated report.
+
+GitHub-native automation SHALL check npm, Bun/runtime, and GitHub Action updates. It MUST support pinned versions and surface published advisories, including transitive and in-range fixes, via lockfile refresh and an independent vulnerability-alert source. A scheduled PR-independent full-tree audit MUST surface advisories in GitHub workflow status. Every SDK package feeding coverage MUST use an exact manifest version so updates carry reviewable regenerated reports.
+
+#### Scenario: Find fixes without widening a manifest range or enabling another feature
+- **WHEN** a published advisory affects an indirect dependency or has a fix already within a manifest range
+- **THEN** update automation MUST refresh the lockfile to pull in transitive and in-range fixes and use a vulnerability-alert source independent of separately enabled GitHub features
+
+#### Scenario: Audit the entire installed tree between pull requests
+- **WHEN** the scheduled audit runs independently of PR activity
+- **THEN** it MUST scan direct and transitive installed packages and surface advisories through GitHub-native workflow status
+
+#### Scenario: Pin all declarations contributing to coverage
+- **WHEN** package declarations feed the agent coverage report
+- **THEN** each agent SDK and any API SDK supplying its referenced content-block types MUST have an exact manifest version, matching the version used at runtime
+- **AND** its update arrives as a reviewable PR carrying the regenerated report
 
 #### Scenario: A dependency or workflow version becomes outdated
 - **WHEN** a newer compatible version of an npm dependency, Bun runtime, or GitHub Action is available
@@ -113,9 +158,13 @@ The repository SHALL use GitHub-native automation to check for updates to npm de
 - **AND** the pull request cannot pass validation until the coverage report is regenerated against it
 
 ### Requirement: Test-only DOM-simulation tooling runs under the pinned Bun runtime
-Any third-party library used by the repository's test suite to simulate a browser DOM (creating `Document`/`Window` objects, parsing `innerHTML`, executing `querySelector`/`querySelectorAll`, reading inline styles, etc.) MUST run cleanly under the project's pinned Bun runtime version. A library that depends on Node-specific runtime behavior that Bun does not faithfully reproduce — most notably installing global constructors on a contextified `Window` via `vm.createContext` and `Script.runInContext` — MUST NOT be selected, even if it is otherwise the fastest or most popular option.
 
-This requirement applies to dev-only tooling; it does not constrain runtime dependencies of the shipped `uatu` artifact.
+Third-party test DOM-simulation libraries MUST run cleanly under pinned Bun. A library depending on Node-specific behavior Bun does not faithfully reproduce MUST NOT be selected, regardless of speed or popularity. This rule applies only to dev tooling, not dependencies of the shipped uatu artifact.
+
+#### Scenario: Exercise DOM simulation under pinned Bun
+- **WHEN** a test library creates `Document`/`Window`, parses `innerHTML`, runs `querySelector`/`querySelectorAll`, or reads inline styles
+- **THEN** it MUST run cleanly under the project's pinned Bun version
+- **AND** a library relying on unsupported contextified-`Window` global installation through `vm.createContext` and `Script.runInContext` MUST NOT be selected, even if fastest or most popular
 
 #### Scenario: A new DOM-simulation library is proposed for tests
 - **WHEN** a contributor or automated update proposes adding or upgrading a DOM-simulation devDependency

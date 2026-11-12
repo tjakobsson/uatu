@@ -39,13 +39,13 @@
     "api:swift": "bash scripts/verify-swift-openapi.sh"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.316",
+    "@anthropic-ai/claude-agent-sdk": "0.3.319",
     "@anthropic-ai/sdk": "1.6.0",
     "@asciidoctor/core": "^4.0.7",
     "@block65/webcrypto-web-push": "2.0.0",
     "@opencode-ai/sdk": "1.19.5",
     "@opencode/client": "2.2.5",
-    "@pierre/diffs": "1.6.2",
+    "@pierre/diffs": "1.6.4",
     "@pierre/trees": "1.0.0-beta.6",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",

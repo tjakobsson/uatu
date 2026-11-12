@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import type { ChatAvailability, ChatProbeOutcome, ChatStartupDiagnostics } from "../types";
 import { discoverExecutableCandidates } from "../executable";
 import { describeProbe } from "../diagnostics";
+import { preparePresentationGuidanceFile, removePresentationGuidanceFile, withPresentationInstructions } from "../presentation-guidance";
 
 const HOSTNAME = "127.0.0.1";
 // Generous by design. Too long only means Chat appears a moment late behind the
@@ -72,6 +73,7 @@ export type OpenCodeServiceOptions = {
   termGraceMs?: number;
   stderrLimitBytes?: number;
   bindAttempts?: number;
+  presentationGuidanceFile?: { prepare(env: NodeJS.ProcessEnv): Promise<string>; remove(file: string): Promise<void> };
 };
 
 export class OpenCodeService {
@@ -100,6 +102,8 @@ export class OpenCodeService {
   private restartPromise: Promise<ChatAvailability> | null = null;
   private disposePromise: Promise<void> | null = null;
   private closed = false;
+  private guidanceFile: string | null = null;
+  private readonly guidanceFiles: NonNullable<OpenCodeServiceOptions["presentationGuidanceFile"]>;
 
   constructor(options: OpenCodeServiceOptions) {
     this.workspacePath = options.workspacePath;
@@ -123,6 +127,7 @@ export class OpenCodeService {
     this.termGraceMs = options.termGraceMs ?? TERM_GRACE_MS;
     this.stderrLimitBytes = options.stderrLimitBytes ?? STDERR_LIMIT_BYTES;
     this.bindAttempts = options.bindAttempts ?? BIND_ATTEMPTS;
+    this.guidanceFiles = options.presentationGuidanceFile ?? { prepare: preparePresentationGuidanceFile, remove: removePresentationGuidanceFile };
   }
 
   /**
@@ -164,6 +169,19 @@ export class OpenCodeService {
       return this.setUnavailable("not-installed", "OpenCode is not installed or is not available on PATH.");
     }
 
+    // Presentation hints are optional. Preserve the original inline settings
+    // verbatim when they cannot safely be extended; OpenCode owns validation.
+    let guidanceForStart: string | undefined;
+    try {
+      withPresentationInstructions(this.env.OPENCODE_CONFIG_CONTENT, "validation-only");
+      this.guidanceFile ??= await this.guidanceFiles.prepare(this.env);
+      guidanceForStart = this.guidanceFile;
+    } catch (error) {
+      const reason = error instanceof Error && error.message.startsWith("Uatu cannot add chat guidance:")
+        ? error.message : "Uatu cannot prepare the optional chat guidance state file.";
+      console.warn(`${reason} Starting OpenCode without Uatu presentation hints.`);
+    }
+
     let lastDiagnostic = "";
     let lastEndpoint: string | null = null;
     let lastStdout = "";
@@ -182,6 +200,7 @@ export class OpenCodeService {
       const stdoutCapture = new BoundedTextCapture(this.stderrLimitBytes, password);
       let spawned: SpawnedOpenCode;
       try {
+        if (this.closed) return this.stoppedAvailability();
         spawned = this.spawn([
           executable,
           "serve",
@@ -191,7 +210,7 @@ export class OpenCodeService {
           String(port),
         ], {
           cwd: this.workspacePath,
-          env: buildOpenCodeEnvironment(this.env, password),
+          env: buildOpenCodeEnvironment(this.env, password, guidanceForStart),
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
@@ -418,6 +437,10 @@ export class OpenCodeService {
     if (this.process && this.process !== active) await this.process.terminate();
     this.process = null;
     this.connection = null;
+    if (this.guidanceFile) {
+      await this.guidanceFiles.remove(this.guidanceFile);
+      this.guidanceFile = null;
+    }
     this.stoppedAvailability();
   }
 
@@ -454,7 +477,7 @@ export function resolveStartupTimeoutMs(env: NodeJS.ProcessEnv): number | undefi
   return parsed;
 }
 
-export function buildOpenCodeEnvironment(source: NodeJS.ProcessEnv, password: string): Record<string, string> {
+export function buildOpenCodeEnvironment(source: NodeJS.ProcessEnv, password: string, guidanceFile?: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(source)) if (value !== undefined) env[name] = value;
   // 1.x reads `OPENCODE_SERVER_PASSWORD`; 2.x reads `OPENCODE_PASSWORD` first
@@ -463,6 +486,9 @@ export function buildOpenCodeEnvironment(source: NodeJS.ProcessEnv, password: st
   // variable unset and starts without a password.
   env.OPENCODE_PASSWORD = password;
   env.OPENCODE_SERVER_PASSWORD = password;
+  // Both generations support runtime inline config. They combine instruction
+  // entries across config documents, retaining native agent/project guidance.
+  if (guidanceFile) env.OPENCODE_CONFIG_CONTENT = withPresentationInstructions(source.OPENCODE_CONFIG_CONTENT, guidanceFile);
   return env;
 }
 
@@ -660,4 +686,3 @@ export function classifyProbeFailure(error: unknown): ChatProbeOutcome {
   if (name === "TimeoutError" || name === "AbortError") return { kind: "abandoned" };
   return { kind: "unknown", error: error instanceof Error ? error.message : String(error) };
 }
-

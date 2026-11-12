@@ -6,9 +6,35 @@ Provide a library-backed document tree with selection and reveal behavior, filte
 ## Requirements
 
 ### Requirement: Preserve manual directory open/closed state in the document tree
-Directories in the sidebar tree SHALL render collapsed (closed) by default, matching the conventions of common file trees (VS Code, Finder, GitHub). When a user expands or collapses a directory, that explicit choice SHALL persist across document selections and across sidebar re-renders triggered by file changes — including filesystem-driven `resetPaths` calls into the library — except for ancestors required to reveal a newly active document. When a document becomes active (initial default, follow-mode auto-switch, or explicit document navigation), the system SHALL reveal its path by expanding every ancestor directory between the watched root and the document, then marking that document's row as selected. Reveal MUST be purely additive — it opens ancestors but never closes any directory the user has opened. In the All view, background refreshes that leave the document selection unchanged, including an intentionally empty selection, MUST preserve surviving directories' open/closed state; refreshing content or rebuilding the file list MUST NOT itself request a new reveal or choose a document. A manual collapse of an ancestor of the active document SHALL instead clear the active document as specified by the manual-collapse requirement below. The separate Changed-filter expansion and filter-transition policies remain unchanged and MUST NOT be mistaken for manual deselection. Folder expansion need not persist across page reloads; intentional document deselection SHALL persist as specified below.
+Directories in the sidebar tree SHALL render collapsed (closed) by default, matching common file trees (VS Code, Finder, GitHub). Manual open/closed choices SHALL survive selections and file-driven rebuilds except for additive reveal of a newly active document. Manual ancestor collapse SHALL clear the document under the requirement below; Changed-filter policies SHALL remain unchanged and separate from manual deselection.
 
-A new selection that cannot yet be represented in the tree SHALL receive its pending reveal when it first becomes available; this completes the selection change rather than treating it as an unchanged-selection background refresh. A previously represented selection returning at the same path after temporary absence SHALL synchronize selection without a new reveal only when the application has continuously retained that document as its requested selection. Navigating to another document, even an unavailable one, and then returning SHALL count as a new selection. Explicitly clearing selection and subsequently selecting the same document SHALL count as a new selection.
+#### Scenario: New active documents add required ancestors to manual expansion choices
+- **WHEN** a document becomes active by initial default, Follow auto-switch, or explicit navigation
+- **THEN** the system SHALL expand every ancestor between watched root and document, then mark its row selected
+- **AND** reveal MUST be purely additive, never closing user-opened directories
+- **AND** explicit expansion/collapse choices SHALL persist across document selections and file-driven sidebar re-renders, including filesystem-driven library `resetPaths`, except ancestors required by a newly active document
+
+#### Scenario: Unchanged-selection refresh preserves surviving directory state
+- **GIVEN** the All view's document selection is unchanged, including intentionally empty selection
+- **WHEN** content refreshes or the file list rebuilds
+- **THEN** surviving directories' open/closed state MUST be preserved; refresh/rebuild MUST NOT itself request reveal or choose a document
+
+#### Scenario: Changed policies are not manual deselection
+- **WHEN** Changed-filter expansion or filter-transition policies apply
+- **THEN** those policies remain unchanged and MUST NOT be mistaken for manual deselection
+
+#### Scenario: Reload persistence differs for expansion and intentional deselection
+- **WHEN** the page reloads
+- **THEN** folder expansion need not persist, but intentional document deselection SHALL persist as specified below
+
+#### Scenario: Pending and returning selections distinguish new navigation from continuous retention
+- **WHEN** a selected path first becomes representable or returns after temporary absence
+- **THEN** a new selection SHALL receive its pending reveal on first availability, completing the selection change rather than counting as unchanged-selection refresh
+- **AND** a previously represented same-path selection SHALL synchronize without new reveal only if continuously retained as the requested selection
+
+#### Scenario: Navigation away or explicit clearing makes reselection new
+- **WHEN** navigation goes to another document, even an unavailable one, and returns, or selection is explicitly cleared and the same document is selected again
+- **THEN** it SHALL count as a new selection, even if that path was already representable in the tree
 
 #### Scenario: Directories start collapsed
 - **WHEN** the document tree is first rendered and the default document is at a watched root with no ancestor directories
@@ -105,15 +131,51 @@ A new selection that cannot yet be represented in the tree SHALL receive its pen
 - **AND** Follow remains on
 
 ### Requirement: Manual ancestor collapse closes the active document
-When the user manually collapses any ancestor directory of the active file, the system SHALL clear the application's active document selection, clear the preview, and turn Follow off. This SHALL apply in both All and Changed views, for pointer, touch, and supported keyboard collapse operations. The preview SHALL no longer present the closed file's title, path, or content. The tree SHALL have no selected row after this action; focus SHALL remain on the operated directory so native keyboard navigation can continue, whenever that directory is still present in the displayed tree. When closing the document removes the operated directory from the displayed tree (the Changed view was showing it only because the active file was open), focus SHALL move to a remaining visible row; the filter SHALL NOT retain an otherwise-excluded row to hold focus. The action SHALL NOT automatically switch a touch device from Files to Preview.
+When the user manually collapses any ancestor directory of the active file, the system SHALL clear the application's active document selection, clear the preview, and turn Follow off. This SHALL apply in both All and Changed views, for pointer, touch, and supported keyboard collapse operations. The resulting intentional emptiness SHALL persist locally for the workspace until explicit navigation or enabling Follow ends it.
 
-The resulting intentional empty selection SHALL survive reopening the folder, content/index refreshes, additions/removals/renames, filter transitions, reconnect/resume reconciliation, and page reloads. None of these operations SHALL restore the closed file, choose a default document, or enable Follow. The current session location and remembered document selection SHALL represent the deselected state rather than automatically restoring the closed file. Existing first-visit/default selection behavior SHALL remain unchanged for users who have not deliberately deselected a document. Explicit document navigation or enabling Follow SHALL resume the existing selection behavior and end intentional emptiness.
+#### Scenario: Ancestor collapse clears all selected-document presentation and preserves usable focus
+- **WHEN** the user manually collapses an active-file ancestor
+- **THEN** the preview SHALL no longer present the closed file's title, path, or content, and the tree SHALL have no selected row
+- **AND** focus SHALL remain on the operated directory while it remains displayed so native keyboard navigation can continue
+- **AND** if closing removes that directory (Changed showed it only for the open active file), focus SHALL move to a remaining visible row; the filter SHALL NOT retain an otherwise-excluded row merely to hold focus
+- **AND** the action SHALL NOT automatically switch touch devices from Files to Preview
+- **AND** a previously initiated preview load SHALL NOT repopulate the preview after explicit deselection
 
-Only the intentional-deselection indication SHALL be persisted in this browser, scoped to the workspace. Existing document-path, Follow, and other personal preferences SHALL retain their existing Hub-backed persistence. The browser indication SHALL NOT be sent as a new personal-state API field, propagate to another browser, or force already-open clients to navigate. Background reconciliation in another tab SHALL NOT erase the indication for future reloads.
+#### Scenario: Intentional emptiness survives reconciliation without changing first-visit defaults
+- **GIVEN** manual ancestor collapse intentionally cleared selection
+- **WHEN** the folder reopens, content/index refreshes, files are added/removed/renamed, filters transition, reconnect/resume reconciliation runs, or the page reloads
+- **THEN** intentional empty selection SHALL survive; none of these operations SHALL restore the closed file, choose a default document, or enable Follow
+- **AND** current session location and remembered selection SHALL represent deselection rather than restoring the closed file
 
-Clicking or tapping a directory row SHALL only expand or collapse it. A directory row SHALL never be presented as selected, and pointer or touch interaction SHALL NOT leave a focus ring on the row; the focus ring SHALL be shown only for keyboard navigation. On devices without hover support, a tapped row SHALL NOT keep a hover tint that resembles selection. Clicking a directory that is not a collapsing ancestor of the active file SHALL keep the active file selected.
+#### Scenario: Deliberate deselection does not change first-visit defaults
+- **WHEN** a client has not deliberately deselected a document
+- **THEN** existing first-visit/default selection behavior SHALL remain unchanged
 
-Collapsing an unrelated directory, opening a directory, moving keyboard focus without collapsing, or collapsing when no document is active SHALL NOT close a document or change Follow. Programmatic directory changes, including rebuilds, filter reconciliation, and restoration of expansion, SHALL NOT count as manual collapse. A previously initiated preview load SHALL NOT repopulate the preview after explicit deselection.
+#### Scenario: Explicit navigation or Follow enable ends intentional emptiness
+- **WHEN** the user explicitly navigates to a document or enables Follow after intentional deselection
+- **THEN** existing selection behavior SHALL resume and intentional emptiness SHALL end
+
+#### Scenario: Browser-local deselection does not replace Hub-backed preferences
+- **WHEN** intentional deselection is persisted or another tab reconciles in the background
+- **THEN** only the intentional-deselection indication SHALL be persisted in this browser, scoped to the workspace; existing document-path, Follow, and other personal preferences SHALL retain Hub-backed persistence
+- **AND** the indication SHALL NOT become a new personal-state API field, propagate to another browser, or force already-open clients to navigate
+- **AND** another tab's background reconciliation SHALL NOT erase it for future reloads
+
+#### Scenario: Ordinary directory interaction conveys expansion rather than file selection
+- **WHEN** a user clicks, taps, or keyboard-navigates a directory row
+- **THEN** clicking/tapping SHALL only expand or collapse it
+- **AND** pointer/touch interaction SHALL NOT leave a focus ring; only keyboard navigation SHALL show it
+- **AND** on devices without hover support a tapped row SHALL NOT retain a hover tint resembling selection
+- **AND** clicking a directory that is not a collapsing active-file ancestor SHALL keep the active file selected
+- **AND** unrelated collapse, opening, focus movement without collapse, or collapse without an active document SHALL NOT close a document or change Follow
+
+#### Scenario: Directory rows never show a selected-file state
+- **WHEN** a directory row is displayed, including after programmatic changes
+- **THEN** it SHALL never be presented as selected
+
+#### Scenario: Programmatic directory changes are not manual collapse
+- **WHEN** directory changes are programmatic, including rebuilds, filter reconciliation, and restoration of expansion
+- **THEN** they SHALL NOT count as manual collapse
 
 #### Scenario: Pointer collapse closes a nested active document
 - **GIVEN** `guides/setup.md` is active and `guides/` is expanded
@@ -252,7 +314,13 @@ Collapsing an unrelated directory, opening a directory, moving keyboard focus wi
 - **AND** no title, path, rendered content, source, or diff from that old request replaces the empty preview
 
 ### Requirement: Display sidebar file count breakdown
-The sidebar SHALL display one quiet count of eligible file entries in the selected All, Recent, or Changed view after visibility, filename/path, and media-type filtering. The count SHALL include eligible entries outside the current viewport and SHALL exclude directory rows; All SHALL count files regardless of collapsed folders. Changed SHALL include any existing temporary active-file inclusion. The count MUST NOT display binary subcounts, hidden counts, or N-of-M wording. Its accessible name SHALL identify it as a file/result count.
+The sidebar SHALL display one quiet count of eligible file entries in the selected All, Recent, or Changed view after visibility, filename/path, and media-type filtering. Its accessible name SHALL identify it as a file/result count.
+
+#### Scenario: File count measures eligible entries rather than visible rows or subcounts
+- **WHEN** the sidebar count is computed
+- **THEN** it SHALL include eligible entries outside the viewport and exclude directories; All SHALL count files regardless of collapsed folders
+- **AND** Changed SHALL include any existing temporary active-file inclusion
+- **AND** the count MUST NOT display binary subcounts, hidden counts, or N-of-M wording
 
 #### Scenario: Counter shows only the total when the tree is uniform
 - **WHEN** All contains three eligible text files
@@ -280,7 +348,20 @@ The sidebar SHALL display one quiet count of eligible file entries in the select
 
 ### Requirement: Reduce the tree's path set when the Files-pane filter is set to Changed
 
-When the Files-pane filter is in the `Changed` state, the path set fed to `@pierre/trees` MUST be reduced to the changed-files list plus every ancestor directory of each file in that list. Files listed in the git-ignored files list MUST NOT contribute to the reduced set — gitignored entries are ambient git policy, not change content. The reduction MUST be implemented by handing the library a shorter `paths` array via `resetPaths(paths, { initialExpandedPaths })`; uatu MUST NOT mutate, hide, or otherwise modify the library's internal row visibility or DOM. Every ancestor directory included in the reduced set MUST be auto-expanded so the change entries are visible without further clicks. When the filter is `All`, the path set fed to the library MUST be the full set unchanged from current behavior. The same chip controls the filter regardless of how many watched roots are present; one chip toggles all roots together.
+When the Files-pane filter is in the `Changed` state, the path set fed to `@pierre/trees` MUST be reduced to the changed-files list plus every ancestor directory of each file in that list. Files in the git-ignored files list MUST NOT contribute: gitignored entries are ambient git policy, not change content.
+
+#### Scenario: Changed filtering uses public path reset and expanded ancestors
+- **WHEN** Changed reduces the tree's path set
+- **THEN** reduction MUST hand the library a shorter `paths` array via `resetPaths(paths, { initialExpandedPaths })`; uatu MUST NOT mutate, hide, or otherwise modify internal row visibility or DOM
+- **AND** every included ancestor MUST auto-expand so change entries are visible without further clicks
+
+#### Scenario: All retains the existing full path set
+- **WHEN** the filter is All
+- **THEN** All MUST supply the full path set unchanged from current behavior
+
+#### Scenario: The same filter chip controls every root together
+- **WHEN** the Files filter control is displayed in either All or Changed, with any number of watched roots
+- **THEN** the same chip controls the filter and toggles all roots together regardless of root count
 
 #### Scenario: Filter `Changed` reduces the tree to change-set entries plus their ancestors
 - **WHEN** the filter is `Changed` and the changed-files list reports two changed paths under `src/auth/` and one under `tests/`
@@ -305,7 +386,13 @@ When the Files-pane filter is in the `Changed` state, the path set fed to `@pier
 
 ### Requirement: Preserve the full-tree expansion state across filter toggles
 
-When the user toggles the filter from `All` to `Changed`, the system MUST snapshot the user's current set of manually-expanded directories. When the user toggles back to `All`, the snapshot MUST be restored as the expansion state — every directory the user had opened in the full-tree view is open again. Directories that were auto-expanded as ancestors of change-set entries in `Changed` mode MUST NOT carry over into `All` (they were not user choices). When the user expands or collapses a directory while in `Changed` mode, that interaction is recorded as a user choice for the duration of `Changed`, but does NOT modify the stored full-tree snapshot — a subsequent toggle back to `All` SHALL still restore the original snapshot.
+When the user toggles the filter from `All` to `Changed`, the system MUST snapshot the user's current set of manually-expanded directories. Toggling back to `All` MUST restore that snapshot so every directory opened in the full-tree view is open again.
+
+#### Scenario: Changed expansion choices do not alter the saved All snapshot
+- **WHEN** ancestors auto-expand or the user expands/collapses directories in Changed
+- **THEN** auto-expanded change-set ancestors MUST NOT carry into All because they were not user choices
+- **AND** manual Changed interactions SHALL be recorded for the duration of Changed but MUST NOT modify the stored full-tree snapshot
+- **AND** returning to All SHALL still restore the original snapshot
 
 #### Scenario: Full-tree expansions survive a filter on/off cycle
 - **WHEN** the user has manually expanded `src/`, `src/auth/`, and `tests/` in the `All` view
@@ -322,7 +409,12 @@ When the user toggles the filter from `All` to `Changed`, the system MUST snapsh
 
 ### Requirement: Reveal the active document via temporary inclusion when follow crosses the filter boundary
 
-When the filter is `Changed` and follow-mode auto-switches the active document to a path that is not in the filtered set, the path set fed to the library MUST be expanded to include exactly that path plus its ancestor directories, so the row is rendered and selected. The temporarily-included row MUST be marked with a distinguishing visual cue (subtle dimming or italicization) so users can distinguish "this row is here because Follow asked" from "this row is in the change set". When the active document subsequently changes — to another path in the change set, or to another path outside it (in which case the previous temporary inclusion is dropped and the new one added) — the temporary inclusion MUST be recomputed and the previous temporary row removed. The user's filter setting MUST NOT be toggled by this reveal — `Changed` remains active throughout.
+When the filter is `Changed` and follow-mode auto-switches the active document to a path that is not in the filtered set, the path set fed to the library MUST be expanded to include exactly that path plus its ancestor directories, so the row is rendered and selected. Reveal MUST NOT toggle the user's filter setting: `Changed` remains active throughout.
+
+#### Scenario: Temporary active-path inclusion is distinguishable and replaced on selection change
+- **WHEN** a Follow-revealed temporary row is shown or the active document subsequently changes
+- **THEN** the row MUST have a distinguishing cue (subtle dimming or italicization) separating "here because Follow asked" from change-set membership
+- **AND** every subsequent active-document change, to an in-set or out-of-set path, MUST recompute temporary inclusion and remove the previous temporary row, adding the new one only when outside the set
 
 #### Scenario: Follow auto-switch to an unfiltered path reveals only that one row
 - **WHEN** the filter is `Changed`
@@ -343,7 +435,22 @@ When the filter is `Changed` and follow-mode auto-switches the active document t
 - **AND** P2 (and its ancestors) is now included with the same visual cue
 
 ### Requirement: Render the document tree through `@pierre/trees`
-The sidebar document tree SHALL be rendered by the [`@pierre/trees`](https://github.com/pierrecomputer/pierre/tree/main/packages/trees) library (vanilla entry). uatu MUST use the library's path-array input (`paths`) and selection API (`getSelectedPaths` / equivalent observer hook) as the public surface for the tree. uatu MUST NOT re-implement, replace, or mutate the library's row DOM, expansion handling, or keyboard navigation. Selection events from the library MUST drive the existing document-routing flow exactly as a sidebar tree click does today; manual file selection MUST disable follow mode under the existing rules. The library SHALL remain the source of truth for current directory expansion state. Application-directed default expansion, state preservation across path rebuilds and filter transitions, and additive reveal SHALL use the library's public APIs; uatu MUST NOT maintain a competing continuously tracked open/closed-state model. Observing native user actions to route document activation or explicit ancestor-collapse deselection SHALL leave the library's own expansion and keyboard behavior intact, and programmatic updates MUST NOT be interpreted as user navigation.
+The sidebar document tree SHALL be rendered by the [`@pierre/trees`](https://github.com/pierrecomputer/pierre/tree/main/packages/trees) library (vanilla entry). uatu MUST use its path-array input (`paths`) and selection API (`getSelectedPaths` / equivalent observer hook) as the public surface. The library SHALL remain the source of truth for current directory expansion state.
+
+#### Scenario: Library integration preserves DOM, expansion, and keyboard ownership
+- **WHEN** the app integrates the document tree, including rendering, path rebuilds, filter transitions, and additive reveal
+- **THEN** uatu MUST NOT re-implement, replace, or mutate the library's row DOM, expansion handling, or keyboard navigation
+- **AND** default expansion, path-rebuild/filter-transition state preservation, and additive reveal SHALL use public library APIs
+- **AND** uatu MUST NOT maintain a competing continuously tracked open/closed-state model
+
+#### Scenario: Native file and ancestor actions route intent without confusing programmatic updates
+- **WHEN** the library reports selection or native user actions are observed
+- **THEN** selection events MUST drive the existing document-routing flow exactly as sidebar clicks do today, with manual file selection disabling Follow under existing rules
+- **AND** observing native activation or explicit ancestor-collapse deselection SHALL leave library expansion and keyboard behavior intact
+
+#### Scenario: All programmatic tree updates remain distinct from user navigation
+- **WHEN** the tree is updated programmatically, whether or not a selection callback fires
+- **THEN** the update MUST NOT be interpreted as user navigation
 
 #### Scenario: Files pane renders the library's tree
 - **WHEN** the `Files` pane renders for a folder-scoped session
@@ -369,7 +476,15 @@ The sidebar document tree SHALL be rendered by the [`@pierre/trees`](https://git
 - **AND** directory interactions and programmatic selection do not trigger file activation
 
 ### Requirement: Display file-type icons via the library's built-in `'standard'` icon set
-The document tree SHALL display a small icon next to each tree leaf — both clickable and non-clickable — that reflects its file type. uatu SHALL configure `@pierre/trees` with `icons: { set: 'standard', colored: true }` so the library renders its built-in ~50-icon set inline (markdown, typescript, json, css, image, etc.). A generic fallback icon MUST be used for any extension the built-in set does not cover. Binary entries MUST also display an icon. uatu MAY override or extend the built-in icons via the library's `byFileName` and `byFileExtension` configuration hooks; baseline behavior MUST work without any overrides.
+The document tree SHALL display a small file-type icon next to every leaf, clickable or not. uatu SHALL configure `@pierre/trees` with `icons: { set: 'standard', colored: true }` to render its built-in ~50-icon set inline (markdown, typescript, json, css, image, etc.).
+
+#### Scenario: File icons cover unknown and binary entries without overrides
+- **WHEN** a leaf has an unmapped extension or is binary
+- **THEN** an unmapped extension MUST use a generic fallback icon, and binary entries MUST also show an icon
+
+#### Scenario: Icon customization is optional for all file types
+- **WHEN** icons are configured for the tree
+- **THEN** uatu MAY override or extend icons through `byFileName` and `byFileExtension`, but baseline behavior MUST work without overrides
 
 #### Scenario: Markdown documents show a markdown icon in the tree
 - **WHEN** the sidebar lists a `.md` or `.markdown` file
@@ -384,7 +499,21 @@ The document tree SHALL display a small icon next to each tree leaf — both cli
 - **THEN** the tree row shows the library's icon for that extension (or the default icon if not mapped)
 
 ### Requirement: Annotate tree rows with git status
-When repository change data is available, the document tree SHALL annotate changed paths from the changed-files list using its existing Git-status presentation. Supported statuses SHALL include added, modified, deleted, renamed, untracked, and ignored; renamed annotations SHALL apply at the new path. Change annotations SHALL update when repository change data changes and SHALL coexist with All/Recent/Changed presentation controls. Independently supplied known Git-ignore classification SHALL permit ignored styling without waiting for repository change collection. Ignored files SHALL use a muted filename and faded file icon without a visible ignored-status label or badge. Selection, focus, recency cues, and playback actions SHALL remain legible and usable. Unknown ignore status MUST NOT be presented as confirmed ignored or confirmed clean. Recent SHALL use the same muted ignored treatment.
+When repository change data is available, the document tree SHALL annotate changed paths from the changed-files list using its existing Git-status presentation. Supported statuses SHALL include added, modified, deleted, renamed, untracked, and ignored; renamed annotations SHALL apply at the new path.
+
+#### Scenario: Git status and independently known ignore classification update the shared presentation
+- **WHEN** repository change data or known Git-ignore classification arrives
+- **THEN** change annotations SHALL update with repository data and coexist with All/Recent/Changed controls
+- **AND** independent known ignore classification SHALL permit ignored styling without waiting for repository change collection
+
+#### Scenario: Displayed files retain ignored styling and usable interaction cues
+- **WHEN** files are displayed in the tree or Recent, whether or not new repository or ignore data arrives
+- **THEN** ignored files SHALL use muted filenames and faded icons without visible ignored-status labels or badges; Recent SHALL use the same treatment
+- **AND** selection, focus, recency cues, and playback actions SHALL remain legible and usable
+
+#### Scenario: Unknown ignore status remains uncertain without a classification update
+- **WHEN** ignore status is unknown
+- **THEN** it MUST NOT be presented as confirmed ignored or confirmed clean
 
 #### Scenario: Modified file shows a modified annotation
 - **WHEN** repository change data reports an uncommitted modification
@@ -410,3 +539,45 @@ When repository change data is available, the document tree SHALL annotate chang
 #### Scenario: An ignored file is selected or playing
 - **WHEN** a muted ignored row is selected or its clip is auditioned
 - **THEN** selection and playback controls remain clearly distinguishable and actionable
+
+### Requirement: Ignored folders load their contents when expanded
+The tree SHALL show each Git-ignored folder entry as a folder row with muted ignored treatment, following Show ignored files like ignored files do. A folder whose level has not been listed SHALL be expandable even though its contents are unknown. Unlisted-level user expansion, already-listed levels, and programmatic expansion SHALL follow their respective listing rules below.
+
+#### Scenario: User expansion loads and merges one ignored-folder level
+- **WHEN** an unlisted folder is expanded by pointer, touch, or keyboard
+- **THEN** it SHALL request that level's listing and show its files/subfolders in alphabetical tree order on arrival, merged with files already known from live writes
+- **AND** while pending the row SHALL indicate loading without moving focus or selection
+- **AND** failed listing SHALL leave the folder expandable with a row retry affordance
+
+#### Scenario: An already-listed ignored folder is expanded again
+- **WHEN** a user collapses and expands an already-listed folder
+- **THEN** it SHALL NOT request that folder's listing again
+
+#### Scenario: Programmatic expansion avoids discovery and counts remain knowledge-based
+- **WHEN** mount, selected-file reveal, or filter reconciliation expands folders programmatically
+- **THEN** it SHALL NOT request listings except ancestors needed to reveal an explicitly selected file
+
+#### Scenario: File counts include only known ignored-folder contents
+- **WHEN** the file count is computed, regardless of how folders were expanded
+- **THEN** it SHALL include only known files; files inside levels nobody has listed SHALL NOT be counted
+
+#### Scenario: Expanding `build/` lists its first level
+- **WHEN** the user expands the muted `build/` row that has not been listed
+- **THEN** a loading indication appears on that row and is replaced by `build/`'s files and subfolders
+- **AND** focus stays on the `build/` row
+
+#### Scenario: A live render is visible before expansion completes
+- **WHEN** `build/renders/take-5.wav` was captured from a live write and the user expands `build/` and then `build/renders/`
+- **THEN** `take-5.wav` is shown together with the rest of the listed files, once each
+
+#### Scenario: A listing fails
+- **WHEN** the listing request for `node_modules/` fails
+- **THEN** the folder stays expandable and offers a retry, and the rest of the tree is unchanged
+
+#### Scenario: Show ignored files off hides ignored folders
+- **WHEN** Show ignored files is off
+- **THEN** ignored folder rows and their known contents are hidden, except paths revealed by an `ignore.exclude` negation
+
+#### Scenario: The count reflects known files
+- **WHEN** `node_modules/` has not been listed
+- **THEN** the file count does not include its contents, and listing a level adds that level's eligible files to the count

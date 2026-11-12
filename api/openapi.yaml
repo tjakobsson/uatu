@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 14.35.0-experimental
+  version: 15.37.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 14 and workspace revision 35
+  summary: Hub revision 15 and workspace revision 37
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves personal state, worker
@@ -21,8 +21,8 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 14
-    workspaceApiRevision: 35
+    hubApiRevision: 15
+    workspaceApiRevision: 37
 servers:
   - url: https://{hubHost}
     variables:
@@ -149,9 +149,9 @@ paths:
                   summary: An ordinary workspace
                   value:
                     version: 0.5.1 (abcdef0)
-                    hubApiRevision: 10
-                    workspaceApiRevision: 20
-                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 20, shells: [{ attached: false, label: zsh }] }]
+                    hubApiRevision: 15
+                    workspaceApiRevision: 37
+                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 37, shells: [{ attached: false, label: zsh }] }]
                     workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
                 worktrees:
                   summary: A main workspace and one linked worktree
@@ -1016,11 +1016,11 @@ paths:
         - name: subs
           in: query
           schema: { type: string, contentMediaType: application/json, contentSchema: { $ref: '#/components/schemas/LiveSubscriptionList' } }
-          description: "Initial subscriptions as a JSON array of LiveSubscription, each with the cursor to resume from. A reconnect presents every retained cursor here. Malformed JSON or an invalid entry answers 400. The set rides the query string, and proxies commonly refuse a request line past about 8 KB. A client whose set would exceed that presents part of it here and adds the rest with hubUpdateLiveSubscriptions after `hello`, from the same cursors."
+          description: "Initial subscriptions as a JSON array of LiveSubscription, each with the cursor to resume from. A reconnect presents every retained cursor here. A conversation subscription's boolean `reconnect` overrides the stream-level reconnect default. Malformed JSON or an invalid entry answers 400. The set rides the query string, and proxies commonly refuse a request line past about 8 KB. A client whose set would exceed that presents part of it here and adds the rest with hubUpdateLiveSubscriptions after `hello`, from the same cursors and with `reconnect: true` on each deferred recovering conversation."
         - name: reconnect
           in: query
           schema: { type: string, enum: ['0', '1'], default: '0' }
-          description: "`1` when this stream replaces one the client lost. The Hub records it in diagnostics and behaves the same either way."
+          description: "`1` when this stream replaces one the client lost. Also recorded in diagnostics. Supplies the recovery-intent default for opening conversation subscriptions in `subs`; each conversation's boolean `reconnect` overrides it. Recovery can reconcile missed same-cursor visual metadata through the existing resync protocol, but does not require a fresh snapshot on every reconnect. A healthy shared subscription at its head sends resync only when the presented cursor matches that conversation's last remembered visual-trailer cursor; otherwise it sends ready. Later POST additions do not inherit this query parameter."
       responses:
         '200':
           description: SSE stream described by streaming.yaml#channels.live
@@ -1048,6 +1048,14 @@ paths:
         snapshot's cursor. Once this operation answers, the stream carries no
         further envelope for a removed subscription.
 
+        A conversation addition may set `reconnect: true` with a nonempty
+        cursor to preserve transport-recovery intent when deferred from the
+        opening URL. This can repair missed same-cursor visual metadata;
+        it does not request a full snapshot on every reconnect. Omitted or
+        false means a fresh attachment, even if the stream opened with
+        `reconnect=1`. Opening `subs` instead use the GET's reconnect default
+        unless the conversation supplies its own boolean override.
+
         A 400, 403, or 404 answer means this stream cannot take the change,
         and repeating the request fails the same way. Reconnect and present
         the whole subscription set in `subs`. Retry a 5xx, or a request that
@@ -1058,7 +1066,15 @@ paths:
       requestBody:
         required: true
         content:
-          application/json: { schema: { $ref: '#/components/schemas/LiveSubscriptionChange' } }
+          application/json:
+            schema: { $ref: '#/components/schemas/LiveSubscriptionChange' }
+            examples:
+              deferredRecovery:
+                summary: Resume a conversation deferred from the opening URL
+                value: { add: [{ topic: conversation, key: 'opencode:conversation-1', cursor: 'eyJ2IjoxfQ', reconnect: true }] }
+              freshConversation:
+                summary: Attach a new conversation without recovery intent
+                value: { add: [{ topic: conversation, key: 'opencode:conversation-2', reconnect: false }] }
       responses:
         '200':
           description: Subscriptions changed
@@ -2389,10 +2405,33 @@ components:
       minimum: 0
       description: "Provider-reported terminal timestamp in Unix epoch milliseconds. Omitted when unknown; never inferred from creation time, duration, receive time, or silence. Display only for a terminal item status, not pending or running."
     TimelineBase: { type: object, required: [id, type, createdAt], properties: { id: { type: string }, type: { type: string }, createdAt: { type: number, minimum: 0 } } }
+    ChatVisualSnapshot:
+      type: object
+      description: |
+        Immutable snapshot of a permanently admitted agent-authored visual in
+        current rendered occurrence order. At most eight logical occurrences
+        per native assistant message, including refusals, and 10 MiB per image.
+        Removing or reordering markup does not free admissions. Only currently
+        present admitted occurrences have entries; omitted occurrences are limit
+        refusals, even at low rendered indexes. Missing files are retried at turn completion. Authenticated
+        internal GET /api/chat/visuals/{id} serves preview bytes. For SVG,
+        /api/chat/visuals/{id}/source serves the exact original as text/plain;
+        the image endpoint uses a restrictive sandbox CSP. These child routes
+        are internal workspace protocol, not public Hub API operations.
+      required: [index, status]
+      properties:
+        index: { type: integer, minimum: 0, maximum: 9007199254740991, description: "Current rendered occurrence index, not an admission slot. It may exceed seven after HTML repair or late reference resolution; only the at-most-eight permanently admitted occurrences have entries." }
+        status: { type: string, enum: [ready, pending, unavailable] }
+        id: { type: string, pattern: '^[a-f0-9]{64}$' }
+        mimeType: { type: string, enum: [image/png, image/jpeg, image/svg+xml] }
+        message: { type: string }
+      if: { properties: { status: { const: ready } }, required: [status] }
+      then: { properties: { id: {}, mimeType: {} }, required: [id, mimeType] }
+      additionalProperties: false
     ConversationItem:
       oneOf:
         - { type: object, required: [id, type, createdAt, text], properties: { id: { type: string }, type: { const: user_message }, createdAt: { type: number }, text: { type: string }, requestId: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } }, origin: { const: wakeup, description: "Present when the user did not type this prompt: `wakeup` is a scheduled wakeup firing, and the item opens that wakeup's turn. Clients present it as a wakeup, never as the user's message. Absent means the user typed it." }, wakeupId: { type: string, minLength: 1, maxLength: 512, description: "With `origin: wakeup`: the `scheduled_wakeup` item that fired, when known." } }, additionalProperties: false }
-        - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, completedAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512, description: "Execution identity joining usage to its window observation, including the selected window variant." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "Message-level tokens. Normalization emits exactly one dedicated carrier per reported provider message: its id is `usage:<provider-message-id>` and its markdown is empty, so clients MUST treat it as data rather than render it as a message bubble. Present only where the agent declares the context capability and reported usage." }, model: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "The model that reported this usage carrier, when known. Context percentages MUST use this model's context limit rather than a newly selected model that has not produced usage yet." }, agent: { type: string, minLength: 1, description: "The agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind). Rides the usage carrier so a cost receipt can name the main agent's lines. Absent where the provider names none." } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, visuals: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/ChatVisualSnapshot' } }, completedAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512, description: "Execution identity joining usage to its window observation, including the selected window variant." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "Message-level tokens. Normalization emits exactly one dedicated carrier per reported provider message: its id is `usage:<provider-message-id>` and its markdown is empty, so clients MUST treat it as data rather than render it as a message bubble. Present only where the agent declares the context capability and reported usage." }, model: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "The model that reported this usage carrier, when known. Context percentages MUST use this model's context limit rather than a newly selected model that has not produced usage yet." }, agent: { type: string, minLength: 1, description: "The agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind). Rides the usage carrier so a cost receipt can name the main agent's lines. Absent where the provider names none." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, text, status], properties: { id: { type: string }, type: { const: reasoning }, createdAt: { type: number }, text: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, durationMs: { type: number }, label: { type: string, minLength: 1, description: "The row's label when it is recalled context rather than the model's own thinking (\"Recalled from memory\"). Absent for ordinary reasoning." } }, additionalProperties: false }
         - type: object
           required: [id, type, createdAt, name, status]
@@ -2640,10 +2679,16 @@ components:
       required: [id, name, relativePath, mtimeMs, rootId, kind, revision]
       properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] }, revision: { type: integer, minimum: 0 }, gitIgnoreStatus: { enum: [ignored, not-ignored, unknown] }, ignoreVisibilityException: { type: boolean } }
       additionalProperties: false
+    FolderEntry:
+      type: object
+      description: "A folder Git ignores as a whole, such as node_modules/ or build/, or a folder inside one. Its contents are listed one level at a time on demand rather than discovered up front. `relativePath` ends in `/`. `listed` is true once that level's files and subfolders are in the inventory; until then only files written during the session can appear beneath it."
+      required: [id, rootId, relativePath, listed, revision]
+      properties: { id: { type: string }, rootId: { type: string }, relativePath: { type: string, pattern: '/$' }, listed: { type: boolean }, revision: { type: integer, minimum: 0 } }
+      additionalProperties: false
     RootGroup:
       type: object
       required: [id, label, path, docs, hiddenCount]
-      properties: { id: { type: string }, label: { type: string }, path: { type: string }, docs: { type: array, items: { $ref: '#/components/schemas/DocumentMeta' } }, hiddenCount: { type: integer, minimum: 0 } }
+      properties: { id: { type: string }, label: { type: string }, path: { type: string }, docs: { type: array, items: { $ref: '#/components/schemas/DocumentMeta' } }, folders: { type: array, description: "Git-ignored folder entries of this root. Absent when there are none.", items: { $ref: '#/components/schemas/FolderEntry' } }, hiddenCount: { type: integer, minimum: 0 } }
       additionalProperties: false
     WorkspaceState:
       type: object
@@ -2705,6 +2750,8 @@ components:
         unscopedFingerprint: { type: string }
         upserts: { type: array, items: { $ref: '#/components/schemas/DocumentMeta' } }
         removals: { type: array, items: { type: object, required: [rootId, id], properties: { rootId: { type: string }, id: { type: string } }, additionalProperties: false } }
+        folderUpserts: { type: array, description: "Git-ignored folder entries added or changed (for example, newly listed) at this revision.", items: { $ref: '#/components/schemas/FolderEntry' } }
+        folderRemovals: { type: array, description: "Git-ignored folder entries that no longer exist.", items: { type: object, required: [rootId, id], properties: { rootId: { type: string }, id: { type: string } }, additionalProperties: false } }
         roots: { type: array, items: { $ref: '#/components/schemas/DocumentRoot' } }
         discovery: { $ref: '#/components/schemas/DocumentDiscovery' }
         repositories: { type: array, items: { $ref: '#/components/schemas/RepositorySnapshot' } }
@@ -2789,7 +2836,7 @@ components:
             topic: { type: string, const: personal }
           additionalProperties: false
     LiveSubscription:
-      description: A subscription and the cursor to resume it from.
+      description: A subscription and the cursor to resume it from. Only conversation subscriptions accept the optional boolean reconnect recovery intent.
       oneOf:
         - type: object
           required: [topic]
@@ -2810,6 +2857,17 @@ components:
             topic: { type: string, const: conversation }
             key: { $ref: '#/components/schemas/LiveConversationKey' }
             cursor: { $ref: '#/components/schemas/LiveCursor' }
+            reconnect:
+              type: boolean
+              description: "Transport-recovery intent, not a request to refresh every reconnect. True requires a nonempty cursor bounded to 1024 UTF-8 bytes. Recovery reconciles possibly missed visual metadata only where retained visual evidence requires it. False is a fresh attachment. In opening GET subs, omission inherits the stream's reconnect query parameter; later POST additions use only their own flag, with omitted/false meaning fresh. Older Hubs may ignore this field, so deferred visual repair requires an updated Hub."
+          if:
+            required: [reconnect]
+            properties:
+              reconnect: { const: true }
+          then:
+            required: [cursor]
+            properties:
+              cursor: { minLength: 1 }
           additionalProperties: false
         - type: object
           required: [topic]

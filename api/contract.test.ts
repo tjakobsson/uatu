@@ -23,6 +23,7 @@ import {
   type LiveEnvelope,
   parseLiveEnvelope,
   parseLiveHello,
+  parseLiveStreamQuery,
   parseLiveSubscriptionChange,
   sanitizeWorkspaceActivity,
   WORKTREE_INVALIDATION,
@@ -46,7 +47,7 @@ describe("API contract structure", () => {
   test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([35, 14, 3]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([37, 15, 4]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -311,7 +312,8 @@ describe("API contract structure", () => {
     expect(result.changedDomains).toEqual(["hub"]);
     expect(result.breaking.hub).toContain("POST /s/{workspaceId}/api/personal-worker-dismissals: request schema for application/json: oneOf branch count changed");
     expect(result.breaking.workspace).toEqual([]);
-    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 13, workspaceApiRevision: 35 }, metadata, changelog)).not.toThrow();
+    // The dismissal union shipped at the Hub 14 / Workspace 35 pair.
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 13, workspaceApiRevision: 35 }, { ...metadata, hubApiRevision: 14, workspaceApiRevision: 35 }, changelog)).not.toThrow();
   });
 
   test("metadata revisions agree with OpenAPI and changelog", async () => {
@@ -400,6 +402,31 @@ describe("streaming protocol is closed", () => {
 });
 
 describe("conversation configuration", () => {
+  test("assistant visuals agree with runtime validation", async () => {
+    const { parseConversationItem } = await import("../src/chat/validation");
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationItem, openapi.components.schemas));
+    const item = { id: "a", type: "assistant_message", createdAt: 1, markdown: "![image](image.svg)" };
+    for (const visual of [
+      { index: 0, status: "pending" },
+      { index: 0, status: "unavailable", message: "Image is unavailable" },
+      { index: 0, status: "unavailable", id: "a".repeat(64), mimeType: "image/svg+xml", message: "SVG preview is unavailable" },
+      { index: 0, status: "ready", id: "a".repeat(64), mimeType: "image/svg+xml" },
+      { index: 80, status: "ready", id: "a".repeat(64), mimeType: "image/png" },
+    ]) {
+      const wire = { ...item, visuals: [visual] };
+      expect(validate(wire)).toBe(true);
+      expect(parseConversationItem(wire)).toEqual(wire);
+    }
+    for (const visual of [{ index: Number.MAX_SAFE_INTEGER + 1, status: "pending" }, { index: -1, status: "pending" }, { index: 0, status: "ready" }, { index: 0, status: "ready", id: "../secret", mimeType: "text/html" }]) {
+      const wire = { ...item, visuals: [visual] };
+      expect(validate(wire)).toBe(false);
+      expect(() => parseConversationItem(wire)).toThrow();
+    }
+    const excess = { ...item, visuals: Array.from({ length: 9 }, (_, index) => ({ index, status: "pending" })) };
+    expect(validate(excess)).toBe(false);
+    expect(() => parseConversationItem(excess)).toThrow();
+  });
   test("window-only observations and execution keys agree with runtime validation", async () => {
     const { parseConversationItem } = await import("../src/chat/validation");
     const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
@@ -545,6 +572,77 @@ describe("live stream contract agrees with the shared wire protocol", () => {
     expect(String(schemas.LiveDocumentKey!.description)).toContain(`${LIVE_MAX_KEY_BYTES} UTF-8 bytes`);
     expect(String(schemas.LiveConversationKey!.description)).toContain(`${LIVE_MAX_KEY_BYTES} UTF-8 bytes`);
     expect(String(schemas.LiveCursor!.description)).toContain(`${LIVE_MAX_CURSOR_BYTES} UTF-8 bytes`);
+  });
+
+  test("conversation reconnect intent agrees across opening and control subscription validators", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const schemas = openapi.components.schemas;
+    const list = createAjv().compile(schemaForAjv(schemas.LiveSubscriptionList, schemas));
+    const change = createAjv().compile(schemaForAjv(schemas.LiveSubscriptionChange, schemas));
+    const opening = (subscription: object) => parseLiveStreamQuery(new URLSearchParams({
+      ws: "uatu", reconnect: "1", subs: JSON.stringify([subscription]),
+    }));
+    const conversation = { topic: "conversation", key: "opencode:conversation-1" };
+    for (const subscription of [
+      { ...conversation, cursor: "opaque-replay-cursor", reconnect: true },
+      { ...conversation, cursor: "å".repeat(LIVE_MAX_CURSOR_BYTES / 2), reconnect: true },
+      { ...conversation, reconnect: false },
+      { ...conversation, cursor: "", reconnect: false },
+      { ...conversation, cursor: "opaque-replay-cursor", reconnect: false },
+      { ...conversation, cursor: "opaque-replay-cursor" },
+      conversation,
+    ]) {
+      expect(list([subscription]), JSON.stringify(list.errors)).toBe(true);
+      expect(change({ add: [subscription] }), JSON.stringify(change.errors)).toBe(true);
+      const query = opening(subscription);
+      expect("error" in query).toBe(false);
+      if ("error" in query) throw new Error(query.error);
+      // Parsing preserves the explicit false override despite GET reconnect=1;
+      // no flag is invented when the subscription omits it.
+      const { cursor, ...withoutCursor } = subscription as Record<string, unknown>;
+      const normalized = cursor === "" ? withoutCursor : subscription;
+      expect(query).toMatchObject({ reconnect: true, subs: [normalized] });
+      expect(parseLiveSubscriptionChange({ add: [subscription] })).toEqual({ add: [normalized] });
+    }
+    const refused = [
+      { ...conversation, reconnect: true },
+      ...["", null, 1].map(cursor => ({ ...conversation, cursor, reconnect: true })),
+      ...["true", 1, null, {}].map(reconnect => ({ ...conversation, cursor: "cursor", reconnect })),
+      ...["document", "inventory", "worktrees", "personal"].flatMap(topic =>
+        [true, false].map(reconnect => ({ topic, cursor: "cursor", reconnect }))),
+    ];
+    for (const subscription of refused) {
+      expect(list([subscription])).toBe(false);
+      expect(change({ add: [subscription] })).toBe(false);
+      expect("error" in opening(subscription)).toBe(true);
+      expect("error" in parseLiveSubscriptionChange({ add: [subscription] })).toBe(true);
+    }
+    const oversized = { ...conversation, cursor: "å".repeat(LIVE_MAX_CURSOR_BYTES / 2 + 1), reconnect: true };
+    // Standard JSON Schema counts characters, not UTF-8 bytes. Retain the
+    // LiveCursor byte annotation and test the actual parser's byte bound.
+    expect("error" in opening(oversized)).toBe(true);
+    expect("error" in parseLiveSubscriptionChange({ add: [oversized] })).toBe(true);
+
+    // Keep the published object closed. Runtime subscription parsing strips
+    // unknown properties, so schema rejection here is intentionally stricter.
+    const unknown = { ...conversation, cursor: "cursor", reconnect: true, unknown: true };
+    expect(list([unknown])).toBe(false);
+    expect(change({ add: [unknown] })).toBe(false);
+    expect(parseLiveSubscriptionChange({ add: [unknown] })).toEqual({ add: [{ ...conversation, cursor: "cursor", reconnect: true }] });
+    const subscriptionSchema = schemas.LiveSubscription as { oneOf: Array<{ properties?: Record<string, object>; if?: object; then?: object }> };
+    const previous = {
+      ...subscriptionSchema,
+      oneOf: subscriptionSchema.oneOf.map(variant => {
+        if (!variant.properties?.reconnect) return variant;
+        const { reconnect: _flag, ...properties } = variant.properties;
+        const { if: _condition, then: _requirement, ...legacy } = variant;
+        return { ...legacy, properties };
+      }),
+    };
+    const old = createAjv().compile(schemaForAjv(previous, schemas));
+    expect(old(conversation)).toBe(true);
+    expect(old({ ...conversation, cursor: "cursor", reconnect: true })).toBe(false);
+    expect(old({ ...conversation, reconnect: false })).toBe(false);
   });
 
   test("the Hub accepts every contract-valid subscription change and the contract states what it refuses", async () => {

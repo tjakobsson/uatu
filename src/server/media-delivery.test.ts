@@ -127,7 +127,7 @@ test("media authentication, exact roots, internal paths and policy are enforced 
   const left = await directory(), right = await directory(), outside = await directory();
   for (const [dir, value] of [[left, "left"], [right, "right"]]) await writeFile(path.join(dir!, "clip.mp3"), value!);
   await writeFile(path.join(left, ".gitignore"), "clip.mp3\n");
-  await writeFile(path.join(left, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.mp3"], include: ["build/renders"] } }));
+  await writeFile(path.join(left, ".uatu.json"), JSON.stringify({ ignore: { exclude: ["excluded.mp3", "build/other/"] } }));
   await mkdir(path.join(left, "build/renders"), { recursive: true });
   await mkdir(path.join(left, "build/other"));
   for (const name of ["excluded.mp3", ".env.mp3", "build/other/no.mp3", "build/renders/yes.mp3"]) await writeFile(path.join(left, name), "secret or output");
@@ -140,7 +140,8 @@ test("media authentication, exact roots, internal paths and policy are enforced 
   expect(await (await fetch(unauth, { headers: { cookie: `${terminalCookieName(unauth)}=media-secret` } })).text()).toBe("left");
   expect(await (await fetch(url)).text()).toBe("left"); expect(await (await fetch(app.url(right, "clip.mp3"))).text()).toBe("right");
   expect((await fetch(app.url(left, "build/renders/yes.mp3"))).status).toBe(200);
-  for (const relative of ["excluded.mp3", ".env.mp3", "build/other/no.mp3", "link.mp3", "missing.mp3"]) {
+  expect((await fetch(app.url(left, ".env.mp3"))).status).toBe(200);
+  for (const relative of ["excluded.mp3", "build/other/no.mp3", "link.mp3", "missing.mp3"]) {
     const denied = new URL(url); denied.searchParams.set("path", relative);
     expect((await fetch(denied)).status).toBe(404);
   }
