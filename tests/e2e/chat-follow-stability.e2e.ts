@@ -52,9 +52,9 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
             const registry = globalThis.__coordinatedOwners ??= new Map(); const prior = registry.get(scroller);
             const entry = { id: prior?.id ?? registry.size + 1, anchor: this.options.anchor, registrations: (prior?.registrations ?? 0) + 1 };
             registry.set(scroller, entry);
-            const flush = this.flush; this.flush = function(timestamp) {
+            const flush = this.flush; this.flush = function(...args) {
               const previous = globalThis.__activeCorrectionOwner; globalThis.__activeCorrectionOwner = entry.id;
-              try { return flush.call(this, timestamp); } finally { globalThis.__activeCorrectionOwner = previous; }
+              try { return flush.apply(this, args); } finally { globalThis.__activeCorrectionOwner = previous; }
             };
             const coordinated = this;
             for (const method of ["pause", "observe"]) {

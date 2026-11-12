@@ -52,6 +52,8 @@ export class CoordinatedScrollOwner {
   private heldOptions: RevealOptions | undefined;
   private heldTop: number | null = null;
   private resumeFollowing = false;
+  // Durable reading beneath answer placement, retained after blur until a new
+  // reader choice or departure. The live anchor still owns focus placement.
   private heldPosition: TimelinePosition | undefined;
   private pendingPosition: { position: TimelinePosition; reader: boolean } | undefined;
   private disposed = false;
@@ -109,6 +111,7 @@ export class CoordinatedScrollOwner {
   }
 
   private readerChose(): void {
+    this.heldPosition = undefined;
     if (!this.pendingPosition || !this.options.position) return;
     // Until the incoming transcript renders, its semantic items are unavailable.
     // A genuine pause still chooses this offset, not an outgoing view's row.
@@ -217,6 +220,7 @@ export class CoordinatedScrollOwner {
     this.previous = { ...geometry, scrollTop: this.scroller.scrollTop };
     if (reveal.moved) {
       this.options.anchor.pause(this.options.measure(true, false));
+      if (!this.heldTarget) this.readerChose();
       this.motion = null;
     }
     // Any later scroll echo belongs to this correction, not an earlier
@@ -278,11 +282,14 @@ export class CoordinatedScrollOwner {
     return this.heldTarget === element && this.scroller.contains(element);
   }
 
-  /** End temporary answer positioning and resume only the original follow intent.
-   * Position writes still wait for a coordinated frame and its final geometry. */
+  /** End the hold without undoing focus navigation. Keep a paused view's
+   * durable reading for departure until a newer reader choice supersedes it.
+   * Following resumes through a coordinated frame and its final geometry. */
   release(): void {
     const resume = this.resumeFollowing;
+    const held = this.heldPosition;
     this.clearHold();
+    if (held?.kind !== "following") this.heldPosition = held;
     if (resume) {
       // Ending a temporary control placement restores its prior follow intent;
       // it is not a new reader-requested animated journey through the transcript.
@@ -376,6 +383,7 @@ export class CoordinatedScrollOwner {
       this.touchPaused = false;
       // Do not overwrite the pre-mutation anchor while a correction is waiting.
       if (this.frame === null) this.options.anchor.beforeMutation(this.measure(preferredItemId), preferredItemId);
+      if (preferredItemId && !this.heldTarget) this.readerChose();
     }
   }
 

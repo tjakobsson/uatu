@@ -929,7 +929,7 @@ describe("chat reversible-history composer", () => {
     }
   });
 
-  for (const departure of ["browser back", "header back"] as const) test(`lifecycle: ${departure} does not save a following child's temporary answer pause`, async () => {
+  for (const following of [false, true]) for (const focusTransfer of [false, true]) for (const departure of ["browser back", "header back"] as const) test(`lifecycle: ${departure} preserves a ${following ? "following" : "paused"} child's reading through answer departure with focus transfer ${focusTransfer}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "touch");
@@ -958,7 +958,7 @@ describe("chat reversible-history composer", () => {
     const parent = document.querySelector<HTMLElement>("#chat-timeline")!;
     const timeline = document.querySelector<HTMLElement>("#chat-drilldown-timeline")!;
     const container = document.querySelector<HTMLElement>("#chat-drilldown-items")!;
-    let height = 2000;
+    let height = 2000, rowShift = 0;
     for (const scroller of [parent, timeline]) {
       Object.defineProperties(scroller, {
         clientHeight: { configurable: true, get: () => 400 },
@@ -975,9 +975,9 @@ describe("chat reversible-history composer", () => {
       if (row?.getAttribute("data-chat-item-id") === "question:q1") {
         const origin = this.matches("[data-question-custom-input]") ? 1000
           : this.matches(".chat-request-actions") ? 1060 : 900;
-        return rect(origin - timeline.scrollTop, this === row ? 220 : 40);
+        return rect(origin + rowShift - timeline.scrollTop, this === row ? 220 : 40);
       }
-      if (row?.getAttribute("data-chat-item-id") === "message:held-tail") return rect(1120 - timeline.scrollTop, height - 1120);
+      if (row?.getAttribute("data-chat-item-id") === "message:held-tail") return rect(1120 + rowShift - timeline.scrollTop, height - 1120 - rowShift);
       if (row?.getAttribute("data-chat-item-id") === "tool:held") return rect(600 - parent.scrollTop, 400);
       return originalBounds.call(this);
     };
@@ -1000,7 +1000,7 @@ describe("chat reversible-history composer", () => {
     let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
     api.stream = (id, _cursor, handlers) => { if (id === "child") { stream = handlers; streams++; } return { close() {} }; };
     const click = (selector: string) => document.querySelector(selector)!.dispatchEvent(new window.Event("click", { bubbles: true }));
-    const { initChat } = await import(`./ui.ts?lifecycle-held-departure=${departure}-${Date.now()}`);
+    const { initChat } = await import(`./ui.ts?lifecycle-held-departure=${departure}-${following}-${focusTransfer}-${Date.now()}`);
     initChat(api);
     try {
       await waitUntil(() => { drain(); return !!document.querySelector('[data-worker-item="tool:held"]'); });
@@ -1010,6 +1010,12 @@ describe("chat reversible-history composer", () => {
       click('[data-worker-item="tool:held"]');
       await waitUntil(() => { drain(); return streams === 1 && timeline.scrollTop === 1600; });
       expect(browserHistory.state).toHaveProperty("chatDrilldown");
+      if (!following) {
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        timeline.scrollTop = 1250;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        expect(container.querySelector<HTMLElement>('[data-chat-item-id="message:held-tail"]')!.getBoundingClientRect().top).toBe(-130);
+      }
       const card = container.querySelector<HTMLElement>('[data-chat-item-id="question:q1"]')!;
       const toggle = card.querySelector<HTMLInputElement>("[data-question-custom-toggle]")!;
       Object.defineProperty(toggle, "form", { configurable: true, value: card.querySelector("form[data-question-form]") });
@@ -1020,7 +1026,16 @@ describe("chat reversible-history composer", () => {
       field.dispatchEvent(new window.Event("focusin", { bubbles: true }));
       drain();
       expect(document.documentElement.hasAttribute("data-chat-answering")).toBe(true);
-      expect(timeline.scrollTop, "real answer reveal temporarily moves a following child").toBe(700);
+      expect(timeline.scrollTop, "real answer reveal temporarily moves the child away from its reading position").toBe(700);
+      if (focusTransfer) {
+        // Chromium's pointer focus happens before click. LinkeDOM supplies no
+        // focus transport, so dispatch the real focusout/focusin event path.
+        active = document.querySelector("#chat-drilldown-back")!;
+        field.dispatchEvent(new window.Event("focusout", { bubbles: true }));
+        active.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+        await Promise.resolve();
+        expect(document.documentElement.hasAttribute("data-chat-answering")).toBe(false);
+      }
       if (departure === "browser back") browserHistory.back();
       else click("#chat-drilldown-back");
       await waitUntil(() => Boolean(document.querySelector<HTMLElement>("#chat-drilldown")!.hidden));
@@ -1028,6 +1043,7 @@ describe("chat reversible-history composer", () => {
       active = null;
       drain();
       height = 2400;
+      rowShift = 300; // Reopening must restore the semantic row, not raw 1250px.
       click('[data-worker-item="tool:held"]');
       await waitUntil(() => streams === 2);
       drain();
@@ -1036,8 +1052,11 @@ describe("chat reversible-history composer", () => {
       stream!.event({ type: "item.upsert", conversationId: "child", generation: "g", sequence: 1,
         item: { id: "message:held-later", type: "user_message", createdAt: 3, text: "Output after answer departure" } }, "held-later");
       await waitUntil(() => { drain(); return container.textContent!.includes("Output after answer departure"); });
-      expect({ reopened, afterOutput: timeline.scrollTop, parent: parent.scrollTop },
-        "temporary answer placement must not become durable paused intent").toEqual({ reopened: 2000, afterOutput: 2400, parent: 650 });
+      expect({ reopened, afterOutput: timeline.scrollTop, parent: parent.scrollTop,
+        readingOffset: container.querySelector<HTMLElement>('[data-chat-item-id="message:held-tail"]')!.getBoundingClientRect().top },
+        "temporary answer placement must not become durable paused intent").toEqual(following
+        ? { reopened: 2000, afterOutput: 2400, parent: 650, readingOffset: -980 }
+        : { reopened: 1550, afterOutput: 1550, parent: 650, readingOffset: -130 });
     } finally {
       window.dispatchEvent(new window.Event("pagehide"));
       globalThis.requestAnimationFrame = requestFrame;
@@ -1218,7 +1237,7 @@ describe("chat reversible-history composer", () => {
     }
   });
 
-  test("lifecycle: parent selection does not persist a following conversation's temporary answer pause", async () => {
+  for (const following of [false, true]) for (const focusTransfer of [false, true]) test(`lifecycle: parent selection preserves ${following ? "following" : "paused"} reading through answer departure with focus transfer ${focusTransfer}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "touch");
@@ -1227,7 +1246,7 @@ describe("chat reversible-history composer", () => {
     let active: Element | null = null;
     Object.defineProperty(document, "activeElement", { configurable: true, get: () => active });
     const timeline = document.querySelector<HTMLElement>("#chat-timeline")!;
-    let height = 2000;
+    let height = 2000, rowShift = 0;
     Object.defineProperties(timeline, {
       clientHeight: { configurable: true, get: () => 400 },
       scrollHeight: { configurable: true, get: () => height },
@@ -1241,9 +1260,9 @@ describe("chat reversible-history composer", () => {
       if (row?.getAttribute("data-chat-item-id") === "question:q1") {
         const origin = this.matches("[data-question-custom-input]") ? 1000
           : this.matches(".chat-request-actions") ? 1060 : 900;
-        return rect(origin - timeline.scrollTop, this === row ? 220 : 40);
+        return rect(origin + rowShift - timeline.scrollTop, this === row ? 220 : 40);
       }
-      if (row) return rect(1120 - timeline.scrollTop, height - 1120);
+      if (row) return rect(1120 + rowShift - timeline.scrollTop, height - 1120 - rowShift);
       return originalBounds.call(this);
     };
     const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
@@ -1267,10 +1286,16 @@ describe("chat reversible-history composer", () => {
       select.value = id;
       select.dispatchEvent(new window.Event("change", { bubbles: true }));
     };
-    const { initChat } = await import(`./ui.ts?lifecycle-parent-held-departure=${Date.now()}`);
+    const { initChat } = await import(`./ui.ts?lifecycle-parent-held-departure=${following}-${focusTransfer}-${Date.now()}`);
     initChat(api);
     try {
       await waitUntil(() => { drain(); return oneStreams === 1 && timeline.scrollTop === 1600; });
+      if (!following) {
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        timeline.scrollTop = 1250;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        expect(document.querySelector<HTMLElement>('[data-chat-item-id="message:parent-held-tail"]')!.getBoundingClientRect().top).toBe(-130);
+      }
       const card = document.querySelector<HTMLElement>('#chat-items [data-chat-item-id="question:q1"]')!;
       const toggle = card.querySelector<HTMLInputElement>("[data-question-custom-toggle]")!;
       Object.defineProperty(toggle, "form", { configurable: true, value: card.querySelector("form[data-question-form]") });
@@ -1280,14 +1305,24 @@ describe("chat reversible-history composer", () => {
       active.dispatchEvent(new window.Event("focusin", { bubbles: true }));
       drain();
       expect(timeline.scrollTop, "answer hold is the real source of the temporary pause").toBe(700);
+      if (focusTransfer) {
+        const field = active;
+        active = document.querySelector("#chat-conversation-select")!;
+        field.dispatchEvent(new window.Event("focusout", { bubbles: true }));
+        active.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+        await Promise.resolve();
+        expect(document.documentElement.hasAttribute("data-chat-answering")).toBe(false);
+      }
       choose("two");
       await waitUntil(() => { drain(); return timeline.textContent!.includes("Other parent conversation"); });
       active = null;
       height = 2400;
+      rowShift = 300;
       choose("one");
       await waitUntil(() => oneStreams === 2);
       drain();
-      expect(timeline.scrollTop, "parent persistence must exclude the temporary hold just like child departure").toBe(2000);
+      expect(timeline.scrollTop, "parent persistence must exclude the temporary hold just like child departure").toBe(following ? 2000 : 1550);
+      if (!following) expect(document.querySelector<HTMLElement>('[data-chat-item-id="message:parent-held-tail"]')!.getBoundingClientRect().top).toBe(-130);
     } finally {
       window.dispatchEvent(new window.Event("pagehide"));
       globalThis.requestAnimationFrame = requestFrame;

@@ -240,6 +240,55 @@ describe("coordinated scrolling", () => {
     expect(f.anchor.isPinned()).toBe(false);
   });
 
+  test("releasing a paused answer hold retains durable reading without undoing live focus placement", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll");
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -200 } };
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    const writes = [...f.writes];
+    f.owner.release();
+    f.owner.release(); // Repeated focus synchronization does not discard it.
+    expect(f.writes).toEqual(writes);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.event("scroll"); // A late echo of the temporary placement is not input.
+    f.shift(50); f.grow(900); f.owner.request(true); f.flush(40);
+    expect(f.element.scrollTop).toBe(190);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.owner.cancel(); // Departure restores the durable, not temporary, anchor.
+    f.owner.request(); f.flush(60);
+    expect(f.element.scrollTop).toBe(250);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  for (const choice of ["native focus scroll", "reveal", "activity selection", "pause", "Latest"] as const) test(`${choice} supersedes durable reading after answer release`, () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    const button = f.document.createElement("button");
+    f.element.append(field, button);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    stubRect(button, () => ({ top: 350 - f.element.scrollTop, bottom: 370 - f.element.scrollTop }));
+    f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll");
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    f.owner.release();
+    if (choice === "native focus scroll") { f.move(100); f.event("scroll"); }
+    else if (choice === "reveal") { f.owner.reveal(button as unknown as HTMLElement, { align: "end" }); f.flush(40); }
+    else if (choice === "activity selection") f.owner.beforeMutation("line");
+    else if (choice === "pause") f.event("wheel", { deltaY: -1 });
+    else f.owner.latest();
+    const expected = choice === "Latest" ? { kind: "following" as const } : {
+      kind: "anchor" as const, anchor: { itemId: "line", offset: choice === "native focus scroll" ? -100 : choice === "reveal" ? -70 : -140 },
+    };
+    expect(f.owner.capturePosition()).toEqual(expected);
+    f.owner.cancel();
+    expect(f.owner.capturePosition()).toEqual(expected);
+  });
+
   test("native downward timeline arrival respects the 48px boundary", () => {
     for (const gap of [49, 48, 47.9, 20, 0.4, 0]) {
       const f = fixture(() => "smooth");
