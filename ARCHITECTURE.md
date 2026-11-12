@@ -1141,6 +1141,9 @@ Snapshot replacement cancels stale callbacks while retaining the owner's
 unconsumed instant-placement intent; replacement geometry determines the target.
 Ordinary cancellation and reader pause still clear that intent.
 Newer paused reader intent also retires snapshot restoration owed before first render.
+That notification comes from the owner's input classification, not a layout-only
+change callback. Empty child-loading renders retain pending placement until a
+transcript projection exists, including hide/reopen and resize during the read.
 Saved reading-anchor restoration and ordinary updates keep their same-frame
 render/correction transaction; focused answer holds retain their existing owner.
 When browser hit testing is usable, geometry resolves the first viewport row,

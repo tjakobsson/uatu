@@ -1632,6 +1632,20 @@ Chat timelines and shell viewports SHALL preserve reading anchors and independen
 - **THEN** the newer paused intent and reading position survive first render and later updates
 - **AND** the pending navigation restore or initial latest placement does not overwrite that intent
 
+#### Scenario: Loading child restoration survives visibility and layout changes
+- **GIVEN** a child transcript snapshot is still loading
+- **WHEN** Chat is hidden and reopened, or the empty child surface changes size, before that snapshot arrives
+- **THEN** the loading presentation does not consume the pending saved reading position or first-time latest placement
+- **AND** layout-only callbacks do not impersonate newer reader input
+- **AND** once content arrives, a paused child restores its saved visible anchor while a first-time child places directly at latest
+- **AND** the outer timeline retains its independent reading position
+
+#### Scenario: A question arrives while the reader follows or reads earlier content
+- **WHEN** a pending question arrives through the live conversation stream in a parent or child view
+- **THEN** an already-following reader continues to follow the newly rendered content
+- **AND** a paused reader retains the same visible reading anchor within 2px in controlled regression fixtures
+- **AND** paused following stays paused and its latest-content affordance remains available for unseen content
+
 #### Scenario: Shell output initially follows independently
 - **WHEN** a shell viewport first shows output and further output arrives
 - **THEN** it shows the bottom of its scrollback

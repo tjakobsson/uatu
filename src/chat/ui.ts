@@ -885,10 +885,8 @@ export function initChat(api = new ChatApiClient()): void {
   const parentScroll = new CoordinatedScrollOwner(timeline, {
     anchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? geometry(preserveAnchor, preferredItemId) : extentsOf(timeline), active: chatSurfaceActive,
     followMotion: scrollFollowMotion,
+    onReaderPause: () => { parentPositionRestore = undefined; },
     onChange: () => {
-      // A paused live owner is newer than the snapshot's owed first-paint
-      // restore. Do not replay navigation/latest over intervening reader input.
-      if (!anchor.isPinned()) parentPositionRestore = undefined;
       if (projection) {
         const current = anchor.currentAnchor();
         if (current) presentation.anchors[projection.conversationId] = current;
@@ -912,8 +910,8 @@ export function initChat(api = new ChatApiClient()): void {
     anchor: childAnchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? childGeometry(preserveAnchor, preferredItemId) : extentsOf(drilldownTimeline),
     active: () => chatSurfaceActive() && !!child,
     followMotion: scrollFollowMotion,
+    onReaderPause: () => { childPositionRestore = undefined; },
     onChange: () => {
-      if (!childAnchor.isPinned()) childPositionRestore = undefined;
       if (childLatest) childLatest.hidden = !childAnchor.hasUnseen();
     },
   }) : null;
@@ -4272,6 +4270,9 @@ export function initChat(api = new ChatApiClient()): void {
     childRenderFrame = requestAnimationFrame(timestamp => {
       childRenderFrame = null;
       if (!chatSurfaceActive()) return;
+      // Visibility may return while the read is unresolved. Empty loading UI
+      // cannot consume the actual transcript's saved/initial placement.
+      if (!child?.projection) return;
       const content = childNewContent;
       childNewContent = false;
       childRenderDirty = false;

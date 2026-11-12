@@ -816,6 +816,119 @@ describe("chat reversible-history composer", () => {
     }
   });
 
+  for (const saved of [false, true]) for (const trigger of ["visibility", "resize"] as const) test(`loading child retains ${saved ? "saved paused anchor" : "fresh instant placement"} through ${trigger} without reader input`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>("#chat-drilldown-timeline")!;
+    const container = document.querySelector<HTMLElement>("#chat-drilldown-items")!;
+    let top = 0, height = 2000, rowOrigin = 600;
+    const writes: number[] = [];
+    const loaded = () => !!container.querySelector('[data-chat-item-id="message:loading"]');
+    const extent = () => loaded() ? height : 400;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: extent },
+      scrollTop: { configurable: true, get: () => Math.min(top, extent() - 400), set: (value: number) => { top = Math.max(0, Math.min(value, extent() - 400)); writes.push(top); } },
+    });
+    const rect = (position: number, size: number) => ({ top: position, bottom: position + size, height: size, left: 0, right: 640, width: 640 }) as DOMRect;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    const prototype = window.HTMLElement.prototype, originalBounds = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function () {
+      return this.getAttribute("data-chat-item-id") === "message:loading" ? rect(rowOrigin - timeline.scrollTop, 400) : originalBounds.call(this);
+    };
+    const previousObserver = globalThis.ResizeObserver;
+    const observers: Array<{ targets: Element[]; resize(): void }> = [];
+    globalThis.ResizeObserver = class {
+      targets: Element[] = [];
+      constructor(readonly resize: () => void) { observers.push(this); }
+      observe(element: Element) { this.targets.push(element); }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0, timestamp = performance.now();
+    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const frame = () => { timestamp += 20; for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp); };
+    const drain = () => { for (let n = 0; n < 40 && frames.size; n++) frame(); };
+    const incoming = deferred<ConversationSnapshot>();
+    let reads = 0, streams = 0;
+    const api = questionApi(document, { capabilities: ["subagents"], items: id => id === "one" ? [{
+      id: "tool:loading", type: "tool", createdAt: 1, name: "task", status: "completed",
+      input: JSON.stringify({ description: "Loading child", subagent_type: "explore", prompt: "go" }), childConversationId: "child",
+    }] : [{ id: "message:loading", type: "user_message", createdAt: 1, text: "Retained child row" }] });
+    const snapshotNow = api.snapshot.bind(api);
+    api.snapshot = (id, ...args) => id === "child" && ++reads === (saved ? 2 : 1) ? incoming.promise : snapshotNow(id, ...args);
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    api.stream = (id, _cursor, handlers) => { if (id === "child") { streams++; stream = handlers; } return { close() {} }; };
+    const click = (selector: string) => document.querySelector(selector)!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const { initChat } = await import(`./ui.ts?loading-placement=${saved}-${trigger}-${Date.now()}`);
+    initChat(api);
+    try {
+      await waitUntil(() => { drain(); return !!document.querySelector('[data-worker-item="tool:loading"]'); });
+      click('[data-worker-item="tool:loading"]');
+      if (saved) {
+        await waitUntil(() => { drain(); return loaded() && timeline.scrollTop === 1600; });
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        timeline.scrollTop = 650;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        expect(container.querySelector<HTMLElement>('[data-chat-item-id="message:loading"]')!.getBoundingClientRect().top).toBe(-50);
+        click("#chat-drilldown-back");
+        drain();
+        click('[data-worker-item="tool:loading"]');
+      }
+      await waitUntil(() => reads === (saved ? 2 : 1));
+      expect(loaded()).toBe(false);
+      writes.length = 0;
+      if (trigger === "visibility") {
+        document.documentElement.setAttribute("data-chat-panel", "collapsed");
+        await Promise.resolve(); await Promise.resolve();
+        drain();
+        document.documentElement.setAttribute("data-chat-panel", "open");
+        await Promise.resolve(); await Promise.resolve();
+        drain(); // Crucially, the response is STILL unresolved here.
+      } else {
+        const observer = observers.find(value => value.targets.includes(timeline))!;
+        expect(observer).toBeDefined();
+        observer.resize();
+        drain(); // Layout-only correction; no hide/show and no input.
+      }
+      expect(loaded()).toBe(false);
+      expect(streams).toBe(saved ? 1 : 0);
+      expect(writes, "empty loading UI has no placement to perform").toEqual([]);
+      rowOrigin = 900; // A raw 650px restoration cannot satisfy the saved anchor.
+      incoming.resolve(await snapshotNow("child"));
+      await waitUntil(() => streams === (saved ? 2 : 1));
+      drain();
+      expect(loaded()).toBe(true);
+      if (saved) {
+        expect(container.querySelector<HTMLElement>('[data-chat-item-id="message:loading"]')!.getBoundingClientRect().top).toBe(-50);
+        expect(timeline.scrollTop).toBe(950);
+        expect(writes).toEqual([950]);
+      } else {
+        expect(timeline.scrollTop).toBe(1600);
+        expect(writes, "actual transcript is placed directly, never animated from blank UI").toEqual([1600]);
+      }
+      height = 2400;
+      stream!.event({ type: "item.upsert", conversationId: "child", generation: "g", sequence: 1,
+        item: { id: "message:loading-later", type: "user_message", createdAt: 2, text: "Later loaded output" } }, "loading-later");
+      await waitUntil(() => { drain(); return container.textContent!.includes("Later loaded output"); });
+      expect(timeline.scrollTop).toBe(saved ? 950 : 2000);
+      expect(document.querySelector<HTMLButtonElement>("#chat-drilldown-latest")!.hidden).toBe(!saved);
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      globalThis.ResizeObserver = previousObserver;
+      globalThis.requestAnimationFrame = requestFrame;
+      globalThis.cancelAnimationFrame = cancelFrame;
+      prototype.getBoundingClientRect = originalBounds;
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
   test("a child resync before its first visible paint preserves pending immediate placement", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
@@ -1125,6 +1238,86 @@ describe("chat reversible-history composer", () => {
       expect(timeline.scrollTop).toBe(1600);
     } finally {
       window.dispatchEvent(new window.Event("pagehide"));
+      prototype.getBoundingClientRect = originalBounds;
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
+  for (const target of ["parent", "child"] as const) for (const paused of [false, true]) test(`${target} streamed pending question preserves ${paused ? "paused reading" : "following"} through card growth`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>(target === "parent" ? "#chat-timeline" : "#chat-drilldown-timeline")!;
+    const container = document.querySelector<HTMLElement>(target === "parent" ? "#chat-items" : "#chat-drilldown-items")!;
+    let cardHeight = 300;
+    const question = () => container.querySelector<HTMLElement>('[data-chat-item-id="question:incoming"]');
+    const extent = () => 2000 + (question() ? cardHeight : 0);
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: extent },
+    });
+    timeline.scrollTop = 0;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 640, width: 640 }) as DOMRect;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    const prototype = window.HTMLElement.prototype, originalBounds = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function () {
+      if (this.getAttribute("data-chat-item-id") === "message:question-reader") return rect(600 - timeline.scrollTop, 400);
+      if (this.closest('[data-chat-item-id="question:incoming"]')) return rect(2000 - timeline.scrollTop, cardHeight);
+      return originalBounds.call(this);
+    };
+    const previousObserver = globalThis.ResizeObserver;
+    const observers: Array<{ targets: Element[]; resize(): void }> = [];
+    globalThis.ResizeObserver = class {
+      targets: Element[] = [];
+      constructor(readonly resize: () => void) { observers.push(this); }
+      observe(element: Element) { this.targets.push(element); }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    const api = questionApi(document, { capabilities: ["questions", "subagents"], items: id => target === "child" && id === "one" ? [{
+      id: "tool:question-reader", type: "tool", createdAt: 1, name: "task", status: "completed",
+      input: JSON.stringify({ description: "Question child", subagent_type: "explore", prompt: "go" }), childConversationId: "child",
+    }] : [{ id: "message:question-reader", type: "user_message", createdAt: 1, text: "Read before incoming question" }] });
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    const targetId = target === "parent" ? "one" : "child";
+    api.stream = (id, _cursor, handlers) => { if (id === targetId) stream = handlers; return { close() {} }; };
+    const { initChat } = await import(`./ui.ts?streamed-question=${target}-${paused}-${Date.now()}`);
+    initChat(api);
+    try {
+      if (target === "child") {
+        await waitUntil(() => !!document.querySelector('[data-worker-item="tool:question-reader"]'));
+        document.querySelector('[data-worker-item="tool:question-reader"]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      }
+      await waitUntil(() => !!stream && timeline.scrollTop === 1600);
+      if (paused) {
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        timeline.scrollTop = 650;
+        timeline.dispatchEvent(new window.Event("scroll"));
+      }
+      const row = () => container.querySelector<HTMLElement>('[data-chat-item-id="message:question-reader"]')!;
+      const readingTop = row().getBoundingClientRect().top;
+      const latest = document.querySelector<HTMLButtonElement>(target === "parent" ? "#chat-latest" : "#chat-drilldown-latest")!;
+      stream!.event({ type: "item.upsert", conversationId: targetId, generation: "g", sequence: 1,
+        item: pendingQuestion("incoming", 2) }, "incoming-question-1");
+      await waitUntil(() => !!question() && (paused || timeline.scrollTop === extent() - 400));
+      const frames = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      await frames();
+      expect(question()!.querySelector("form[data-question-form]")).not.toBeNull();
+      expect(latest.hidden).toBe(!paused);
+      if (paused) expect(row().getBoundingClientRect().top).toBe(readingTop);
+      else expect(timeline.scrollTop).toBe(extent() - 400);
+      cardHeight = 600;
+      observers.find(value => value.targets.includes(timeline))!.resize();
+      if (paused) await frames();
+      else await waitUntil(() => timeline.scrollTop === extent() - 400);
+      expect(latest.hidden).toBe(!paused);
+      expect(timeline.scrollTop).toBe(paused ? 650 : 2200);
+      if (paused) expect(row().getBoundingClientRect().top).toBe(readingTop);
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      globalThis.ResizeObserver = previousObserver;
       prototype.getBoundingClientRect = originalBounds;
       document.documentElement.setAttribute("data-chat-panel", "collapsed");
     }

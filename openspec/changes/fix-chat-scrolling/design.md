@@ -65,6 +65,8 @@ If hit testing is absent, occluded or inconclusive, retain the full conservative
 
 Normal layout for already-loaded assistant text avoids placeholder-height replacement under the reader. Preserve existing activity `content-visibility` and closed-tool deferral; do not fetch or materialize extra history. First parent/child presentation without a saved anchor crosses the render/layout boundary before instant bottom placement. Snapshot replacement retains an already owed instant placement using fresh geometry, but hiding, navigation and upward input retire stale movement. Saved anchors and ordinary updates keep atomic correction.
 
+An empty child-loading render must not consume placement intended for the still-pending transcript. Keep that intent through hide/reopen and layout callbacks until loaded content can use it. The coordinator reports deliberate reader pause separately from ordinary changes, so layout-only corrections cannot clear pending restoration merely because its saved anchor is paused. This preserves the newer-input priority without conflating it with a pending snapshot's existing paused state.
+
 Retaining skipped assistant bodies was cheaper for distant text but conflicted with stable loaded-text geometry. The chosen trade-off needs final long-history regression checks rather than claims based on screenshots.
 
 ### 6. Preserve measured control minima when enlarging desktop reading

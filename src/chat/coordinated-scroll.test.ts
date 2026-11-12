@@ -64,6 +64,40 @@ function withVisibleBand(band: { height: number; offsetTop: number }, run: () =>
 }
 
 describe("coordinated scrolling", () => {
+  test("reader-pause notification excludes layout, clamps and correction echoes", () => {
+    const f = fixture();
+    let pauses = 0;
+    Object.assign(f.options, { onReaderPause: () => { pauses++; } });
+    f.owner.request(); f.flush(0);
+    f.move(200); f.anchor.pause(f.options.measure(true));
+    f.shift(20); f.owner.request(); f.flush(20);
+    f.event("scroll");
+    expect(pauses).toBe(0);
+    f.grow(450); f.event("scroll"); f.flush(40);
+    expect(pauses).toBe(0);
+    f.event("wheel", { deltaY: -1 });
+    expect(pauses).toBe(1);
+    f.owner.request(); f.flush(60);
+    expect(pauses).toBe(1);
+    f.hide(); f.event("wheel", { deltaY: -1 });
+    expect(pauses).toBe(1);
+  });
+
+  test("reader-pause notification uses the owner's native, key and touch input classification", () => {
+    const f = fixture();
+    let pauses = 0;
+    Object.assign(f.options, { onReaderPause: () => { pauses++; } });
+    f.move(250); f.event("scroll");
+    expect(pauses).toBe(1);
+    f.event("scroll");
+    expect(pauses).toBe(1);
+    f.event("keydown", { key: "ArrowUp" });
+    expect(pauses).toBe(2);
+    f.event("touchstart", { touches: [{ clientY: 100 }] });
+    f.event("touchmove", { touches: [{ clientY: 110 }] });
+    expect(pauses).toBe(3);
+  });
+
   test("native downward timeline arrival respects the 48px boundary", () => {
     for (const gap of [49, 48, 47.9, 20, 0.4, 0]) {
       const f = fixture(() => "smooth");

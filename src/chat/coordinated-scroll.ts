@@ -11,6 +11,8 @@ export interface CoordinatedScrollOptions {
   measure: (includeItems: boolean, preserveAnchor?: boolean, preferredItemId?: string) => AnchorGeometry;
   active?: () => boolean;
   onChange?: () => void;
+  /** Deliberate pause input or native upward reading, never a layout correction. */
+  onReaderPause?: () => void;
   /** Defaults to instant. Read each frame so reduced-motion changes finish an in-flight follow. */
   followMotion?: () => "smooth" | "instant";
   requestFrame?: (callback: FrameRequestCallback) => number;
@@ -374,6 +376,7 @@ export class CoordinatedScrollOwner {
     this.options.anchor.pause(geometry);
     this.upwardPending = true;
     this.previous = geometry;
+    this.options.onReaderPause?.();
     this.options.onChange?.();
   }
 
@@ -446,6 +449,7 @@ export class CoordinatedScrollOwner {
       this.request();
     } else {
       this.options.anchor.observe(movement !== "none" ? this.options.measure(true, false) : this.measure(), movement);
+      if (movement === "up" && !this.options.anchor.isPinned()) this.options.onReaderPause?.();
       if (this.options.anchor.isPinned()) this.request();
     }
     this.previous = geometry;

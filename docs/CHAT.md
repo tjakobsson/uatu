@@ -567,7 +567,7 @@ when its touch-first controls retain comfortable density.
 Desktop cards share only a measured capacity, never an outer scroller. When both
 are collapsed the cap is 40% of the measured chat panel (and 25rem), with the
 lesser of 12rem or 35% reserved for conversation. Expanded fine-pointer/hover
-desktop cards prefer a 35% reading reserve, bounded to 200–280px; physical action
+desktop cards prefer a 50% reading reserve, bounded to 200–420px; physical action
 minimums can reduce it. Expanded desktop work first reserves a whole transcript
 action plus its scroll insets. If both work panes cannot keep their full
 allocations, the inactive pane compacts before the dock falls back to Show work;
