@@ -4,7 +4,29 @@
 Detect and recover from wedged session-child processes (the internal `serve` process defined by `serve-cli-startup`) through suspend-safe heartbeat monitoring, bounded forensic capture, diagnostic counters, force termination, and self-pruning XDG cache storage.
 ## Requirements
 ### Requirement: Watchdog subprocess detects and recovers from a wedged session child
-A session child process SHALL spawn a sibling watchdog subprocess at startup. The main process MUST refresh a heartbeat file mtime at least once per second. The watchdog MUST stat the heartbeat file at least once per second and MUST treat the heartbeat as stale only when its mtime has not advanced across a number of consecutive watchdog ticks equivalent to the configured staleness threshold (default 30 seconds of observed ticks). Staleness MUST NOT be derived from comparing the heartbeat mtime against wall-clock time: ticks accumulate only while the watchdog itself is running, so a system suspend/resume cycle — during which both processes are frozen and wall-clock time advances — MUST NOT count toward staleness. When the heartbeat goes stale, the watchdog MUST capture a forensic dump bundle (see "Forensic dump bundle" below) and then SHALL force-terminate the main process with `SIGKILL`. The watchdog MUST exit cleanly when the main process is no longer reachable, regardless of cause. The watchdog MUST be a single re-execution of the same uatu binary (no separate executable, no new runtime dependency).
+
+A session child SHALL spawn a sibling watchdog. It MUST be one re-execution of the same binary without a separate executable or new runtime dependency. Staleness MUST use consecutive observed ticks, not suspended wall-clock time. On staleness, the watchdog MUST capture a dump, then SHALL force-terminate the main process with `SIGKILL`. It MUST exit cleanly whenever the main process is unreachable.
+
+#### Scenario: Start the independent watchdog without another dependency
+- **WHEN** a session child starts
+- **THEN** it spawns a sibling watchdog that MUST be one re-execution of the same uatu binary, with no separate executable or new runtime dependency
+
+#### Scenario: Maintain periodic heartbeat monitoring
+- **WHEN** the session child is running
+- **THEN** the main process MUST refresh heartbeat-file mtime at least once per second
+- **WHEN** the watchdog is running
+- **THEN** it MUST stat the heartbeat file at least once per second
+
+#### Scenario: Count consecutive observed stale ticks
+- **WHEN** heartbeat mtime fails to advance over watchdog ticks
+- **THEN** staleness MUST require consecutive stale ticks equivalent to the configured threshold, defaulting to 30 seconds of observed ticks
+- **AND** staleness MUST NOT come from wall-clock comparison; suspend/resume time MUST NOT count because ticks accumulate only while the watchdog runs
+
+#### Scenario: Recover in dump-before-kill order and end with the parent
+- **WHEN** the heartbeat becomes stale
+- **THEN** the watchdog MUST capture a forensic dump bundle before it SHALL force-terminate the main process with `SIGKILL`
+- **WHEN** the main process becomes unreachable for any cause
+- **THEN** the watchdog MUST exit cleanly
 
 #### Scenario: Healthy heartbeat keeps uatu alive
 - **WHEN** a session child is running normally
@@ -42,7 +64,23 @@ A session child process SHALL spawn a sibling watchdog subprocess at startup. Th
 - **AND** the session child operates exactly as it did before this capability was introduced (modulo other features in this change)
 
 ### Requirement: Forensic dump bundle is written when the watchdog detects a freeze
-When the watchdog acts on a stale heartbeat, it SHALL write a dump bundle into the cache directory before terminating the main process. The bundle MUST include: a stack-state capture of the wedged process, a file-descriptor listing, the most recent counter history available (verbose NDJSON tail when verbose metrics are enabled, otherwise the always-on counter snapshot file), and a small JSON cause file naming the watchdog reason, recording the heartbeat age at detection, and recording the platform under which the dump was taken. Stack and FD capture MUST be implemented as platform adapters: on macOS via `sample` and `lsof`; on Linux via direct reads of `/proc/<pid>/`; on Windows the capture MAY be omitted and a sentinel file written instead. Each external command MUST be capped at 5 seconds; if a command exceeds the cap the partial output MUST still be written and MUST be marked with a "timed out" sentinel. Dump filenames MUST encode the wedged PID and a timestamp so multiple dumps can coexist without collision. Force-termination of the wedged process MUST work on every supported platform regardless of the fidelity of the stack/FD capture step.
+
+Before terminating a stale parent, the watchdog SHALL write collision-safe forensic artifacts with platform-specific stack/FD capture, recent counters, and a small JSON cause file. External capture commands MUST be time-bounded with partial-output sentinels; limited capture fidelity MUST NOT prevent termination.
+
+#### Scenario: Preserve the available evidence before killing a stale parent
+- **WHEN** the watchdog acts on a stale heartbeat
+- **THEN** it writes a cache-directory bundle before termination, with filenames that MUST encode wedged PID and timestamp to avoid collisions
+- **AND** the bundle MUST include stack state, FD listing, the latest verbose NDJSON tail or otherwise the always-on counter snapshot, and a small JSON cause file naming reason, heartbeat age at detection, and platform
+
+#### Scenario: Select the platform's forensic adapter
+- **WHEN** stack and FD evidence is captured
+- **THEN** adapters MUST use `sample` and `lsof` on macOS and direct `/proc/<pid>/` reads on Linux; Windows MAY omit capture and write a sentinel instead
+- **AND** force-termination MUST work on every supported platform regardless of stack/FD capture fidelity
+
+#### Scenario: Keep external forensic commands within five seconds
+- **WHEN** an external capture command runs
+- **THEN** its runtime MUST be capped at 5 seconds
+- **AND** exceeding the cap MUST still write partial output marked with a "timed out" sentinel
 
 #### Scenario: Dump bundle captures stack, fds, metrics tail, and cause
 - **WHEN** the watchdog detects a stale heartbeat on a supported platform
@@ -120,7 +158,19 @@ When `--debug` is set, the local watch server SHALL expose a `/debug/metrics` ro
 - **THEN** the server responds 404
 
 ### Requirement: A wedged session child is force-terminated within the watchdog staleness threshold without operator intervention
-A user MUST be able to recover from a wedged session child without escalating to `kill -9` from a separate terminal. When the JavaScript event loop is unresponsive, the existing JS-side shutdown handlers cannot run; the watchdog subprocess MUST therefore be the killability primitive in that state. From the moment the main process stops refreshing its heartbeat, no more than the configured staleness threshold of watchdog runtime MAY elapse before the watchdog force-terminates the parent; watchdog runtime equals wall-clock time whenever the system is awake, and excludes intervals during which the system is suspended. Resources owned by the process (PTY masters, listening sockets, native watcher handles) MUST be reaped via the operating system's normal process-exit cleanup after force-termination; the change MUST NOT regress the user-visible outcome that PTY children are terminated when the session child exits.
+
+From heartbeat stoppage, no more than the configured threshold of watchdog runtime MAY elapse before forced termination. Users MUST recover without manual escalation; the watchdog MUST provide killability when JavaScript is unresponsive. After forced exit, OS process-exit cleanup MUST reap owned resources. The change MUST NOT regress PTY-child termination when a session child exits. Watchdog runtime excludes suspension.
+
+#### Scenario: Bound recovery even when JavaScript cannot shut down
+- **WHEN** the JavaScript event loop is unresponsive
+- **THEN** the independent watchdog MUST provide killability without requiring `kill -9` from another terminal
+- **WHEN** the main process stops refreshing its heartbeat
+- **THEN** no more than the configured staleness threshold of watchdog runtime MAY elapse before force-termination; runtime equals awake wall-clock time and excludes system suspension
+
+#### Scenario: Reap process-owned resources after forced exit
+- **WHEN** the watchdog force-terminates the child
+- **THEN** operating-system process-exit cleanup MUST reap PTY masters, listening sockets, and native watcher handles
+- **AND** the change MUST NOT regress termination of PTY children when the session child exits
 
 #### Scenario: Ctrl+C exits a healthy source-run session child immediately
 - **WHEN** a user presses Ctrl+C in the terminal running a healthy source-run session child

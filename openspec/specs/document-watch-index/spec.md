@@ -6,7 +6,50 @@ Securely index, classify, serve, and continuously refresh allowed files under wa
 ## Requirements
 
 ### Requirement: Keep the indexed view and preview current
-The system SHALL detect creations, deletions, renames, and writes under permitted watched roots and update file metadata and views incrementally. Watching and indexing SHALL share exposure rules. A changed active non-media file SHALL refresh regardless of Follow, invalidating affected Source, Rendered, Diff, and image representations; freshness SHALL not depend solely on a batch's representative Follow target or modification-time equality. Selected and embedded watched images SHALL show the new revision without rerendering the surrounding document or resetting scroll. Existing exclusions for file-scoped embedded-image refresh, srcset/picture, CSS background images, and interactive SVG objects SHALL remain. Active audio/video is the explicit-refresh exception: revision changes SHALL follow media-playback's New render available/Reload contract rather than replacing a mounted source automatically. Fresh snapshots SHALL reconcile revisions after gaps, and stale asynchronous work MUST NOT replace newer selections or revisions. Classification SHALL be reevaluated for writes/renames. Publication of events outside Git-ignored folders SHALL be scheduled within two seconds of the first queued normalized event even under sustained churn, including churn inside ignored folders. Events inside Git-ignored folders SHALL follow the batched ignored-folder publication requirement. Keepalives SHALL have no presentation effect or expected-idle warnings. Watchers MUST NOT traverse Git internals or excluded symlink trees and MUST survive transient watcher errors.
+The system SHALL incrementally detect creations, deletions, renames, and writes under permitted watched roots, updating metadata and views under shared watching/indexing exposure rules. Active-file freshness, image refresh, media exceptions, bounded publication, and safe watcher recovery SHALL follow the scenarios below.
+
+#### Scenario: A changed active file invalidates every affected representation
+- **WHEN** an active non-media file changes with Follow on or off
+- **THEN** it SHALL refresh and invalidate affected Source, Rendered, Diff, and image representations; freshness SHALL not depend solely on the batch's representative Follow target or modification-time equality
+
+#### Scenario: Writes, renames, and snapshot recovery preserve current revisions
+- **WHEN** any indexed path is written or renamed
+- **THEN** classification SHALL be reevaluated
+- **WHEN** a fresh snapshot is applied after a gap
+- **THEN** it SHALL reconcile revisions
+
+#### Scenario: Asynchronous work completes during connected navigation or recovery
+- **WHEN** asynchronous work completes with a selection or revision older than the current one
+- **THEN** it MUST NOT replace newer selections or revisions, whether or not a connection gap occurred
+
+#### Scenario: Watched image and media revisions retain their refresh boundaries
+- **WHEN** a selected or embedded watched image changes revision
+- **THEN** it SHALL show the new revision without rerendering the surrounding document or resetting scroll
+- **AND** existing exclusions for file-scoped embedded-image refresh, srcset/picture, CSS background images, and interactive SVG objects SHALL remain
+
+#### Scenario: Active media revisions retain explicit reload intent
+- **WHEN** an active audio/video revision changes
+- **THEN** it SHALL follow media-playback's New render available/Reload contract, without automatically replacing its mounted source
+
+#### Scenario: Normalized events arrive during ignored-folder churn
+- **WHEN** the first normalized event outside Git-ignored folders is queued, including during sustained churn inside or outside ignored folders
+- **THEN** its publication SHALL be scheduled within two seconds of that event
+
+#### Scenario: Events inside Git-ignored folders use their own publication schedule
+- **WHEN** events inside Git-ignored folders are queued
+- **THEN** they SHALL follow the batched ignored-folder publication requirement
+
+#### Scenario: Keepalives do not affect presentation
+- **WHEN** a keepalive arrives
+- **THEN** it SHALL have no presentation effect or expected-idle warnings
+
+#### Scenario: Transient watcher errors do not end watching
+- **WHEN** a watcher encounters a transient error
+- **THEN** it MUST survive that error
+
+#### Scenario: Watch coverage is established or refreshed
+- **WHEN** a watcher establishes or refreshes filesystem observation
+- **THEN** it MUST NOT traverse Git internals or excluded symlink trees
 
 #### Scenario: A new file appears in the sidebar
 - **WHEN** a permitted file is created under a watched root
@@ -69,7 +112,17 @@ The system SHALL detect creations, deletions, renames, and writes under permitte
 - **THEN** index and Recent metadata update but the media source is not automatically replaced or restarted
 
 ### Requirement: Detect binary files and route them to the right preview
-The system SHALL classify permitted files as Markdown, AsciiDoc, viewable text, or binary using known-extension fast paths and at most an initial 8 KB binary sniff for unfamiliar names. Binary entries SHALL remain clickable. Existing previewable image extensions SHALL render through the image path; recognized audio/video candidates SHALL open paused media previews; other binaries SHALL show preview unavailable. Codec failure SHALL not be misreported as document absence. Images SHALL retain existing Follow eligibility, while audio/video and unsupported binaries SHALL not become automatic Follow targets. All binaries SHALL remain excluded from initial default-document selection and Follow-enable catch-up.
+The system SHALL classify permitted files as Markdown, AsciiDoc, viewable text, or binary using known-extension fast paths and at most an initial 8 KB binary sniff for unfamiliar names. Binary entries SHALL remain clickable and use the preview and Follow eligibility rules below.
+
+#### Scenario: A binary is selected or considered for automatic navigation
+- **WHEN** a permitted binary is selected
+- **THEN** existing previewable image extensions SHALL render through the image path, recognized audio/video candidates SHALL open paused media previews, and other binaries SHALL show preview unavailable
+- **AND** codec failure SHALL NOT be misreported as document absence
+
+#### Scenario: Automatic navigation considers binary candidates without selection
+- **WHEN** Follow or initial default-document selection considers indexed binary files
+- **THEN** images SHALL retain existing Follow eligibility, but audio/video and unsupported binaries SHALL NOT become automatic Follow targets
+- **AND** all binaries SHALL remain excluded from initial default-document selection and Follow-enable catch-up
 
 #### Scenario: An image file is rendered inline in the preview pane
 - **WHEN** a known previewable image is selected
@@ -96,13 +149,32 @@ The system SHALL classify permitted files as Markdown, AsciiDoc, viewable text, 
 - **THEN** Recent updates but Follow does not switch the preview to the export or start it playing
 
 ### Requirement: Live document state recovers from interrupted client paths
-The live document channel SHALL transmit transport keepalives often enough to prevent normal HTTP intermediaries from treating an otherwise idle stream as abandoned. A keepalive MUST NOT produce an application state update, change the current selection, trigger rendering, or advance state generation. After a channel error, the client MUST own a continuing reconnect cycle with bounded delay and MUST NOT depend indefinitely on a native connection object remaining in a connecting state. A replacement channel MUST deliver and apply a fresh authoritative state snapshot so file changes missed during the gap are reconciled.
+The live document channel SHALL maintain idle transport liveness and recover through client-owned bounded reconnect and authoritative snapshots. A keepalive MUST NOT update application state, change selection, trigger rendering, or advance state generation. Lifecycle wake-ups SHALL converge on one current channel, hidden pages SHALL retain recovery, and each recovery task SHALL be time-bounded.
 
-When a suspended page resumes, a hidden page becomes visible, or the browser reports restored network connectivity, the client SHALL reconcile authoritative state and ensure that its live channel is current. Duplicate lifecycle signals and overlapping recovery attempts MUST converge to one effective current channel without allowing an older attempt to replace a newer connection.
+#### Scenario: Idle transport passes through normal intermediaries
+- **WHEN** a live document stream has no application events
+- **THEN** transport keepalives SHALL be frequent enough that normal HTTP intermediaries do not treat it as abandoned
+- **AND** a keepalive MUST NOT update application state, change selection, trigger rendering, or advance state generation
 
-A page being hidden SHALL NOT permanently end the client's ability to recover. The client MAY release its connection and cancel its pending work whenever the page is hidden, however the browser announces it, but MUST retain its subscriptions and cursors and MUST keep listening for the wake-up signals above, so that a page which is hidden and later shown again reconnects without a manual reload. The client MUST NOT treat any single lifecycle event as proof that the document will never run again; a document that is genuinely unloaded stops its own work.
+#### Scenario: An errored channel needs a replacement
+- **WHEN** the live document channel reports an error
+- **THEN** the client MUST own a continuing reconnect cycle with bounded delay and MUST NOT depend indefinitely on a native connection remaining in connecting state
+- **AND** a replacement MUST deliver and apply a fresh authoritative snapshot reconciling changes missed during the gap
 
-Recovery work SHALL be individually bounded in time. Coalescing overlapping wake-up signals into one recovery MUST NOT let an unfinished recovery suppress later signals indefinitely: a recovery task that does not complete within a bounded period SHALL be abandoned, and the next wake-up signal SHALL be honoured.
+#### Scenario: A lifecycle wake-up overlaps another recovery
+- **WHEN** a suspended page resumes, a hidden page becomes visible, or the browser reports restored network connectivity
+- **THEN** the client SHALL reconcile authoritative state and ensure a current live channel
+- **AND** duplicate signals and overlapping attempts MUST converge to one effective current channel without an older attempt replacing a newer connection
+- **AND** an unfinished recovery SHALL be abandoned within a bounded period so it cannot indefinitely suppress later signals; the next wake-up SHALL be honoured
+
+#### Scenario: Hiding a page cancels work without ending future recovery
+- **WHEN** a page becomes hidden, however the browser announces it
+- **THEN** the client MAY release its connection and cancel pending work, but MUST retain subscriptions and cursors and keep listening for resume, visibility, and network-restored signals
+- **AND** being shown again SHALL reconnect without manual reload; hiding SHALL NOT permanently end recovery
+
+#### Scenario: Lifecycle events do not prove permanent document termination
+- **WHEN** the client receives any single lifecycle event
+- **THEN** it MUST NOT treat that event as proof that the document will never run again; a genuinely unloaded document stops its own work
 
 #### Scenario: Idle intermediary path stays active
 - **WHEN** a client has an open live document channel and no watched files change for an extended period
@@ -140,7 +212,17 @@ Recovery work SHALL be individually bounded in time. Coalescing overlapping wake
 - **AND** a stale recovery completion cannot replace the newer channel or state
 
 ### Requirement: Live stream lifecycles remain isolated and releasable
-Each client's document and Chat streaming requests SHALL have an independent lifecycle through the Hub proxy. Disconnecting, suspending, or reconnecting one client MUST NOT close or delay another client's established streams. When a downstream client abandons a stream, the Hub MUST detach that client from its live broker. For each upstream topic whose final subscriber was that client, the Hub MUST cancel the child request after a short linger, and the child MUST release its subscription within a bounded period. Upstream topics that other clients still subscribe to MUST stay open and keep delivering to those clients. No child subscription may outlive its last client. Stream lifecycle diagnostics SHALL distinguish opens, successful recovery, downstream cancellation, and upstream failure by transport class without recording event payloads, credentials, or sensitive query values.
+Each client's document and Chat streaming requests SHALL have an independent lifecycle through the Hub proxy. Disconnecting, suspending, or reconnecting one client MUST NOT close or delay another client's established streams. No child subscription may outlive its last client. Abandoned subscriptions SHALL be released, and lifecycle diagnostics SHALL preserve the privacy boundaries below.
+
+#### Scenario: A downstream client abandons a shared or final topic
+- **WHEN** a downstream client abandons a stream
+- **THEN** the Hub MUST detach that client from its live broker
+- **AND** for each topic losing its final subscriber, the Hub MUST cancel the child request after a short linger and the child MUST release its subscription within a bounded period
+- **AND** topics with other subscribers MUST stay open and delivering
+
+#### Scenario: A stream lifecycle outcome is recorded
+- **WHEN** a stream opens, successfully recovers, is cancelled downstream, or fails upstream
+- **THEN** diagnostics SHALL distinguish these outcomes by transport class without recording event payloads, credentials, or sensitive query values
 
 #### Scenario: One client reconnects while another remains live
 - **WHEN** two clients subscribe to the same running workspace and one client's transport is interrupted
@@ -163,7 +245,11 @@ Each client's document and Chat streaming requests SHALL have an independent lif
 - **AND** it does not contain streamed payloads, credentials, or sensitive query values
 
 ### Requirement: Hub-served pages receive document state over the brokered stream
-When a session is served through the hub, the browser SHALL receive workspace state snapshots and change signals as the `document` topic of the hub's brokered live stream rather than by opening the workspace's own event route. Every guarantee stated for the live update channel — automatic preview refresh, reconciliation of a missed active-document change from a fresh snapshot, bounded refresh under sustained churn, keepalives with no presentation effect, and one current channel after overlapping lifecycle signals — SHALL hold unchanged for the brokered topic. The workspace's own event route SHALL remain the internal source the hub subscribes to.
+When a session is served through the hub, the browser SHALL receive workspace state snapshots and change signals as the `document` topic of the hub's brokered live stream rather than opening the workspace's own event route. Every live-update-channel guarantee SHALL hold unchanged for the brokered topic. The workspace's own event route SHALL remain the internal source the hub subscribes to.
+
+#### Scenario: Brokered delivery refreshes or recovers document state
+- **WHEN** a hub-served session uses the `document` topic, including idle delivery and overlapping lifecycle signals
+- **THEN** all live-update guarantees SHALL hold unchanged: automatic preview refresh, fresh-snapshot reconciliation of missed active-document changes, bounded refresh under sustained churn, keepalives without presentation effect, and one current channel after overlapping lifecycle signals
 
 #### Scenario: A file change reaches a hub-served page over the brokered stream
 - **WHEN** a watched file changes while a user views the workspace through the hub
@@ -177,7 +263,25 @@ When a session is served through the hub, the browser SHALL receive workspace st
 
 ### Requirement: Workspace refreshes publish coherent ordered state
 
-The document index SHALL publish coherent snapshots and incremental batches with an explicit ordered revision within a session epoch. Clients SHALL apply a batch only to its declared predecessor; an incompatible epoch or missing predecessor SHALL require a fresh snapshot. File events received during discovery, classification, or recovery SHALL be retained, and stale asynchronous completions MUST NOT overwrite newer path state. Sustained edits SHALL produce progress and converge on the final allowed contents after edits stop. A failed update SHALL preserve the last coherent state and allow subsequent recovery. Repository completion SHALL merge only repository information into the current state and MUST NOT restore an older file inventory. These guarantees SHALL hold for HTTP reads and simultaneous live subscribers with independent scopes.
+The document index SHALL publish coherent snapshots and incremental batches with an explicit ordered revision within a session epoch. Clients SHALL apply a batch only to its declared predecessor; an incompatible epoch or missing predecessor SHALL require a fresh snapshot. HTTP reads and simultaneous independently scoped live subscribers SHALL share the ordering and recovery guarantees below.
+
+#### Scenario: Discovery or update work overlaps newer events
+- **WHEN** file events arrive during discovery, classification, or recovery
+- **THEN** they SHALL be retained
+
+#### Scenario: Every asynchronous completion respects newer path state
+- **WHEN** asynchronous index work completes, with or without overlapping file events
+- **THEN** stale completions MUST NOT overwrite newer path state
+
+#### Scenario: Sustained edits continue or an update fails without overlapping events
+- **WHEN** edits are sustained
+- **THEN** updates SHALL produce progress and converge on the final allowed contents after edits stop
+- **WHEN** any update fails
+- **THEN** it SHALL preserve the last coherent state and allow subsequent recovery
+
+#### Scenario: Repository completion merges into a newer inventory
+- **WHEN** repository work completes, whether or not file state has advanced
+- **THEN** it SHALL merge only repository information into current state and MUST NOT restore an older file inventory
 
 #### Scenario: Edits arrive during slow classification
 - **WHEN** a file changes again while an earlier classification is pending
@@ -205,7 +309,15 @@ The document index SHALL publish coherent snapshots and incremental batches with
 
 ### Requirement: Discovery publishes explicit incremental progress
 
-The workspace SHALL publish allowed files as background discovery progresses and SHALL distinguish indexing, ready, and failed discovery states. Discovery SHALL reuse the filesystem watcher's inventory and available metadata rather than perform a second application-owned recursive traversal. Classification work SHALL have bounded concurrency. Discovery completion SHALL mean that the initial inventory and its classification work have been applied. Files with unknown extensions SHALL retain the existing binary-sniffing behavior before being offered as Follow targets or search inputs.
+The workspace SHALL publish allowed files as background discovery progresses and distinguish indexing, ready, and failed states. Discovery SHALL reuse the filesystem watcher's inventory and available metadata rather than perform a second application-owned recursive traversal. Classification SHALL have bounded concurrency.
+
+#### Scenario: Unknown extensions are sniffed before Follow or search eligibility
+- **WHEN** a file with an unknown extension is to be offered as a Follow target or search input
+- **THEN** unknown extensions SHALL retain existing binary-sniffing behavior before being offered
+
+#### Scenario: Discovery decides whether its initial inventory is complete
+- **WHEN** discovery reports completion
+- **THEN** the initial inventory and its classification work SHALL already have been applied
 
 #### Scenario: A large tree is still being discovered
 - **WHEN** the initial inventory is incomplete
@@ -225,7 +337,20 @@ The workspace SHALL publish allowed files as background discovery progresses and
 
 ### Requirement: Ordinary file updates have path-bounded work
 
-After discovery, an ordinary file creation, modification, or deletion SHALL update only the affected index entries. Content-only edits SHALL avoid tree path reconciliation; creates and deletes SHALL use the tree library's incremental mutations, which are permitted to recalculate its complete visible-row projection internally. A directory removal SHALL remove its indexed descendants. Ordinary updates MUST NOT trigger a full index scan, full-corpus reclassification, or a full file-list transmission to already synchronized clients. No timer SHALL periodically rescan the document tree while the watcher is healthy. Batches SHALL retain all affected paths even when only one is chosen for Follow. Filesystem indexing work and message size for a single-file edit SHALL depend on the affected entries rather than the number of unrelated indexed files.
+After discovery, ordinary file creations, modifications, and deletions SHALL update only affected index entries. Ordinary updates MUST NOT trigger a full index scan, full-corpus reclassification, or full file-list transmission to synchronized clients. Single-file indexing work and message size SHALL depend on affected entries, not unrelated indexed files. Batches SHALL retain all affected paths even when only one is chosen for Follow.
+
+#### Scenario: An ordinary change updates tree membership or contents
+- **WHEN** an ordinary file event arrives after discovery
+- **THEN** content-only edits SHALL avoid tree path reconciliation, and creates/deletes SHALL use the tree library's incremental mutations, which MAY internally recalculate its complete visible-row projection
+- **AND** batches SHALL retain all affected paths even if only one is chosen for Follow
+
+#### Scenario: Directory removal deletes its indexed descendants
+- **WHEN** a directory is removed after discovery
+- **THEN** its indexed descendants SHALL be removed
+
+#### Scenario: A healthy watcher remains idle between file events
+- **WHEN** the watcher is healthy, with or without ordinary file events
+- **THEN** no timer SHALL periodically rescan the document tree
 
 #### Scenario: One file changes in a large workspace
 - **WHEN** one already indexed file changes and the watcher's observation remains healthy
@@ -249,13 +374,48 @@ After discovery, an ordinary file creation, modification, or deletion SHALL upda
 
 ### Requirement: Repository work is independent of file delivery
 
-Repository snapshots SHALL refresh independently of file indexing and file-update delivery. A slow or failed repository refresh MUST NOT delay publication of file changes or Source and Rendered previews. Repository results SHALL carry their own freshness state and SHALL preserve the last successful result while a replacement is pending or fails. Git-only changes SHALL remain observable, including commits, index changes, branch switches and fetched remote refs with no document edit.
+Repository snapshots SHALL refresh independently of file indexing and delivery. Slow or failed refreshes MUST NOT delay file changes or Source/Rendered previews. Results SHALL carry independent freshness and preserve the last successful result while a replacement is pending or fails. Clients MUST NOT drive repository collection with periodic requests. Git-only changes SHALL remain observable under the subscription, observation, pacing, and no-write rules below.
 
-While at least one client is subscribed, the system SHALL learn about Git-only changes from filesystem events on the repository's Git metadata. That covers the top level of the Git directory and, for a linked worktree, of the shared Git directory, plus the ref files of the current branch and the resolved compare base, and the repository's `info/exclude`. The Git directory MUST NOT be watched recursively. Lock files, object storage and fsmonitor cookie files SHALL NOT trigger a refresh. When a watch root is narrower than its repository, the system SHALL also observe the repository's working tree outside that root, so that edits there update repository data. That observation excludes the Git directory and untracked paths the repository's top-level `.gitignore` excludes, and it never adds those files to the document index. In any watched root, changes to paths the content watcher excludes (built-in folders such as `dist/`, configured excludes, or a `.gitignore` it honours) still count when Git can see them: tracked files, and untracked files no `.gitignore` excludes. Clients MUST NOT drive repository collection with periodic requests. Periodic polling SHALL be used only where native observation is unavailable or failed, or when the session runs in polling mode. No Git metadata observation, polling or repository collection SHALL run while no client is subscribed.
+#### Scenario: Subscribed clients need Git-only changes
+- **WHEN** at least one client is subscribed
+- **THEN** filesystem events SHALL reveal commits, index changes, branch switches, and fetched remote refs even without document edits
+- **AND** observation SHALL cover the Git directory's top level, the shared Git directory's top level for a linked worktree, current-branch and resolved-compare-base ref files, and repository `info/exclude`
+- **AND** the Git directory MUST NOT be watched recursively; lock files, object storage, and fsmonitor cookie files SHALL NOT trigger refresh
 
-A repository collection SHALL start promptly after the first trigger that follows a quiet period. Under sustained triggers, successive collections SHALL start no closer together than a minimum interval. Triggers that arrive in the meantime SHALL coalesce into one follow-up collection that reflects the latest state. Repository reads MUST NOT write to the repository, including Git's opportunistic index refresh.
+#### Scenario: Repository changes fall outside content-watcher coverage
+- **WHEN** a watched root is narrower than its repository
+- **THEN** the system SHALL also observe the repository working tree outside that root, excluding the Git directory and untracked paths excluded by the repository's top-level `.gitignore`, without adding those files to the document index
 
-A refresh whose result matches the published result SHALL publish nothing and keep its generation. Text that varies only with wall-clock time, such as a relative commit age, does not count as a difference. Repository data SHALL be marked stale only if collection is still in progress after a short grace period of about one second. Repository refreshes MUST NOT initiate document-tree rescans or replay a previous Follow target.
+#### Scenario: Content exclusions do not hide Git-visible changes in any root
+- **WHEN** Git-visible changes occur in any watched root, including a repository-root watch
+- **THEN** content-watcher exclusions (built-in folders such as `dist/`, configured excludes, or an honoured `.gitignore`) SHALL NOT suppress repository updates for tracked files and untracked files no `.gitignore` excludes
+
+#### Scenario: Repository observation needs polling or loses its last client
+- **WHEN** periodic repository polling is considered
+- **THEN** it SHALL be used only where native observation is unavailable or failed, or when the session runs in polling mode
+
+#### Scenario: Subscription state controls repository work for every observation mode
+- **WHEN** repository work is scheduled or its client subscription count changes
+- **THEN** clients MUST NOT drive repository collection with periodic requests
+- **AND** no Git metadata observation, polling, or repository collection SHALL run while no client is subscribed
+
+#### Scenario: Repository triggers arrive after quiet or during sustained edits
+- **WHEN** the first repository trigger follows a quiet period
+- **THEN** collection SHALL start promptly
+
+#### Scenario: Sustained repository triggers are coalesced and paced
+- **WHEN** repository triggers are sustained, with or without document edits
+- **THEN** successive collections SHALL start no closer than a minimum interval; intervening triggers SHALL coalesce into one follow-up reflecting the latest state
+
+#### Scenario: Every repository read is read-only
+- **WHEN** repository information is read, whether after quiet or sustained activity
+- **THEN** reads MUST NOT write to the repository, including Git's opportunistic index refresh
+
+#### Scenario: A repository refresh is pending or unchanged
+- **WHEN** repository collection is in progress or completes
+- **THEN** data SHALL be marked stale only if collection remains in progress after a short grace period of about one second
+- **AND** a result matching the published result SHALL publish nothing and keep its generation; wall-clock-only text such as relative commit age SHALL NOT count as a difference
+- **AND** repository refreshes MUST NOT initiate document-tree rescans or replay a previous Follow target
 
 #### Scenario: Git stalls while the active document changes
 - **WHEN** repository collection is blocked and the active file is saved
@@ -342,7 +502,15 @@ A refresh whose result matches the published result SHALL publish nothing and ke
 
 ### Requirement: Recovery is explicit and repairs watch coverage
 
-The system SHALL reconcile the affected roots when ignore policy changes, filesystem observation is known to have failed, or the user requests workspace recovery. Reconciliation SHALL repair watch coverage as well as the index, including previously excluded directories that become allowed. Concurrent requests SHALL coalesce, retain intervening file events, and preserve the last coherent inventory until replacement succeeds. A browser connection gap alone SHALL recover from current server state without requiring a new filesystem crawl. The system SHALL retain existing root containment, ignore, secret, symlink, and independent client-scope rules throughout discovery and recovery.
+The system SHALL reconcile affected roots when ignore policy changes, filesystem observation is known to have failed, or the user requests workspace recovery. Reconciliation SHALL repair watch coverage and the index, including newly allowed directories. The system SHALL retain existing root containment, ignore, secret, symlink, and independent client-scope rules throughout discovery and recovery.
+
+#### Scenario: Recovery requests overlap or a browser reconnects
+- **WHEN** concurrent root-recovery requests arrive
+- **THEN** they SHALL coalesce, retain intervening file events, and preserve the last coherent inventory until replacement succeeds
+
+#### Scenario: A browser reconnects without lost server watch coverage
+- **WHEN** only a browser connection gap needs recovery
+- **THEN** it SHALL recover from current server state without requiring a new filesystem crawl
 
 #### Scenario: An excluded directory becomes allowed
 - **WHEN** a root's active ignore policy stops excluding a directory
@@ -360,14 +528,49 @@ The system SHALL reconcile the affected roots when ignore policy changes, filesy
 - **AND** their reconnections do not each start a filesystem scan
 
 ### Requirement: Failed document loads are classified as final or transient
-When the server cannot answer a document request with the document, it SHALL classify the failure by whether it can recover on its own. A document the workspace index does not hold, or whose indexed path no longer resolves to a readable file (the file is missing, a path component is not a directory, the path is a directory, the path is a symbolic-link loop, or the path name is too long), SHALL be answered as not found (HTTP 404). A document the server process is not permitted to read (permission denied or operation not permitted) SHALL be answered as forbidden (HTTP 403) with an error body that identifies the document as not readable. A binary document SHALL be answered as not viewable (HTTP 415). Any other failure, including a renderer error, resource exhaustion such as too many open files, an I/O error, or an unrecognized error, SHALL be answered as a server failure (HTTP 500). The server SHALL record a server failure, with the document and its cause, in the session log. It MUST NOT log a not-found, forbidden, or not-viewable answer. Error bodies MUST NOT include the underlying error message or the filesystem cause.
+The server SHALL classify failed document requests using the status and logging rules below, without exposing underlying error messages or filesystem causes in error bodies. The preview SHALL retry only transient outcomes on a bounded schedule and show cause-specific final notices. Reselecting after a final failure SHALL issue exactly one new request unless that request fails transiently.
 
-The preview SHALL treat a load as transient only when the answer's status was a 5xx, 408 (Request Timeout) or 429 (Too Many Requests), or when the request received no complete answer: the request failed, or the body of a successful response stopped arriving before it was complete. It SHALL retry a transient failure on its bounded schedule, and it does not read a `Retry-After` header. Every other outcome SHALL be final and MUST NOT be retried automatically. This includes every other 4xx status and a successful status whose body cannot be parsed as a document payload. A failure answer whose body is not the server's JSON error body (for example a proxy's HTML error page), or whose body stopped arriving before it was complete, SHALL be classified by its status alone. A final failure SHALL show a notice that states its cause:
-- forbidden: "Uatu doesn't have permission to read this file. Change its permissions, then select it again."
-- not found: "File unavailable. It may have been removed or excluded from this workspace."
-- any other final failure: "This file couldn't be loaded. Select it again to retry."
+#### Scenario: A document is missing, unreadable, or binary
+- **WHEN** a requested document is absent from the workspace index or its indexed path cannot resolve to a readable file because it is missing, a component is not a directory, it is a directory, a symbolic-link loop exists, or the path name is too long
+- **THEN** the server SHALL answer not found (HTTP 404)
 
-While a transient failure is still being retried, the preview SHALL show "This file couldn't be loaded. Retrying…". Once the schedule is used up, it SHALL show "This file couldn't be loaded. Select it again to retry." When the user selects the document again after a final failure, the preview SHALL make exactly one new request. It MUST NOT restart a retry cycle unless that request fails transiently.
+#### Scenario: A document read is denied or its content is binary
+- **WHEN** a document request fails with permission denied or operation not permitted
+- **THEN** the server SHALL answer forbidden (HTTP 403) with a body identifying the document as not readable
+- **WHEN** the requested document is binary
+- **THEN** the server SHALL answer not viewable (HTTP 415)
+
+#### Scenario: Expected document failures do not enter the session log
+- **WHEN** a document request answers not-found, forbidden, or not-viewable
+- **THEN** the answer MUST NOT be logged
+
+#### Scenario: A document request fails for another reason
+- **WHEN** a renderer error, resource exhaustion such as too many open files, an I/O error, or any other unrecognized failure prevents delivery
+- **THEN** the server SHALL answer server failure (HTTP 500) and record the document and cause in the session log
+
+#### Scenario: Any document error body preserves private failure details
+- **WHEN** a document request returns an error body, for any failure class
+- **THEN** it MUST NOT include the underlying error message or filesystem cause
+
+#### Scenario: The preview classifies a complete or interrupted response
+- **WHEN** a document load fails
+- **THEN** it SHALL be transient only for 5xx, 408 (Request Timeout), 429 (Too Many Requests), a failed request with no complete answer, or a successful response whose body stops before completion
+- **AND** transient failures SHALL retry on the bounded schedule without reading `Retry-After`
+- **AND** every other outcome SHALL be final and MUST NOT retry automatically, including all other 4xx statuses and a successful status with an unparseable document payload
+- **AND** a failure answer with a non-server-JSON body (such as proxy HTML) or an incomplete body SHALL be classified by status alone
+
+#### Scenario: A final failure or exhausted retry is displayed
+- **WHEN** a document load reaches a final failure
+- **THEN** a forbidden notice SHALL read "Uatu doesn't have permission to read this file. Change its permissions, then select it again."
+- **AND** a not-found notice SHALL read "File unavailable. It may have been removed or excluded from this workspace."
+- **AND** every other final failure SHALL read "This file couldn't be loaded. Select it again to retry."
+- **AND** selecting the document again after a final failure SHALL make exactly one new request and MUST NOT restart a retry cycle unless that request fails transiently
+
+#### Scenario: A transient document load is retrying or exhausts its budget
+- **WHEN** transient retries remain
+- **THEN** the preview SHALL show "This file couldn't be loaded. Retrying…"
+- **WHEN** those retries are exhausted
+- **THEN** the preview SHALL show "This file couldn't be loaded. Select it again to retry."
 
 #### Scenario: A permission-denied document is final
 - **WHEN** the selected document exists in the index but the server process is not permitted to read it
@@ -421,7 +624,23 @@ While a transient failure is still being retried, the preview SHALL show "This f
 - **THEN** the preview shows "This file couldn't be loaded. Select it again to retry." without retrying
 
 ### Requirement: Ignored-file observation is shared and never steers Follow
-The shared index SHALL retain the permitted Gitignored files it knows (individually ignored files, the contents of listed ignored-folder levels, and live writes retained by the ignored-folder window) and deliver their write metadata and revisions through existing ordered snapshots/patches. Each client's visibility SHALL determine its browsing results without reconstructing the shared watcher or changing another client's corpus. Gitignored files SHALL NOT be Follow candidates in any client. Unknown ignore classification SHALL be represented without falsely asserting a Git state. Policy evaluation SHALL support standard Git-ignore sources and shall update when they change. Discovery/recovery SHALL remain bounded and incremental file writes SHALL retain path-bounded index work; toggling a client preference MUST NOT start a filesystem crawl.
+The shared index SHALL retain known permitted Gitignored files and deliver their write metadata and revisions through existing ordered snapshots/patches. Each client's visibility SHALL determine its browsing results without reconstructing the shared watcher or changing another client's corpus. Gitignored files SHALL NOT be Follow candidates in any client.
+
+#### Scenario: Shared ignored-file knowledge is retained
+- **WHEN** the shared index learns individually ignored files, contents of listed ignored-folder levels, or live writes retained by the ignored-folder window
+- **THEN** it SHALL retain those permitted files
+
+#### Scenario: Unknown ignore classification does not assert a Git state
+- **WHEN** a file's ignore classification is unknown
+- **THEN** that uncertainty SHALL be represented without falsely asserting a Git state
+
+#### Scenario: Ignore policy changes or indexing and visibility work is requested
+- **WHEN** ignore policy is evaluated
+- **THEN** evaluation SHALL support standard Git-ignore sources and update when they change
+- **WHEN** discovery, recovery, or incremental writes run
+- **THEN** discovery/recovery SHALL remain bounded and incremental writes SHALL retain path-bounded index work
+- **WHEN** a client toggles its visibility preference
+- **THEN** it MUST NOT start a filesystem crawl
 
 #### Scenario: Two clients choose different ignored visibility
 - **WHEN** one shows ignored files and another hides them while the same ignored export changes
@@ -437,7 +656,13 @@ The shared index SHALL retain the permitted Gitignored files it knows (individua
 - **THEN** results are projected from known file metadata without restarting watchers or performing a full scan
 
 ### Requirement: Browse permitted files from watched roots
-The sidebar SHALL offer the permitted indexed files under each watched root through All, Recent, and Changed. Markdown, AsciiDoc, and viewable text SHALL render through their existing document pipelines. Binary files SHALL be clickable; previewable images SHALL render as images, recognized audio/video SHALL open paused media previews, and unsupported binaries SHALL show preview unavailable. Built-in exclusions and explicit Uatu exclusions SHALL not appear or be directly readable; no file SHALL be withheld because its name looks like a secret. Git-ignore status SHALL be indexed separately from each client's visibility choice, and permitted ignored files SHALL be available when that client shows them. Contents of folders Git ignores as a whole SHALL be offered as specified by the on-demand ignored-folder requirement.
+The sidebar SHALL offer permitted indexed files under each watched root through All, Recent, and Changed. Markdown, AsciiDoc, and viewable text SHALL use existing document pipelines. Binary files SHALL be clickable and route to image, paused recognized audio/video, or unsupported-binary preview-unavailable views. Exposure and ignored-folder browsing SHALL follow the rules below.
+
+#### Scenario: A file is considered for exposure in a client's browser
+- **WHEN** a watched-root file is indexed or requested directly
+- **THEN** built-in and explicit Uatu exclusions SHALL neither appear nor be directly readable; no file SHALL be withheld merely because its name looks like a secret
+- **AND** Git-ignore status SHALL be indexed separately from each client's visibility choice, and permitted ignored files SHALL be available when that client shows them
+- **AND** contents of folders Git ignores as a whole SHALL be offered under the on-demand ignored-folder requirement
 
 #### Scenario: Sidebar lists every non-ignored file under each watched root
 - **WHEN** roots contain Markdown, AsciiDoc, source, configuration, image, media, and unsupported binary files
@@ -473,7 +698,27 @@ The sidebar SHALL offer the permitted indexed files under each watched root thro
 - **THEN** selection updates to that file and preview unavailable is displayed without streaming its contents into document rendering
 
 ### Requirement: Serve adjacent permitted files as static content
-The server SHALL distinguish HTML-preferring top-level navigation from subresource requests using Accept. Navigation to any known indexed file SHALL return the SPA shell rather than raw file contents, including images/media, so a watched SVG cannot execute at the app origin through direct navigation. Other fallback requests SHALL resolve against permitted files under watched roots, enforcing built-in exclusions, explicit Uatu excludes, and realpath containment. Git-ignore browsing visibility SHALL not deny permitted authenticated static delivery. Authored rendered src/href references SHALL remain unchanged in server HTML and resolve through the per-document base. Mounted watched images SHALL retain revision query parameters for cache invalidation; static path resolution SHALL ignore that query string. External or non-watched image URLs SHALL remain unchanged. Traversal, malformed encoding, and symlink escapes SHALL fail without serving outside contents. The dedicated media route SHALL retain its own indexed-identity/range contract and SHALL not depend on this fallback's Accept negotiation.
+The server SHALL use Accept to distinguish HTML-preferring top-level navigation from subresources. Navigation to any known indexed file, including images/media, SHALL return the SPA shell rather than raw contents, preventing watched SVG execution at the app origin through direct navigation. Other fallback requests SHALL serve only permitted watched-root files under the containment and URL rules below.
+
+#### Scenario: A static fallback resolves a watched-root resource
+- **WHEN** any non-navigation fallback request is resolved, whether or not it identifies a permitted file
+- **THEN** built-in exclusions, explicit Uatu excludes, and realpath containment SHALL be enforced
+- **AND** Git-ignore browsing visibility SHALL NOT deny permitted authenticated static delivery
+- **AND** traversal, malformed encoding, and symlink escapes SHALL fail without serving outside contents
+
+#### Scenario: Dedicated media delivery does not depend on static fallback
+- **WHEN** the dedicated media route handles a request
+- **THEN** it SHALL retain its own indexed-identity/range contract independently of fallback Accept negotiation
+
+#### Scenario: Rendered document references reach static delivery
+- **WHEN** server HTML contains authored rendered src/href references
+- **THEN** they SHALL remain unchanged and resolve through the per-document base
+
+#### Scenario: Watched image revisions and unrelated image URLs retain their boundaries
+- **WHEN** a watched image is mounted or its static path is resolved
+- **THEN** mounted images SHALL retain revision query parameters for cache invalidation, while static path resolution SHALL ignore that query string
+- **WHEN** an image URL is external or non-watched
+- **THEN** it SHALL remain unchanged
 
 #### Scenario: A README's centered hero image loads via the static file fallback
 - **WHEN** an allowed adjacent image is referenced by a relative src
@@ -524,7 +769,17 @@ The server SHALL distinguish HTML-preferring top-level navigation from subresour
 - **THEN** authenticated static delivery can still load that image
 
 ### Requirement: Git-ignored folders are listed on demand
-In a watched root inside a Git working tree, a folder that Git ignores as a whole SHALL be indexed as a folder entry without reading its contents during discovery or recovery. A folder that contains tracked files, or files that Git does not ignore, is not ignored as a whole and SHALL be discovered normally. A client SHALL be able to request the listing of one level of such a folder. The listing SHALL return that level's permitted files with their metadata and its subfolders. Subfolders inside an ignored folder SHALL be folder entries listed on demand in turn. A listed level SHALL become part of the shared index for the rest of the session, and later changes in that level SHALL be published to every client. Listing SHALL apply built-in and explicit exclusions and realpath containment. Listing a level that no longer exists SHALL remove the folder entry. Changes to Git ignore sources SHALL reconcile folder entries and listed levels without a session restart. In a watched root outside any Git working tree, no folder SHALL be treated as ignored and discovery SHALL be complete.
+In a watched root inside a Git working tree, a folder Git ignores as a whole SHALL be indexed as a folder entry without reading its contents during discovery/recovery. Folders containing tracked or non-ignored files SHALL be discovered normally. Clients SHALL be able to list ignored folders one level at a time under the shared-index and exposure rules below. In watched roots outside Git, no folder SHALL be treated as ignored and discovery SHALL be complete.
+
+#### Scenario: A client lists one ignored-folder level
+- **WHEN** a client requests a level of a wholly ignored folder
+- **THEN** the listing SHALL return that level's permitted files with metadata and its subfolders; subfolders SHALL be folder entries listed on demand in turn
+- **AND** the listed level SHALL join the shared index for the rest of the session, with later changes published to every client
+- **AND** listing SHALL enforce built-in and explicit exclusions and realpath containment; a nonexistent level SHALL remove its folder entry
+
+#### Scenario: Git ignore sources change without another listing request
+- **WHEN** Git ignore sources change
+- **THEN** folder entries and listed levels SHALL reconcile without a session restart
 
 #### Scenario: `node_modules/` is not read at startup
 - **WHEN** a Git root ignores `node_modules/`, which contains 100,000 files
@@ -551,7 +806,20 @@ In a watched root inside a Git working tree, a folder that Git ignores as a whol
 - **THEN** every permitted file is discovered, and only explicit exclusions limit discovery
 
 ### Requirement: Writes inside unlisted ignored folders are captured within a bounded window
-A file created or written inside a Git-ignored folder level that has not been listed SHALL be indexed when the write is observed, so it appears in Recent and type filters without its folder being listed. Per watched root, the system SHALL retain at most the 2,000 most recently written such files. When a newer write would exceed that bound, the oldest retained file SHALL leave the index unless it is pinned. A file SHALL become pinned for the rest of the session once any client has requested its document, static, or media content. A file that leaves the index this way SHALL become available again when its folder level is listed. Removals inside unlisted ignored folders SHALL remove any retained entry. Writes inside listed levels SHALL NOT count toward the window.
+A file created or written inside an unlisted Git-ignored folder level SHALL be indexed when observed, appearing in Recent and type filters without listing its folder. Per root, the system SHALL retain at most the 2,000 most recently written such files, with the pinning and eviction rules below. Writes inside listed levels SHALL NOT count toward this window.
+
+#### Scenario: The unlisted-folder write window fills or a retained file is removed
+- **WHEN** a newer write would exceed the per-root window
+- **THEN** the oldest retained file SHALL leave the index unless pinned
+- **AND** an evicted file SHALL become available again when its folder level is listed
+
+#### Scenario: A content request pins a file before or after window pressure
+- **WHEN** any client requests a file's document, static, or media content
+- **THEN** that file SHALL be pinned for the rest of the session
+
+#### Scenario: An unlisted ignored folder loses a retained file
+- **WHEN** a file is removed inside an unlisted ignored folder
+- **THEN** any retained entry for that file SHALL be removed
 
 #### Scenario: A new render appears without expanding `build/`
 - **WHEN** no client has listed `build/` and a script writes `build/renders/take-5.wav`
@@ -570,7 +838,15 @@ A file created or written inside a Git-ignored folder level that has not been li
 - **THEN** the listing includes `take-1.wav` again
 
 ### Requirement: Ignored-folder updates are published in bounded batches
-Updates for files inside Git-ignored folders, whether listed or captured by the live-write window, SHALL be published separately from other updates. Creations, writes, and removals SHALL be coalesced by path, so a path that changes several times before publication is published once in its latest state, and a path created and removed before publication is not published. These entries SHALL be published with ignored status and SHALL NOT be followed by a separate classification update. Publication SHALL be scheduled no sooner than one second after the first queued event and no later than five seconds after it, including under sustained churn. Each publication SHALL carry at most 1,024 entries per patch, with remaining entries following in subsequent patches without waiting for another interval. These updates SHALL NOT produce Follow-candidate updates. An open ignored file SHALL still refresh after its revision is published, under the existing active-file and media rules.
+Updates inside Git-ignored folders, whether listed or captured by the live-write window, SHALL publish separately from other updates. Publication SHALL be scheduled one to five seconds after the first queued event, including under sustained churn, with at most 1,024 entries per patch. Coalescing, ignored classification, and refresh SHALL follow the rules below.
+
+#### Scenario: Ignored-folder paths change repeatedly within a batch interval
+- **WHEN** creations, writes, or removals queue for an ignored-folder publication
+- **THEN** they SHALL coalesce by path into one latest-state entry; a path created and removed before publication SHALL NOT be published
+- **AND** entries SHALL carry ignored status and SHALL NOT be followed by a separate classification update
+- **AND** these updates SHALL NOT produce Follow-candidate updates
+- **AND** entries beyond the 1,024-per-patch limit SHALL follow in subsequent patches without another interval
+- **AND** an open ignored file SHALL refresh after its revision is published under existing active-file and media rules
 
 #### Scenario: A large rebuild arrives in a few patches
 - **WHEN** a build writes 5,000 files inside a listed ignored `build/` within two seconds

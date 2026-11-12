@@ -7,7 +7,24 @@ Define how UatuCode publishes an authoritative, versioned API contract that huma
 ## Requirements
 
 ### Requirement: Public APIs have one canonical machine-readable contract
-UatuCode SHALL maintain an OpenAPI 3.1 contract for every supported HTTP operation intended for external clients. That public surface is the Hub API: the operations the hub serves itself, including the brokered live stream and its subscription control. Most are at the hub's own origin. An operation the hub serves itself under a workspace prefix (`/s/<id>/`), such as the per-user personal state it stores for each workspace, is part of the Hub API too and SHALL be published as a Hub operation, versioned by the Hub revision. The session child's routes under a workspace prefix are internal and MUST NOT be published as public operations: the child's API the hub proxies to it, and the child's SSE routes and activity endpoint, which the hub itself subscribes to as its internal hub-to-child protocol and does not proxy to clients. They MUST be classified by an explicit, machine-checkable exclusion. Payload schemas the hub forwards from a workspace on the live stream (document state, conversation events) SHALL remain published as part of that stream's protocol definition and versioned by the workspace revision. The contract SHALL define operation identifiers, authentication, path and query parameters, request bodies, successful responses, documented error responses, and reusable schemas. Supported SSE surfaces SHALL additionally have machine-readable protocol definitions covering event names and payload schemas, topic and signal vocabularies, cursor and reconnection rules, and lifecycle behavior that OpenAPI does not fully express. Internal debug, test-only, HTML, and static-asset routes MAY be excluded, but exclusions MUST be explicit and machine-checkable.
+
+UatuCode SHALL maintain an OpenAPI 3.1 contract for all supported external HTTP operations: the Hub API, including Hub-served workspace-prefixed operations. Session-child routes MUST NOT be published as public operations and MUST have explicit machine-checkable exclusions. Forwarded workspace payload schemas SHALL remain in the live-stream protocol under the workspace revision; Hub operations SHALL use the Hub revision. Supported SSE surfaces SHALL have machine-readable protocol definitions.
+
+#### Scenario: An external client discovers Hub HTTP operations or SSE protocols, including routes and payloads under workspace prefixes
+- **WHEN** an external client discovers Hub HTTP operations or SSE protocols, including routes and payloads under workspace prefixes
+- **THEN** UatuCode SHALL maintain an OpenAPI 3.1 contract for every supported HTTP operation intended for external clients.
+- **AND** That public surface is the Hub API: the operations the hub serves itself, including the brokered live stream and its subscription control.
+- **AND** Most are at the hub's own origin.
+- **AND** An operation the hub serves itself under a workspace prefix (`/s/<id>/`), such as the per-user personal state it stores for each workspace, is part of the Hub API too and SHALL be published as a Hub operation, versioned by the Hub revision.
+- **AND** The session child's routes under a workspace prefix are internal and MUST NOT be published as public operations: the child's API the hub proxies to it, and the child's SSE routes and activity endpoint, which the hub itself subscribes to as its internal hub-to-child protocol and does not proxy to clients.
+- **AND** They MUST be classified by an explicit, machine-checkable exclusion.
+- **AND** Payload schemas the hub forwards from a workspace on the live stream (document state, conversation events) SHALL remain published as part of that stream's protocol definition and versioned by the workspace revision.
+
+#### Scenario: Published HTTP and SSE contracts describe their complete protocols
+- **WHEN** an external client reads a supported operation or streaming surface's published definition
+- **THEN** The contract SHALL define operation identifiers, authentication, path and query parameters, request bodies, successful responses, documented error responses, and reusable schemas.
+- **AND** Supported SSE surfaces SHALL additionally have machine-readable protocol definitions covering event names and payload schemas, topic and signal vocabularies, cursor and reconnection rules, and lifecycle behavior that OpenAPI does not fully express.
+- **AND** Internal debug, test-only, HTML, and static-asset routes MAY be excluded, but exclusions MUST be explicit and machine-checkable.
 
 #### Scenario: Agent discovers an HTTP operation
 - **WHEN** an agent reads the published OpenAPI contract
@@ -32,7 +49,14 @@ UatuCode SHALL maintain an OpenAPI 3.1 contract for every supported HTTP operati
 - **THEN** every omitted route is classified as an explicit non-public exclusion rather than disappearing silently
 
 ### Requirement: Human and agent documentation are generated from reviewed sources
-UatuCode SHALL provide human-readable API documentation and concise guides for authentication, Hub and workspace boundaries, common workflows, streaming behavior, compatibility, and errors. It SHALL also provide an agent-oriented guide that identifies the authoritative contract, explains how to determine compatibility and migrations, and links directly to raw machine-readable artifacts. Generated reference pages MUST derive endpoint and schema details from the canonical contract and MUST NOT establish a second independently edited wire contract.
+
+Human and agent API guides SHALL orient readers to authoritative contracts, compatibility, workflows, streaming, and errors. Generated endpoint and schema reference details MUST derive from the canonical contract, not a second wire definition.
+
+#### Scenario: A developer or agent reads generated API references, workflow guidance, or raw-artifact orientation
+- **WHEN** a developer or agent reads generated API references, workflow guidance, or raw-artifact orientation
+- **THEN** UatuCode SHALL provide human-readable API documentation and concise guides for authentication, Hub and workspace boundaries, common workflows, streaming behavior, compatibility, and errors.
+- **AND** It SHALL also provide an agent-oriented guide that identifies the authoritative contract, explains how to determine compatibility and migrations, and links directly to raw machine-readable artifacts.
+- **AND** Generated reference pages MUST derive endpoint and schema details from the canonical contract and MUST NOT establish a second independently edited wire contract.
 
 #### Scenario: Human browses the API reference
 - **WHEN** a developer opens the generated API documentation
@@ -43,7 +67,15 @@ UatuCode SHALL provide human-readable API documentation and concise guides for a
 - **THEN** it receives the minimum orientation needed to locate authoritative artifacts, compare revisions, and identify required client changes without scraping a JavaScript-rendered page
 
 ### Requirement: GitHub Pages publishes the product site and raw API artifacts
-The project SHALL publish a static UatuCode product and documentation site at the repository's standard GitHub Pages URL under `/uatu/`. The site SHALL work with that base path and SHALL expose static, directly fetchable raw artifacts at documented stable paths, including `llms.txt`, the agent guide, OpenAPI contract, streaming protocol contract, contract metadata, and API changelog. Raw contract artifacts SHALL be served directly under `/uatu/api/` with no channel path segment. Essential agent-facing content MUST be available without executing client-side JavaScript or authenticating.
+
+The project SHALL publish a static product/documentation site under /uatu/ with stable directly fetchable API artifacts under /uatu/api/ and essential agent content available without authentication or JavaScript.
+
+#### Scenario: A reader or agent opens the GitHub Pages product site or directly fetches a documented raw API artifact
+- **WHEN** a reader or agent opens the GitHub Pages product site or directly fetches a documented raw API artifact
+- **THEN** The project SHALL publish a static UatuCode product and documentation site at the repository's standard GitHub Pages URL under `/uatu/`.
+- **AND** The site SHALL work with that base path and SHALL expose static, directly fetchable raw artifacts at documented stable paths, including `llms.txt`, the agent guide, OpenAPI contract, streaming protocol contract, contract metadata, and API changelog.
+- **AND** Raw contract artifacts SHALL be served directly under `/uatu/api/` with no channel path segment.
+- **AND** Essential agent-facing content MUST be available without executing client-side JavaScript or authenticating.
 
 #### Scenario: User opens the repository Pages site
 - **WHEN** a user visits `https://tjakobsson.github.io/uatu/`
@@ -81,7 +113,14 @@ The published API contract SHALL have exactly one identity, built from the curre
 - **AND** neither run depends on state carried over from an earlier publication
 
 ### Requirement: Contract changes are validated before publication
-Continuous integration SHALL validate contract syntax and references, compare supported route inventory with documented operations, validate representative running-server requests and responses against the contract, and report backward-incompatible contract differences against the appropriate baseline. A breaking change MUST increment the affected public API revision and include consumer-facing migration information in the API changelog. The publication workflow MUST itself validate the contract it builds and MUST verify the built site before deploying it, and MUST NOT deploy when either check fails.
+
+CI SHALL check contract structure, route coverage, running-server conformance, and compatibility. Breaking changes MUST carry revision and migration updates; publication MUST validate its own contract and built site and MUST NOT deploy if either fails.
+
+#### Scenario: A contract change is checked in CI or a publication workflow builds and deploys the site
+- **WHEN** a contract change is checked in CI or a publication workflow builds and deploys the site
+- **THEN** Continuous integration SHALL validate contract syntax and references, compare supported route inventory with documented operations, validate representative running-server requests and responses against the contract, and report backward-incompatible contract differences against the appropriate baseline.
+- **AND** A breaking change MUST increment the affected public API revision and include consumer-facing migration information in the API changelog.
+- **AND** The publication workflow MUST itself validate the contract it builds and MUST verify the built site before deploying it, and MUST NOT deploy when either check fails.
 
 #### Scenario: Handler response drifts from its schema
 - **WHEN** a contract test observes a documented operation returning a status or body that violates its contract

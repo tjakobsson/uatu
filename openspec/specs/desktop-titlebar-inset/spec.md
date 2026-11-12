@@ -4,14 +4,16 @@
 Coordinate the desktop wrapper's native titlebar inset with SPA layout and selective glass effects so interactive chrome remains visible while eligible scrolling content frosts beneath it.
 ## Requirements
 ### Requirement: The wrapper announces a titlebar inset to the SPA
-The desktop wrapper SHALL announce to the hosted page that native chrome
-covers the top of the content area, by setting a marker class and a CSS
-custom property carrying the covered height in CSS pixels on the document
-root. The announcement MUST be installed as a document-start user script so
-it applies before first paint and survives page reloads (including the SPA's
-live-reload). When the native chrome height changes while the page is open —
-such as the native tab bar appearing or disappearing — the wrapper SHALL
-update the announced inset in place.
+
+The desktop wrapper SHALL announce native chrome coverage through a document-root marker and CSS height property. A document-start script MUST establish it before first paint, and native chrome height changes SHALL update the inset in place.
+
+#### Scenario: Establish coverage before page paint
+- **WHEN** the hosted document starts, including after ordinary or SPA live reload
+- **THEN** a document-start user script MUST set the document-root marker class and CSS custom property to the covered top height in CSS pixels before first paint
+
+#### Scenario: Native chrome changes while the page remains open
+- **WHEN** the native tab bar appears or disappears, or another chrome-height change occurs
+- **THEN** the wrapper updates the announced covered height in place without reloading the page
 
 #### Scenario: Inset present in the desktop wrapper
 - **WHEN** the SPA loads inside UatuCode Desktop
@@ -53,21 +55,17 @@ content still flows beneath the floating toolbar. When the marker is absent
 - **THEN** no top padding is added and layout matches pre-change behavior
 
 ### Requirement: The page frosts the covered strip
-When the inset marker is present, the SPA SHALL render a non-interactive
-progressive frost over the covered strip — blur-forward with a light tint,
-dissolving over an eased ramp below the inset — so content beneath the
-native chrome reads as blurred glass rather than raw content (the web view
-cannot render the system scroll-edge effect for chrome it does not know
-about). The frost SHALL only cover regions where scrolled content can flow
-under the chrome. Solid, non-scrolling app surfaces — the sidebar column
-and the right-docked terminal panel column — SHALL be excluded, and over a
-fullscreen terminal the frost SHALL be confined to the covered strip with
-no falloff onto the panel: these are inset-cleared surfaces that never
-scroll under the chrome, and frosting them only washes the brand mark or
-smears an opaque surface into a gradient band. The app's own top chrome —
-the preview header and the chat panel's header and collapsed strip — SHALL
-render above the frost so its controls stay crisp while content beneath
-them still frosts.
+
+With the inset marker present, the SPA SHALL frost scrolling content beneath native chrome without intercepting interaction. Inset-cleared solid surfaces SHALL be excluded, fullscreen terminals SHALL receive no falloff, and the app's own top chrome SHALL remain crisp above the frost. WebViews cannot supply the system effect for unknown chrome; frosting solid surfaces would wash the brand or smear opaque panels.
+
+#### Scenario: Paint the inset's selective glass treatment
+- **WHEN** the inset marker is present
+- **THEN** scrolling-under-chrome regions receive non-interactive, blur-forward frost with a light tint and an eased dissolving ramp below the inset
+- **AND** sidebar and right-docked terminal columns receive no frost; a fullscreen terminal has frost only in the covered strip, with no falloff onto its panel
+
+#### Scenario: Layer app headers over the frost
+- **WHEN** frost is active beneath preview or chat chrome
+- **THEN** the preview header and chat header and collapsed strip render above it, keeping controls crisp while underlying scrolled content frosts
 
 #### Scenario: Scrolled content under the titlebar reads as glass
 - **WHEN** dark or saturated document content scrolls into the covered strip

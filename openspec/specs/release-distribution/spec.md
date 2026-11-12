@@ -4,7 +4,13 @@
 Define how uatu is released and distributed: a tag-triggered GitHub release pipeline that cross-compiles the CLI for macOS and Linux, publishes verifiable archives with a stable naming contract, smoke-tests before publishing, keeps a Homebrew tap formula current automatically, and documents installation in the README.
 ## Requirements
 ### Requirement: Release Please maintains a reviewable release proposal
-The repository SHALL use Release Please with the Node release strategy and a version manifest initialized to the latest published release. Release Please SHALL derive the next semantic version and user-facing changelog entries from Conventional Commits merged after the latest release tag, and SHALL maintain a release pull request that updates `package.json` and `CHANGELOG.md`. Routine maintenance commit types such as `chore`, `ci`, and `test` MUST NOT appear as user-facing changelog entries by default. Between releases, `package.json` on the main branch SHALL continue to identify the latest released version until the release pull request is merged.
+
+The repository SHALL use Release Please's Node strategy and a version manifest initialized to the latest published release. Release Please SHALL derive the next semantic version and user-facing changelog from Conventional Commits after the latest release tag and maintain a PR updating `package.json` and `CHANGELOG.md`. Routine maintenance MUST NOT appear in user-facing notes by default; main SHALL keep the latest released package version until the release PR merges.
+
+#### Scenario: Propose a release without exposing routine maintenance
+- **WHEN** Release Please processes Conventional Commits merged after the latest release tag
+- **THEN** the release PR proposes the next semantic version and updates `package.json` and `CHANGELOG.md`
+- **AND** routine maintenance such as `chore`, `ci`, and `test` MUST NOT appear in user-facing changelog entries by default
 
 #### Scenario: A user-facing fix lands after the latest release
 - **WHEN** a `fix` Conventional Commit is merged to the main branch after the latest release tag
@@ -34,7 +40,13 @@ Release Please SHALL authenticate with a dedicated repository-scoped credential 
 - **THEN** the tag event triggers the artifact-publication workflow
 
 ### Requirement: A version tag produces a GitHub Release with cross-compiled binaries
-The repository SHALL define Release Please automation that creates a `v*` version tag and draft GitHub Release when a release pull request is merged. A tag-triggered publication workflow MUST cross-compile the CLI from a single Linux runner for exactly four targets — `bun-darwin-arm64`, `bun-darwin-x64`, `bun-linux-x64`, `bun-linux-arm64` — via `bun build --compile --target=...`, and MUST upload the four platform archives to the matching draft GitHub Release before publishing it. The publication workflow MUST fail before building if the pushed tag does not equal `v` followed by the `version` field in `package.json`. The workflows MUST use a pinned Bun version and pinned GitHub Action references, and MUST declare only the permissions each job needs.
+
+Release Please automation SHALL create a `v*` tag and draft GitHub Release when a release PR merges. A tag-triggered workflow MUST fail before building on a tag/package-version mismatch, cross-compile exactly four targets on one Linux runner, and upload their archives to the matching draft before publishing. Workflows MUST use pinned Bun and GitHub Action references and declare only each job's needed permissions.
+
+#### Scenario: Validate the tag before compiling the exact platform set
+- **WHEN** a version tag triggers publication
+- **THEN** the workflow MUST fail before any build unless the tag is `v` followed by `package.json`'s `version`
+- **AND** a matching tag builds exactly `bun-darwin-arm64`, `bun-darwin-x64`, `bun-linux-x64`, and `bun-linux-arm64` on one Linux runner via `bun build --compile --target=...`, uploading all four archives to the matching draft before publication
 
 #### Scenario: Merging a release pull request publishes a release
 - **WHEN** a validated Release Please release pull request is merged
@@ -67,7 +79,13 @@ Release archives SHALL be named `uatu-darwin-arm64.zip`, `uatu-darwin-x64.zip`, 
 - **THEN** it builds for the host platform to `dist/uatu`, as before
 
 ### Requirement: Releases ship verifiable integrity artifacts
-The release workflow SHALL upload a `SHA256SUMS` file covering all four archives as a release asset, and SHALL generate GitHub build-provenance attestations (via `actions/attest-build-provenance`) for all four archives, such that `gh attestation verify <asset> --repo tjakobsson/uatu` succeeds for every published archive. The workflow SHALL additionally publish each archive's provenance as a Sigstore bundle release asset (`<asset>.sigstore.json`, retrieved via `gh attestation download`), so provenance is discoverable from the release page by third-party scanners and verifiable without GitHub-specific tooling.
+
+The release workflow SHALL upload a `SHA256SUMS` file covering all four platform archives as a release asset, and publish GitHub build-provenance attestations and downloadable Sigstore bundles for those archives so each archive's integrity and provenance can be independently verified.
+
+#### Scenario: Publish checksums and both provenance forms for every archive
+- **WHEN** release integrity artifacts are generated
+- **THEN** a `SHA256SUMS` file covering all four archives is uploaded as a release asset and `actions/attest-build-provenance` generates attestations so `gh attestation verify <asset> --repo tjakobsson/uatu` succeeds for each
+- **AND** each archive's provenance, retrieved via `gh attestation download`, is published as `<asset>.sigstore.json`, discoverable on the release page and verifiable with standard Sigstore tooling
 
 #### Scenario: A user verifies a downloaded asset
 - **WHEN** a user downloads `uatu-darwin-arm64.zip` from a release and runs `gh attestation verify uatu-darwin-arm64.zip --repo tjakobsson/uatu`
@@ -125,7 +143,18 @@ The repository README SHALL document how to install uatu, listing Homebrew (`bre
 - **AND** the macOS quarantine workaround is documented alongside the manual method
 
 ### Requirement: uatu is installable from the edge channel via the tap
-The tap automation SHALL generate `Formula/uatu-edge.rb` in `tjakobsson/homebrew-tap` from the edge release's SHA256SUMS, pointing at the `edge` tag's CLI archives with the edge version string, on every successful edge workflow run — including runs whose build was skipped — so a transiently failed tap update self-heals from the published release without a rebuild. The edge formula SHALL declare `conflicts_with` the stable `uatu` formula and the stable formula SHALL declare the reciprocal conflict (both install `bin/uatu`, so exactly one may be installed at a time), and the stable formula's version and URLs MUST remain unaffected by edge publishing. Both formulas SHALL be emitted by the same generator (`scripts/generate-formula.ts`), parameterized by formula name and release tag the way the cask generator already is, with unit tests covering both channels.
+
+Every successful edge workflow, including skipped builds, SHALL regenerate `Formula/uatu-edge.rb` in `tjakobsson/homebrew-tap` from published edge checksums. Stable and edge formulas SHALL declare reciprocal `conflicts_with`; edge publishing MUST leave stable version and URLs unaffected. Both formulas SHALL use `scripts/generate-formula.ts`, parameterized by formula name and release tag, with unit tests for both channels.
+
+#### Scenario: Regenerate edge installation metadata from the published release
+- **WHEN** an edge workflow succeeds, even if its build was skipped
+- **THEN** the tap formula is generated from the edge release's SHA256SUMS with the edge version string and `edge` tag CLI archive URLs
+- **AND** a previously failed tap update can thereby self-heal without rebuilding
+
+#### Scenario: Keep the two CLI formulas mutually exclusive
+- **WHEN** stable and edge formula metadata is generated
+- **THEN** `uatu-edge` declares a conflict with `uatu` and `uatu` declares the reciprocal conflict, because both install `bin/uatu`
+- **AND** the shared generator uses formula-name and release-tag parameters as the cask generator does, with unit tests covering both channels
 
 #### Scenario: Opting into the CLI edge channel
 
