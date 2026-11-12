@@ -6,6 +6,9 @@ import { WORKER_EVIDENCE_LIMIT } from "../chat/worker-dismissal-evidence";
 import { dismissalIdentifier, WorkerDismissalsError, type WorkerDismissalEvidence, type WorkerDismissalChanges, type WorkerDismissalState, type WorkerDismissalsStore } from "./worker-dismissals";
 
 export const WORKER_DISMISSALS_PATH = "/api/personal-worker-dismissals";
+// The child's covered-history read allows 25 seconds (chat/adapter.ts).
+// Leave five seconds for transport/publication instead of cutting it short.
+const WORKER_EVIDENCE_TIMEOUT_MS = 30_000;
 const NO_STORE = { "cache-control": "no-store" };
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: NO_STORE });
 const invalid = (): never => { throw new WorkerDismissalsError("invalid-input", "invalid worker dismissal request"); };
@@ -26,7 +29,7 @@ async function boundedText(response: Response | Request, maxBytes: number): Prom
 
 export async function readAuthoritativeWorkerEvidence(running: RunningSession, conversationId: string): Promise<WorkerDismissalEvidence[]> {
   const url = new URL(`${running.basePath}api/chat/conversations/${encodeURIComponent(conversationId)}/worker-evidence`, "http://child.invalid");
-  const response = await fetch(childUrlFor(running, url), { headers: childRequestHeaders(running), signal: AbortSignal.timeout(10_000), redirect: "error" });
+  const response = await fetch(childUrlFor(running, url), { headers: childRequestHeaders(running), signal: AbortSignal.timeout(WORKER_EVIDENCE_TIMEOUT_MS), redirect: "error" });
   if (!response.ok) { await response.body?.cancel(); throw new WorkerDismissalsError(response.status === 507 ? "capacity" : "unavailable", "authoritative worker status is unavailable"); }
   const malformed = (): never => { throw new WorkerDismissalsError("unavailable", "invalid authoritative worker evidence"); };
   let input: unknown;
