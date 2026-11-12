@@ -6,7 +6,7 @@ import { CoordinatedScrollOwner } from "./coordinated-scroll";
 const disposals: Array<() => void> = [];
 afterEach(() => { for (const dispose of disposals.splice(0).reverse()) dispose(); });
 
-function fixture(followMotion?: () => "smooth" | "instant") {
+function fixture(followMotion?: () => "smooth" | "instant", endThreshold?: number) {
   const { document, window } = parseHTML("<html><body><div></div></body></html>");
   const element = document.querySelector("div")! as unknown as HTMLElement;
   const frames = new Map<number, FrameRequestCallback>();
@@ -21,7 +21,7 @@ function fixture(followMotion?: () => "smooth" | "instant") {
     scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(value, extent - viewport)); writes.push(top); } },
     scrollHeight: { get: () => extent }, clientHeight: { get: () => viewport },
   });
-  const anchor = new TimelineAnchorController();
+  const anchor = new TimelineAnchorController(endThreshold);
   const options = {
     followMotion,
     anchor, active: () => active,
@@ -64,6 +64,58 @@ function withVisibleBand(band: { height: number; offsetTop: number }, run: () =>
 }
 
 describe("coordinated scrolling", () => {
+  test("native downward timeline arrival respects the 48px boundary", () => {
+    for (const gap of [49, 48, 47.9, 20, 0.4, 0]) {
+      const f = fixture(() => "smooth");
+      f.move(200); f.owner.pause();
+      f.move(199); f.event("scroll");
+      f.move(300 - gap); f.event("scroll");
+      expect(f.anchor.isPinned()).toBe(gap <= 48);
+    }
+  });
+  test("tiny native downward steps resume at fractional bottom without rounding", () => {
+    // Also exercise the old arrival policy so restoring 48px cannot hide a
+    // native-movement classification regression.
+    for (const threshold of [undefined, 0.5]) {
+      const f = fixture(() => "smooth", threshold);
+      f.owner.request(); f.flush(0);
+      f.move(299.4); f.anchor.pause(f.options.measure(true));
+      f.event("scroll");
+      expect(f.anchor.isPinned()).toBe(false);
+      f.move(299.6); f.event("scroll");
+      expect(f.anchor.isPinned()).toBe(true);
+      f.flush(16); f.flush(32);
+      expect(f.writes).toEqual([]);
+      expect(f.element.scrollTop).toBe(299.6);
+      f.move(300); f.event("scroll"); f.flush(48);
+      expect(f.writes).toEqual([]);
+      expect(f.element.scrollTop).toBe(300);
+    }
+  });
+  test("tiny native downward steps cross the inclusive timeline arrival band", () => {
+    const f = fixture(() => "smooth");
+    f.move(251.8); f.anchor.pause(f.options.measure(true)); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.move(252.1); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+  test("restored fractional position and correction echoes wait for a real downward arrival", () => {
+    const f = fixture(() => "smooth");
+    f.move(251.8);
+    f.anchor.restore({ itemId: "line", offset: -251.8 });
+    f.owner.request(); f.flush(0);
+    f.event("scroll"); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.writes).toEqual([]);
+    f.move(252.1); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    f.event("wheel", { deltaY: -0.1 });
+    expect(f.anchor.isPinned()).toBe(false);
+    f.move(252); f.event("scroll");
+    f.owner.request(true); f.flush(16); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.element.scrollTop).toBe(252);
+  });
   test("native elastic scrolling beyond latest is not snapped back by follow frames", () => {
     const f = fixture(() => "smooth");
     f.owner.request(); f.flush(0);
@@ -1064,7 +1116,7 @@ describe("coordinated scrolling", () => {
     expect(f.element.scrollTop).toBe(296);
     expect(f.anchor.isPinned()).toBe(false);
     f.move(390); f.event("scroll");
-    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.anchor.isPinned()).toBe(true);
     f.move(400); f.event("scroll");
     expect(f.anchor.isPinned()).toBe(true);
     f.flush(); expect(f.element.scrollTop).toBe(400);

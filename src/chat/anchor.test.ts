@@ -102,15 +102,13 @@ describe("semantic timeline anchoring", () => {
     });
     expect(controller.isPinned()).toBe(false);
   });
-  test("a paused reader resumes only upon reaching the actual bottom, not its neighborhood", () => {
-    const controller = new TimelineAnchorController();
-    controller.pause(geometry(200));
-    controller.observe(geometry(280), "down");
-    expect(controller.isPinned()).toBe(false);
-    controller.observe(geometry(299), "down");
-    expect(controller.isPinned()).toBe(false);
-    controller.observe(geometry(300), "down");
-    expect(controller.isPinned()).toBe(true);
+  test("downward timeline arrival resumes inclusively within 48px", () => {
+    for (const gap of [49, 48, 47.9, 20, 0.4, 0]) {
+      const controller = new TimelineAnchorController();
+      controller.pause(geometry(200));
+      controller.observe(geometry(300 - gap), "down");
+      expect(controller.isPinned()).toBe(gap <= 48);
+    }
   });
   test("follows streaming only while pinned and reports unseen content otherwise", () => {
     const controller = new TimelineAnchorController();
@@ -133,9 +131,9 @@ describe("semantic timeline anchoring", () => {
     expect(controller.isPinned()).toBe(false);
     expect(controller.afterMutation(geometry(288, 700), true)).toBe(288);
     expect(controller.hasUnseen()).toBe(true);
-    // Coming back down near the end still preserves reading intent.
+    // Coming back down within 48px resumes following.
     controller.observe(geometry(360, 700), "down");
-    expect(controller.isPinned()).toBe(false);
+    expect(controller.isPinned()).toBe(true);
     controller.observe(geometry(400, 700), "down");
     expect(controller.isPinned()).toBe(true);
     expect(controller.hasUnseen()).toBe(false);
@@ -148,6 +146,18 @@ describe("semantic timeline anchoring", () => {
     expect(controller.isPinned()).toBe(false);
     controller.observe(geometry(288), "none");
     expect(controller.isPinned()).toBe(false);
+  });
+
+  test("fractional downward arrival after a restored-position echo is reader movement", () => {
+    const controller = new TimelineAnchorController();
+    controller.restore({ itemId: "i0", offset: 0 });
+    const restored = geometry(251.8, 600, [0]);
+    expect(controller.afterMutation(restored)).toBe(251.8);
+    controller.observe(restored, "none");
+    controller.observe(restored, "none");
+    expect(controller.isPinned()).toBe(false);
+    controller.observe(geometry(252.1, 600, [-0.3]), "down");
+    expect(controller.isPinned()).toBe(true);
   });
 
   test("a clamped decrease that keeps the end in view stays pinned", () => {
@@ -196,9 +206,9 @@ describe("semantic timeline anchoring", () => {
     controller.observe(restored);
     expect(controller.isPinned()).toBe(false);
     expect(controller.currentAnchor()).not.toBeNull();
-    // A reader scroll to the same neighbourhood still does not pin.
+    // A real downward reader step inside the band resumes following.
     controller.observe(geometry(372, 700, [-82, 18, 118]));
-    expect(controller.isPinned()).toBe(false);
+    expect(controller.isPinned()).toBe(true);
     controller.observe(geometry(400, 700, [-110, -10, 90]));
     expect(controller.isPinned()).toBe(true);
   });

@@ -389,8 +389,10 @@ export class CoordinatedScrollOwner {
     // their native ranges; explicit wheel/touch/key intent still pauses first.
     const currentTop = Math.max(0, Math.min(geometry.scrollTop, bottom));
     const previousTop = Math.max(0, Math.min(previous.scrollTop, previous.scrollHeight - previous.clientHeight));
-    const movement = currentTop < previousTop - 0.5 ? "up"
-      : currentTop > previousTop + 0.5 ? "down" : "none";
+    // Native fractional reader movement is still intent, not the animation's
+    // half-pixel settling tolerance. Ignore only floating-point roundoff.
+    const movement = currentTop < previousTop - 1e-6 ? "up"
+      : currentTop > previousTop + 1e-6 ? "down" : "none";
     if (this.heldTarget) {
       // The held control's position is the one this scroller has. A scroll we
       // did not write — WebKit's autoscroll as the caret is dragged to the
@@ -424,6 +426,9 @@ export class CoordinatedScrollOwner {
       // changes alone still take the ordinary movement path below.
       this.request();
     } else if (movement === "down" && this.options.anchor.isPinned()) {
+      // Preserve follow intent during catch-up, but let adapters observe other
+      // axes (shell horizontal scrolling) before the next correction restores them.
+      this.options.anchor.observe(geometry, "none");
       // Catch-up leaves room for a reader to move toward latest themselves.
       // Only upward intent pauses following; rebase from their new position
       // so an older animation curve cannot pull their forward progress back.

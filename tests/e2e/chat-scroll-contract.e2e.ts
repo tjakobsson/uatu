@@ -2,22 +2,46 @@ import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { test as baseTest, expect } from "./fixtures";
 import { openChatPanel, openChatWorkers } from "./chat-helpers";
 import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
-import { bootShell, log, shell } from "./chat-shell-helpers";
+import { bootShell, control, log, shell } from "./chat-shell-helpers";
 
 const test = withEngineBrowsers(baseTest);
 attachPageDiagnosticsOnFailure(test);
-
-async function control(request: APIRequestContext, data: Record<string, unknown>) {
-  const response = await request.post("/__e2e/chat", { data });
-  expect(response.ok()).toBe(true);
-  return response.json();
-}
 
 async function frames(page: Page, count = 3) {
   await page.evaluate(count => new Promise<void>(resolve => {
     const next = () => { if (--count <= 0) resolve(); else requestAnimationFrame(next); };
     requestAnimationFrame(next);
   }), count);
+}
+
+type FollowSample = { time: number; top: number; extent: number; height: number };
+
+const recordFollowing = (viewport: Locator) => viewport.evaluateHandle(el => {
+  const state = { active: true, samples: [] as FollowSample[] };
+  const sample = (time: number) => {
+    state.samples.push({ time, top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight });
+    if (state.active) requestAnimationFrame(sample);
+  };
+  requestAnimationFrame(sample);
+  return state;
+});
+
+function expectSmoothFollowing(samples: FollowSample[], surface: string) {
+  const growth = samples.findIndex((sample, i) => i > 0 && sample.extent > samples[i - 1]!.extent + 2);
+  expect(growth, `${surface} fixture must produce actual growth`).toBeGreaterThan(0);
+  const moving = samples.slice(growth).filter((sample, i) => sample.top > samples[growth + i - 1]!.top + 0.5);
+  expect(moving.length, `${surface} following must progress across frames, not teleport`).toBeGreaterThanOrEqual(3);
+  expect(moving.some(sample => sample.extent - sample.height - sample.top > 2),
+    `${surface} movement must include intermediate reading positions`).toBe(true);
+  const backwards = samples.slice(growth).filter((sample, i) => {
+    const prior = samples[growth + i - 1]!;
+    return sample.extent >= prior.extent && sample.height === prior.height && sample.top < prior.top - 1;
+  });
+  expect(backwards, `passive append-only ${surface} following must never bounce upward`).toEqual([]);
+  const lastGrowth = samples.reduce((index, sample, i) => i > 0 && sample.extent !== samples[i - 1]!.extent ? i : index, growth);
+  const settled = samples.slice(lastGrowth).find(sample => sample.extent - sample.height - sample.top <= 2);
+  expect(settled, `${surface} following must reach latest after output settles`).toBeDefined();
+  expect(settled!.time - samples[lastGrowth]!.time, `${surface} catch-up after the final layout update`).toBeLessThanOrEqual(300);
 }
 
 /** Arm in the page before triggering motion; send input as soon as it is live,
@@ -209,15 +233,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       await expect(timeline).toContainText("Streaming reply");
       await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
       await frames(page);
-      const trace = await timeline.evaluateHandle(el => {
-        const state = { active: true, samples: [] as Array<{ time: number; top: number; extent: number; height: number }> };
-        const sample = (time: number) => {
-          state.samples.push({ time, top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight });
-          if (state.active) requestAnimationFrame(sample);
-        };
-        requestAnimationFrame(sample);
-        return state;
-      });
+      const trace = await recordFollowing(timeline);
       try {
         await frames(page);
         if (!touch) await timeline.hover();
@@ -240,23 +256,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         await expect(timeline).toContainText("Streamed paragraph 17");
         await frames(page, 24);
         const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
-        const growth = samples.findIndex((sample, i) => i > 0 && sample.extent > samples[i - 1]!.extent + 2);
-        expect(growth, "fixture must produce actual transcript growth").toBeGreaterThan(0);
-        const moving = samples.slice(growth).filter((sample, i) => {
-          const prior = samples[growth + i - 1]!;
-          return sample.top > prior.top + 0.5;
-        });
-        expect(moving.length, "following must progress across frames, not teleport").toBeGreaterThanOrEqual(3);
-        expect(moving.some(sample => sample.extent - sample.height - sample.top > 2), "movement must include intermediate reading positions").toBe(true);
-        const backwards = samples.slice(growth).filter((sample, i) => {
-          const prior = samples[growth + i - 1]!;
-          return sample.extent >= prior.extent && sample.height === prior.height && sample.top < prior.top - 1;
-        });
-        expect(backwards, "passive append-only following must never bounce upward").toEqual([]);
-        const lastGrowth = samples.reduce((index, sample, i) => i > 0 && sample.extent !== samples[i - 1]!.extent ? i : index, growth);
-        const settled = samples.slice(lastGrowth).find(sample => sample.extent - sample.height - sample.top <= 2);
-        expect(settled, "following must reach latest after output settles").toBeDefined();
-        expect(settled!.time - samples[lastGrowth]!.time, "catch-up after the final layout update").toBeLessThanOrEqual(300);
+        expectSmoothFollowing(samples, "timeline");
 
         await pause(page, timeline, touch);
         await control(request, { action: "delta", conversationId: conversation.id, itemId: "contract:stream", delta: "\n\nUnseen while paused." });
@@ -320,35 +320,14 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       });
       await frames(page);
       const outerTop = await fixture.timeline.evaluate(el => el.scrollTop);
-      const trace = await viewport.evaluateHandle(el => {
-        const state = { active: true, samples: [] as Array<{ time: number; top: number; extent: number; height: number }> };
-        const sample = (time: number) => {
-          state.samples.push({ time, top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight });
-          if (state.active) requestAnimationFrame(sample);
-        };
-        requestAnimationFrame(sample);
-        return state;
-      });
+      const trace = await recordFollowing(viewport);
       try {
         await frames(page);
         await fixture.update(shell(shape, log(140)));
         await expect(viewport.locator(".chat-shell-lines > span")).toHaveCount(140);
         await frames(page, 24);
         const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
-        const growth = samples.findIndex((sample, i) => i > 0 && sample.extent > samples[i - 1]!.extent + 2);
-        expect(growth).toBeGreaterThan(0);
-        const moving = samples.slice(growth).filter((sample, i) => sample.top > samples[growth + i - 1]!.top + 0.5);
-        expect(moving.length, "shell following must progress across frames, not teleport").toBeGreaterThanOrEqual(3);
-        expect(moving.some(sample => sample.extent - sample.height - sample.top > 2)).toBe(true);
-        const backwards = samples.slice(growth).filter((sample, i) => {
-          const prior = samples[growth + i - 1]!;
-          return sample.extent >= prior.extent && sample.height === prior.height && sample.top < prior.top - 1;
-        });
-        expect(backwards, "append-only shell following must not bounce upward").toEqual([]);
-        const lastGrowth = samples.reduce((index, sample, i) => i > 0 && sample.extent !== samples[i - 1]!.extent ? i : index, growth);
-        const settled = samples.slice(lastGrowth).find(sample => sample.extent - sample.height - sample.top <= 2);
-        expect(settled).toBeDefined();
-        expect(settled!.time - samples[lastGrowth]!.time).toBeLessThanOrEqual(300);
+        expectSmoothFollowing(samples, "shell");
         expect(Math.abs(await fixture.timeline.evaluate(el => el.scrollTop) - outerTop), "inner output growth must not move the outer reading position").toBeLessThanOrEqual(2);
       } finally {
         try {
@@ -573,6 +552,90 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       }, reading.index);
       await testInfo.attach("intrinsic-image-text-anchor.json", { body: JSON.stringify({ initial: reading.offset, afterImage, drift: afterImage - reading.offset }), contentType: "application/json" });
       expect(Math.abs(afterImage - reading.offset), "intrinsic growth above the text inside one paragraph must not move the reading line").toBeLessThanOrEqual(2);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  for (const child of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} preserves a paused word during paragraph append and rewrap`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
+      viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
+    try {
+      await request.post("/__e2e/reset");
+      const { conversation } = await seed(request, "Scroll contract", child);
+      const timeline = await open(page, request, touch, child);
+      const markdown = Array.from({ length: 1600 }, (_, i) => `word${String(i).padStart(4, "0")}`).join(" ");
+      const update = (markdown: string) => control(request, { action: "item", conversationId: conversation.id,
+        item: { id: "contract:append-rewrap", type: "assistant_message", createdAt: 100, markdown } });
+      await update(markdown);
+      const paragraph = timeline.locator('[data-chat-item-id="contract:append-rewrap"] p');
+      await expect(paragraph).toContainText("word1599");
+      await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
+      await pause(page, timeline, touch);
+      await timeline.evaluate(el => {
+        el.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -1500 }));
+        el.scrollTop -= 1500;
+      });
+      await frames(page);
+      const reading = await paragraph.evaluate(node => {
+        const viewport = node.closest<HTMLElement>(".chat-timeline")!;
+        const doc = node.ownerDocument as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+        const x = node.getBoundingClientRect().left + 5, y = viewport.getBoundingClientRect().top + 8;
+        const caret = doc.caretPositionFromPoint?.(x, y);
+        const fallback = caret ? null : doc.caretRangeFromPoint?.(x, y);
+        const text = caret?.offsetNode ?? fallback?.startContainer;
+        const index = caret?.offset ?? fallback?.startOffset;
+        if (text !== node.firstChild || index === undefined) throw new Error("Fixture must expose a visible plain-text word");
+        let start = Math.min(index, node.textContent!.length - 1), end = start;
+        while (start > 0 && /\S/.test(node.textContent![start - 1]!)) start--;
+        while (end < node.textContent!.length && /\S/.test(node.textContent![end]!)) end++;
+        if (end === start) throw new Error("Fixture reading point must hit a word, not whitespace");
+        const range = doc.createRange(); range.setStart(text!, start); range.setEnd(text!, end);
+        return { start, end, word: node.textContent!.slice(start, end),
+          offset: range.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+          bottom: range.getBoundingClientRect().bottom - viewport.getBoundingClientRect().top, height: viewport.clientHeight,
+          width: node.getBoundingClientRect().width };
+      });
+      const previousNode = await paragraph.elementHandle();
+      // Rewrap in the same DOM-update turn as the append, before the ensuing
+      // ResizeObserver correction. No fake geometry or synthetic resize event.
+      const resize = await timeline.evaluateHandle(el => {
+        const state = { changed: false, disconnect: () => observer.disconnect() };
+        const observer = new MutationObserver(() => {
+          if (!el.querySelector('[data-chat-item-id="contract:append-rewrap"] p')?.textContent?.endsWith(" appended-tail")) return;
+          observer.disconnect();
+          el.style.width = `${el.clientWidth - 64}px`;
+          state.changed = true;
+        });
+        observer.observe(el, { childList: true, subtree: true, characterData: true });
+        return state;
+      });
+      try {
+        await update(`${markdown} appended-tail`);
+        await expect(paragraph).toContainText("appended-tail");
+        await expect.poll(() => resize.evaluate(state => state.changed)).toBe(true);
+        await frames(page, 24);
+        const final = await paragraph.evaluate((node, reading) => {
+          const range = node.ownerDocument.createRange();
+          range.setStart(node.firstChild!, reading.start); range.setEnd(node.firstChild!, reading.end);
+          return { word: node.textContent!.slice(reading.start, reading.end),
+            offset: range.getBoundingClientRect().top - node.closest(".chat-timeline")!.getBoundingClientRect().top,
+            width: node.getBoundingClientRect().width };
+        }, reading);
+        await testInfo.attach("append-rewrap-word.json", { body: JSON.stringify({ reading, final, drift: final.offset - reading.offset }), contentType: "application/json" });
+        expect(await previousNode!.evaluate(node => node.isConnected), "the append must exercise replacement DOM").toBe(false);
+        expect(reading.bottom, "the captured word must intersect the viewport").toBeGreaterThan(0);
+        expect(reading.offset, "the captured word must intersect the viewport").toBeLessThan(reading.height);
+        expect(Math.abs(final.width - reading.width), "the paragraph must really rewrap").toBeGreaterThan(20);
+        expect(final.word).toBe(reading.word);
+        expect(Math.abs(final.offset - reading.offset), "the unchanged visible word must survive append and rewrap").toBeLessThanOrEqual(2);
+        await expect(page.locator(child ? "#chat-drilldown-latest" : "#chat-latest")).toBeVisible();
+      } finally {
+        await resize.evaluate(state => state.disconnect());
+        await resize.dispose();
+        await previousNode?.dispose();
+      }
     } finally {
       await browser.close();
     }

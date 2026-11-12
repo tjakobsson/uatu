@@ -240,11 +240,109 @@ describe("chat reversible-history composer", () => {
     }
   });
 
+  for (const target of ["parent", "child"] as const) for (const scenario of ["49px", "48px", "inside", "fractional", "echo", "upward", "restored", "clamp"] as const) test(`${target} rendered timeline arrival policy: ${scenario}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>(target === "parent" ? "#chat-timeline" : "#chat-drilldown-timeline")!;
+    let height = 2000;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: () => height },
+    });
+    timeline.scrollTop = 0;
+    const rect = (top: number, size: number) => ({ top, bottom: top + size, height: size, left: 0, right: 640, width: 640 }) as DOMRect;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    const prototype = window.HTMLElement.prototype, originalBounds = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function () {
+      return this.getAttribute("data-chat-item-id") === "message:arrival"
+        ? rect(-timeline.scrollTop, height) : originalBounds.call(this);
+    };
+    const tool = { id: "tool:arrival", type: "tool", createdAt: 1, name: "task", status: "completed",
+      input: JSON.stringify({ description: "Arrival child", subagent_type: "explore", prompt: "go" }), childConversationId: "child" };
+    const api = questionApi(document, { conversations: ["one", "two"], capabilities: ["subagents"],
+      items: id => target === "child" && id === "one" ? [tool] : [{ id: "message:arrival", type: "user_message", createdAt: 1, text: "Arrival reading row" }] });
+    const snapshotNow = api.snapshot.bind(api);
+    api.snapshot = (id, ...args) => id === "two" ? new Promise(() => {}) : snapshotNow(id, ...args);
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined, streamCount = 0;
+    const targetId = target === "parent" ? "one" : "child";
+    api.stream = (id, _cursor, handlers) => { if (id === targetId) { stream = handlers; streamCount++; } return { close() {} }; };
+    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0, timestamp = performance.now();
+    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const drain = () => {
+      for (let n = 0; n < 40 && frames.size; n++) {
+        timestamp += 20;
+        for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
+      }
+    };
+    const click = (selector: string) => document.querySelector(selector)!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const move = (top: number) => { timeline.scrollTop = top; timeline.dispatchEvent(new window.Event("scroll")); };
+    const upward = () => timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -1 }));
+    const { initChat } = await import(`./ui.ts?arrival-policy=${target}-${scenario}-${Date.now()}`);
+    initChat(api);
+    try {
+      if (target === "child") {
+        await waitUntil(() => { drain(); return !!document.querySelector('[data-worker-item="tool:arrival"]'); });
+        click('[data-worker-item="tool:arrival"]');
+      }
+      await waitUntil(() => { drain(); return !!stream && timeline.scrollTop === 1600; });
+      upward();
+      move(scenario === "fractional" ? 1551.8 : scenario === "echo" || scenario === "restored" || scenario === "upward" ? 1553 : 1400);
+      if (scenario === "49px") move(1551);
+      if (scenario === "48px") move(1552);
+      if (scenario === "inside") move(1553);
+      // JS fractional geometry is intentional: this exercises the rendered UI
+      // wiring, not a physical browser's native scrolling precision.
+      if (scenario === "fractional") { move(1552.1); expect(timeline.scrollTop).toBe(1552.1); }
+      if (scenario === "echo") { move(1553); move(1553); }
+      if (scenario === "upward") { upward(); move(1552.9); }
+      if (scenario === "restored") {
+        if (target === "child") { click("#chat-drilldown-back"); click('[data-worker-item="tool:arrival"]'); }
+        else {
+          const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+          select.value = "two"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+          select.value = "one"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+        }
+        await waitUntil(() => streamCount === 2);
+        drain();
+        expect(timeline.scrollTop).toBe(1553);
+        move(1553); move(1553);
+      }
+      if (scenario === "clamp") {
+        document.dispatchEvent(new window.Event("uatu:before-surface-change"));
+        height = 1500;
+        move(1100);
+        window.dispatchEvent(new window.Event("resize"));
+      }
+      drain();
+      height += 400;
+      stream!.event({ type: "item.upsert", conversationId: targetId, generation: "g", sequence: 1,
+        item: { id: "message:arrival-later", type: "user_message", createdAt: 2, text: "Arrival later output" } }, "arrival-later");
+      await waitUntil(() => { drain(); return timeline.textContent!.includes("Arrival later output"); });
+      const resumes = ["48px", "inside", "fractional"].includes(scenario);
+      if (resumes) expect(timeline.scrollTop).toBe(height - 400);
+      else expect(timeline.scrollTop).toBeLessThan(height - 400);
+      expect(document.querySelector<HTMLButtonElement>(target === "parent" ? "#chat-latest" : "#chat-drilldown-latest")!.hidden).toBe(resumes);
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      globalThis.requestAnimationFrame = requestFrame;
+      globalThis.cancelAnimationFrame = cancelFrame;
+      prototype.getBoundingClientRect = originalBounds;
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
   const rewrapCases = (["parent", "child"] as const).flatMap(target => (["position", "range"] as const).flatMap(caretApi =>
     (["settled", "batched"] as const).map(cadence => ({ target, caretApi, cadence, readerMove: false, closedGroup: false }))));
   rewrapCases.push({ target: "parent", caretApi: "position", cadence: "batched", readerMove: true, closedGroup: false });
   for (const target of ["parent", "child"] as const) rewrapCases.push({ target, caretApi: "position", cadence: "settled", readerMove: true, closedGroup: true });
-  for (const { target, caretApi, cadence, readerMove, closedGroup } of rewrapCases) test(`${target} preserves the first visible text character with caret ${caretApi} during ${cadence} rewraps and DOM replacement${readerMove ? " after upward reader movement" : ""}${closedGroup ? " following a closed activity group with nonzero hidden geometry" : ""}`, async () => {
+  for (const { target, caretApi, cadence, readerMove, closedGroup } of rewrapCases) for (const change of ["none", "append", ...(caretApi === "position" && cadence === "settled" && !readerMove ? ["ambiguous", "rewrite"] : [])]) test(`${target} preserves the first visible text character with caret ${caretApi} during ${cadence} rewraps and DOM replacement${change !== "none" ? ` with paragraph ${change}` : ""}${readerMove ? " after upward reader movement" : ""}${closedGroup ? " following a closed activity group with nonzero hidden geometry" : ""}`, async () => {
+    const append = change !== "none";
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
@@ -254,7 +352,7 @@ describe("chat reversible-history composer", () => {
     const rowSelector = `${target === "parent" ? "#chat-items" : "#chat-drilldown-items"} [data-chat-item-id="message:rewrap"]`;
     const paragraph = () => document.querySelector<HTMLElement>(`${rowSelector} .markdown-body > p`)!;
     const words = Array.from({ length: 1600 }, (_, index) => `uniqueword${String(index).padStart(4, "0")}`);
-    const plainText = words.join(" ");
+    let plainText = words.join(" ");
     // The fallback caret API also crosses real inline Markdown text nodes.
     const markdown = words.map((word, index) => caretApi === "range" && index % 100 === 0 ? `**${word}**` : word).join(" ");
     let charactersPerLine = 100;
@@ -345,10 +443,27 @@ describe("chat reversible-history composer", () => {
         return range.getBoundingClientRect();
       };
       const originalTop = readingRange().top;
+      const originalRowTop = document.querySelector<HTMLElement>(rowSelector)!.getBoundingClientRect().top;
       const originalText = paragraph().firstChild!;
-      stream!.event({ type: "item.upsert", conversationId: target === "parent" ? "one" : "child", generation: "g", sequence: 1, item: { id: "message:rewrap", type: "assistant_message", createdAt: 1, markdown: `${markdown}\n\n` } }, "cursor-rewrap-1");
+      let replacementMarkdown = markdown;
+      if (append) {
+        plainText += " Appended text beyond the unchanged visible word.";
+        replacementMarkdown += " Appended text beyond the unchanged visible word.";
+        if (change === "ambiguous") replacementMarkdown += `\n\n${markdown} A second matching prefix is ambiguous.`;
+        if (change === "rewrite") {
+          replacementMarkdown = replacementMarkdown.replace("uniqueword0000", "rewritten0000x");
+          plainText = plainText.replace("uniqueword0000", "rewritten0000x");
+        }
+        document.dispatchEvent(new window.Event("uatu:before-surface-change"));
+        if (change === "append") charactersPerLine = 105;
+      }
+      stream!.event({ type: "item.upsert", conversationId: target === "parent" ? "one" : "child", generation: "g", sequence: 1, item: { id: "message:rewrap", type: "assistant_message", createdAt: 1, markdown: `${replacementMarkdown}\n\n` } }, "cursor-rewrap-1");
       await waitUntil(() => !originalText.isConnected);
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      if (change === "ambiguous" || change === "rewrite") {
+        expect(document.querySelector<HTMLElement>(rowSelector)!.getBoundingClientRect().top,
+          "unresolvable old text must use the item-box fallback on replacement").toBe(originalRowTop);
+      }
       for (const width of [110, 125, 140]) {
         document.dispatchEvent(new window.Event("uatu:before-surface-change"));
         charactersPerLine = width;
@@ -360,7 +475,7 @@ describe("chat reversible-history composer", () => {
       }
       if (cadence === "batched") await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       expect(paragraph().textContent).toBe(plainText);
-      expect(Math.abs(readingRange().top - originalTop)).toBeLessThanOrEqual(2);
+      if (change !== "ambiguous" && change !== "rewrite") expect(Math.abs(readingRange().top - originalTop)).toBeLessThanOrEqual(2);
     } finally {
       window.dispatchEvent(new window.Event("pagehide"));
       document.createRange = originalRange;
@@ -542,7 +657,7 @@ describe("chat reversible-history composer", () => {
     }
   });
 
-  for (const target of ["parent", "child"] as const) for (const action of ["place", "wheel", "touch", "hide", "leave", "resync"] as const) test(`${target} initial placement crosses layout and respects ${action} before correction`, async () => {
+  for (const target of ["parent", "child"] as const) for (const action of ["place", "wheel", "touch", "hide", "leave", "resync", "install-wheel", "install-replacement-wheel", "install-saved-wheel", "install-saved-replacement-wheel"] as const) test(`${target} initial placement crosses layout and respects ${action} before correction`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
@@ -592,6 +707,46 @@ describe("chat reversible-history composer", () => {
         await waitUntil(() => { frame(); return !!document.querySelector('[data-worker-item="tool:initial"]'); });
         click('[data-worker-item="tool:initial"]');
         await waitUntil(() => !!stream);
+      }
+      if (action.includes("saved")) {
+        drain();
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        timeline.scrollTop = 700;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        if (target === "child") {
+          click("#chat-drilldown-back");
+          click('[data-worker-item="tool:initial"]');
+        } else {
+          const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+          select.value = "two"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+          select.value = "one"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+        }
+        await waitUntil(() => streamCount === 2);
+      }
+      if (action.includes("replacement")) {
+        const previousCount = streamCount;
+        stream!.resync();
+        await waitUntil(() => streamCount === previousCount + 1);
+      }
+      if (action.startsWith("install-")) {
+        // The snapshot/stream is installed, but NO render frame has run.
+        // New reader input must outrank either null/latest or saved restore.
+        writes.length = 0;
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        // A fresh empty view cannot move yet, but upward intent at that
+        // boundary must still cancel latest. A reopened view has real room.
+        const readerTop = action.includes("saved") ? 650 : 0;
+        timeline.scrollTop = readerTop;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        drain();
+        expect(timeline.scrollTop, "install-to-render input wins over pending restore").toBe(readerTop);
+        height = 2800;
+        stream!.event({ type: "item.upsert", conversationId: targetId, generation: "g", sequence: 1,
+          item: { id: "message:later", type: "user_message", createdAt: 2, text: "Later output" } }, "install-input-later");
+        await waitUntil(() => { drain(); return timeline.textContent!.includes("Later output"); });
+        expect(timeline.scrollTop, "later output retains the newer paused input").toBe(readerTop);
+        expect(writes).toEqual([readerTop]);
+        return;
       }
       await waitUntil(() => { frame(); return !!timeline.querySelector('[data-chat-item-id="message:initial"]'); });
       expect(timeline.scrollTop, "content renders before initial placement").toBe(0);

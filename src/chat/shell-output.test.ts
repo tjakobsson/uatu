@@ -48,6 +48,37 @@ test("rendered shell follows smoothly, settles within 300ms and responds to redu
 });
 
 describe("shell scroll owner", () => {
+  test("shell downward arrival keeps its independent approximately-bottom policy", () => {
+    const viewport = view(); const owner = new ShellScrollOwner(viewport);
+    try {
+      owner.latest(); frame(); owner.readerInput("up");
+      viewport.scrollTop = 1600; owner.observe();
+      for (const gap of [48, 20, 1]) {
+        viewport.scrollTop = 1760 - gap; owner.observe();
+        expect(owner.following).toBe(gap <= 1);
+      }
+    } finally { owner.dispose(); }
+  });
+  test("diagonal native progress during smooth catch-up retains the new horizontal offset", () => {
+    Reflect.set(globalThis, "matchMedia", () => ({ matches: false }));
+    const viewport = view(); const owner = new ShellScrollOwner(viewport);
+    try {
+      owner.updated(); frame();
+      viewport.scrollLeft = 70; owner.observe();
+      Object.assign(viewport, { scrollHeight: 2500 }); owner.updated(); frame(); frame();
+      expect(viewport.scrollTop).toBeGreaterThan(1760);
+      expect(viewport.scrollTop).toBeLessThan(2260);
+      viewport.scrollTop += 10; viewport.scrollLeft = 130; owner.observe();
+      frame();
+      expect(viewport.scrollLeft).toBe(130);
+      expect(owner.snapshot().left).toBe(130);
+      Object.assign(viewport, { scrollHeight: 2600 }); owner.updated();
+      for (let step = 0; step < 18; step++) frame();
+      expect(viewport.scrollTop).toBe(2360);
+      expect(viewport.scrollLeft).toBe(130);
+      expect(owner.following).toBe(true);
+    } finally { owner.dispose(); }
+  });
   test("one frame correction initializes completed output at bottom and coalesces appends", () => {
     const viewport = view(); const owner = new ShellScrollOwner(viewport);
     let writes = 0, top = 0;

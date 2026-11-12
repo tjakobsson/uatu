@@ -144,8 +144,22 @@ function markdownGeometry(element: HTMLElement, viewport: DOMRect, height: numbe
   const visible = measured.find(({ rect }) => rect.bottom > viewport.top && rect.top < viewport.top + height);
   const fresh = visible && visibleCharacter(visible.block, visible.key, visible.rect, viewport, visible.nodes);
   const retained = retainedKey?.match(/^(.*):text:(\d+)$/);
-  const retainedBlock = retained && measured.find(({ key }) => key === retained[1]);
-  const previous = retainedBlock && characterGeometry(retainedBlock.block, retainedBlock.key, Number(retained![2]), viewport.top, retainedBlock.nodes);
+  const prefix = retained?.[1]?.match(/^markdown-v1:([^:]+):(\d+):[^:]+:[^:]+$/);
+  // An append changes the whole-block fingerprint, but not its old prefix or
+  // character offsets. Match that entire opaque prefix, never a repeated word
+  // or occurrence index. Multiple matching regions remain deliberately unsafe.
+  const compatible = retained ? regions.filter(region => {
+    if (region.key === retained[1]) return true;
+    if (!prefix) return false;
+    const length = Number(prefix[2]);
+    const context = region.nodes ? "li-own" : region.block.localName;
+    if (context !== prefix[1] || !Number.isSafeInteger(length) || length <= Number(retained[2])) return false;
+    const text = region.nodes ? region.nodes.map(node => node.data).join("") : region.block.textContent ?? "";
+    return text.length > length && blockKey(region.block, text.slice(0, length), context) === retained[1];
+  }) : [];
+  const retainedBlock = compatible.length === 1 && measured.find(region => region.block === compatible[0]!.block
+    && region.key === compatible[0]!.key && region.nodes === compatible[0]!.nodes);
+  const previous = retainedBlock && characterGeometry(retainedBlock.block, retained![1]!, Number(retained![2]), viewport.top, retainedBlock.nodes);
   // A correction's scroll echo must retain the same visible character, not
   // recapture a new line-start character after every width step. Once it is
   // offscreen, captureAnchor naturally chooses the fresh visible entry.

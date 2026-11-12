@@ -885,6 +885,9 @@ export function initChat(api = new ChatApiClient()): void {
     anchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? geometry(preserveAnchor, preferredItemId) : extentsOf(timeline), active: chatSurfaceActive,
     followMotion: scrollFollowMotion,
     onChange: () => {
+      // A paused live owner is newer than the snapshot's owed first-paint
+      // restore. Do not replay navigation/latest over intervening reader input.
+      if (!anchor.isPinned()) parentPositionRestore = undefined;
       if (projection) {
         const current = anchor.currentAnchor();
         if (current) presentation.anchors[projection.conversationId] = current;
@@ -908,7 +911,10 @@ export function initChat(api = new ChatApiClient()): void {
     anchor: childAnchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? childGeometry(preserveAnchor, preferredItemId) : extentsOf(drilldownTimeline),
     active: () => chatSurfaceActive() && !!child,
     followMotion: scrollFollowMotion,
-    onChange: () => { if (childLatest) childLatest.hidden = !childAnchor.hasUnseen(); },
+    onChange: () => {
+      if (!childAnchor.isPinned()) childPositionRestore = undefined;
+      if (childLatest) childLatest.hidden = !childAnchor.hasUnseen();
+    },
   }) : null;
   childLatest?.addEventListener("click", () => childScroll?.latest());
   /**

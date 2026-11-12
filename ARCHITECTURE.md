@@ -1082,8 +1082,11 @@ under a software keyboard. Touch Stop parent with worker records confirms its
 scope; detached workers remain running. Expanded work tracks hide the prompt rail so
 it cannot cover Stop targets. Transcript anchoring remains with its coordinated
 scroll owner; sending a prompt and remote dock growth preserve a paused reader's
-anchor rather than requesting latest. Only deliberate arrival at the bottom or
-the latest-content control resumes following.
+anchor rather than requesting latest. Deliberate downward arrival within 48 CSS
+pixels of the bottom (including the boundary), or the latest-content control,
+resumes timeline following. Upward input still pauses immediately; restoration,
+layout clamps and unchanged scroll echoes do not impersonate reader arrival.
+Shell output keeps its independent approximately-bottom resumption policy.
 Dock growth reserves its final bounded height and reveals the added area over
 160ms; reduced motion applies it immediately. Reserving layout avoids racing
 animated scroll clamps with prompt echo removal; the coordinated scroll owner
@@ -1099,7 +1102,10 @@ within a block; current text nodes and Range geometry are resolved afresh so a
 paragraph can rewrap without losing the first visible text line. Browsers without
 usable caret/Range geometry fall back to the block anchor. Legacy item-only anchors
 remain valid; missing or ambiguous content keys fall back to the item rather than guessing
-at a repeated paragraph. Nested shell viewports keep their independent owners.
+at a repeated paragraph. An appended paragraph can retain its character anchor
+when exactly one current region matches the complete old-prefix fingerprint;
+rewrites and ambiguous matches still fall back without persisting raw text.
+Nested shell viewports keep their independent owners.
 Genuine reader movement captures a fresh reading point; correction echoes retain
 the previous point so repeated width changes cannot silently select another line.
 Native keyboard and accessibility focus navigation remains authoritative; a
@@ -1122,6 +1128,7 @@ placement, not a retry. Reader input, hiding and navigation can preempt it.
 Snapshot replacement cancels stale callbacks while retaining the owner's
 unconsumed instant-placement intent; replacement geometry determines the target.
 Ordinary cancellation and reader pause still clear that intent.
+Newer paused reader intent also retires snapshot restoration owed before first render.
 Saved reading-anchor restoration and ordinary updates keep their same-frame
 render/correction transaction; focused answer holds retain their existing owner.
 When browser hit testing is usable, geometry resolves the first viewport row,

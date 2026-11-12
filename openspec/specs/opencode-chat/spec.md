@@ -1104,7 +1104,7 @@ Every answered question request SHALL contain exactly one answer array for each 
 - **AND** the request resolves everywhere it is shown under the existing ownership rules
 
 ### Requirement: Timeline position remains stable under streaming and navigation
-The Chat timeline SHALL follow the latest content until the reader deliberately scrolls upward. Following SHALL resume only when the reader scrolls back to the bottom or activates the accessible latest-content affordance. Once following is paused, streaming, message submission, tool updates, image or code layout, and activity expansion MUST NOT steal the reading position; the latest-content affordance SHALL indicate unseen updates and return to the end. Prepending older history SHALL preserve the same visible content and offset. During a client session, each conversation and task view SHALL retain its own reading anchor and follow state across navigation: paused views restore their reading position, following views catch up to latest, and first-time views open at latest. Existing client-local restoration across reloads remains supported where possible.
+The Chat timeline SHALL follow the latest content until the reader deliberately scrolls upward. Following SHALL resume when deliberate downward reader movement returns within 48 CSS pixels of the bottom, including the boundary, or the reader activates the accessible latest-content affordance. Once following is paused, streaming, message submission, tool updates, image or code layout, and activity expansion MUST NOT steal the reading position; the latest-content affordance SHALL indicate unseen updates and return to the end. Prepending older history SHALL preserve the same visible content and offset. During a client session, each conversation and task view SHALL retain its own reading anchor and follow state across navigation: paused views restore their reading position, following views catch up to latest, and first-time views open at latest. Existing client-local restoration across reloads remains supported where possible.
 
 Each shell viewport SHALL have a follow state independent of the outer timeline and other shell items. It SHALL initially follow the bottom. Any upward reader scroll SHALL stop following, including a movement smaller than a near-bottom threshold. Returning to the bottom or activating the viewport's accessible latest-output control SHALL resume following. Incoming output while following SHALL keep the bottom visible without resetting the horizontal offset. While following is paused, incoming output SHALL preserve the visible rendered content and its vertical offset, and the latest-output control SHALL indicate unseen output.
 
@@ -1147,11 +1147,30 @@ Already loaded ordinary assistant text SHALL retain real layout geometry rather 
 - **WHEN** the user scrolls upward by less than the near-end distance while content continues streaming
 - **THEN** the timeline is no longer pinned and the next update does not return it to the end
 
+#### Scenario: Downward arrival within 48px resumes timeline following
+- **GIVEN** following is paused in a parent or child outer timeline
+- **WHEN** deliberate downward reader movement reaches a bottom gap of 48 CSS pixels or less
+- **THEN** following resumes, including arrival exactly at 48px
+- **AND** subsequent content follows without requiring actual-bottom arrival or a Latest activation
+- **AND** deliberate downward movement that leaves a gap greater than 48px keeps following paused
+- **AND** upward input inside the band still pauses immediately
+
+#### Scenario: Near-bottom restoration and layout do not impersonate arrival
+- **WHEN** a paused parent or child timeline is restored, corrected or clamped into the 48px band, or a scroll event reports no actual movement
+- **THEN** following remains paused until deliberate downward reader arrival or activation of Latest
+- **AND** repeated programmatic echoes do not change that intent
+
+#### Scenario: Fractional downward arrival can resume following
+- **GIVEN** a paused parent or child timeline near the resumption boundary
+- **WHEN** actual downward reader movement of less than one CSS pixel enters the 48px band
+- **THEN** following resumes without confusing the fractional arrival with a no-movement event or a correction echo
+- **AND** the restored tolerance does not cause idle rounding of native bottom settling
+
 #### Scenario: Sending preserves a paused reader's position
 - **WHEN** the user submits a message while scrolled above the end
 - **THEN** the same visible content remains anchored and following remains paused
 - **AND** the sent message and subsequent reply do not pull the reader to the end
-- **AND** returning to the bottom or activating the latest-content affordance resumes following
+- **AND** deliberate downward arrival within 48px of the bottom or activating the latest-content affordance resumes following
 
 #### Scenario: Loading older history preserves the viewport
 - **WHEN** the user requests an older history page at the top of the loaded timeline
@@ -1173,6 +1192,11 @@ Already loaded ordinary assistant text SHALL retain real layout geometry rather 
 - **AND** hidden activity descendants are excluded from reading anchors even if the browser reports placeholder layout boxes
 - **AND** the collapsed group's visible summary remains available as an anchor
 
+#### Scenario: Appending text during rewrap preserves an unchanged visible word
+- **WHEN** a paragraph appends text while viewport width changes and a paused reader's visible word remains unchanged
+- **THEN** the same visible word retains its offset within 2px in controlled regression fixtures
+- **AND** changed text elsewhere in that paragraph does not itself discard the reading position or resume following
+
 #### Scenario: History gestures avoid redundant anchor work
 - **WHEN** a paused reader scrolls through loaded conversation history
 - **THEN** each native scroll event performs at most one semantic reading-anchor measurement
@@ -1185,6 +1209,7 @@ Already loaded ordinary assistant text SHALL retain real layout geometry rather 
 - **THEN** semantic geometry measures the viewport row, retained row and explicitly activated row rather than all loaded history
 - **AND** offscreen retained and explicitly activated rows remain available for anchoring
 - **AND** unavailable or unusable hit testing falls back without discarding the reading anchor
+- **AND** ordinary controlled row-lookup fixtures use at most four item-rectangle reads and twelve point queries per semantic measurement, with correctness fallback assessed separately
 
 #### Scenario: Manual arrival settles at the native bottom
 - **WHEN** a manual flick reaches the newest message with elastic overscroll or subpixel settling
@@ -1192,6 +1217,12 @@ Already loaded ordinary assistant text SHALL retain real layout geometry rather 
 - **AND** elastic rebound alone does not pause following
 - **AND** deliberate upward input still pauses immediately
 - **AND** subsequent appended content follows normally
+
+#### Scenario: Newer input outranks pending snapshot placement
+- **GIVEN** a parent or child snapshot is installed but its first render has not occurred
+- **WHEN** the reader deliberately scrolls upward before that render
+- **THEN** the newer paused intent and reading position survive first render and later updates
+- **AND** the pending navigation restore or initial latest placement does not overwrite that intent
 
 #### Scenario: Shell output initially follows independently
 - **WHEN** a shell viewport first shows output and further output arrives
@@ -1214,6 +1245,11 @@ Already loaded ordinary assistant text SHALL retain real layout geometry rather 
 - **THEN** the same rendered content remains at the same vertical offset and the horizontal offset is preserved wherever the content and layout permit
 - **AND** the chosen inline height is retained with its applied size clamped to the available layout
 - **AND** following remains paused even if clamping places the viewport at the bottom
+
+#### Scenario: Diagonal shell reading retains horizontal progress
+- **WHEN** downward and rightward native reader movement occurs together while shell output is following
+- **THEN** the next follow correction and subsequent output preserve the new horizontal offset within available bounds
+- **AND** the shell and outer timeline retain their independent follow intent
 
 #### Scenario: Following survives resize and completion
 - **WHEN** a shell viewport is following and is resized, popped out, maximized, restored to floating size, returned inline, changes between desktop and touch presentation, or receives completion or failure
@@ -1246,6 +1282,11 @@ Already loaded ordinary assistant text SHALL retain real layout geometry rather 
 - **THEN** they do not change whether the reader has chosen to follow
 - **AND** a legitimate position clamp after layout or content shrink is allowed
 - **AND** clamping a paused view to the bottom does not resume following
+
+#### Scenario: Automatic correction has one frame owner
+- **WHEN** streaming, resize and a control reveal request automatic vertical correction in the same frame
+- **THEN** each scrollport receives at most one automatic vertical position write in that animation frame in controlled regression fixtures
+- **AND** upward reader input can cancel queued and in-flight movement
 
 ### Requirement: Desktop presents Preview and Chat as a persistent split
 In desktop mode the work area SHALL present Preview and Chat side by side with

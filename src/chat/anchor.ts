@@ -27,11 +27,11 @@ export class TimelineAnchorController {
   private previous: AnchorGeometry | null = null;
   private restoring = false;
 
-  constructor(private readonly endThreshold = 0.5) {}
+  constructor(private readonly endThreshold = 48) {}
 
   /**
-   * Reads where the reader is after a scroll. Only arriving at the bottom
-   * pins (allowing subpixel rounding), not stopping in its neighborhood.
+   * Reads where the reader is after a scroll. Downward arrival within the
+   * end threshold pins; placement or stopping in that band does not.
    * Leaving is judged differently: `movement` says which way the scroll
    * went, and any upward step unpins, however small. Otherwise frequent
    * streaming renders pull the reader back before their next trackpad tick.
@@ -49,7 +49,9 @@ export class TimelineAnchorController {
   observe(geometry: AnchorGeometry, movement: ScrollMovement = "down"): void {
     const expected = this.expected;
     const maximum = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
-    const echo = expected !== null && Math.abs(geometry.scrollTop - Math.max(0, Math.min(expected, maximum))) <= 1;
+    // A nearby but distinct position can be a genuine fractional reader step.
+    // Assignment echoes match the applied top, allowing arithmetic roundoff only.
+    const echo = expected !== null && Math.abs(geometry.scrollTop - Math.max(0, Math.min(expected, maximum))) < 1e-6;
     const previous = this.previous;
     const clamped = previous !== null && maximum < previous.scrollHeight - previous.clientHeight
       && previous.scrollTop > maximum && Math.abs(geometry.scrollTop - maximum) <= 1;
