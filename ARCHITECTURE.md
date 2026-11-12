@@ -1306,6 +1306,9 @@ the consumed child's owned visibility read supplies deny-only counterproof throu
 publication. Bounded suffix identities from the consumed child transcript preserve
 known retained prefixes independently of cache eviction (at most 256 suffix IDs
 and 16,384 serialized UTF-16 units per child); overflow abstains.
+The deny rule also covers a later request moving between two non-null staged
+boundaries: moving the stage before the consumed idle cannot preserve its old
+completion merely because the previous stage left that idle visible.
 This does not replace the latest baseline or affect a later child dependency.
 Once a child array is consumed, provisional stage denial uses that raw load's
 native request cutoff. A later consumer of a shared or warm old array must not
@@ -1528,9 +1531,10 @@ sources retain the consumed parent launch inventory: a processed new or changed
 relevant launcher revokes dependent outcome recovery before publication, while
 ordinary parent text and unchanged launch replays do not.
 Later native parent-history reads also compare the relevant launch inventory
-against retained sources. Only a nonoverlapping native read can supersede the
-earlier inventory; a conflicting overlapping response withdraws its own
-inference instead. Transport reuse keeps the original native read order, and
+and report digests against retained sources. A later-started native read can deny
+an earlier consumed inference even when the requests overlap and the new reader
+is ownerless. Completion-order fences still prevent overlapping replies from
+replacing the consumed positive baseline. Transport reuse keeps the original native read order, and
 ordinary output or launches for other children do not revoke independent
 outcome authority.
 Idle counterproof is observed at that shared native-history boundary too, so

@@ -2165,9 +2165,10 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (!previous.overflow && signature(previous.launches, child) === signature(launches, child)
           && previous.reports.get(child) === reports.get(child)) continue;
         if (order.started <= previous.completed) conflictingParentOverlap = true;
-        // Only a nonoverlapping native read can supersede earlier evidence.
-        // An overlapping stale response instead withdraws its own inference.
-        for (const target of order.started > previous.completed ? [source] : owners) {
+        // A later-started ownerless read may deny this consumed inventory even
+        // when their transports overlap. It cannot replace the positive
+        // baseline: installation below retains the completion-order fence.
+        for (const target of order.started > previous.started ? [source] : owners) {
           target.historyParentChanges.add(child);
           if (dependsOnWorkerHistory(target, child)) target.revision++;
         }
@@ -3346,7 +3347,7 @@ export class OpenCodeV2Provider implements ChatProvider {
                 // the consumed-load cutoff still excludes genuinely old reads.
                 && (observation.started > childVisibility.ownedAfter || boundary !== childVisibility.initialBoundary
                   || !childVisibility.initialOrder || observation.started > childVisibility.initialOrder.started)
-                && boundary !== null && previous.boundary === null;
+                && boundary !== null;
               if (provisionalStage && childVisibility) {
                 childVisibility.pendingBoundary = childVisibility.pendingBoundary === undefined || childVisibility.pendingBoundary === boundary ? boundary : null;
               }

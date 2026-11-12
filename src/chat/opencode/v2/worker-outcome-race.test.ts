@@ -464,7 +464,7 @@ test(`consumed transcript source preserves paged reuse for pending facts (${chan
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
-  const stream = provider.events(abort.signal);
+  const stream = provider.events(abort.signal)[Symbol.asyncIterator]();
   try {
     parent = (await provider.createSession("Consumed paged source")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
     await stream.next();
@@ -485,7 +485,7 @@ test(`consumed transcript source preserves paged reuse for pending facts (${chan
       const row = (await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal })).find(item => item.taskId === worker.taskId);
       expect(row).toMatchObject({ status: "failed", resultId: "paged-report", summary: "Actual paged failure", terminalReportedAt: 45 });
     }
-  } finally { abort.abort(); await stream.return(undefined); await provider.dispose!(); await fake.stop(); }
+  } finally { abort.abort(); await stream.return?.(undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["warm-pending-prelaunch", "warm-pending-replaced", "warm-pending-delivered", "warm-pending-inbox", "warm-pending-unchanged", "warm-pending-other", "warm-pending-old-inbox", "delivered", "pending-only", "unchanged", "other-parent", "prelaunch", "newer-load"] as const)
@@ -1549,6 +1549,93 @@ test(`scheduler inferred outcome retains native parent visibility through public
   } finally { releaseOlder(); releaseInteractions(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await publication; await fake.stop(); }
 }, 10_000);
 
+for (const surface of ["provider", "scheduler"] as const)
+for (const change of ["failed-report", "unchanged", "append", "other-parent", "older-reply", "newer-source"] as const)
+test(`${surface} fences overlapping ownerless parent report history (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, changed = false, parentReads = 0, captured = false, armed = false, attempts = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, connectedHandled!: () => void, firstEntered!: () => void, releaseFirst!: () => void, secondEntered!: () => void, releaseSecond!: () => void, folded!: () => void, releaseInteractions!: () => void;
+  const connected = new Promise<void>(resolve => { connectedHandled = resolve; }), firstPending = new Promise<void>(resolve => { firstEntered = resolve; }), firstHeld = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const secondPending = new Promise<void>(resolve => { secondEntered = resolve; }), secondHeld = new Promise<void>(resolve => { releaseSecond = resolve; });
+  const returned = new Promise<void>(resolve => { folded = resolve; }), interactions = new Promise<void>(resolve => { releaseInteractions = resolve; });
+  const external = new AsyncLocalStorage<boolean>();
+  const report = () => ({ id: "overlapping-parent-failure", type: "synthetic", time: { created: 45 }, text: "Actual overlapping parent failure", metadata: { source: "subagent", childID: child, state: "error" } });
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 50, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true }); } }), { headers: { "content-type": "text/event-stream" } });
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (surface === "scheduler" && (route === "/api/permission/request" || route === "/api/form")) await interactions;
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message` || route === `/api/session/${other}/message`) {
+      const body = await response.json(), first = body.data[0];
+      const data = first ? [first] : [];
+      if (first) { first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 }; }
+      if (changed && change !== "unchanged" && (change !== "other-parent" || route === `/api/session/${other}/message`)) data.push(change === "append" ? { id: "independent-parent-output", type: "assistant", time: { created: 50 }, content: [{ type: "text", text: "Independent output" }] } : report());
+      if (external.getStore()) { secondEntered(); await secondHeld; }
+      else if (armed && route === `/api/session/${parent}/message` && ++parentReads === 1) { firstEntered(); await firstHeld; }
+      return Response.json({ data, cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), nativeEvents = provider.events.bind(provider);
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { yield event; if (event.eventType === "server.connected") connectedHandled(); } };
+  const guards: import("../../provider").WorkerSourceGuard[] = [], newer: import("../../provider").WorkerSourceGuard[] = [];
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    if (id === parent) attempts++;
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => { options?.onSource?.(source); if (id === parent && !captured) guards.push(source.workerSource.retain(abort.signal)); } });
+    if (id === parent && !captured) { captured = true; expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" })); folded(); }
+    return tasks;
+  };
+  const adapter = surface === "scheduler" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }) : undefined;
+  let pump: Promise<void> | undefined, reading: ReturnType<NonNullable<typeof provider.reconcileBackgroundTasks>> | undefined, observed: ReturnType<NonNullable<typeof provider.getReversibleHistoryState>> | undefined, publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  try {
+    parent = (await provider.createSession("Overlapping native parent report")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const peer = (await provider.createSession("Cache invalidation peer")).id; other = (await provider.createSession("Independent parent")).id;
+    pump = adapter ? adapter.startEventPump() : (async () => { for await (const _event of provider.events(abort.signal)) {} })(); void pump.catch(() => undefined); await connected;
+    if (change === "older-reply" && !adapter) {
+      changed = true; observed = external.run(true, () => provider.getReversibleHistoryState!(parent!)); void observed.catch(() => undefined); await secondPending;
+      changed = false; await nativeRecovery(peer, { fresh: true, signal: abort.signal });
+    }
+    if (adapter) {
+      const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+      publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item; throw new Error("No parent-report worker publication"); })(); void publication.catch(() => undefined);
+      if (change === "older-reply") {
+        await nativeRecovery(peer, { fresh: true, signal: abort.signal }); changed = true;
+        observed = external.run(true, () => provider.getReversibleHistoryState!(parent!)); void observed.catch(() => undefined); await secondPending; changed = false;
+      }
+      await nativeRecovery(peer, { fresh: true, signal: abort.signal }); armed = true;
+      frame("session.inbox.enqueued", { sessionID: parent, inboxID: "parent-overlap-trigger", item: { type: "user", payload: { text: "Ordinary recovery trigger" } } });
+    } else { armed = true; reading = provider.reconcileBackgroundTasks!(parent, { signal: abort.signal }); void reading.catch(() => undefined); }
+    await firstPending;
+    if (change !== "older-reply") {
+      await nativeRecovery(peer, { fresh: true, signal: abort.signal });
+      changed = true; observed = external.run(true, () => provider.getReversibleHistoryState!(change === "other-parent" ? other! : parent!)); void observed.catch(() => undefined); await secondPending;
+    }
+    releaseFirst(); await returned; await reading;
+    expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (change === "newer-source") { const currentParent = parent; await nativeRecovery(currentParent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) }); }
+    const readsBeforeObservation = parentReads;
+    releaseSecond(); await observed;
+    expect(parentReads).toBe(readsBeforeObservation); // Counterproof itself starts no transcript IO.
+    const contradicted = change === "failed-report" || change === "newer-source";
+    if (adapter) {
+      releaseInteractions(); const row = await publication!;
+      expect(row.status).toBe(contradicted ? "failed" : "completed");
+      if (contradicted) expect(row).toMatchObject({ resultId: "overlapping-parent-failure", summary: "Actual overlapping parent failure", terminalReportedAt: 45 });
+      expect(attempts).toBe(contradicted ? 2 : 1);
+    }
+    expect(guards.every(guard => guard.isCurrent())).toBe(!contradicted);
+    if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
+    const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(fresh?.status).toBe(changed && change !== "append" && change !== "unchanged" && change !== "other-parent" ? "failed" : "completed");
+    if (contradicted) expect(fresh).toMatchObject({ resultId: "overlapping-parent-failure", summary: "Actual overlapping parent failure", terminalReportedAt: 45 });
+  } finally { releaseFirst(); releaseSecond(); releaseInteractions(); abort.abort(); await reading?.catch(() => undefined); await observed?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await pump; await publication?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
 for (const change of ["removed", "unchanged", "other-child", "newer-source", "older-reply"] as const)
 test(`scheduler fences overlapping ownerless raw child history (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
@@ -1605,7 +1692,10 @@ test(`scheduler fences overlapping ownerless raw child history (${change})`, asy
       releaseFirst();
     }
     await returned; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
-    if (change === "newer-source") await replacement.run(true, () => nativeRecovery(parent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) }));
+    if (change === "newer-source") {
+      const currentParent = parent;
+      await replacement.run(true, () => nativeRecovery(currentParent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) }));
+    }
     releaseSecond(); await observed; releaseInteractions(); const row = await publication;
     const hidden = change === "removed" || change === "newer-source";
     if (hidden) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
@@ -1615,6 +1705,83 @@ test(`scheduler fences overlapping ownerless raw child history (${change})`, asy
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
     expect(fresh?.status).toBe(hidden ? "running" : "completed"); if (hidden) expect(fresh?.activity?.kind).toBe("working");
   } finally { releaseFirst(); releaseSecond(); releaseInteractions(); abort.abort(); await observed?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
+}, 10_000);
+
+for (const surface of ["provider", "scheduler"] as const)
+for (const change of ["hidden", "prefix", "unchanged", "other-child", "older-reply", "newer-source"] as const)
+test(`${surface} fences overlapping moves between staged child boundaries (${change})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, other: string | undefined, boundary = "suffix", holdOwn = false, firstChild = true, captured = false;
+  let wire!: ReadableStreamDefaultController<Uint8Array>, connectedHandled!: () => void, ownEntered!: () => void, releaseOwn!: () => void, observedEntered!: () => void, releaseObserved!: () => void, folded!: () => void, releaseInteractions!: () => void;
+  const connected = new Promise<void>(resolve => { connectedHandled = resolve; }), ownPending = new Promise<void>(resolve => { ownEntered = resolve; }), ownHeld = new Promise<void>(resolve => { releaseOwn = resolve; });
+  const observedPending = new Promise<void>(resolve => { observedEntered = resolve; }), observedHeld = new Promise<void>(resolve => { releaseObserved = resolve; });
+  const returned = new Promise<void>(resolve => { folded = resolve; }), interactions = new Promise<void>(resolve => { releaseInteractions = resolve; });
+  const external = new AsyncLocalStorage<boolean>();
+  const target = change === "prefix" ? "far-suffix" : change === "unchanged" ? "suffix" : "idle";
+  const frame = (type: string, data: unknown) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, data, created: 50, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller; frame("server.connected", {}); request.signal.addEventListener("abort", () => controller.close(), { once: true }); } }), { headers: { "content-type": "text/event-stream" } });
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    if (surface === "scheduler" && (route === "/api/permission/request" || route === "/api/form")) await interactions;
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) { const body = await response.json(), first = body.data[0]; first.time = { created: 10 }; first.content[0].time = { created: 10, ran: 11, completed: 12 }; return Response.json({ data: [first], cursor: {} }); }
+    if (route === `/api/session/${child}/message`) {
+      if (firstChild) { firstChild = false; holdOwn = true; }
+      return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 20 }, outcome: "succeeded" }, { id: "suffix", type: "user", text: "Visible idle prefix", time: { created: 30 } }, { id: "far-suffix", type: "user", text: "Later boundary", time: { created: 40 } }], cursor: {} });
+    }
+    if (route === `/api/session/${child}` || route === `/api/session/${other}`) {
+      const body = await response.json(); body.data.revert = { messageID: external.getStore() ? target : boundary };
+      if (external.getStore()) { observedEntered(); await observedHeld; }
+      else if (holdOwn && route === `/api/session/${child}`) { holdOwn = false; ownEntered(); await ownHeld; }
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport }), abort = new AbortController();
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), nativeEvents = provider.events.bind(provider);
+  provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { yield event; if (event.eventType === "server.connected") connectedHandled(); } };
+  const guards: import("../../provider").WorkerSourceGuard[] = [], newer: import("../../provider").WorkerSourceGuard[] = [];
+  provider.reconcileBackgroundTasks = async (id, options) => {
+    const tasks = await nativeRecovery(id, { ...options, onSource: source => { options?.onSource?.(source); if (id === parent && !captured) guards.push(source.workerSource.retain(abort.signal)); } });
+    if (id === parent && !captured) { captured = true; expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" })); folded(); } return tasks;
+  };
+  const adapter = surface === "scheduler" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }) : undefined;
+  let pump: Promise<void> | undefined, reading: ReturnType<NonNullable<typeof provider.reconcileBackgroundTasks>> | undefined, observed: ReturnType<typeof provider.getSession> | undefined, publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  try {
+    parent = (await provider.createSession("Overlapping staged boundaries")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId; other = fake.launchRequestWorker(parent).childId;
+    pump = adapter ? adapter.startEventPump() : (async () => { for await (const _event of provider.events(abort.signal)) {} })(); void pump.catch(() => undefined); await connected;
+    if (change === "older-reply") { observed = external.run(true, () => provider.getSession(child!)); void observed.catch(() => undefined); await observedPending; }
+    if (adapter) {
+      const subscription = await adapter.subscribe(parent, { signal: abort.signal });
+      publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item; throw new Error("No staged-boundary worker publication"); })(); void publication.catch(() => undefined);
+      frame("session.inbox.enqueued", { sessionID: parent, inboxID: "stage-switch-trigger", item: { type: "user", payload: { text: "Ordinary recovery trigger" } } });
+    } else { reading = provider.reconcileBackgroundTasks!(parent, { signal: abort.signal }); void reading.catch(() => undefined); }
+    await ownPending;
+    if (change !== "older-reply") { observed = external.run(true, () => provider.getSession(change === "other-child" ? other! : child!)); void observed.catch(() => undefined); await observedPending; }
+    releaseOwn(); await returned; await reading;
+    expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (change !== "older-reply" && change !== "other-child") boundary = target;
+    if (change === "newer-source") { const currentParent = parent; await nativeRecovery(currentParent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) }); }
+    releaseObserved(); await observed;
+    const hidden = change === "hidden" || change === "newer-source";
+    if (adapter) {
+      releaseInteractions(); const row = await publication!;
+      expect(row.status).toBe(hidden ? "running" : "completed");
+      if (hidden) {
+        expect(workerDismissalEvidence(row)?.dismissible).toBe(false); expect(workerCanStop(row)).toBe(false); expect(row.resultId).toBeUndefined(); expect(row.terminalReportedAt).toBeUndefined(); expect(row.activity?.endedAt).toBeUndefined();
+        const evidence = await adapter.workerEvidence(parent);
+        expect(evidence.entries.find(entry => entry.executionId === row.activity?.executionId)?.dismissible).toBe(false);
+      }
+    }
+    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
+    const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(fresh?.status).toBe(hidden ? "running" : "completed");
+    if (hidden) { expect(workerDismissalEvidence(fresh)?.dismissible).toBe(false); expect(fresh?.activity?.kind).toBe("session-active"); }
+  } finally { releaseOwn(); releaseObserved(); releaseInteractions(); abort.abort(); await reading?.catch(() => undefined); await observed?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await pump; await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["load-overlap-hidden", "load-overlap-prefix", "load-overlap-unchanged", "load-overlap-other", "owned-overlap-newer-source", "owned-overlap-hidden", "owned-overlap-prefix", "owned-overlap-unchanged", "owned-overlap-other", "collecting-hidden", "collecting-prefix", "hidden", "unchanged", "other-child", "retained-prefix", "newer-source"] as const)

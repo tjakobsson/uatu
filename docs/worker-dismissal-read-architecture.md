@@ -113,10 +113,11 @@ history authority, without granting ownership or invalidating unrelated controls
 Changes observed during that await remain deny-only counterproof until outcome
 or activity authority is used; unverified intent grants no ownership, child
 read or Stop authority, and does not itself invalidate unrelated controls.
-Fresh parent-history reads provide the same scoped counterproof before SSE:
-nonoverlapping reads can revoke an older launch inventory, while conflicting
-overlapping responses cannot supersede later consumed evidence. Native read
-order survives transport reuse.
+Fresh parent-history reads provide the same scoped counterproof before SSE.
+Later-started ownerless reads can revoke an older consumed launch/report
+inference even when their native requests overlap. Completion-order fences still
+prevent overlapping responses from replacing the positive baseline; denial is
+not report admission. Native read order survives transport reuse.
 The shared native-history boundary also observes idle counterproof from direct
 child history, accounting and inspection reads; it is not limited to a parent
 worker fold.
@@ -156,6 +157,10 @@ Raw child-history contradictions use the consumed array's native request start
 for denial, including later-started overlapping ownerless reads. Their response
 arrival and replacement cache entry do not redate the consumed array. Existing
 completion fences still prevent overlapping replies from replacing baselines.
+Late child visibility counterproof also covers switches between two non-null
+staged boundaries. A new stage hiding the consumed idle revokes its captured
+inference; the existing bounded suffix identities preserve a known visible
+prefix. Neither switch replaces the newer owned baseline or grants Stop.
 Streamed subagent enqueues feed the same bounded slot before ownership awaits,
 without a native inbox reread. They add facts rather than replacing the inbox
 baseline, and exact replays coalesce. Their shared read-order clock fences older
