@@ -929,6 +929,156 @@ describe("chat reversible-history composer", () => {
     }
   });
 
+  const refreshBlurCases = (["parent", "child"] as const).flatMap(target => [false, true].flatMap(following =>
+    (["same-view resync", "navigation", "resync then navigation"] as const).map(action => ({ target, following, action,
+      control: "none" as "none" | "surface capture" | "settled focusout" }))));
+  for (const control of ["surface capture", "settled focusout"] as const) refreshBlurCases.push({ target: "parent", following: false, action: "same-view resync", control });
+  for (const { target, following, action, control } of refreshBlurCases) test(`lifecycle: ${target} ${action} after answer blur preserves ${following ? "following" : "paused"} reading${control === "none" ? "" : ` with ${control}`}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "touch");
+    document.documentElement.setAttribute("data-active-tab", "chat");
+    stubConversationSelect(document);
+    let active: Element | null = null;
+    Object.defineProperty(document, "activeElement", { configurable: true, get: () => active });
+    const timeline = document.querySelector<HTMLElement>(target === "parent" ? "#chat-timeline" : "#chat-drilldown-timeline")!;
+    const container = document.querySelector<HTMLElement>(target === "parent" ? "#chat-items" : "#chat-drilldown-items")!;
+    const targetId = target === "parent" ? "one" : "child";
+    let revision = 0, outputGrowth = 0;
+    // Geometry changes only when the replacement snapshot actually renders.
+    // Keeping raw scrollTop across that render cannot satisfy the row guard.
+    const rowShift = () => container.textContent!.includes("Shifted snapshot") ? 80 : 0;
+    const extent = () => 1000 + rowShift() + outputGrowth;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: extent },
+    });
+    timeline.scrollTop = 0;
+    const rect = (top: number, size: number) => ({ top, bottom: top + size, height: size, left: 0, right: 640, width: 640 }) as DOMRect;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    container.getBoundingClientRect = () => rect(-timeline.scrollTop, extent());
+    const prototype = window.HTMLElement.prototype, originalBounds = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function () {
+      const row = this.closest(`${target === "parent" ? "#chat-items" : "#chat-drilldown-items"} [data-chat-item-id]`);
+      if (row?.getAttribute("data-chat-item-id") === "question:q1") {
+        const origin = this.matches("[data-question-custom-input]") ? 440
+          : this.matches(".chat-request-actions") ? 500 : 300;
+        return rect(origin + rowShift() - timeline.scrollTop, this === row ? 240 : 40);
+      }
+      if (row) return rect(540 + rowShift() - timeline.scrollTop, extent() - 540 - rowShift());
+      return originalBounds.call(this);
+    };
+    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0, timestamp = performance.now();
+    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const drain = () => {
+      for (let pass = 0; pass < 40 && frames.size; pass++) {
+        timestamp += 20;
+        for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
+      }
+      expect(frames.size, "coordinated frames settle within the fixture's budget").toBe(0);
+    };
+    const api = questionApi(document, { conversations: ["one", "two"], capabilities: ["questions", "subagents"], items: id => id === targetId
+      ? [pendingQuestion("q1", 1), { id: "message:refresh-tail", type: "user_message", createdAt: 2,
+        text: revision === 2 ? "Shifted snapshot" : `Snapshot revision ${revision}` }]
+      : id === "one" ? [{ id: "tool:refresh-blur", type: "tool", createdAt: 1, name: "task", status: "completed",
+        input: JSON.stringify({ description: "Answering child", subagent_type: "explore", prompt: "go" }), childConversationId: "child" }]
+      : [{ id: "message:other", type: "user_message", createdAt: 1, text: "Other parent conversation" }] });
+    let streams = 0;
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    api.stream = (id, _cursor, handlers) => { if (id === targetId) { stream = handlers; streams++; } return { close() {} }; };
+    const click = (selector: string) => document.querySelector(selector)!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const choose = (id: string) => {
+      const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+      select.value = id;
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+    };
+    const reading = () => ({ top: timeline.scrollTop,
+      row: container.querySelector<HTMLElement>('[data-chat-item-id="question:q1"]')!.getBoundingClientRect().top });
+    const { initChat } = await import(`./ui.ts?refresh-after-answer-blur=${target}-${following}-${action}-${Date.now()}`);
+    initChat(api);
+    try {
+      if (target === "child") {
+        await waitUntil(() => { drain(); return !!document.querySelector('[data-worker-item="tool:refresh-blur"]'); });
+        click('[data-worker-item="tool:refresh-blur"]');
+      }
+      await waitUntil(() => { drain(); return streams === 1 && timeline.scrollTop === 600; });
+      if (!following) {
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -100 }));
+        timeline.scrollTop = 200;
+        timeline.dispatchEvent(new window.Event("scroll"));
+        expect(reading()).toEqual({ top: 200, row: 100 });
+      }
+      const card = container.querySelector<HTMLElement>('[data-chat-item-id="question:q1"]')!;
+      const toggle = card.querySelector<HTMLInputElement>("[data-question-custom-toggle]")!;
+      Object.defineProperty(toggle, "form", { configurable: true, value: card.querySelector("form[data-question-form]") });
+      toggle.checked = true;
+      toggle.dispatchEvent(new window.Event("change", { bubbles: true }));
+      const field = card.querySelector<HTMLInputElement>("[data-question-custom-input]")!;
+      active = field;
+      field.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+      drain();
+      expect(document.documentElement.hasAttribute("data-chat-answering")).toBe(true);
+      expect(reading(), "the real answer hold, not a test assignment, moves 200px reading to 140px").toEqual({ top: 140, row: 160 });
+      active = null;
+      field.dispatchEvent(new window.Event("focusout", { bubbles: true }));
+      await Promise.resolve();
+      if (control === "settled focusout") await flush();
+      drain();
+      expect(document.documentElement.hasAttribute("data-chat-answering")).toBe(false);
+      const afterBlur = reading();
+      expect(afterBlur, "blur retains paused live reading, but resumes a following reader").toEqual(following
+        ? { top: 600, row: -300 } : { top: 140, row: 160 });
+      let afterResync: ReturnType<typeof reading> | undefined;
+      if (action !== "navigation") {
+        revision = 1;
+        stream!.resync();
+        await waitUntil(() => streams === 2);
+        // The child's renderer captures at this point; the parent's passive
+        // snapshot normally does not. Exercise that difference through the
+        // public surface-change seam, without changing snapshot cancellation.
+        if (control === "surface capture") document.dispatchEvent(new window.Event("uatu:before-surface-change"));
+        await waitUntil(() => { drain(); return streams === 2 && container.textContent!.includes("Snapshot revision 1"); });
+        afterResync = reading();
+      }
+      if (action !== "same-view resync") {
+        if (target === "child") click("#chat-drilldown-back");
+        else {
+          choose("two");
+          await waitUntil(() => { drain(); return container.textContent!.includes("Other parent conversation"); });
+        }
+      }
+      revision = 2;
+      if (action === "same-view resync") stream!.resync();
+      else if (target === "child") click('[data-worker-item="tool:refresh-blur"]');
+      else choose("one");
+      await waitUntil(() => { drain(); return streams === (action === "navigation" ? 2 : 3) && container.textContent!.includes("Shifted snapshot"); });
+      const afterShift = reading();
+      outputGrowth = 200;
+      stream!.event({ type: "item.upsert", conversationId: targetId, generation: "g", sequence: 1,
+        item: { id: "message:refresh-later", type: "user_message", createdAt: 3, text: "Output after answer blur" } }, "refresh-blur-later");
+      await waitUntil(() => { drain(); return container.textContent!.includes("Output after answer blur"); });
+      const latest = document.querySelector<HTMLButtonElement>(target === "parent" ? "#chat-latest" : "#chat-drilldown-latest")!;
+      const paused = action === "same-view resync" ? { top: 220, row: 160 } : { top: 280, row: 100 };
+      expect({ afterResync, afterShift, afterOutput: reading(), latestHidden: latest.hidden },
+        action === "same-view resync" ? "a passive same-view snapshot must retain live reading after blur, including semantic row shifts"
+          : "actual departure must retain the durable pre-answer anchor rather than the temporary hold").toEqual({
+        afterResync: action !== "navigation" ? afterBlur : undefined,
+        afterShift: following ? { top: 680, row: -300 } : paused,
+        afterOutput: following ? { top: 880, row: -500 } : paused,
+        latestHidden: following,
+      });
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      globalThis.requestAnimationFrame = requestFrame;
+      globalThis.cancelAnimationFrame = cancelFrame;
+      prototype.getBoundingClientRect = originalBounds;
+      document.documentElement.setAttribute("data-active-tab", "preview");
+    }
+  });
+
   for (const following of [false, true]) for (const focusTransfer of [false, true]) for (const departure of ["browser back", "header back"] as const) test(`lifecycle: ${departure} preserves a ${following ? "following" : "paused"} child's reading through answer departure with focus transfer ${focusTransfer}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

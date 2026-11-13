@@ -4702,9 +4702,10 @@ export function initChat(api = new ChatApiClient()): void {
   const cancelForSnapshot = (owner: CoordinatedScrollOwner) => {
     const field = heldAnswerField;
     const restore = field && owner.isHolding(field);
-    // cancel restores the hold's original follow intent without scheduling;
-    // the replacement hold must inherit that rather than a reveal's pause.
-    owner.cancel({ preserveInstantPlacement: true });
+    // An active replacement hold inherits its original intent, not a reveal's
+    // pause. After blur, snapshot cancellation leaves live reading in place
+    // while retaining the separate durable position used on actual departure.
+    owner.cancel({ forSnapshot: true });
     if (restore && field.isConnected && document.activeElement === field && chatSurfaceActive()) {
       holdInOwningTimeline(field);
     }

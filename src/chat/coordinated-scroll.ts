@@ -405,14 +405,16 @@ export class CoordinatedScrollOwner {
   }
 
   /** Cancel work and transient input, retaining the anchor's follow choice.
-   * Snapshot replacement may retain an already owed, unconsumed instant
-   * placement; this neither schedules work nor creates a new follow choice.
+   * A passive snapshot keeps unconsumed instant placement and, after answer
+   * blur, both live reading and the separate durable position for departure.
+   * Active holds restore their original intent so callers can renew them.
+   * This neither schedules work nor creates a new follow choice.
    */
-  cancel(options?: { preserveInstantPlacement?: boolean }): void {
+  cancel(options?: { forSnapshot?: boolean }): void {
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
     this.motion = null;
-    if (!options?.preserveInstantPlacement) this.instantNext = false;
+    if (!options?.forSnapshot) this.instantNext = false;
     this.newContent = false;
     this.upwardPending = false;
     this.revealTarget = null;
@@ -423,8 +425,10 @@ export class CoordinatedScrollOwner {
     // nothing. pause() immediately replaces that choice with explicit intent.
     const resume = this.resumeFollowing;
     const held = this.heldPosition;
+    const preserveReleasedPosition = options?.forSnapshot && !this.heldTarget;
     this.clearHold();
-    if (held) this.options.position!.restorePosition(held);
+    if (preserveReleasedPosition) this.heldPosition = held;
+    else if (held) this.options.position!.restorePosition(held);
     else if (resume) this.options.anchor.jumpToLatest(this.options.measure(false));
     this.touchY = null;
   }
@@ -506,11 +510,14 @@ export class CoordinatedScrollOwner {
         this.motion.started = this.motion.sampled;
       }
       this.request();
-    } else if (changedExtent && movement !== "up") {
+    } else if (changedExtent && movement !== "up"
+      && !(movement === "down" && geometry.scrollTop > previous.scrollTop + 1e-6 && !this.pendingPosition)) {
       // Extent growth alone cannot speak for the reader. An unaccounted
       // upward movement can reveal intrinsic-size content at the same time;
       // it still pauses following. Actual clamps were handled above, and our
-      // own assignments already updated `previous` in flush().
+      // own assignments already updated `previous` in flush(). A loaded reader's
+      // raw downward progress still reaches the arrival rule during a resize;
+      // normalized progress from an unchanged elastic offset does not.
       this.request();
     } else {
       if (!this.pendingPosition || movement !== "none") {

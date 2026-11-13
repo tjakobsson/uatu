@@ -265,7 +265,36 @@ describe("coordinated scrolling", () => {
     expect(f.anchor.isPinned()).toBe(false);
   });
 
-  for (const choice of ["native focus scroll", "reveal", "activity selection", "pause", "Latest"] as const) test(`${choice} supersedes durable reading after answer release`, () => {
+  for (const positions of [false, true]) for (const following of [false, true]) test(`passive snapshot after answer release preserves live and durable reading with positions=${positions}, following=${following}`, () => {
+    const f = fixture(undefined, undefined, positions);
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    if (!following) { f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll"); }
+    const saved = positions ? f.owner.capturePosition() : undefined;
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    f.owner.release(); f.flush(40);
+    const writes = [...f.writes];
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel({ forSnapshot: true });
+    expect(f.writes).toEqual(writes);
+    if (saved) expect(f.owner.capturePosition()).toEqual(saved);
+    f.shift(50); f.grow(900); f.owner.request(true); f.flush(60);
+    expect(f.element.scrollTop).toBe(following ? 600 : 190);
+    if (saved) {
+      expect(f.owner.capturePosition()).toEqual(saved);
+      f.owner.cancel();
+      f.owner.restorePosition(saved);
+      f.shift(100);
+      f.owner.flush(80, { rendered: true }); f.flush(100);
+      expect(f.element.scrollTop).toBe(following ? 600 : 300);
+    }
+  });
+
+  for (const snapshot of [false, true]) for (const choice of ["native focus scroll", "reveal", "activity selection", "pause", "Latest"] as const) test(`${choice} supersedes durable reading after answer release${snapshot ? " and passive snapshot" : ""}`, () => {
     const f = fixture();
     stubRect(f.element, () => ({ top: 0, bottom: 300 }));
     const field = f.document.createElement("input");
@@ -276,6 +305,7 @@ describe("coordinated scrolling", () => {
     f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll");
     f.owner.hold(field as unknown as HTMLElement); f.flush(20);
     f.owner.release();
+    if (snapshot) f.owner.cancel({ forSnapshot: true });
     if (choice === "native focus scroll") { f.move(100); f.event("scroll"); }
     else if (choice === "reveal") { f.owner.reveal(button as unknown as HTMLElement, { align: "end" }); f.flush(40); }
     else if (choice === "activity selection") f.owner.beforeMutation("line");
@@ -298,6 +328,68 @@ describe("coordinated scrolling", () => {
       expect(f.anchor.isPinned()).toBe(gap <= 48);
     }
   });
+  for (const shrink of [0, 18]) test(`loaded paused downward arrival resumes with ${shrink}px simultaneous viewport shrink`, () => {
+    const f = fixture();
+    f.resize(606); f.grow(1608); f.move(378); f.owner.pause();
+    f.move(377); f.event("scroll"); // Consume the earlier upward intent.
+    f.resize(606 - shrink); f.move(1001); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(1002 + shrink);
+    f.resize(568); f.owner.request(true); f.flush(40);
+    expect(f.element.scrollTop).toBe(1040);
+  });
+
+  test("layout-only range growth cannot resume a loaded paused reader", () => {
+    const f = fixture();
+    f.move(281); f.owner.pause(); f.move(280); f.event("scroll");
+    f.resize(282); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(280);
+  });
+  test("resize clamping a paused reader into the arrival band does not resume", () => {
+    const f = fixture();
+    f.move(281); f.owner.pause(); f.move(280); f.event("scroll");
+    f.resize(340); f.move(260); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(260);
+  });
+  test("range growth cannot turn an unchanged raw elastic position into downward reader arrival", () => {
+    const f = fixture();
+    f.move(330); f.owner.pause(); f.move(329); f.event("scroll");
+    f.resize(260); f.event("scroll"); // Normalized top rises 300→329; raw top does not.
+    expect(f.anchor.isPinned()).toBe(false);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(329);
+  });
+  test("a paused correction echo during range growth cannot resume following", () => {
+    const f = fixture();
+    f.move(281); f.owner.pause(); f.move(280); f.event("scroll");
+    f.shift(1); f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(281);
+    f.resize(282); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+  for (const position of [{ kind: "following" as const }, { kind: "anchor" as const, anchor: { itemId: "line", offset: -100 } }]) {
+    test(`layout-driven downward movement preserves pending ${position.kind} placement`, () => {
+      const f = fixture();
+      f.owner.restorePosition(position);
+      f.resize(282); f.move(300); f.event("scroll");
+      expect(f.owner.capturePosition()).toEqual(position);
+      f.move(0); f.owner.flush(20, { rendered: true }); f.flush(40);
+      expect(f.element.scrollTop).toBe(position.kind === "following" ? 318 : 100);
+    });
+  }
+  for (const consumed of [false, true]) test(`${consumed ? "consumed" : "unconsumed"} upward intent does not resume inside the arrival band on resize`, () => {
+    const f = fixture();
+    f.move(281); f.owner.pause();
+    if (consumed) { f.move(280); f.event("scroll"); }
+    f.resize(282); f.move(consumed ? 279 : 300); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
   test("tiny native downward steps resume at fractional bottom without rounding", () => {
     // Also exercise the old arrival policy so restoring 48px cannot hide a
     // native-movement classification regression.
@@ -748,8 +840,8 @@ describe("coordinated scrolling", () => {
   test("snapshot cancellation retains only an unconsumed instant placement across replacements", () => {
     const f = fixture(() => "smooth");
     f.move(0); f.owner.latest({ motion: "instant" });
-    f.owner.cancel({ preserveInstantPlacement: true });
-    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel({ forSnapshot: true });
     expect(f.frames.size).toBe(0);
     expect(f.writes).toEqual([]);
     f.grow(900); f.owner.request(); f.flush(0);
@@ -757,7 +849,7 @@ describe("coordinated scrolling", () => {
     expect(f.writes).toEqual([600]);
     // Once consumed, replacement cancellation must not invent another instant
     // placement: ordinary subsequent output still follows smoothly.
-    f.grow(1200); f.owner.cancel({ preserveInstantPlacement: true });
+    f.grow(1200); f.owner.cancel({ forSnapshot: true });
     f.owner.request(true); f.flush(16); f.flush(48);
     expect(f.element.scrollTop).toBeGreaterThan(600);
     expect(f.element.scrollTop).toBeLessThan(900);
@@ -765,7 +857,7 @@ describe("coordinated scrolling", () => {
   test("ordinary cancellation clears an unconsumed instant placement", () => {
     const f = fixture(() => "smooth");
     f.move(0); f.owner.latest({ motion: "instant" }); f.owner.cancel();
-    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.cancel({ forSnapshot: true });
     f.owner.request(); f.flush(0); f.flush(32);
     expect(f.element.scrollTop).toBeGreaterThan(0);
     expect(f.element.scrollTop).toBeLessThan(300);
@@ -773,7 +865,7 @@ describe("coordinated scrolling", () => {
   test("reader pause cancels initial placement and snapshot cancellation cannot repin it", () => {
     const f = fixture(() => "smooth");
     f.move(100); f.owner.latest({ motion: "instant" }); f.owner.pause();
-    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.cancel({ forSnapshot: true });
     f.grow(900); f.owner.request(true); f.flush(0); f.flush(32);
     expect(f.anchor.isPinned()).toBe(false);
     expect(f.element.scrollTop).toBe(100);
@@ -783,8 +875,8 @@ describe("coordinated scrolling", () => {
     const f = fixture(() => "smooth");
     f.owner.request(); f.flush(0);
     f.grow(900);
-    f.owner.cancel({ preserveInstantPlacement: true });
-    f.owner.cancel({ preserveInstantPlacement: true });
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel({ forSnapshot: true });
     f.owner.request(true); f.flush(16); f.flush(48);
     expect(f.element.scrollTop).toBeGreaterThan(300);
     expect(f.element.scrollTop).toBeLessThan(600);

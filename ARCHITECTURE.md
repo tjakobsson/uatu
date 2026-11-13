@@ -1146,6 +1146,9 @@ supersede that restoration; layout-only callbacks cannot manufacture a choice.
 Durable capture prefers pending placement over incidental live geometry and
 preserves the original reading intent beneath a temporary answer hold. UI keeps
 per-view identity and storage, not a second pending-placement state machine.
+After answer blur, passive same-view snapshots preserve the live reading position
+and retain the separate durable anchor for later departure; cancelling snapshot
+work is not itself a request to return to that earlier anchor.
 Empty loading renders retain placement through hide/reopen, resize and departure
 before a read completes. Header Back and browser Back share the finishing capture
 path. Legacy stored anchors retain their shape; a finite-offset variant preserves

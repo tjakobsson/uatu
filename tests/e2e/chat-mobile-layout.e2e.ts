@@ -903,8 +903,7 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`mobile layo
     const offset = () => anchor.evaluate(element => element.getBoundingClientRect().top - document.querySelector("#chat-timeline")!.getBoundingClientRect().top);
     await expect.poll(offset).toBeGreaterThanOrEqual(35);
     const before = await offset();
-    // A remote worker update grows chrome without the deliberate jump to
-    // latest that submitting one's own prompt correctly requests.
+    // A remote worker update grows chrome while the reader remains paused.
     await control(request, { op: "launchWorker", conversationId: id });
     await expect(page.locator("#chat-compact-workers-items [data-inspect-task]")).toHaveCount(1);
     await expect.poll(offset).toBeCloseTo(before, 0);
