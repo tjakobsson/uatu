@@ -1,0 +1,82 @@
+{
+  "kind": "static-chat-first-ui-concept-browser-captures",
+  "date": "2026-11-09",
+  "source": "prototype.html",
+  "sourceSha256": "645fa108eb9ca97712c4ece00e991d6c652b484654d5f64c0a31c41bcfed7385",
+  "captureMethod": "Native Playwright Chromium browser; temporary loopback HTTP; viewport captures with internal pane scrolling; animations disabled; bundled font loaded before capture",
+  "browser": "Chromium 154.0.0.0 on macOS",
+  "deviceScaleFactor": 1,
+  "imageScale": "css",
+  "captureQuery": "capture=1",
+  "provenance": "Static UI proposals, not implemented product or live-provider evidence. All data and artwork are illustrative. No AI image generation was used. Origin is embedded in every PNG.",
+  "originalGallery": "../opencode-background-concepts/",
+  "originalGalleryAggregateSha256": "61dcf29efbb178aa7b081720872f864cc52ff1a392a826311e37922cc515bf04",
+  "checks": {
+    "pageErrors": [],
+    "documentHorizontalOverflow": false,
+    "conceptLabelVisible": true,
+    "logoLoaded": true,
+    "bundledMonoFontLoaded": true,
+    "documentPreviewRetainedOnDesktop": true,
+    "newFeatureTabs": 0,
+    "mobileWorkerAndScheduleSummariesInitiallyCollapsed": true
+  },
+  "screenshots": [
+    {
+      "file": "01-chat-overview-desktop-light.png",
+      "view": "overview",
+      "theme": "light",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "d19abb28685b031fae9ad6f8970f050eedb5dd86a8449b44ce634157f97f6ea4"
+    },
+    {
+      "file": "02-schedule-details-desktop-light.png",
+      "view": "schedule-details",
+      "theme": "light",
+      "viewport": { "width": 1440, "height": 1200 },
+      "sha256": "7fd7a0a94d3722ba1aaeea44c0231540eca564b07e4a7ce2884e04373bab4951"
+    },
+    {
+      "file": "03-shell-inspection-desktop-dark.png",
+      "view": "shell-inspection",
+      "theme": "dark",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "79bc9b1a4fc579bdbbbd2104655621f6f0da144dabf916cf893f55f32646f2c6"
+    },
+    {
+      "file": "04-image-inspection-desktop-light.png",
+      "view": "image-inspection",
+      "theme": "light",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "639930d75416a640e6927cd82b482838523094c284dd7949ee483fa2b34eb5d0"
+    },
+    {
+      "file": "05-agent-terminal-inspection-desktop-dark.png",
+      "view": "terminal-inspection",
+      "theme": "dark",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "705714614c499cdf1cb0a34270b0e9c022ef9d01850eb5606f646456c5baba24"
+    },
+    {
+      "file": "06-scheduled-followup-desktop-light.png",
+      "view": "wakeup",
+      "theme": "light",
+      "viewport": { "width": 1440, "height": 1000 },
+      "sha256": "d6d04943353682c346f626b1821b115e8339cfcaf09b551b290146a66b7db514"
+    },
+    {
+      "file": "07-chat-overview-mobile-light.png",
+      "view": "overview",
+      "theme": "light",
+      "viewport": { "width": 430, "height": 932 },
+      "sha256": "11574cbdfc49eddd3b30213b69c4a759ea6a41359818b2322104eb883a152df9"
+    },
+    {
+      "file": "08-shell-inspection-mobile-dark.png",
+      "view": "shell-inspection",
+      "theme": "dark",
+      "viewport": { "width": 430, "height": 932 },
+      "sha256": "8493c8c6c2291209a6a86348de48e05239337eb13015ed5fa3786eb1b5de2578"
+    }
+  ]
+}
