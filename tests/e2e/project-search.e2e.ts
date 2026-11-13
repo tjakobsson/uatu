@@ -246,13 +246,16 @@ test("arrow keys walk results and Enter opens the focused one", async ({ page })
   await expect(page.locator("#preview-path")).not.toHaveText("README.md");
 });
 
-test("ignored and binary files never appear in results", async ({ page, request }) => {
+test("ignored visibility controls search while exposure excludes and binaries stay out", async ({ page, request }) => {
   await request.post("/__e2e/reset", {
     data: {
+      uatuConfig: { ignore: { exclude: ["private.md"] } },
       extras: {
         ".gitignore": "secret.md\n",
         "secret.md": "compare-target is in here too\n",
         "visible.md": "compare-target is here\n",
+        "private.md": "compare-target is exposure-excluded\n",
+        "data.bin": "compare-target\0binary content",
       },
       git: true,
     },
@@ -260,7 +263,16 @@ test("ignored and binary files never appear in results", async ({ page, request 
   await page.reload();
   await openSearch(page);
   await page.locator("#search-query").fill("compare-target");
-  await expect(page.locator(".search-file")).toHaveCount(1, { timeout: 10_000 });
+  await expect(page.locator(".search-file")).toHaveCount(2, { timeout: 10_000 });
+  await expect(page.locator(".search-file-path").filter({ hasText: "secret.md" })).toHaveCount(1);
+  await expect(page.locator(".search-file-path").filter({ hasText: "visible.md" })).toHaveCount(1);
+  await expect(page.locator(".search-file-path").filter({ hasText: /private\.md|data\.bin/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Files options", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Show ignored files" }).uncheck();
+  await page.getByRole("button", { name: "Files options", exact: true }).click();
+  await expect(page.locator(".search-file")).toHaveCount(0);
+  await page.locator("[data-search-rerun]").click();
+  await expect(page.locator(".search-file")).toHaveCount(1);
   await expect(page.locator(".search-file-path")).toContainText("visible.md");
 });
 

@@ -693,6 +693,15 @@ export function initHubNav(): void {
     dashboard.appendChild(dashboardLabel);
     add(dashboard);
 
+    const settings = document.createElement("a");
+    settings.className = "hub-menu-item";
+    settings.href = "/settings#personal-chat-preferences-pane";
+    const settingsLabel = document.createElement("span");
+    settingsLabel.className = "hub-menu-label";
+    settingsLabel.textContent = "Settings";
+    settings.appendChild(settingsLabel);
+    add(settings);
+
     if (latest.length > 0) {
       add(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
     }

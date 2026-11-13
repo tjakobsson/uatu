@@ -2,11 +2,12 @@
 // the /s/<id>/ proxy dispatch. Assembled as a single fetch handler so the
 // gate provably runs before anything session- or dashboard-shaped executes.
 
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import type { ServerWebSocket } from "bun";
+import { startMediaHttpBoundary, type MediaHttpBoundary } from "../server/media-http-boundary";
 
 import hubMonoFontAsset from "../assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
 import hubIcon192Asset from "../assets/icon-192.png" with { type: "file" };
@@ -48,6 +49,7 @@ import { isPathAtOrBelow, normalizeAbsolutePath, pathsOverlap, type PathReservat
 import {
   bridgeWebSocketHandlers,
   childUrlFor,
+  isLocalDiscardAction,
   proxyHttp,
   upgradeToBridge,
   type BridgeData,
@@ -67,7 +69,12 @@ import { createHubUpstreamSource } from "./live-source";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
 import { OnboardingError, resolveOnboardingAssignments, type WorkspaceOnboardingCoordinator } from "./onboarding";
 import { HubPreferencesError, type HubPreferencesStore } from "./preferences";
+import { isChildPolicyAction, type VerifiedChatPolicy } from "./child-policy";
+import { PersonalChatPreferencesError, type PersonalChatPreferencesStore } from "./personal-chat-preferences";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
+import type { WorkerDismissalsStore } from "./worker-dismissals";
+import { handleWorkerDismissals, readAuthoritativeWorkerEvidence, WORKER_DISMISSALS_PATH } from "./worker-dismissals-api";
+import { observeWorkerProjection } from "./worker-dismissals-observation";
 import type { ActivityMarkSink } from "./activity-marks";
 import type { SessionManager } from "./sessions";
 import { PAGE_ORIGIN_HEADER } from "../terminal/auth";
@@ -97,6 +104,8 @@ export type HubDeps = {
   // harness leave the broker lazy, watching from its first activity feed.
   watchActivityFromStart?: boolean;
   preferences?: HubPreferencesStore;
+  personalChatPreferences?: PersonalChatPreferencesStore;
+  workerDismissals?: WorkerDismissalsStore;
   onboarding?: WorkspaceOnboardingCoordinator;
   folderManager?: Pick<FolderManager, "create" | "rename" | "remove" | "assertNoPendingMutation">;
   reservations?: PathReservationCoordinator;
@@ -1629,6 +1638,29 @@ export function createHubFetchHandler(deps: HubDeps) {
         return json(400, { error: "malformed workspace id" });
       }
       const suffix = pathname.slice(sessionMatch[0].endsWith("/") ? sessionMatch[0].length - 1 : sessionMatch[0].length);
+      if (suffix === WORKER_DISMISSALS_PATH) {
+        // Shares the session route's authenticated principal and cookie-origin
+        // protection. The lifecycle lock excludes concurrent forget/restart.
+        const workspace = registry.byId(workspaceId);
+        if (!workspace) return json(404, { error: "unknown workspace" }, NO_STORE_HEADERS);
+        const admittedRunning = sessions.get(workspaceId);
+        // Parse and bound exact-action admission BEFORE waiting. The callback
+        // still holds the lifecycle lock throughout authoritative I/O and save.
+        return handleWorkerDismissals(request, {
+          user: session.user, workspaceId, store: deps.workerDismissals,
+          runExclusive: operation => sessions.runExclusive(workspaceId, async () => {
+            if (registry.byId(workspaceId) !== workspace || sessions.get(workspaceId) !== admittedRunning) throw new Error("workspace generation changed");
+            return operation();
+          }),
+          read: async conversationId => {
+            const running = sessions.get(workspaceId);
+            if (!running) throw new Error("workspace unavailable");
+            const evidence = await readAuthoritativeWorkerEvidence(running, conversationId);
+            if (sessions.get(workspaceId) !== running) throw new Error("workspace generation changed");
+            return evidence;
+          },
+        });
+      }
       if (suffix === "/api/personal-state") {
         if (!registry.byId(workspaceId)) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
@@ -1657,7 +1689,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (message.startsWith("unknown workspace:")) return json(404, { error: message });
-          if (/personal state|documentPath|follow|previewMode|compareTarget|filesFilter|lastPtyId|unknown/.test(message)) {
+          if (/personal state|documentPath|follow|previewMode|compareTarget|filesFilter|showIgnored|lastPtyId|unknown/.test(message)) {
             return json(400, { error: message });
           }
           return json(500, { error: "failed to persist personal state" });
@@ -1696,7 +1728,24 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         return upgradeToBridge(request, server, running);
       }
-      return proxyHttp(request, running);
+      if (isLocalDiscardAction(request.method, url.pathname, running.basePath)) {
+        // Identity only: discard cannot consult or apply automatic policy.
+        return proxyHttp(request, running, { principal: session.user, revision: 0, autoBackgroundOnSteer: false });
+      }
+      if (isChildPolicyAction(request.method, url.pathname, running.basePath)) {
+        let policy: VerifiedChatPolicy;
+        try {
+          const state = deps.personalChatPreferences?.get(session.user);
+          if (!state) throw new Error("personal preferences unavailable");
+          policy = { principal: session.user, revision: state.revision, autoBackgroundOnSteer: state.autoBackgroundOnSteer };
+        } catch {
+          policy = { principal: session.user, revision: 0, autoBackgroundOnSteer: false, unavailable: true };
+        }
+        return proxyHttp(request, running, policy);
+      }
+      return proxyHttp(request, running, undefined, deps.workerDismissals
+        ? (conversationId, value) => observeWorkerProjection(deps.workerDismissals!, workspaceId, conversationId, value)
+        : undefined);
     }
 
     // Dashboard + its APIs.
@@ -1708,6 +1757,34 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
     if (pathname === "/settings" && request.method === "GET") {
       return htmlResponse(settingsPage(session.user));
+    }
+    if (pathname === "/api/hub/settings/chat-preferences") {
+      if (request.method !== "GET" && !csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      if (request.method !== "GET" && request.method !== "PUT") {
+        return json(405, { error: "method not allowed" }, { ...NO_STORE_HEADERS, allow: "GET, PUT" });
+      }
+      // Identity is selected exclusively from the verified session. There
+      // are no query/header selectors on this closed personal resource.
+      if (url.search !== "" || request.headers.has("x-hub-user") || request.headers.has("x-hub-account")) {
+        return json(400, { error: "personal identity selectors are not supported" }, NO_STORE_HEADERS);
+      }
+      if (!deps.personalChatPreferences) return json(503, { error: "personal chat preferences are unavailable" }, NO_STORE_HEADERS);
+      try {
+        if (request.method === "GET") return json(200, deps.personalChatPreferences.get(session.user), NO_STORE_HEADERS);
+        let input: unknown;
+        try { input = await request.json(); } catch { return json(400, { error: "invalid JSON body" }, NO_STORE_HEADERS); }
+        return json(200, await deps.personalChatPreferences.update(session.user, input), NO_STORE_HEADERS);
+      } catch (error) {
+        if (error instanceof PersonalChatPreferencesError) {
+          return json(error.code === "conflict" ? 409 : error.code === "invalid-input" ? 400 : 503, {
+            error: error.message,
+            ...(error.current ? { current: error.current } : {}),
+          }, NO_STORE_HEADERS);
+        }
+        return json(503, { error: "personal chat preferences are unavailable" }, NO_STORE_HEADERS);
+      }
     }
     // The published JSON worktree family, behind the same gate as the
     // dashboard. A cookie transport keeps the same-origin rule on every
@@ -2076,7 +2153,10 @@ export function createHubFetchHandler(deps: HubDeps) {
             await personalState.forgetWorkspace(
               workspaceId,
               () => registry.remove(workspaceId),
-              async () => { await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId); },
+              async () => {
+                await deps.workerDismissals?.forgetWorkspace(workspaceId);
+                await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId);
+              },
             );
             return "forgotten";
           });
@@ -2119,11 +2199,27 @@ function assembleLive(deps: HubDeps): { live: LiveEndpoint; liveBroker: LiveBrok
     },
     metrics,
   });
+  if (deps.workerDismissals) liveBroker.observeWorkerConversations((workspaceId, conversationId, value) => {
+    observeWorkerProjection(deps.workerDismissals!, workspaceId, conversationId, value);
+  });
+  // Installed once per endpoint/store pair, including the separately assembled
+  // production endpoint. Changed marks notify after atomic commits; storage
+  // health invalidations make personal reads report failure without touching chat.
+  if (deps.workerDismissals) bindWorkerDismissals(deps.workerDismissals, live);
   return { live, liveBroker };
 }
 
-// Starts the hub's Bun.serve with TLS when configured and the WebSocket
-// bridge handlers wired.
+const dismissalBindings = new WeakMap<LiveEndpoint, WeakSet<WorkerDismissalsStore>>();
+function bindWorkerDismissals(store: WorkerDismissalsStore, live: LiveEndpoint): void {
+  let stores = dismissalBindings.get(live);
+  if (!stores) { stores = new WeakSet(); dismissalBindings.set(live, stores); }
+  if (stores.has(store)) return;
+  stores.add(store);
+  store.subscribe((scope, notice) => live.invalidatePersonal(scope.user, scope.workspaceId, notice));
+}
+
+// Starts the public HTTP/TLS media boundary around the private Bun router
+// and its existing WebSocket bridge handlers.
 export function startHubServer(deps: HubDeps) {
   const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
     processFactory: new CloneProcessAdapter({ gitCommand: deps.gitCommand }),
@@ -2137,15 +2233,14 @@ export function startHubServer(deps: HubDeps) {
   deps.notifications?.usePresence(liveBroker);
   const worktreeReconciler = assembleWorktreeReconciler(deps, liveBroker);
   const handler = createHubFetchHandler({ ...deps, cloneJobs, live, liveBroker, ...(worktreeReconciler ? { worktreeReconciler } : {}) });
-  const server = Bun.serve<BridgeData>({
-    hostname: deps.config.host,
-    port: deps.config.port,
+  let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve<BridgeData>>> | undefined;
+  const tls = deps.config.tls ? { cert: readFileSync(deps.config.tls.cert), key: readFileSync(deps.config.tls.key) } : undefined;
+  const inner = Bun.serve<BridgeData>({
+    hostname: "127.0.0.1",
+    port: 0,
     // SSE and long-lived terminal sockets must never be idle-reaped.
     idleTimeout: 0,
-    ...(deps.config.tls
-      ? { tls: { cert: Bun.file(deps.config.tls.cert), key: Bun.file(deps.config.tls.key) } }
-      : {}),
-    fetch: (request, server) => handler(request, server),
+    fetch: (request, server) => handler(boundary?.normalizeRequest(request) ?? request, boundary?.server ?? server),
     websocket: {
       open(socket: ServerWebSocket<BridgeData>) {
         bridgeWebSocketHandlers.open(socket);
@@ -2158,5 +2253,9 @@ export function startHubServer(deps: HubDeps) {
       },
     },
   });
-  return Object.assign(server, { cloneJobs, live, liveBroker, worktreeReconciler });
+  boundary = startMediaHttpBoundary({ server: inner, hostname: deps.config.host, port: deps.config.port, tls,
+    isMediaRequest: request => /^\/s\/[^/]+\/api\/media$/.test(new URL(request.url).pathname),
+    fetch: (request, server) => handler(request, server),
+  });
+  return Object.assign(boundary.server, { ready: boundary.ready, cloneJobs, live, liveBroker, worktreeReconciler });
 }

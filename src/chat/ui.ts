@@ -1,11 +1,14 @@
 import { boundedSet } from "../shared/bounded-map";
+import { Composer, type PendingQueueAction } from "./composer";
 import { escapeHtml } from "../shared/html";
 import { createLoadingSignal } from "../preview/loading-signal";
 import { measureChatWork } from "./performance";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
+import { onUiModeChange } from "../shell/ui-mode";
 import { registerBackInterceptor } from "../shell/history";
-import { onManualRecovery, registerRecoveryWork, requestManualRecovery } from "../shell/live";
+import { liveChannel, onManualRecovery, registerLiveTeardown, registerRecoveryWork, requestManualRecovery } from "../shell/live";
+import { isHubPage } from "../shared/app-url";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
@@ -16,34 +19,40 @@ import { setActiveTab } from "../shell/tab-bar";
 import { expandChatPanel, isChatPanelOpen } from "./surface";
 import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "./surface-visibility";
 import { newRequestId } from "./ids";
-import { insertCommand, localHistoryOperation, matchingCommands, slashCommandQuery, type LocalHistoryOperation } from "./slash-commands";
+import { activeInteractionRequests } from "./interaction-order";
+import { insertCommand, localHistoryOperation, matchingCommands, parsePromptSlashCommand, sideQuestionOperation, slashCommandQuery, type LocalHistoryOperation } from "./slash-commands";
 import { LatestRefresh } from "./latest-refresh";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, statusLabel, subagentEntries, subagentLabel, workingLabel } from "./timeline-renderer";
-import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
+import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, questionStepLabel, statusLabel, subagentEntries, workingLabel } from "./timeline-renderer";
+import { backgroundTasksByTool, runningBackgroundTasks } from "./background-tasks";
 import { pausedStatusLabel, pausedWakeups, pendingWakeups, scheduledStatusLabel, wakeupFireTime } from "./scheduled-wakeups";
-import { RunningWorkDisclosure } from "./running-work-disclosure";
-import { SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, runningTaskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
+import { CompactDisclosure, compactWorkers, workerSummary, type CompactWorker } from "./compact-work";
+import { WorkerDismissalClient, visibleWorkers, workerDismissible, workerExecutionIds } from "./worker-dismissal-client";
+import { CheckingPresentation } from "./worker-dismissal-client-checking";
+import { revealWorkerRequest } from "./worker-dismissal-client-request";
+import { CompactWorkersView } from "./compact-workers-view";
+import { expandedWorkBudget } from "./work-budget";
+import { renderChatMarkdown } from "./markdown";
+import { decorateChatVisuals } from "./visual-ui";
+import { SHELL_WORKER_STOP_WARNING, SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, taskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
+import type { BackgroundTaskItem } from "./types";
 import { contextReadout } from "./context-readout";
-import { buildReceiptRows, buildReceiptTotal, parseReceiptView, receiptHeading, subagentTrackSummary, subagentTranscriptTitle, type ReceiptView } from "./receipt-view";
+import { HoldToQueue, HOLD_ARM_MS, HOLD_COUNTDOWN_MS, HOLD_TOTAL_MS } from "./hold-to-queue";
+import { QueueDiscovery } from "./queue-discovery";
+import { buildReceiptRows, buildReceiptTotal, parseReceiptView, receiptHeading, subagentTranscriptTitle, type ReceiptView } from "./receipt-view";
 import { formatTokens, totalTokens } from "./usage";
 import { resolveSessionTotals, type ConversationTotals } from "./conversation-totals";
 import {
-  addAcceptedDraft,
   applyChatEvent,
-  confirmAcceptedDraft,
-  dropQueuedMessage,
-  noteQueuedMessage,
   prependSnapshot,
   projectionFromSnapshot,
   refreshFromSnapshot,
-  removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatLoginState, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type ContextReportItem, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type SessionTotals } from "./types";
+import type { AgentChatStatus, ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatLoginState, ChatModel, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationSummary, ContextReportItem, MessageDelivery, ModelSelection, PermissionOutcome, QuestionOutcome, SessionTotals } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -55,6 +64,7 @@ import { dateTime, nextLocalMidnight } from "./dates";
 import { watchPinnedDayLabels } from "./pinned-day";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
+const TOO_LATE = "Too late — already delivered";
 const SAVE_DEBOUNCE_MS = 400;
 const MAX_EXPANDED_ENTRIES = 400;
 const REFRESH_RETRY_INITIAL_MS = 100;
@@ -131,10 +141,13 @@ export function initChat(api = new ChatApiClient()): void {
   const revertedLabel = document.querySelector<HTMLElement>("#chat-reverted-label");
   const revertedItems = document.querySelector<HTMLElement>("#chat-reverted-items");
   const queueDockElement = document.querySelector<HTMLElement>("#chat-queue");
+  const queueNoteElement = document.querySelector<HTMLElement>("#chat-queue-note");
   const form = document.querySelector<HTMLFormElement>("#chat-composer");
   const input = document.querySelector<HTMLTextAreaElement>("#chat-input");
   const commandMenu = document.querySelector<HTMLElement>("#chat-command-menu");
   const send = document.querySelector<HTMLButtonElement>("#chat-send");
+  const sendGroup = document.querySelector<HTMLElement>("#chat-send-group");
+  const stop = document.querySelector<HTMLButtonElement>("#chat-stop");
   const sendLabel = document.querySelector<HTMLElement>("#chat-send .chat-send-label");
   const configurationTrigger = document.querySelector<HTMLButtonElement>("#chat-configuration-trigger");
   const configurationSummary = document.querySelector<HTMLElement>("#chat-configuration-summary");
@@ -189,16 +202,6 @@ export function initChat(api = new ChatApiClient()): void {
   // rebuilds (a resync, a switch away and back) so a late acceptance never
   // recreates a row the stream already retired.
   const removedRows = new Map<string, string[]>();
-  // A `/reload` this client sent, by conversation, with the agent whose
-  // catalogs it changes and — once accepted — its message id: when its turn
-  // completes, the palette and pickers re-read them. A reload held behind a
-  // running turn is still in the conversation's queue when THAT turn
-  // completes, so a completion arriving while it is queued is not its own.
-  // One arriving before the acceptance names the message cannot be told
-  // apart: it re-reads (harmlessly) and keeps the mark for the real one.
-  // A failed or interrupted reload changed nothing to re-read.
-  // Several can wait in one conversation's queue, oldest first.
-  const pendingReloads = new Map<string, Array<{ agentId: string; messageId?: string }>>();
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
   // Attachment surfaces. Guarded at use rather than joining the required
@@ -285,7 +288,10 @@ export function initChat(api = new ChatApiClient()): void {
   const revertedDock = revertedShell && revertedLabel && revertedItems
     ? new RevertedMessagesDockRenderer(revertedShell, revertedLabel, revertedItems)
     : null;
-  let presentation = readPresentation();
+  // Keep read/write ownership with this page even if a host replaces its
+  // global window while an in-flight read still owes us a save after pagehide.
+  const presentationStorage = presentationLocalStorage();
+  let presentation = readPresentation(presentationStorage);
   let conversations: ConversationSummary[] = [];
   // Every offered agent with its availability, in server presentation order.
   let agentStatuses: AgentChatStatus[] = [];
@@ -302,8 +308,12 @@ export function initChat(api = new ChatApiClient()): void {
   let models: ChatModel[] = [];
   let modes: ChatMode[] = [];
   let commands: ChatCommand[] = [];
+  // Whether a dock entry's text runs as a listed command — what the adapter's
+  // parseSlashCommand decides — so the dock offers no steer for one.
+  const isListedCommand = (text: string): boolean => parsePromptSlashCommand(text, commands) !== undefined;
   let projection: ChatProjection | null = null;
   const stagedConfigurations = new Map<string, ConversationConfiguration>();
+  const configurationLabels = { summary: "Chat settings", inline: "", accessible: [] as string[] };
   let configurationPicker: ChatConfigurationPickerController | null = null;
   let stream: ChatEventStream | null = null;
   let inventoryStream: ChatEventStream | null = null;
@@ -311,6 +321,7 @@ export function initChat(api = new ChatApiClient()): void {
   // A stored reference is not an opened selection. Keep it inert across
   // missing inventories, even if creation cancels startup before it finishes.
   let hasSelectedConversation = false;
+  let failedOpeningConversationId: string | null = null;
   // A consumed startup restore is not deletion-recovery eligible until its
   // opening read succeeds. Keep this scoped to its current selection epoch.
   let unestablishedStartup: { conversationId: string; generation: number } | null = null;
@@ -354,6 +365,8 @@ export function initChat(api = new ChatApiClient()): void {
     task?: OpenTaskInspection;
   };
   let child: Drilldown | null = null;
+  let childInvoker: HTMLElement | null = null;
+  let childInvokerSelector: string | null = null;
   // The error line the output view last put up. When a later read answers,
   // the panel says so and the line comes down — but only if it still says
   // what the panel put there, so a message something else has since spoken
@@ -380,7 +393,7 @@ export function initChat(api = new ChatApiClient()): void {
   const syncTaskInspection = () => {
     if (!taskPanel || !child?.task) return;
     const owner = projection?.conversationId === child.task.conversationId ? projection : null;
-    taskPanel.sync(owner ? taskById(owner.items, child.task.taskId) : undefined, stoppingTasks.has(child.task.taskId));
+    taskPanel.sync(checkingPresentation.task(owner ? taskById(owner.items, child.task.taskId, child.task.itemId) : undefined), stoppingTasks.has(child.task.taskId));
   };
   let childGeneration = 0;
   // A run that streams nothing — the review a typed command launches — or
@@ -480,28 +493,13 @@ export function initChat(api = new ChatApiClient()): void {
   let lastTranscriptPaint = 0;
   let childIncrementalTimer: ReturnType<typeof setTimeout> | null = null;
   let lastChildPaint = 0;
-  let submitting = false;
   let cancelling = false;
   // Bumped on every main-projection snapshot install. queueRevision restarts
   // at zero with each fresh projection, so an in-flight held echo compares
   // this epoch too — a revision captured before a reload must never pass
   // against the replacement projection's coincidentally equal revision.
   let projectionEpoch = 0;
-  // A failed send leaves acceptance unknown — the server may already hold a
-  // receipt for the request. Resubmitting the same text reuses its id so the
-  // receipt dedupes instead of starting a second agent turn. Keyed per
-  // conversation: a success elsewhere must not discard another
-  // conversation's unresolved id.
-  // `attachments` joins the retry identity: a resubmission with the same text
-  // but a changed attachment set is a different message, and reusing the old
-  // request id would let the server replay the first acceptance receipt for a
-  // payload the provider never saw.
-  const retryRequests = new Map<string, { text: string; requestId: string; attachments: string }>();
-  const historyMutations = new Set<string>();
-  const pendingHistoryResyncs = new Set<string>();
-  const historyRefreshRequired = new Set<string>();
   type HistoryOperation = LocalHistoryOperation | "revert" | "restore";
-  const historyRetries = new Map<string, { operation: HistoryOperation; messageId?: string; requestId: string; result?: ReversibleHistoryResult }>();
   let commandInventoryAvailable = true;
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
@@ -735,6 +733,23 @@ export function initChat(api = new ChatApiClient()): void {
   const announce = announcerFor(state);
   const announceChild = announcerFor(drilldownState);
 
+  // Step narration owns a live region of its own, beside each status line.
+  // The status line is shared with connection-interruption messaging, whose
+  // recovery affordance keys on the line's current text: a transient
+  // "Question 2 of 4" landed in it would strip the in-place Reconnect button
+  // while a stream is still down (and its clear() would not re-expose the
+  // owned message). Question steps are ambient, not actionable — they speak
+  // politely without displacing anything.
+  const stepAnnouncerFor = (target: HTMLElement | null): Announcer => {
+    const region = document.createElement("div");
+    region.className = "sr-only";
+    region.setAttribute("aria-live", "polite");
+    target?.parentNode?.insertBefore(region, target.nextSibling);
+    return announcerFor(region);
+  };
+  const announceQuestionStep = stepAnnouncerFor(state);
+  const announceQuestionStepChild = stepAnnouncerFor(drilldownState);
+
   // Connection-interruption messaging has a dedicated owner, PER STREAM. The
   // status line is shared with provider outages, validation refusals, and turn
   // failures — all of which the user still has to act on — so a reconnect may
@@ -772,12 +787,35 @@ export function initChat(api = new ChatApiClient()): void {
         reconnect.remove();
       }
     };
+    // A transient message replaced this owner's interruption text: the
+    // stream is still down underneath, so the in-place recovery affordance
+    // stands beside the transient line until owned text returns.
+    const keepRecoveryVisible = (): void => {
+      if (owned.size > 0 && speak.target) speak.target.append(reconnect);
+    };
     speak.spoken.add(sync);
     return {
       report(stream: string, error: unknown) {
         const message = messageOf(error);
         if (error instanceof ChatConnectionInterruptedError) owned.set(stream, message);
         speak(message, true);
+      },
+      // Whether the line is currently showing one of this owner's messages.
+      isShowingOwned(): boolean {
+        return speak.target !== null && owned.size > 0 && [...owned.values()].includes(speak.current());
+      },
+      // Whether a stream of this surface is still down, even while another
+      // message (a validation refusal on an ordinary click) occupies the
+      // line in its place.
+      hasDown(): boolean {
+        return owned.size > 0;
+      },
+      keepRecoveryVisible,
+      // Speak the newest owned interruption again — a finished message left
+      // the line without retelling it while the stream is still down.
+      restoreOwned(): void {
+        const remaining = [...owned.values()].at(-1);
+        if (remaining !== undefined) speak(remaining, true);
       },
       // This stream's transport is healthy again. Its message goes; if the
       // other stream is still interrupted, the line states that instead of
@@ -786,7 +824,16 @@ export function initChat(api = new ChatApiClient()): void {
         const message = owned.get(stream);
         if (message === undefined) return;
         owned.delete(stream);
-        if (speak.current() !== message) return;
+        if (speak.current() !== message) {
+          // A transient message (a validation refusal on an ordinary click)
+          // displaced this owner's text. While another stream of this
+          // surface is still down, preserve the affordance's current
+          // attached or detached state — re-attaching here would hang
+          // recovery on an unrelated status the user must act on first.
+          // When no interruptions remain at all, it goes.
+          if (owned.size === 0) sync();
+          return;
+        }
         const remaining = [...owned.values()].at(-1);
         speak(remaining ?? "", remaining !== undefined);
       },
@@ -794,6 +841,26 @@ export function initChat(api = new ChatApiClient()): void {
   };
   const interruptions = interruptionsFor(announce);
   const childInterruptions = interruptionsFor(announceChild);
+  // The interruption owner for the surface a message belongs to, so a
+  // transient writer can preserve that surface's recovery affordances.
+  const interruptionsOwnerFor = (source: ChatProjection) =>
+    child && source.conversationId === child.conversationId ? childInterruptions : interruptions;
+
+  // Which question request currently owns each surface's owed-answer line —
+  // the parent's line and the drill-down's are one resource each, shared by
+  // every conversation and card that surface shows, so the timeline wirings
+  // (one per surface, separate closures) must read and write this one map.
+  // The key is the exact question request — its conversation plus its
+  // requestId — not merely the conversation: one conversation can ask again
+  // (or carry a newer mirrored card) while an earlier question's resolve
+  // still sits in flight, and a resolution landing then must never retire
+  // the newer question's line. The record also carries the surface's own
+  // interruption owner, captured when the line was raised: a resolution
+  // landing on one surface retires the line on every surface whose record
+  // matches, and each retired line restores its own surface's affordances.
+  const owedAnswerOwners = new Map<Announcer, { key: string; owner: ReturnType<typeof interruptionsFor> }>();
+  const questionOwnershipKey = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>) =>
+    `${item.conversationId ?? source.conversationId}\u0000${item.requestId}`;
 
   const geometryOf = (scroller: HTMLElement, container: HTMLElement): AnchorGeometry => {
     const bounds = scroller.getBoundingClientRect();
@@ -958,7 +1025,7 @@ export function initChat(api = new ChatApiClient()): void {
       expanded.delete(oldest);
     }
     presentation.expanded = [...expanded];
-    try { presentationLocalStorage()?.setItem(PRESENTATION_KEY, JSON.stringify(presentation)); } catch { /* best effort */ }
+    try { presentationStorage?.setItem(PRESENTATION_KEY, JSON.stringify(presentation)); } catch { /* best effort */ }
   };
 
   const save = () => {
@@ -1007,131 +1074,253 @@ export function initChat(api = new ChatApiClient()): void {
     taskList.hidden = false;
   };
 
-  const backgroundTasks = document.querySelector<HTMLDetailsElement>("#chat-background-tasks");
-  const backgroundTasksLabel = document.querySelector<HTMLElement>("#chat-background-tasks-label");
-  const backgroundTasksItems = document.querySelector<HTMLElement>("#chat-background-tasks-items");
-
-  /**
-   * Both pinned lists of running work open when running work first appears
-   * in them, so a task's inspect and Stop controls are a tap away rather
-   * than behind a disclosure; a user's collapse of running work is held
-   * until that work is over (see running-work-disclosure.ts). Opening sets
-   * `open` and nothing else — no focus moves and the timeline is not
-   * scrolled; the list's rows are height-bounded, so the composer's
-   * displacement stays capped.
-   */
-  const trackRunningWork = (list: HTMLDetailsElement | null) => {
-    const disclosure = new RunningWorkDisclosure(list?.open ?? false);
-    list?.addEventListener("toggle", () => disclosure.toggled(list.open));
-    return (runningCount: number) => {
-      if (list && disclosure.paint(projection?.conversationId ?? null, runningCount) && !list.open) list.open = true;
-    };
+  const compactWorkersList = document.querySelector<HTMLDetailsElement>("#chat-compact-workers");
+  const compactWorkersLabel = document.querySelector<HTMLElement>("#chat-compact-workers-label");
+  const compactWorkersItems = document.querySelector<HTMLElement>("#chat-compact-workers-items");
+  const hubDismissals = isHubPage();
+  const checkingPresentation = new CheckingPresentation(() => { syncCompactWork(); syncTaskInspection(); });
+  const dismissalNotice = document.createElement("p");
+  dismissalNotice.className = "chat-worker-dismissal-notice";
+  dismissalNotice.setAttribute("role", "status");
+  dismissalNotice.hidden = true;
+  // Personal-state guidance has its own owner, but shares the composer's
+  // measured, bounded and keyboard-scrollable feedback band. An extra dock
+  // sibling would consume unallocated space between Workers and Pending.
+  document.querySelector("#chat-composer-notices")?.append(dismissalNotice);
+  const personalDismissals = hubDismissals ? new WorkerDismissalClient({ channel: liveChannel(), changed: () => syncCompactWork() }) : null;
+  registerLiveTeardown(() => { personalDismissals?.dispose(); checkingPresentation.dispose(); });
+  const compactWorkerState = new CompactDisclosure();
+  const compactPendingState = new CompactDisclosure();
+  const pendingScrollPositions = new Map<string, number>();
+  let pendingPaintedConversation: string | null = null;
+  let pendingPaintedOpen = false;
+  let pendingScrollRestore: { conversation: string; top: number } | null = null;
+  compactWorkersList?.addEventListener("toggle", () => {
+    compactWorkerState.toggled(compactWorkersList.open);
+    compactWorkersList.querySelector("summary")?.setAttribute("aria-expanded", String(compactWorkersList.open));
+    syncQueueOverflow();
+    syncDesktopWorkLayout();
+  });
+  let dismissalBatchFeedback: { conversationId: string; skipped: number } | null = null;
+  const dismissWorkers = async (workers: readonly CompactWorker[], bulk = false) => {
+    if (!projection) return;
+    const conversationId = projection.conversationId;
+    if (personalDismissals) {
+      const eligible = workers.filter(worker => workerDismissible(checkingPresentation.worker(worker)));
+      dismissalBatchFeedback = { conversationId, skipped: eligible.filter(worker => !workerExecutionIds(worker).length).length };
+      syncCompactWork();
+      // One explicit conditional group, one durable outcome. Active observations
+      // and selection epochs stay owned by the dismissal client while it saves.
+      const groups = eligible.map(workerExecutionIds).filter(ids => ids.length);
+      if (bulk) await personalDismissals.dismissMany(groups);
+      else if (groups[0]) await personalDismissals.dismiss(groups[0][0], groups[0]);
+      return;
+    }
+    const dismissed = new Set(presentation.dismissedSubagents[projection.conversationId] ?? []);
+    for (const worker of workers) {
+      if (workerDismissible(checkingPresentation.worker(worker))) dismissed.add(worker.activity?.executionId ?? worker.id);
+    }
+    presentation.dismissedSubagents[projection.conversationId] = [...dismissed];
+    save(); syncCompactWork();
   };
-  const discloseBackgroundTasks = trackRunningWork(backgroundTasks);
+  const compactView = compactWorkersItems ? new CompactWorkersView(compactWorkersItems, () => {
+    void dismissWorkers(compactWorkers(projection?.items ?? []).filter(worker => worker.state !== "working" && worker.state !== "unknown"), true);
+  }) : null;
+  const syncCompactWork = () => {
+    if (!compactWorkersList || !compactWorkersItems || !compactWorkersLabel) return;
+    const allWorkers = checkingPresentation.paint(projection?.conversationId ?? null, compactWorkers(projection?.items ?? []))
+      .filter(worker => worker.kind === "agent" && declares("subagents") || Boolean(worker.taskId) && declares("background-tasks"))
+      .map(worker => declares("context") ? worker : { ...worker, tokens: undefined });
+    personalDismissals?.select(projection?.conversationId ?? null);
+    personalDismissals?.observe(allWorkers);
+    const dismissed = new Set(projection ? presentation.dismissedSubagents[projection.conversationId] ?? [] : []);
+    if (!personalDismissals && projection) {
+      const oldSize = dismissed.size;
+      for (const worker of allWorkers) if (worker.activity?.kind === "working" || worker.activity?.kind === "needs-answer") {
+        for (const id of workerExecutionIds(worker)) dismissed.delete(id);
+        dismissed.delete(worker.id);
+        for (const reference of worker.references) dismissed.delete(reference);
+      }
+      if (dismissed.size !== oldSize) { presentation.dismissedSubagents[projection.conversationId] = [...dismissed]; save(); }
+    }
+    // Legacy browser aliases are never authority in a Hub account. Local mode
+    // keeps its old terminal marks, but new marks prefer exact execution ids.
+    const workers = personalDismissals ? visibleWorkers(allWorkers, personalDismissals.dismissed) : allWorkers.filter(worker =>
+      !workerDismissible(worker) || !(worker.activity?.executionId ? workerExecutionIds(worker).some(id => dismissed.has(id)) : dismissed.has(worker.id) || worker.references.some(id => dismissed.has(id))));
+    if (dismissalBatchFeedback?.conversationId !== projection?.conversationId) dismissalBatchFeedback = null;
+    const skipped = dismissalBatchFeedback?.skipped ?? 0;
+    const dismissalText = personalDismissals ? [...new Set([
+      personalDismissals.error,
+      skipped ? `Skipped ${skipped} worker${skipped === 1 ? "" : "s"} with an unverified execution identity; ${skipped === 1 ? "it remains" : "they remain"} visible.` : "",
+    ].filter(Boolean))].join(" ") : (workers.length ? "Worker dismissals apply only on this device." : "");
+    // Replacing unchanged composer text during disclosure allocation can make
+    // WebKit move the timeline before the next geometry read. Keep its node.
+    if (dismissalNotice.textContent !== dismissalText) dismissalNotice.textContent = dismissalText;
+    dismissalNotice.hidden = !dismissalNotice.textContent;
+    const summary = workerSummary(workers);
+    compactWorkersLabel.textContent = summary;
+    compactWorkersList.querySelector("summary")?.setAttribute("aria-label", `Workers: ${summary}`);
+    compactWorkersList.hidden = workers.length === 0;
+    const open = compactWorkerState.paint(projection?.conversationId ?? null,
+      workers.filter(worker => worker.state === "working" || worker.state === "unknown").length,
+      document.documentElement.dataset.uiMode === "touch" ? "touch" : "desktop", compactWorkersList.open);
+    if (compactWorkersList.open !== open) compactWorkersList.open = open;
+    compactWorkersList.querySelector("summary")?.setAttribute("aria-expanded", String(compactWorkersList.open));
+    compactView?.paint(projection?.conversationId ?? null, workers, stoppingTasks, declares("background-tasks"));
+    syncQueueOverflow();
+  };
+  compactWorkersItems?.addEventListener("mousedown", event => keepTouchComposerFocus(event));
+  compactWorkersList?.querySelector("summary")?.addEventListener("mousedown", event => keepTouchComposerFocus(event));
+  surface.addEventListener("keydown", event => {
+    const root = document.documentElement;
+    if (event.key !== "Escape" || event.defaultPrevented || !compactWorkersList?.open || child || surface.querySelector('dialog[open]:not([data-presentation="window"])')
+      || root.dataset.uiMode !== "touch" || !root.matches("[data-chat-keyboard], [data-chat-short], [data-chat-wide-short]")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const owned = compactWorkersList.contains(document.activeElement);
+    compactWorkersList.open = false;
+    compactWorkerState.toggled(false);
+    if (owned) compactWorkersList.querySelector<HTMLElement>(":scope > summary")?.focus({ preventScroll: true });
+  });
+  compactWorkersItems?.addEventListener("click", event => {
+    const dismiss = (event.target as Element).closest<HTMLElement>("[data-dismiss-worker]");
+    if (dismiss) {
+      const worker = compactWorkers(projection?.items ?? []).find(worker => worker.id === dismiss.dataset.dismissWorker);
+      if (worker) void dismissWorkers([worker]);
+      return;
+    }
+    const stop = (event.target as Element).closest<HTMLButtonElement>("[data-stop-task]");
+    if (stop) { if (!stop.disabled) void requestStopTask(stop.dataset.stopTask!, stop, stop.dataset.stopItem); return; }
+    const id = (event.target as Element).closest<HTMLElement>("[data-worker-item]")?.dataset.workerItem;
+    if (!id) return;
+    const worker = compactWorkers(projection?.items ?? []).find(worker => worker.id === id);
+    if (!worker) return;
+    if (worker.activity?.kind === "needs-answer" && worker.activity.request) {
+      revealWorkerRequest(worker.activity, projection?.items ?? [], id => jumpToPrompt(id, false));
+      return; // Never create a second reply flow or guess a child association.
+    }
+    const task = worker.taskId ? taskById(projection?.items ?? [], worker.taskId, worker.id) : undefined;
+    const target = task ? taskInspection(task) : undefined;
+    if (task && target && (target.view === "transcript" || taskById(projection?.items ?? [], task.taskId)?.id === task.id)) { inspectTask(task.taskId, task.id); return; }
+    if (worker.conversationId) { openChildConversation(worker.conversationId, subagentLabelFor(worker.conversationId, projection)); return; }
+    expanded.add(id);
+    scheduleRender();
+    requestAnimationFrame(() => {
+      const node = jumpToPrompt(id, false);
+      const details = node instanceof HTMLDetailsElement ? node : node?.querySelector("details");
+      if (details) details.open = true;
+    });
+  });
 
-  /**
-   * Work the agent left running in the background, pinned above the
-   * composer with a stop control per task (spec: each task is listed with a
-   * stop action). Settled tasks leave the list and take a timeline row.
-   * Rebuilt only on change, for the same tap reason as the other tracks.
-   */
-  // Null forces a repaint: an empty list's signature is the empty string,
-  // so the string itself cannot double as the "never painted" marker.
-  let paintedBackgroundTasks: string | null = null;
   // Stops in flight, by task id: a rebuild mid-request must not hand back
   // an enabled button that would send the stop twice.
   const stoppingTasks = new Set<string>();
-  const syncBackgroundTasks = () => {
-    if (!backgroundTasks || !backgroundTasksLabel || !backgroundTasksItems) return;
-    // The open drill-down's strip reads the same items; it keeps its own
-    // change check, so it is asked before this list's early return.
-    syncTaskInspection();
-    const entries = projection && declares("background-tasks") ? runningBackgroundTasks(projection.items) : [];
-    // Ahead of the unchanged-signature return: the rule reads every paint,
-    // since the conversation it is keyed on can change under one signature.
-    discloseBackgroundTasks(entries.length);
-    const signature = entries.map(entry => [entry.taskId, entry.description, entry.progress ?? "", entry.childConversationId ?? "", stoppingTasks.has(entry.taskId) ? "stopping" : ""].join("\u0001")).join("\u0002");
-    if (signature === paintedBackgroundTasks) return;
-    paintedBackgroundTasks = signature;
-    if (entries.length === 0) {
-      backgroundTasks.hidden = true;
-      // Emptied as well as hidden: a summary kept from the last task is read
-      // out by anything that reaches the label without seeing the `hidden`
-      // attribute, and it comes back on the next open still naming work that
-      // has long finished.
-      backgroundTasksLabel.textContent = "";
-      backgroundTasksItems.replaceChildren();
-      return;
+  const queueDiscovery = new QueueDiscovery(presentationStorage);
+  const actionFeedback = document.querySelector<HTMLElement>("#chat-action-feedback");
+  let pendingChatAction: { dialog: HTMLDialogElement; closed: Promise<void>; reopening: boolean; cancel(): void } | undefined;
+  const confirmChatAction = async (title: string, message: string, accept: string, invoker?: HTMLElement): Promise<boolean> => {
+    const dialog = document.querySelector<HTMLDialogElement>("#chat-action-confirm");
+    if (pendingChatAction && (!pendingChatAction.dialog.isConnected || pendingChatAction.dialog !== dialog)) pendingChatAction.cancel();
+    if (!dialog || dialog.open) return false;
+    if (pendingChatAction) {
+      // Native close clears open and restores focus before delivering close.
+      // Reserve at most one reopen intent; no next owner may consume that event.
+      const previous = pendingChatAction;
+      if (previous.reopening) return false;
+      previous.reopening = true;
+      await previous.closed;
+      if (!dialog.isConnected || document.querySelector("#chat-action-confirm") !== dialog || dialog.open || pendingChatAction) return false;
     }
-    backgroundTasksLabel.textContent = backgroundStatusLabel(entries);
-    backgroundTasksItems.replaceChildren(...entries.map(entry => {
-      const row = document.createElement("li");
-      row.className = "is-running";
-      row.dataset.backgroundTask = entry.taskId;
-      // A running task's description is the way in: an agent task opens its
-      // transcript, a shell task its output (spec: a running task is
-      // inspected). Settled tasks never reach this list.
-      const target = taskInspection(entry);
-      const text = document.createElement(target ? "button" : "span");
-      text.className = "chat-background-task-text";
-      text.textContent = entry.description;
-      text.title = entry.description;
-      if (target && text instanceof HTMLButtonElement) {
-        text.type = "button";
-        text.classList.add("chat-background-task-inspect");
-        text.dataset.inspectTask = entry.taskId;
-        text.dataset.inspectView = target.view;
-        text.setAttribute("aria-label", `${target.view === "transcript" ? "Open the transcript of" : "Show the output of"} ${entry.description}`);
+    // WebKit pointer activation need not focus its button. Capture the
+    // actual invoker rather than the unrelated control still holding focus.
+    const previousFocus = invoker ?? document.activeElement;
+    const inspection = previousFocus instanceof HTMLElement && drilldownTask?.contains(previousFocus) ? child?.task : undefined;
+    dialog.querySelector("#chat-action-confirm-title")!.textContent = title;
+    dialog.querySelector("#chat-action-confirm-body")!.textContent = message;
+    dialog.querySelector("#chat-action-confirm-accept")!.textContent = accept;
+    dialog.returnValue = "cancel";
+    return new Promise((resolve, reject) => {
+      let complete!: () => void;
+      const closed = new Promise<void>(done => { complete = done; });
+      const owner = { dialog, closed, reopening: false, cancel: () => settle(false, false) };
+      pendingChatAction = owner;
+      let settled = false;
+      const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") event.stopPropagation(); };
+      const cleanup = () => {
+        dialog.removeEventListener("keydown", onKey);
+        dialog.removeEventListener("close", onClose);
+      };
+      const settle = (confirmed: boolean, restoreFocus = true) => {
+        if (pendingChatAction !== owner || settled) return;
+        settled = true;
+        cleanup();
+        try {
+          if (restoreFocus) {
+            const survivingInspection = inspection && child?.task?.taskId === inspection.taskId && child.task.conversationId === inspection.conversationId
+              ? drilldownTask?.querySelector<HTMLElement>("[data-task-result], [data-stop-task]:not(:disabled)") ?? drilldownBack ?? drilldownTimeline : null;
+            (previousFocus instanceof HTMLElement && previousFocus.isConnected ? previousFocus : survivingInspection ?? input)?.focus({ preventScroll: true });
+          }
+        } finally {
+          pendingChatAction = undefined;
+          resolve(confirmed);
+          complete();
+        }
+      };
+      // Snapshot this owner's result before focus restoration can invoke UI code.
+      const onClose = () => settle(dialog.returnValue === "confirm");
+      dialog.addEventListener("keydown", onKey);
+      dialog.addEventListener("close", onClose, { once: true });
+      try { dialog.showModal(); }
+      catch (error) {
+        cleanup();
+        pendingChatAction = undefined;
+        complete();
+        reject(error);
       }
-      row.append(text);
-      if (entry.progress) {
-        const progress = document.createElement("span");
-        progress.className = "chat-background-task-progress";
-        progress.textContent = entry.progress;
-        row.append(progress);
-      } else {
-        // With no progress note the elapsed time IS the progress line (D6). A
-        // shell task never reports progress at all — the CLI emits no
-        // `task_progress` for `local_bash` — so without this the row has no
-        // live signal whatsoever, and a reader cannot tell a task that is
-        // working from one that is wedged. The readout is stamped with the
-        // launch time and ticked by the shared second clock, never a timer
-        // of its own: one row or ten, it is the same tick.
-        const elapsed = document.createElement("span");
-        elapsed.className = "chat-background-task-progress chat-background-task-elapsed";
-        elapsed.dataset.elapsedSince = String(entry.createdAt);
-        elapsed.textContent = formatTaskElapsed(Date.now() - entry.createdAt);
-        row.append(elapsed);
-      }
-      const stop = document.createElement("button");
-      stop.type = "button";
-      stop.className = "chat-task-stop";
-      stop.dataset.stopTask = entry.taskId;
-      stop.textContent = stoppingTasks.has(entry.taskId) ? "Stopping…" : "Stop";
-      stop.disabled = stoppingTasks.has(entry.taskId);
-      stop.setAttribute("aria-label", `Stop ${entry.description}`);
-      row.append(stop);
-      return row;
-    }));
-    backgroundTasks.hidden = false;
+    });
+  };
+  const syncBackgroundTasks = () => {
+    syncTaskInspection();
+    for (const taskId of stoppingTasks) {
+      const current = taskById(projection?.items ?? [], taskId);
+      if (current && current.status !== "running") stoppingTasks.delete(taskId);
+    }
   };
   // One stop path for every control that offers it: the composer row and the
   // drill-down's strip both name the task, and the in-flight guard is shared
   // so neither can send the stop twice.
-  const requestStopTask = (taskId: string) => {
+  const requestStopTask = async (taskId: string, invoker: HTMLElement, itemId?: string) => {
     if (!projection || stoppingTasks.has(taskId)) return;
     const source = projection;
+    const task = taskById(source.items, taskId);
+    if (!task || itemId !== undefined && task.id !== itemId || task.status !== "running" || task.stateUncertain) return;
+    if (declares("background-blocking-work") && task.taskType === "shell") {
+      if (!await confirmChatAction("Stop shell worker?", SHELL_WORKER_STOP_WARNING, "Stop shell worker", invoker)) return;
+      const current = taskById(projection?.items ?? [], taskId);
+      if (projection?.conversationId !== source.conversationId || current?.id !== task.id || current.status !== "running" || current.stateUncertain || stoppingTasks.has(taskId)) return;
+    }
+    const asynchronous = declares("background-blocking-work");
     // The agent reports the stop as the task settling, which is what moves
     // the row out of this list; until then the control stays inert.
     stoppingTasks.add(taskId);
-    paintedBackgroundTasks = null;
     syncBackgroundTasks();
-    void api.stopTask(source.conversationId, taskId, newRequestId()).catch(error => {
-      announceFailureFor(source)(messageOf(error), true);
-    }).finally(() => {
+    syncCompactWork();
+    void api.stopTask(source.conversationId, taskId, newRequestId()).catch(async error => {
       stoppingTasks.delete(taskId);
-      paintedBackgroundTasks = null;
+      const message = error instanceof ChatTransportError && error.status !== undefined && error.code !== "operation_outcome_unknown"
+        ? messageOf(error) : "Outcome unknown; refreshing. Stop will not be replayed automatically.";
+      // Snapshot installation clears its transient loading announcement. Keep
+      // the mutation outcome independently, and announce it after that read;
+      // a successful read cannot turn an unknown receipt into acceptance.
+      await refreshSelectedConversation(source.conversationId);
+      setComposerError(message, source.conversationId);
+      if (projection?.conversationId === source.conversationId) {
+        (child?.task?.conversationId === source.conversationId ? announceChild : announce)(message, true);
+      }
+    }).finally(() => {
+      if (!asynchronous) stoppingTasks.delete(taskId);
       syncBackgroundTasks();
+      syncCompactWork();
     });
   };
   /**
@@ -1139,28 +1328,26 @@ export function initChat(api = new ChatApiClient()): void {
    * agent task, titled as its subagents-track row is, and the task view for
    * a shell task, titled by the command.
    */
-  const inspectTask = (taskId: string) => {
+  const inspectTask = (taskId: string, itemId?: string) => {
     if (!projection) return;
     const source = projection;
-    const task = taskById(source.items, taskId);
+    const task = taskById(source.items, taskId, itemId);
     const target = task ? taskInspection(task) : undefined;
     if (!task || !target) return;
     if (target.view === "transcript") {
       const known = subagentEntries(source.items).some(entry => entry.conversationId === target.conversationId);
-      openChildConversation(target.conversationId, known ? subagentLabelFor(target.conversationId, source) : task.description, false, { conversationId: source.conversationId, taskId, view: "transcript" });
+      openChildConversation(target.conversationId, known ? subagentLabelFor(target.conversationId, source) : task.description, false, { conversationId: source.conversationId, taskId, itemId: task.id, view: "transcript" });
       return;
     }
-    openChildConversation(`task-output:${taskId}`, task.description, false, { conversationId: source.conversationId, taskId, view: "output" });
+    openChildConversation(`task-output:${taskId}`, task.description, false, { conversationId: source.conversationId, taskId, itemId: task.id, view: "output" });
   };
-  backgroundTasksItems?.addEventListener("click", event => {
-    const target = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-stop-task], [data-inspect-task]");
-    if (!target) return;
-    if (target.dataset.stopTask !== undefined) requestStopTask(target.dataset.stopTask);
-    else if (target.dataset.inspectTask !== undefined) inspectTask(target.dataset.inspectTask);
-  });
   drilldownTask?.addEventListener("click", event => {
-    const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-stop-task]");
-    if (button?.dataset.stopTask !== undefined) requestStopTask(button.dataset.stopTask);
+    const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-stop-task], [data-task-result]");
+    if (button?.dataset.stopTask !== undefined) requestStopTask(button.dataset.stopTask, button, button.dataset.stopItem);
+    else if (button?.dataset.taskResult) {
+      pendingRequestJump = button.dataset.taskResult;
+      closeChildConversation();
+    }
   });
 
   const scheduledWakeups = document.querySelector<HTMLDetailsElement>("#chat-scheduled-wakeups");
@@ -1291,17 +1478,7 @@ export function initChat(api = new ChatApiClient()): void {
     });
   });
 
-  const subagents = document.querySelector<HTMLDetailsElement>("#chat-subagents");
-  const subagentsLabel = document.querySelector<HTMLElement>("#chat-subagents-label");
-  const subagentsItems = document.querySelector<HTMLElement>("#chat-subagents-items");
-  const dismissButton = document.querySelector<HTMLButtonElement>("#chat-subagents-dismiss");
-  const discloseSubagents = trackRunningWork(subagents);
   const requestsJump = document.querySelector<HTMLButtonElement>("#chat-requests-jump");
-  // Finished subagents stay until explicitly dismissed — nothing retires
-  // them on a timer. Dismissals persist with the rest of the per-conversation
-  // presentation, so a reload does not resurrect an already-dismissed strip.
-  const dismissedSubagents = (conversationId: string): Set<string> =>
-    new Set(presentation.dismissedSubagents[conversationId] ?? []);
   // One policy for what a drill-down is titled, read from the structured
   // entries rather than scraped from whichever markup happens to carry the
   // text — the track row and the timeline row must produce the same title.
@@ -1311,28 +1488,6 @@ export function initChat(api = new ChatApiClient()): void {
     // one task; the transcript is the whole agent.
     return source ? subagentTranscriptTitle(subagentEntries(source.items), source.items, conversationId) : "Subagent";
   };
-  subagentsItems?.addEventListener("click", event => {
-    const open = (event.target as Element).closest<HTMLElement>("[data-open-conversation]");
-    if (open?.dataset.openConversation) openChildConversation(open.dataset.openConversation, subagentLabelFor(open.dataset.openConversation, projection));
-  });
-  dismissButton?.addEventListener("click", event => {
-    event.preventDefault();
-    if (!projection) return;
-    const dismissed = dismissedSubagents(projection.conversationId);
-    for (const entry of subagentEntries(projection.items)) {
-      if (entry.status !== "running" && entry.status !== "pending") dismissed.add(entry.id);
-    }
-    presentation.dismissedSubagents[projection.conversationId] = [...dismissed];
-    save();
-    syncSubagents();
-    syncOutstandingRequests();
-  });
-
-  /**
-   * Running and finished subagents, pinned beside the task list. A fan-out of
-   * three subagents is three rows that would otherwise scroll away, and while
-   * they run there is nothing else saying how many are still going.
-   */
   /**
    * Outstanding requests, pinned so they cannot scroll away. Ten permissions in
    * one turn left a user unable to tell which still needed them; per-card
@@ -1398,8 +1553,7 @@ export function initChat(api = new ChatApiClient()): void {
     const outstanding = projection
       ? projection.items.filter(item => (item.type === "permission" || item.type === "question") && item.status === "pending")
       : [];
-    const target = outstanding.reduce<(typeof outstanding)[number] | undefined>((newest, item) =>
-      !newest || item.createdAt > newest.createdAt || (item.createdAt === newest.createdAt && item.id > newest.id) ? item : newest, undefined);
+    const target = projection ? activeInteractionRequests(projection.items, projection.conversationId)[0] : undefined;
     // Skipped when nothing changed: rewriting the pill's text every frame
     // replaces the text node a finger may be resting on.
     const signature = `${outstanding.length}\u0001${target?.id ?? ""}`;
@@ -1411,8 +1565,7 @@ export function initChat(api = new ChatApiClient()): void {
       } else {
         const noun = outstanding.length === 1 ? "request needs" : "requests need";
         requestsJump.textContent = `${outstanding.length} ${noun} your answer`;
-        // The answerable one is the newest; that is where the jump lands,
-        // because it is the only one a user can act on right now.
+        // Jump only to an answerable head, never a request waiting behind it.
         requestsJump.dataset.requestTarget = target!.id;
       }
     }
@@ -1432,7 +1585,11 @@ export function initChat(api = new ChatApiClient()): void {
   const jumpToRequestCard = (id: string) => {
     const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
     if (!(card instanceof HTMLElement)) return;
+    for (let parent = card.parentElement; parent && parent !== items; parent = parent.parentElement) {
+      if (parent instanceof HTMLDetailsElement) parent.open = true;
+    }
     if (card instanceof HTMLDetailsElement) card.open = true;
+    if (!card.hasAttribute("tabindex")) card.tabIndex = -1;
     card.scrollIntoView({ block: "center" });
     card.focus?.();
   };
@@ -1449,30 +1606,7 @@ export function initChat(api = new ChatApiClient()): void {
     jumpToRequestCard(id);
   });
 
-  // Same rebuild-only-on-change rule as the task list, for the same tap
-  // reason — these rows are buttons, and a button replaced mid-tap is a
-  // button that never fires.
-  let paintedSubagents = "";
-  const syncSubagents = () => {
-    if (!subagents || !subagentsLabel || !subagentsItems) return;
-    if (!declares("subagents")) {
-      discloseSubagents(0);
-      paintedSubagents = "";
-      subagents.hidden = true;
-      subagentsItems.replaceChildren();
-      return;
-    }
-    const all = projection ? subagentEntries(projection.items) : [];
-    const dismissed = projection ? dismissedSubagents(projection.conversationId) : new Set<string>();
-    const entries = all.filter(entry => !dismissed.has(entry.id));
-    // Finished entries stay listed until dismissed, but they are not running
-    // work: only a run that has not settled opens the track.
-    discloseSubagents(entries.filter(entry => entry.status === "running" || entry.status === "pending").length);
-    const signature = entries
-      .map(entry => [entry.id, entry.status, entry.subagent ?? "", entry.description, entry.conversationId ?? "", entry.model ?? "", entry.usage ? String(totalTokens(entry.usage)) : "", entry.usage?.costUsd ?? "", entry.progress ?? ""].join("\u0001"))
-      .join("\u0002");
-    if (signature === paintedSubagents) return;
-    paintedSubagents = signature;
+  const syncSubagentTitle = () => {
     // The open transcript's title states the same cost as the row: a running
     // subagent's price moves while its transcript is open, and a title
     // computed once at the click would keep the earlier figure. A task's
@@ -1484,62 +1618,6 @@ export function initChat(api = new ChatApiClient()): void {
         drilldownTitle.textContent = label;
       }
     }
-    if (dismissButton) {
-      dismissButton.hidden = !entries.some(entry => entry.status !== "running" && entry.status !== "pending");
-    }
-    if (entries.length === 0) {
-      subagents.hidden = true;
-      subagentsItems.replaceChildren();
-      return;
-    }
-    subagentsLabel.textContent = subagentTrackSummary(entries);
-    subagentsItems.replaceChildren(...entries.map(entry => {
-      const row = document.createElement("li");
-      row.className = `is-${entry.status}`;
-      const text = subagentLabel(entry);
-      if (entry.conversationId) {
-        const open = document.createElement("button");
-        open.type = "button";
-        open.className = "chat-subagent-open";
-        open.dataset.openConversation = entry.conversationId;
-        open.textContent = text;
-        row.append(open);
-      } else {
-        const label = document.createElement("span");
-        label.className = "chat-subagent-label";
-        label.textContent = text;
-        row.append(label);
-      }
-      // What the subagent is doing right now, where the agent reports it —
-      // the model-written summary, or the tool it is using.
-      if (entry.progress) {
-        const progress = document.createElement("span");
-        progress.className = "chat-subagent-progress";
-        progress.textContent = entry.progress;
-        progress.title = entry.progress;
-        row.append(progress);
-      }
-      // What it ran and what it cost, after the description so the row still
-      // leads with what the subagent is doing. The model shows whenever the
-      // agent named it; the token figure only where the agent declares it
-      // reports usage, and only once it has reported some — an unattributed
-      // subagent stays a readable row rather than one asserting a zero.
-      const attribution = [
-        entry.model,
-        declares("context") && entry.usage ? `${formatTokens(totalTokens(entry.usage))} tokens` : undefined,
-        // The child's own price, where its session reported one. Zero is
-        // an unpriced model, not a free one, and is not asserted.
-        declares("context") && entry.usage?.costUsd ? formatUsd(entry.usage.costUsd) : undefined,
-      ].filter(Boolean).join(" · ");
-      if (attribution) {
-        const note = document.createElement("span");
-        note.className = "chat-subagent-attribution";
-        note.textContent = attribution;
-        row.append(note);
-      }
-      return row;
-    }));
-    subagents.hidden = false;
   };
 
   /**
@@ -1564,6 +1642,15 @@ export function initChat(api = new ChatApiClient()): void {
     // The newest report or carrier, scanned from the tail — it is almost
     // always right at the end of a long timeline (see context-readout.ts).
     const readout = contextReadout(projection?.items ?? [], models, displayedConfiguration().model);
+    const inlineContext = document.querySelector<HTMLElement>("#chat-inline-context");
+    if (inlineContext) {
+      const qualifier = readout?.window?.source === "estimate" ? "~" : "";
+      inlineContext.textContent = !readout || !declares("context") ? "Context not reported"
+        : readout.limit === undefined ? `${formatTokens(readout.used)} context · limit unknown`
+        : `${qualifier}${Math.round((readout.fraction ?? 0) * 100)}% · ${formatTokens(readout.used)}/${formatTokens(readout.limit)} context`;
+      inlineContext.title = !readout || !declares("context") ? "Context occupancy has not been reported"
+        : `${readout.used.toLocaleString()} tokens in context; ${readout.limit === undefined ? "limit unknown" : `${readout.limit.toLocaleString()} ${readout.window?.source ?? "reported"} limit`}${readout.window?.freshness === "cached" ? " (cached)" : ""}`;
+    }
     const reportingModel = readout?.model ? modelValue(readout.model) : "";
     const windowKey = JSON.stringify([readout?.limit, readout?.window]);
     if (readout?.source === paintedSource && reportingModel === paintedUsageModel && windowKey === paintedWindowKey) return;
@@ -1787,7 +1874,7 @@ export function initChat(api = new ChatApiClient()): void {
   });
 
   const syncHistoryControls = () => {
-    const historyBusy = submitting || (projection ? historyMutations.has(projection.conversationId) : false);
+    const historyBusy = composer.submitting || (projection ? composer.historyBusy(projection.conversationId) : false);
     for (const button of items.querySelectorAll<HTMLButtonElement>("[data-history-revert]")) button.disabled = historyBusy;
     for (const button of revertedItems?.querySelectorAll<HTMLButtonElement>("[data-history-restore]") ?? []) button.disabled = historyBusy;
   };
@@ -1815,13 +1902,42 @@ export function initChat(api = new ChatApiClient()): void {
     // Reconcile the current snapshot before revealing a retained output window.
     renderer.setShellOutputsHidden(false);
     revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
-    queueDock.render(queueDockElement, projection?.queued ?? []);
+    const pendingPane = queueDockElement.querySelector<HTMLElement>(".chat-queue-content");
+    if (pendingPaintedConversation && pendingPaintedOpen && !pendingScrollRestore && !queueDockElement.hidden && pendingPane?.clientHeight) {
+      boundedSet(pendingScrollPositions, pendingPaintedConversation, pendingPane.scrollTop, 200);
+    }
+    const pendingConversation = projection?.conversationId ?? null;
+    const pendingOpen = compactPendingState.paint(pendingConversation, projection?.queued.length ?? 0,
+      document.documentElement.dataset.uiMode === "touch" ? "touch" : "desktop");
+    const restorePending = pendingOpen && (pendingConversation !== pendingPaintedConversation || !pendingPaintedOpen);
+    queueDock.render(queueDockElement, projection?.queued ?? [], {
+      conversationId: pendingConversation,
+      withdrawalRetries: pendingConversation ? composer.withdrawalRetries(pendingConversation) : undefined,
+      pendingActions: pendingConversation ? composer.pendingActions(pendingConversation) : undefined,
+      steering: declares("steering"),
+      sendNow: declares("send-now"),
+      running: isLiveConversationStatus(projection?.status),
+      replacement: projection?.reversibleHistory?.staged === true,
+      compactOpen: pendingOpen,
+      isCommand: isListedCommand,
+      ...(queueNoteElement ? { note: queueNoteElement } : {}),
+    });
+    if (pendingConversation !== pendingPaintedConversation || restorePending) {
+      pendingScrollRestore = pendingConversation && pendingOpen && !projection?.reversibleHistory?.staged
+        ? { conversation: pendingConversation, top: pendingScrollPositions.get(pendingConversation) ?? 0 } : null;
+      const pane = queueDockElement.querySelector<HTMLElement>(".chat-queue-content");
+      if (pane) pane.scrollTop = pendingScrollRestore?.top ?? 0;
+    }
+    pendingPaintedConversation = pendingConversation;
+    pendingPaintedOpen = pendingOpen;
     syncHistoryControls();
     rendering = false;
     syncTaskList();
-    syncSubagents();
+    syncSubagentTitle();
     syncBackgroundTasks();
+    syncCompactWork();
     syncScheduledWakeups();
+    syncQueueOverflow();
     syncOutstandingRequests();
     syncContextIndicator();
     syncPromptRail();
@@ -1837,7 +1953,17 @@ export function initChat(api = new ChatApiClient()): void {
     }
     applyFocusAfterPaint(renderer, items);
     reconcileAnswerAfterPaint();
+    syncDesktopWorkLayout();
+    restorePendingScroll();
   };
+
+  function restorePendingScroll() {
+    if (!pendingScrollRestore || pendingPaintedConversation !== pendingScrollRestore.conversation || !pendingPaintedOpen) return;
+    const pane = queueDockElement?.querySelector<HTMLElement>(".chat-queue-content");
+    if (!pane?.clientHeight) return;
+    pane.scrollTop = pendingScrollRestore.top;
+    pendingScrollRestore = null;
+  }
 
   const scheduleRender = (newContent = false, captureCurrent = true, incremental = false) => {
     renderDirty = true;
@@ -1902,12 +2028,6 @@ export function initChat(api = new ChatApiClient()): void {
   // progress note, ticked by the same clock as the working lines: the rows
   // are rebuilt only when what they SAY changes, and the elapsed time is not
   // part of that, so the second hand writes into the row in place.
-  const tickBackgroundTaskElapsed = () => {
-    if (!chatSurfaceActive()) return;
-    for (const readout of backgroundTasksItems?.querySelectorAll<HTMLElement>("[data-elapsed-since]") ?? []) {
-      readout.textContent = formatTaskElapsed(Date.now() - Number(readout.dataset.elapsedSince));
-    }
-  };
 
   // The tick runs while anything on screen is working: the parent's turn, the
   // subagent in the drill-down, or a background task the turn left running. A
@@ -1920,7 +2040,12 @@ export function initChat(api = new ChatApiClient()): void {
   const syncWorkingTimer = () => {
     const tasksRunning = declares("background-tasks") && runningBackgroundTasks(projection?.items ?? []).length > 0;
     const working = chatSurfaceActive() && (isLiveConversationStatus(projection?.status) || isLiveConversationStatus(child?.projection?.status) || tasksRunning);
-    if (working && workingTimer === null) workingTimer = setInterval(() => { syncRoutineStatus(); tickWorkingLines(); tickBackgroundTaskElapsed(); }, 1_000);
+    if (working && workingTimer === null) workingTimer = setInterval(() => {
+      syncRoutineStatus(); tickWorkingLines();
+      for (const readout of compactWorkersItems?.querySelectorAll<HTMLElement>("[data-elapsed-since]") ?? []) {
+        readout.textContent = formatTaskElapsed(Date.now() - Number(readout.dataset.elapsedSince));
+      }
+    }, 1_000);
     if (!working && workingTimer !== null) {
       clearInterval(workingTimer);
       workingTimer = null;
@@ -1930,6 +2055,7 @@ export function initChat(api = new ChatApiClient()): void {
   const showComposerError = (message: string | null) => {
     composerError.textContent = message ?? "";
     composerError.hidden = !message;
+    composerError.classList.toggle("is-notice", message === TOO_LATE);
   };
   // Composer errors belong to the conversation they happened in: an upload
   // that fails after the user switched away must not flash its refusal into
@@ -1946,89 +2072,67 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   // ------------------------------------------------------------------
-  // Image attachments: staged per conversation, uploaded at attach time,
-  // referenced by id everywhere after (spec: bytes cross each boundary once).
-  // Pending state deliberately does not persist across reloads.
-  // ------------------------------------------------------------------
-  type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
-  const pendingAttachments = new Map<string, PendingAttachment[]>();
-  const unavailableAttachments = new Map<string, MessageAttachment[]>();
-  // One serialized staging chain per conversation. Serialization makes the
-  // per-message bound check honest — a second paste near the eight-image
-  // limit runs after the first and sees its result instead of racing past
-  // the cap — and submission drains the chain (re-reading the tail until
-  // nothing new was appended while it waited) so an image attached moments
-  // before Enter joins the message it was attached for.
-  const attachmentStaging = new Map<string, Promise<void>>();
-  const attachmentStagingGeneration = new Map<string, number>();
-  // Attachments riding an in-flight submission still count against the
-  // per-message cap: a failure restores them to pending, and an intake that
-  // ignored them could push the restored draft past eight and make every
-  // retry refusable.
-  const submittedAttachmentReserve = new Map<string, number>();
-  // Monotonic per-conversation refusal count. Submission compares it across
-  // the staging drain: a refusal that lands while a submit waits is a piece
-  // of THAT message going missing, and the send must stop rather than
-  // deliver a partial prompt. Refusals from before the submit are the
-  // user's informed choice to send without the refused file.
-  const attachmentRefusals = new Map<string, number>();
-  const noteAttachmentRefusal = (conversationId: string, count = 1) => {
-    if (count > 0) attachmentRefusals.set(conversationId, (attachmentRefusals.get(conversationId) ?? 0) + count);
-  };
-
-  // The prompt route bounds attachment names to 200 UTF-8 bytes and refuses
-  // blank ones; a name staged verbatim past either rule would upload fine
-  // and then fail every send. Bounded here — fallback for empty and
-  // whitespace-only, truncation on a code-point boundary — so the reference
-  // stays sendable.
-  const boundAttachmentName = (name: string): string => {
-    const trimmed = name.trim() === "" ? "image" : name;
-    const encoder = new TextEncoder();
-    if (encoder.encode(trimmed).length <= 200) return trimmed;
-    let bounded = trimmed;
-    while (bounded.length > 1 && encoder.encode(bounded).length > 200) bounded = bounded.slice(0, -1);
-    // UTF-16 slicing can leave a lone high surrogate at the cut; it would
-    // encode as U+FFFD garbage in the name.
-    const last = bounded.charCodeAt(bounded.length - 1);
-    if (last >= 0xd800 && last <= 0xdbff) bounded = bounded.slice(0, -1);
-    return bounded || "image";
-  };
-  const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
-
-  // The conversation attachments belong to. The projection may still be
-  // loading when the user attaches — the selection is already made, so the
-  // selected id serves until the snapshot installs. Without this, an attach
-  // during the load window silently did nothing.
   const activeConversationId = (): string | null =>
     projection?.conversationId ?? presentation.selectedId ?? null;
-
-  const currentPendingAttachments = (): PendingAttachment[] => {
-    const conversationId = activeConversationId();
-    return conversationId ? pendingAttachments.get(conversationId) ?? [] : [];
-  };
-
-  const currentUnavailableAttachments = (): MessageAttachment[] => {
-    const conversationId = activeConversationId();
-    return conversationId ? unavailableAttachments.get(conversationId) ?? [] : [];
-  };
-
-  const setPendingAttachments = (conversationId: string, entries: PendingAttachment[]) => {
-    if (entries.length > 0) pendingAttachments.set(conversationId, entries);
-    else pendingAttachments.delete(conversationId);
-  };
-
-  const setUnavailableAttachments = (conversationId: string, entries: MessageAttachment[]) => {
-    if (entries.length > 0) unavailableAttachments.set(conversationId, entries);
-    else unavailableAttachments.delete(conversationId);
-  };
-
-  const revokeAttachmentPreviews = (entries: readonly PendingAttachment[]) => {
-    for (const entry of entries) if (entry.previewUrl.startsWith("blob:")) URL.revokeObjectURL(entry.previewUrl);
-  };
-
-  const invalidateAttachmentStaging = (conversationId: string) => {
-    attachmentStagingGeneration.set(conversationId, (attachmentStagingGeneration.get(conversationId) ?? 0) + 1);
-  };
+  const composer = new Composer({
+    selected: activeConversationId, read: () => projection,
+    write: next => { projection = next; }, epoch: () => projectionEpoch,
+    cancelling: () => cancelling, declares,
+    commands: () => commands, commandsAvailable: () => commandInventoryAvailable,
+    agentId: () => contextAgentId,
+    refreshCommands: agentId => { void refreshBankedCommands(agentId); },
+    reloadCommands: async () => {
+      if (!contextAgentId) return false;
+      try {
+        commands = await api.commands(contextAgentId);
+        commandInventoryAvailable = true;
+        const cached = agentCatalogs.get(contextAgentId);
+        if (cached) agentCatalogs.set(contextAgentId, { ...cached, commands, commandInventoryAvailable: true });
+        return true;
+      } catch { return false; }
+    },
+    configuration: () => {
+      const configuration = displayedConfiguration();
+      const record = declares("models") && configuration.model ? models.find(model => sameModel(model.selection, configuration.model!)) : undefined;
+      const model = record?.selection ?? (declares("models") && declares("custom-model-id") ? configuration.model : undefined);
+      const variant = declares("variants") && configuration.variant && record?.variants?.includes(configuration.variant) ? configuration.variant : undefined;
+      const mode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
+      return { value: { model, mode, variant }, stage: stagedConfigurations.get(activeConversationId()!) };
+    },
+    consumeConfiguration: (id, stage) => {
+      if (stagedConfigurations.get(id) === stage) stagedConfigurations.delete(id);
+    },
+    imageSupport: () => attachmentModelSupport(),
+    refresh: (id, entry) => refreshSelectedConversation(id, entry),
+  }, api, {
+    read: id => activeConversationId() === id ? input.value : presentation.drafts[id] ?? "",
+    write: (id, text) => {
+      presentation.drafts[id] = text;
+      if (activeConversationId() === id && input.value !== text) { input.value = text; slashQueryActive = false; autosize(input); }
+      save();
+    },
+  }, {
+    changed: (change, id) => {
+      if (change === "draft") closeCommandMenu();
+      if (change === "attachments" || change === "submit" || (change === "edit" || change === "history" || change === "restored") && activeConversationId() === id) renderAttachments();
+      if (change === "accepted" && projection?.conversationId === id) renderConfiguration();
+      syncControls();
+      if (change === "submit") { parentScroll.latest(); latestButton.hidden = true; }
+      if (change === "submit" || change === "accepted" || change === "pending" || change === "projection" || change === "restored") scheduleRender(change === "submit" || change === "accepted");
+      if ((change === "edit" || change === "history") && activeConversationId() === id) input.focus();
+    },
+    error: setComposerError, note: (message, error) => noteComposer(message, error), announce,
+    accepted: accepted => {
+      if (!accepted.conversation) return;
+      conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
+      relabelConversationOption(accepted.conversation);
+      if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
+    },
+    heldByHold: () => queueDiscovery.accepted(true),
+  });
+  const currentPendingAttachments = () => composer.pendingAttachments();
+  const currentUnavailableAttachments = () => composer.unavailableAttachments();
+  const noteAttachmentRefusal = (id: string, count = 1) => composer.noteAttachmentRefusal(id, count);
 
   // Whether the displayed model can see images. No selection means the agent
   // chooses — unknown is not "no", so the intake stays open and the provider
@@ -2086,8 +2190,7 @@ export function initChat(api = new ChatApiClient()): void {
       remove.addEventListener("click", () => {
         const conversationId = activeConversationId();
         if (!conversationId) return;
-        URL.revokeObjectURL(entry.previewUrl);
-        setPendingAttachments(conversationId, currentPendingAttachments().filter(candidate => candidate !== entry));
+        composer.removeAttachment(entry);
         renderAttachments();
         syncControls();
       });
@@ -2113,7 +2216,7 @@ export function initChat(api = new ChatApiClient()): void {
       remove.addEventListener("click", () => {
         const conversationId = activeConversationId();
         if (!conversationId) return;
-        setUnavailableAttachments(conversationId, currentUnavailableAttachments().filter(candidate => candidate !== entry));
+        composer.removeAttachment(entry);
         renderAttachments();
         syncControls();
       });
@@ -2149,65 +2252,7 @@ export function initChat(api = new ChatApiClient()): void {
    * explains itself on the composer error line and touches neither the draft
    * nor the attachments already staged.
    */
-  const stageAttachmentFiles = async (files: File[]) => {
-    const conversationId = activeConversationId();
-    if (!conversationId || files.length === 0) return;
-    if (agent && !declares("attachments")) return;
-    const support = attachmentModelSupport();
-    if (!support.supported) {
-      setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
-      return;
-    }
-    const generation = attachmentStagingGeneration.get(conversationId) ?? 0;
-    const noteRefusal = () => noteAttachmentRefusal(conversationId);
-    const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
-      for (const file of files) {
-        if ((attachmentStagingGeneration.get(conversationId) ?? 0) !== generation) return;
-        if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
-          setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`, conversationId);
-          noteRefusal();
-          break;
-        }
-        // An empty type claim is unknown, not unsupported: browsers derive
-        // File.type from the filename and local files carry no guarantee, so
-        // the authoritative magic-byte sniff on the upload route decides.
-        // Only an explicit non-image claim is refused without the round trip.
-        if (file.type !== "" && !supportedAttachmentTypes.has(file.type.toLowerCase())) {
-          setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`, conversationId);
-          noteRefusal();
-          continue;
-        }
-        if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
-          setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`, conversationId);
-          noteRefusal();
-          continue;
-        }
-        try {
-          const stored = await api.uploadAttachment(conversationId, file);
-          if ((attachmentStagingGeneration.get(conversationId) ?? 0) !== generation) return;
-          // Keyed to the conversation the upload was staged for, which may no
-          // longer be the selected one by the time the round trip returns.
-          const entries = pendingAttachments.get(conversationId) ?? [];
-          entries.push({ id: stored.id, name: boundAttachmentName(file.name), mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
-          setPendingAttachments(conversationId, entries);
-        } catch (error) {
-          setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`, conversationId);
-          noteRefusal();
-        }
-      }
-    });
-    attachmentStaging.set(conversationId, task);
-    // The chain existing is what makes an empty draft sendable, so the send
-    // control resyncs now, not only when the upload lands.
-    syncControls();
-    try {
-      await task;
-    } finally {
-      if (attachmentStaging.get(conversationId) === task) attachmentStaging.delete(conversationId);
-    }
-    renderAttachments();
-    syncControls();
-  };
+  const stageAttachmentFiles = (files: File[]) => composer.attach(files);
 
   const openAttachmentViewer = (src: string, name: string) => {
     if (!imageViewer || !imageViewerImage) return;
@@ -2600,13 +2645,13 @@ export function initChat(api = new ChatApiClient()): void {
   const usagePaneSection = document.querySelector('.sidebar-pane[data-pane-id="usage"]');
   if (usagePaneSection) planPinObserver.observe(usagePaneSection, { attributes: true, attributeFilter: ["hidden", "class"] });
 
-  const syncRoutineStatus = () => {
+  const syncRoutineStatus = (announceEvent = false) => {
     const conversationStatus = projection?.status;
     const { stateName, label } = composerRoutineState({
       status: conversationStatus,
       statusMessage: projection ? statusMessages.get(projection.conversationId) : undefined,
       cancelling,
-      submitting,
+      submitting: composer.submitting,
       backgroundDeclared: declares("background-tasks"),
       backgroundTasks: runningBackgroundTasks(projection?.items ?? []),
       scheduledDeclared: declares("scheduled-wakeups"),
@@ -2650,12 +2695,16 @@ export function initChat(api = new ChatApiClient()): void {
     composerStatus.setAttribute("aria-label", label);
     composerStatus.title = stateName === "working" ? workingText() : label;
     const announcement = composerNote ?? label;
-    if (announcement !== lastRoutineAnnouncement) {
+    if (announceEvent || announcement !== lastRoutineAnnouncement) {
       lastRoutineAnnouncement = announcement;
       composerStatusLive.textContent = announcement;
     }
   };
 
+  // Use the same canonical occurrences as Workers, including foreground agents.
+  // Unknown workers remain inspectable, but are not confirmed live work.
+  const hasLiveWorkers = () => declares("background-blocking-work")
+    && compactWorkers(projection?.items ?? []).some(worker => worker.state === "working");
   const syncControls = () => {
     const status = projection?.status ?? null;
     if (status !== lastStatus) {
@@ -2673,29 +2722,53 @@ export function initChat(api = new ChatApiClient()): void {
       save();
     }
     syncWorkingTimer();
-    send.type = running ? "button" : "submit";
-    send.dataset.action = running ? "cancel" : "send";
     // A message needs content, not necessarily words: pending attachments make
     // an empty draft sendable (image-only prompts are accepted end to end),
     // and an upload still in flight counts — submission waits for it.
     const activeId = activeConversationId();
+    const openAside = document.querySelector<HTMLDialogElement>("#chat-aside-dialog[open]");
+    if (openAside && openAside.dataset.conversation !== activeId) minimiseAside("switch");
+    const asideButton = document.querySelector<HTMLButtonElement>("#chat-aside-ready");
+    if (asideButton) {
+      asideButton.hidden = !activeId || !composer.sideAnswer(activeId) && !composer.sideGenerating(activeId);
+      asideButton.disabled = !projection || Boolean(activeId && composer.sideGenerating(activeId));
+      asideButton.textContent = activeId && composer.sideGenerating(activeId) ? "Side answer…" : activeId && composer.sideAnswer(activeId)?.failed ? "Side question failed" : "Side answer ready";
+    }
     const hasContent = Boolean(input.value.trim()) || currentPendingAttachments().length > 0
-      || (activeId !== null && attachmentStaging.has(activeId));
-    send.disabled = running ? cancelling || !projection : submitting || !projection || !hasContent;
-    const action = running ? "Cancel" : "Send";
-    sendLabel.textContent = action;
-    send.setAttribute("aria-label", running ? "Cancel response" : "Send message");
-    send.title = running ? "Cancel response" : "Send message";
-    configurationTrigger.disabled = submitting || !projection || catalogLoading;
+      || (activeId !== null && composer.uploading(activeId));
+    // Initial openings wait for a snapshot. After failure, keep that
+    // conversation's private draft editable through explicit read retries.
+    input.disabled = !projection && (!activeId || failedOpeningConversationId !== activeId);
+    send.disabled = composer.submitting || cancelling || !projection || !hasContent;
+    if (stop) {
+      stop.disabled = cancelling || !projection || !running;
+      const workers = hasLiveWorkers();
+      stop.classList.toggle("has-worker-scope", declares("background-blocking-work"));
+      stop.setAttribute("aria-label", workers ? "Stop parent" : "Stop response");
+      stop.textContent = workers ? "Stop parent" : "Stop";
+      stop.title = workers ? "Stop the parent and still-blocking work. Detached workers continue; their later notifications can wake the parent again." : "Stop";
+    }
+    if (actionFeedback) {
+      const note = activeId ? composer.feedback(activeId) : "";
+      actionFeedback.hidden = !note;
+      if (actionFeedback.textContent !== note) actionFeedback.textContent = note;
+    }
+    syncSendDescription();
+    syncConfigurationScope();
+    sendGroup?.toggleAttribute("data-steering", declares("steering"));
+    configurationTrigger.disabled = composer.submitting || !projection || catalogLoading;
     configurationTrigger.toggleAttribute("aria-busy", catalogLoading);
+    if (renameButton) renameButton.disabled = !projection || selectedConversationDeleted;
     syncHistoryControls();
     olderButton.hidden = !projection?.olderCursor;
     syncRoutineStatus();
   };
 
-  const noteComposer = (message: string | null) => {
+  const noteComposer = (message: string | null, announceEvent = false) => {
     composerNote = message;
-    syncRoutineStatus();
+    // Explicit successful mutations are events, even when their words repeat.
+    // Routine paints still deduplicate against the resulting current note.
+    syncRoutineStatus(announceEvent);
   };
 
   const displayedConfiguration = (): ConversationConfiguration => {
@@ -2706,6 +2779,34 @@ export function initChat(api = new ChatApiClient()): void {
       delete configuration.variant;
     }
     return configuration;
+  };
+
+  const syncConfigurationScope = () => {
+    // A held submission can commit conversation configuration before the
+    // running turn ends. These controls describe future turns, not evidence
+    // of the active turn's settings, even after the local stage is consumed.
+    const nextTurn = declares("steering") && (deliveryChoiceOffered() || projection?.reversibleHistory?.staged === true);
+    const staged = projection && stagedConfigurations.get(projection.conversationId);
+    const effective = projection?.configuration;
+    const changed = nextTurn && Boolean(staged && (
+      staged.model && (!effective?.model || !sameModel(staged.model, effective.model))
+      || staged.mode && staged.mode !== effective?.mode
+      || staged.variant && staged.variant !== effective?.variant
+    ));
+    const prefix = nextTurn ? "Next turn · " : "";
+    configurationSummary.textContent = prefix + configurationLabels.summary;
+    const inline = document.querySelector<HTMLElement>("#chat-inline-configuration");
+    if (inline) {
+      inline.textContent = prefix + configurationLabels.inline;
+      inline.title = [agent?.name, inline.textContent].filter(Boolean).join(" · ");
+    }
+    configurationTrigger.setAttribute("aria-label", configurationLabels.accessible.length
+      ? `Chat configuration. ${nextTurn ? "Next turn. " : ""}${configurationLabels.accessible.join(". ")}`
+      : "Chat settings");
+    const notice = document.querySelector<HTMLElement>("#chat-configuration-scope");
+    if (notice) notice.hidden = !changed;
+    configurationTrigger.setAttribute("aria-describedby", `chat-inline-context${changed ? " chat-configuration-scope" : ""}`);
+    send.setAttribute("aria-describedby", `chat-send-help${changed ? " chat-configuration-scope" : ""}`);
   };
 
   const setStagedConfiguration = (conversationId: string, configuration: ConversationConfiguration) => {
@@ -2733,15 +2834,18 @@ export function initChat(api = new ChatApiClient()): void {
     const displayedModel = configuration.model
       ? models.find(model => sameModel(model.selection, configuration.model!))
       : defaultModel;
-    configurationSummary.textContent = declares("models")
+    configurationLabels.summary = declares("models")
       ? (displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
       : "Chat settings";
     const offersMode = declares("modes") && modes.length > 0;
     const offersReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
-    // The chip states only what is in force: a chosen value, or a default
-    // the agent itself declares. A delegation without a declared default is
-    // said once in the dialog ("Let ... choose"), not echoed here.
+    // The chip states the selected value, or a default the agent declares.
+    // Steering keeps these choices for future turns. A delegation without a
+    // declared default is said once in the dialog ("Let ... choose"), not echoed here.
     const displayedMode = configuration.mode ?? defaultMode?.name;
+    configurationLabels.inline = [displayedMode ? configurationOptionLabel(displayedMode) : agent?.name,
+      declares("models") ? configurationLabels.summary : undefined,
+      configuration.variant ? configurationOptionLabel(configuration.variant) : undefined].filter(Boolean).join(" · ");
     const showMode = offersMode && Boolean(displayedMode);
     const showReasoning = offersReasoning && Boolean(configuration.variant);
     configurationModeSummary.hidden = !showMode;
@@ -2749,14 +2853,13 @@ export function initChat(api = new ChatApiClient()): void {
     configurationVariantSummary.hidden = !showReasoning;
     configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant!) : "";
     configurationDetails.hidden = !showMode && !showReasoning;
-    const accessibleValues = [
+    configurationLabels.accessible = [
       // An unlisted selection is the user's own typed id under an agent that
       // runs them; only elsewhere is it a model that went away.
       declares("models") ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? (declares("custom-model-id") ? `${configuration.model.modelId}, typed` : `${configuration.model.providerId}/${configuration.model.modelId}, unavailable`) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
       offersMode ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
       offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
-    configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
     configurationPicker?.update({
       agent,
       models,
@@ -2830,18 +2933,17 @@ export function initChat(api = new ChatApiClient()): void {
     });
   };
 
-  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number) => {
-    projection = projectionFromSnapshot(snapshot, acceptedDrafts);
+  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number, readingAnchor: TimelineAnchor | null = presentation.anchors[snapshot.conversation.id] ?? null) => {
+    projection = composer.acceptSnapshot(snapshot, acceptedDrafts);
     const carried = removedRows.get(snapshot.conversation.id);
     if (carried) projection = { ...projection, removedIds: carried };
-    historyRefreshRequired.delete(snapshot.conversation.id);
     projectionEpoch += 1;
     conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
     renderConfiguration();
     renderAttachments();
     announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
     cancelForSnapshot(parentScroll);
-    anchor.restore(presentation.anchors[snapshot.conversation.id] ?? null);
+    anchor.restore(readingAnchor);
     scheduleRender(false, false);
     stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
   };
@@ -2865,23 +2967,10 @@ export function initChat(api = new ChatApiClient()): void {
           return;
         }
         projection = result.projection;
+        composer.observe(event, result.outcome === "applied");
         if (projection.removedIds) removedRows.set(conversationId, projection.removedIds);
         if (event.type === "conversation.configuration") renderConfiguration();
         if (event.type === "conversation.status") {
-          const reloads = pendingReloads.get(conversationId);
-          if (reloads && (event.status === "completed" || event.status === "failed" || event.status === "interrupted")) {
-            // The turn that ended is the oldest tracked reload no longer
-            // waiting in the queue; one not yet named by its acceptance
-            // cannot be told apart, so it re-reads and stays tracked.
-            const queued = new Set((projection?.queued ?? []).map(entry => entry.id));
-            const index = reloads.findIndex(entry => entry.messageId === undefined || !queued.has(entry.messageId));
-            const reload = index < 0 ? undefined : reloads[index];
-            if (reload) {
-              if (reload.messageId !== undefined) reloads.splice(index, 1);
-              if (reloads.length === 0) pendingReloads.delete(conversationId);
-              if (event.status === "completed") void refreshBankedCommands(reload.agentId);
-            }
-          }
           if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
           else if (isLiveConversationStatus(event.status)) setComposerError(null);
           statusMessages.set(conversationId, event.message);
@@ -2899,8 +2988,7 @@ export function initChat(api = new ChatApiClient()): void {
       },
       resync: () => {
         if (token !== selectionGeneration) return;
-        if (historyMutations.has(conversationId)) pendingHistoryResyncs.add(conversationId);
-        else recoverSelectedConversation(conversationId);
+        if (!composer.historyResync(conversationId)) recoverSelectedConversation(conversationId);
       },
       error: error => { if (token === selectionGeneration) interruptions.report("conversation", error); },
       // Transport is healthy again. Cursor replay and `resync` still own
@@ -2909,16 +2997,102 @@ export function initChat(api = new ChatApiClient()): void {
       recovered: () => { if (token === selectionGeneration) interruptions.clear("conversation"); },
     });
 
-  async function refreshSelectedConversation(id: string): Promise<boolean> {
+  // Shared by the selected conversation and the open child. Each surface
+  // supplies its own selection/read/mutation ownership; neither owns the
+  // other's projection, draft, anchor or stream installation.
+  async function readLoadedConversationRange(current: ChatProjection, signal: AbortSignal,
+    latest: () => ChatProjection | null, ownsOwner: () => boolean): Promise<{ snapshot: ConversationSnapshot; isCurrent(): boolean } | null> {
+    const id = current.conversationId;
+    // Match TimelineRenderer's empty-markdown carrier rule. These rows keep
+    // their accounting in the snapshot, but cannot locate the reader's range.
+    const hasTranscriptContent = (item: ConversationItem) => !(item.type === "assistant_message" && item.markdown === "");
+    // Follow the oldest loaded transcript boundary, not item count: snapshots
+    // also carry workers/permissions and providers can cap each history page.
+    // A removed boundary is covered once paging passes its timestamp. If the
+    // reader reached the beginning, recover through the beginning again.
+    const boundary = current.items.filter(item => hasTranscriptContent(item) && !["background_task", "scheduled_wakeup", "permission", "question", "context_window", "context_report"].includes(item.type))
+      .reduce<ConversationItem | undefined>((oldest, item) => !oldest || item.createdAt < oldest.createdAt ? item : oldest, undefined);
+    // Inventory may replace only the summary wrapper while this read is
+    // pending. Live events may advance content too; the final snapshot
+    // must cover their cursor. Local changes without that evidence still
+    // invalidate the read. Neither change grants new selection ownership.
+    const ownsRead = () => {
+      const held = latest();
+      return !signal.aborted && ownsOwner() && held?.conversationId === id && held.generation === current.generation
+        && (held.sequence > current.sequence || held.cursor === current.cursor && held.status === current.status && held.items === current.items
+          && held.queued === current.queued && held.configuration === current.configuration && held.acceptedDrafts === current.acceptedDrafts);
+    };
+    let snapshot = await api.snapshot(id, undefined, signal);
+    if (!ownsRead()) return null;
+    let pageReads = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      const head = snapshot;
+      if (head.conversation.id !== id || head.generation === current.generation && projectionFromSnapshot(head).sequence < current.sequence) return null;
+      const cursors = new Set<string>();
+      let advanced = false;
+      // Only the provider-page frontier proves contiguous coverage. Even a
+      // visible answer can be backfilled by a concurrent native update. Older
+      // producers without a frontier conservatively page to the beginning,
+      // within the same read budget, rather than trusting arbitrary items.
+      const covered = () => current.olderCursor !== undefined && (!boundary || snapshot.historyStart !== undefined
+        && (snapshot.historyStart.id === boundary.id || snapshot.historyStart.createdAt < boundary.createdAt));
+      while (snapshot.olderCursor && !covered()) {
+        if (pageReads >= 1_000 || cursors.has(snapshot.olderCursor)) return null;
+        const cursor = snapshot.olderCursor;
+        cursors.add(cursor);
+        pageReads++;
+        const page = await api.snapshot(id, cursor, signal).catch(error => {
+          // This is specifically a history-cursor GET. A source revision can
+          // invalidate its older-page cursor between requests; restart the
+          // owned range read, not the child layer or a provider mutation.
+          if (error instanceof ChatTransportError && error.status === 409) return null;
+          throw error;
+        });
+        if (!page) return null;
+        if (!ownsRead() || page.conversation.id !== id || page.generation !== head.generation) return null;
+        if (page.cursor !== snapshot.cursor) {
+          if (pass !== 0 || projectionFromSnapshot(page).sequence <= projectionFromSnapshot(snapshot).sequence) return null;
+          advanced = true;
+        }
+        snapshot = { ...head, cursor: page.cursor, items: prependSnapshot(projectionFromSnapshot(snapshot), page).items, olderCursor: page.olderCursor,
+          historyStart: page.historyStart ?? snapshot.historyStart };
+      }
+      if (!advanced) break;
+      // A cold native adapter publishes the older rows it first reads.
+      // Warm the entire range once, then verify one stable-cursor range.
+      // The wire has no separate source revision: monotonic advancement
+      // alone cannot distinguish page publication from a native mutation.
+      // This bounded second traversal is linear, not a retry per new page,
+      // and installs only fresh rows sharing the final replay boundary.
+      const previous = snapshot;
+      snapshot = await api.snapshot(id, undefined, signal);
+      if (!ownsRead() || snapshot.generation !== previous.generation
+        || projectionFromSnapshot(snapshot).sequence < projectionFromSnapshot(previous).sequence) return null;
+    }
+    // Returning across await adds a microtask boundary. The installing
+    // surface must recheck this proof immediately before its synchronous swap.
+    const isCurrent = () => {
+      if (!ownsRead() || snapshot.conversation.id !== id) return false;
+      const held = latest()!;
+      return snapshot.generation !== held.generation || projectionFromSnapshot(snapshot).sequence >= held.sequence;
+    };
+    return isCurrent() ? { snapshot, isCurrent } : null;
+  }
+
+  async function refreshSelectedConversation(id: string, pendingEntry?: { id: string; action: PendingQueueAction }): Promise<boolean> {
     const token = selectionGeneration;
     const current = projection;
     if (!current || current.conversationId !== id || activeConversationId() !== id) return false;
+    const epoch = projectionEpoch;
+    const historyBusy = composer.historyBusy(id);
     try {
-      return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id); }, async signal => {
-        const snapshot = await api.snapshot(id, undefined, signal);
-        if (signal.aborted || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
+      return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id, pendingEntry); }, async signal => {
+        const read = await readLoadedConversationRange(current, signal, () => projection, () => token === selectionGeneration
+          && projectionEpoch === epoch && activeConversationId() === id && composer.historyBusy(id) === historyBusy);
+        if (!read?.isCurrent()) return false;
+        const snapshot = composer.checkedSnapshot(id, read.snapshot, pendingEntry);
         const previousStream = stream;
-        installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
+        installConversationSnapshot(snapshot, projection!.acceptedDrafts, token, anchor.currentAnchor());
         if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
           stopConversationRefreshRecovery();
         }
@@ -2934,7 +3108,8 @@ export function initChat(api = new ChatApiClient()): void {
     const openingStartup = deferredStartup || isUnestablishedStartup(id);
     supersedeStartupSelection();
     hasSelectedConversation = true;
-    if (projection?.conversationId === id && stream && !historyRefreshRequired.has(id) && !selectedConversationDeleted) return true;
+    if (failedOpeningConversationId !== id) failedOpeningConversationId = null;
+    if (projection?.conversationId === id && stream && !composer.needsHistoryRefresh(id) && !selectedConversationDeleted) return true;
     // Navigation ends the outgoing hold before a fast snapshot can arrive
     // ahead of its clearing paint. Only an in-place refresh may renew it;
     // otherwise removing A's field could resume A's follow intent over B.
@@ -2953,7 +3128,7 @@ export function initChat(api = new ChatApiClient()): void {
     unestablishedStartup = openingStartup ? { conversationId: id, generation: token } : null;
     stream?.close();
     stream = null;
-    const acceptedDrafts = projection?.conversationId === id ? projection.acceptedDrafts : [];
+    const acceptedDrafts = projection?.conversationId === id ? projection.acceptedDrafts : composer.acceptedDrafts(id);
     if (projection) {
       presentation.drafts[projection.conversationId] = input.value;
       const currentAnchor = anchor.currentAnchor();
@@ -2999,6 +3174,7 @@ export function initChat(api = new ChatApiClient()): void {
         const snapshot = await api.snapshot(id, undefined, signal);
         if (token !== selectionGeneration) return false;
         installConversationSnapshot(snapshot, acceptedDrafts, token);
+        failedOpeningConversationId = null;
         unestablishedStartup = null;
         // The selection is settled; a ready agent stops polling, so this is
         // the moment mid-session command discoveries reach the completion
@@ -3007,6 +3183,10 @@ export function initChat(api = new ChatApiClient()): void {
         return true;
       });
     } catch (error) {
+      if (token === selectionGeneration && presentation.selectedId === id) {
+        failedOpeningConversationId = id;
+        syncControls();
+      }
       return false;
     }
   };
@@ -3254,6 +3434,7 @@ export function initChat(api = new ChatApiClient()): void {
     refreshCatalogsOnUse();
     configurationPicker?.open();
   });
+  configurationTrigger.addEventListener("mousedown", event => keepTouchComposerFocus(event));
   renderConfiguration();
   // With one agent there is no choice to offer; with more, creation asks.
   // The menu shows every offered agent with its availability, so an
@@ -3401,27 +3582,203 @@ export function initChat(api = new ChatApiClient()): void {
     }
   });
 
-  queueDockElement.addEventListener("click", event => {
-    const target = (event.target as Element).closest<HTMLButtonElement>("[data-queue-remove]");
-    if (!target || !projection) return;
-    // The server answers with a queue event that drops the entry on every
-    // client; no optimistic removal. A refusal ("no longer held") is the
-    // server stating this entry does not exist for it — delivered while the
-    // click was in flight, removed elsewhere, or a stale echo a reload left
-    // behind — so the local copy reconciles to that instead of stranding a
-    // Remove button that can only ever 409.
-    const messageId = target.dataset.queueRemove!;
-    const conversationId = projection.conversationId;
-    target.disabled = true;
-    void api.removeQueued(conversationId, messageId, newRequestId())
-      .catch(error => {
-        if (error instanceof ChatTransportError && error.status === 409 && projection?.conversationId === conversationId) {
-          projection = dropQueuedMessage(projection, messageId);
-          scheduleRender();
-        } else announce(messageOf(error), true);
-      })
-      .finally(() => { target.disabled = false; });
+  // Keep the focused touch composer's chrome in place until activation.
+  // Cancel mousedown's focus default, not pointerdown: WebKit suppresses
+  // the compatibility click when a touch pointerdown is cancelled.
+  const keepTouchComposerFocus = (event: MouseEvent) => {
+    if (document.documentElement.dataset.uiMode === "touch" && document.activeElement === input) event.preventDefault();
+  };
+  document.querySelector("#chat-work-dock")?.addEventListener("mousedown", event => {
+    if ((event.target as Element).closest("summary")) keepTouchComposerFocus(event as MouseEvent);
   });
+  queueDockElement.addEventListener("mousedown", event => {
+    if ((event.target as Element).closest(".chat-queued-action, [data-pending-toggle]")) keepTouchComposerFocus(event);
+  });
+  queueDockElement.addEventListener("click", async event => {
+    if ((event.target as Element).closest("[data-pending-toggle]")) {
+      const pane = queueDockElement.querySelector<HTMLElement>(".chat-queue-content");
+      const open = compactPendingState.paint(projection?.conversationId ?? null, projection?.queued.length ?? 0,
+        document.documentElement.dataset.uiMode === "touch" ? "touch" : "desktop");
+      if (projection && open && pane?.clientHeight) {
+        boundedSet(pendingScrollPositions, projection.conversationId, pane.scrollTop, 200);
+      }
+      compactPendingState.toggled(!open);
+      scheduleRender();
+      return;
+    }
+    const target = (event.target as Element).closest<HTMLButtonElement>("[data-queue-remove], [data-queue-edit], [data-queue-steer], [data-queue-queue], [data-queue-send-now], [data-queue-discard]");
+    if (!target || target.disabled || !projection) return;
+    const id = projection.conversationId;
+    const { queueRemove, queueEdit, queueSteer, queueQueue, queueSendNow, queueDiscard } = target.dataset;
+    const messageId = queueRemove ?? queueEdit ?? queueSteer ?? queueQueue ?? queueSendNow ?? queueDiscard!;
+    const action = queueRemove !== undefined ? "remove" : queueEdit !== undefined ? "edit" : queueSteer !== undefined ? "steer" : queueQueue !== undefined ? "queue" : queueSendNow !== undefined ? "send-now" : "discard";
+    const result = composer.pending(messageId, action);
+    if (!result) return;
+    if ("confirm" in result) {
+      if (!await confirmChatAction(result.title, result.explanation, result.acceptLabel, target)) return;
+      target.disabled = true;
+      try {
+        const completed = await result.confirm();
+        if (completed && action === "discard" && activeConversationId() === id && (document.activeElement === target || document.activeElement === document.body)) input.focus({ preventScroll: true });
+      } finally { target.disabled = false; scheduleRender(); }
+    } else {
+      target.disabled = true;
+      try { await result; } finally { target.disabled = false; scheduleRender(); }
+    }
+  });
+
+  function syncQueueOverflow() {
+    if (!queueDockElement || !surface) return;
+    const scroller = queueDockElement.parentElement!;
+    // Both cards retain their own header and content pane. Preserve the last
+    // measurement while desktop's constrained dock is hidden.
+    if (typeof getComputedStyle === "function" && getComputedStyle(scroller).display === "none") {
+      // Hidden desktop work retains its intrinsic card measurements, but its
+      // inline reading allocation must still follow a resized panel.
+      syncExpandedWorkBudget(scroller, parseFloat(scroller.style.getPropertyValue("--chat-work-full-floor")) || 0);
+      return;
+    }
+    const workerHeading = compactWorkersList?.hidden ? null : compactWorkersList?.querySelector("summary");
+    const pendingHeading = queueDockElement.hidden ? null : queueDockElement.querySelector(".chat-queue-header");
+    const workerHeight = workerHeading?.getBoundingClientRect().height ?? 0;
+    const pendingHeight = pendingHeading?.getBoundingClientRect().height ?? 0;
+    const queueContent = queueDockElement.querySelector<HTMLElement>(".chat-queue-content");
+    const workerBody = compactWorkersList?.open && workerHeight ? compactView?.contentHeight() ?? 0 : 0;
+    const queueBody = pendingHeight ? queueContent?.scrollHeight ?? 0 : 0;
+    const workerFloor = workerHeight ? workerHeight + 2 + Math.min(48, workerBody) : 0;
+    const queueActionHeight = Math.max(32, ...[...queueContent?.querySelectorAll<HTMLElement>(".chat-queued-action") ?? []].map(button => button.getBoundingClientRect().height));
+    const warning = queueContent?.querySelector<HTMLElement>(".chat-queue-note.is-replacement:not([hidden])");
+    const batch = queueContent?.querySelector<HTMLElement>(".chat-queue-batch:not([hidden])");
+    // The pointer-transparent fade still paints over glyphs. Reserve its real
+    // size as well as the reading inset; hit testing alone cannot detect it.
+    const warningClearance = warning ? (parseFloat(getComputedStyle(queueDockElement, "::after").height) || 0) + 8 : 8;
+    const safetyHeight = warning ? warning.getBoundingClientRect().height + (batch?.getBoundingClientRect().height ?? 0) + warningClearance : 0;
+    const queueFloor = pendingHeight ? pendingHeight + 2 + Math.min(Math.max(queueActionHeight + 8, safetyHeight), queueBody) : 0;
+    // Reverted history, TODOs and wakeups retain their own bounded contents;
+    // none may silently restore the old shared-scroller fallback.
+    let extraHeight = 0;
+    let extraHeadings = 0;
+    let extraCount = 0;
+    for (const track of scroller.querySelectorAll<HTMLDetailsElement>(":scope > #chat-reverted, :scope > #chat-task-list, :scope > #chat-scheduled-wakeups")) {
+      if (track.hidden || typeof getComputedStyle === "function" && getComputedStyle(track).display === "none") continue;
+      const heading = track.querySelector("summary")?.getBoundingClientRect().height ?? 0;
+      const body = track.querySelector<HTMLElement>(":scope > ul, :scope > .chat-reverted-items");
+      const actionHeight = Math.max(44, ...[...body?.querySelectorAll("button") ?? []].map(button => button.getBoundingClientRect().height));
+      const css = typeof getComputedStyle === "function" ? getComputedStyle(track) : track.style;
+      const border = (parseFloat(css.borderTopWidth) || 0) + (parseFloat(css.borderBottomWidth) || 0);
+      const margin = (parseFloat(css.marginTop) || 0) + (parseFloat(css.marginBottom) || 0);
+      const gap = track.open ? parseFloat(css.rowGap) || 0 : 0;
+      const height = heading + (track.open ? Math.min(body?.scrollHeight ?? 0, actionHeight + 8) + gap : 0) + border;
+      track.style.setProperty("--chat-track-floor", `${height}px`);
+      track.style.setProperty("--chat-track-heading", `${heading + border}px`);
+      extraHeight += height + margin;
+      extraHeadings += heading + border + margin;
+      extraCount++;
+    }
+    const set = (name: string, value: number) => {
+      const pixels = `${value}px`;
+      if (scroller.style.getPropertyValue(name) !== pixels) scroller.style.setProperty(name, pixels);
+    };
+    // Retain open measurements while native details hides its body. CSS uses
+    // [open] to switch to heading-only allocation before `toggle` is delivered.
+    if (compactWorkersList?.open || !workerHeight) {
+      set("--chat-worker-natural", workerHeight ? workerHeight + workerBody + 2 : 0);
+      set("--chat-worker-floor", workerFloor);
+    }
+    set("--chat-queue-natural", pendingHeight ? pendingHeight + queueBody + 2 : 0);
+    set("--chat-worker-heading", workerHeight + 2);
+    set("--chat-queue-heading", pendingHeight + 2);
+    set("--chat-queue-floor", queueFloor);
+    const queueActionFloor = pendingHeight ? pendingHeight + 2 + Math.min(queueBody, queueActionHeight + 8) : 0;
+    const preferredQueueFloor = pendingHeight ? pendingHeight + 2 + Math.min(queueBody, Math.max(queueActionHeight + 8, (warning?.getBoundingClientRect().height ?? 0) + warningClearance)) : 0;
+    const dockCss = typeof getComputedStyle === "function" ? getComputedStyle(scroller) : scroller.style;
+    const cardCount = Number(workerHeight > 0) + Number(pendingHeight > 0) + extraCount;
+    const gapCount = Math.max(0, cardCount - 1);
+    const normalGap = parseFloat(dockCss.getPropertyValue("--chat-work-gap-base")) || 0;
+    const padding = (parseFloat(dockCss.paddingTop) || 0) + (parseFloat(dockCss.paddingBottom) || 0);
+    const close = scroller.querySelector<HTMLElement>("#chat-work-close");
+    const closeCss = close && !close.hidden ? getComputedStyle(close) : null;
+    const closeHeight = closeCss && closeCss.display !== "none"
+      ? close!.getBoundingClientRect().height + (parseFloat(closeCss.marginTop) || 0) + (parseFloat(closeCss.marginBottom) || 0) + normalGap : 0;
+    const fullFloor = workerFloor + queueFloor + gapCount * normalGap + padding + extraHeight + closeHeight;
+    set("--chat-work-full-floor", fullFloor);
+    syncExpandedWorkBudget(scroller, fullFloor);
+    const hardAvailable = parseFloat(scroller.style.getPropertyValue("--chat-work-hard-available"));
+    const cramped = (document.documentElement.dataset.uiMode === "touch" || scroller.hasAttribute("data-work-content-expanded") || document.documentElement.hasAttribute("data-chat-work-expanded"))
+      && Number.isFinite(hardAvailable) && fullFloor > hardAvailable;
+    scroller.toggleAttribute("data-work-cramped", cramped);
+    const active = scroller.dataset.workActive;
+    const effectiveExtras = (cramped && active !== "history" ? extraHeadings : extraHeight) + closeHeight;
+    // Enlarged safety text must keep a whole readable warning. If primary
+    // chrome leaves less room, the existing outer-scroll exception exposes
+    // that warning and the composer instead of clipping the warning's pane.
+    const wholeWarning = warning && document.documentElement.dataset.uiMode === "touch"
+      && parseFloat(getComputedStyle(document.documentElement).fontSize) > 16;
+    const queueCompactFloor = cramped && !wholeWarning
+      ? Math.max(queueActionFloor, Math.min(preferredQueueFloor, hardAvailable - (workerHeight ? workerHeight + 2 : 0) - effectiveExtras - padding))
+      : preferredQueueFloor;
+    set("--chat-queue-compact-floor", queueCompactFloor);
+    const selectedCore = (active === "queue" ? workerHeight ? workerHeight + 2 : 0 : workerFloor)
+      + (active === "queue" ? queueCompactFloor : pendingHeight ? pendingHeight + 2 : 0) + effectiveExtras;
+    // Only inter-card whitespace yields after the reading band is exhausted;
+    // header text, action targets and the composer keep their measured sizes.
+    const gap = cramped && gapCount ? Math.max(0, Math.min(normalGap, (hardAvailable - selectedCore - padding) / gapCount)) : normalGap;
+    const gaps = gapCount * gap + padding;
+    set("--chat-work-gap", gap);
+    set("--chat-work-spacing", gaps);
+    set("--chat-work-extras", effectiveExtras);
+    set("--chat-work-floor", cramped
+      ? selectedCore + gaps
+      : fullFloor);
+    if (cramped && document.documentElement.dataset.uiMode === "touch" && scroller.hasAttribute("data-work-content-expanded")) {
+      const reading = Math.max(0, Math.min(parseFloat(surface.style.getPropertyValue("--chat-expanded-reading")) || 0, hardAvailable - selectedCore - gaps));
+      surface.style.setProperty("--chat-expanded-reading", `${reading}px`);
+      set("--chat-work-expanded-capacity", Math.max(0, hardAvailable - reading));
+    }
+    // When primary chrome plus whole headers/action targets physically exceed
+    // the visual band, use native outer scrolling rather than clipping cards
+    // or shrinking enlarged text. Each body keeps its independent scrollport.
+    surface.toggleAttribute("data-work-overflow", document.documentElement.dataset.uiMode === "touch"
+      && Number.isFinite(hardAvailable) && selectedCore + gaps > hardAvailable + 1);
+    scroller.toggleAttribute("data-work-region-overflow", document.documentElement.hasAttribute("data-chat-work-expanded")
+      && Number.isFinite(hardAvailable) && selectedCore + gaps > hardAvailable + 1);
+    scroller.classList.remove("has-more-below");
+    queueDockElement.classList.toggle("has-more-below", !!queueContent && queueContent.scrollHeight - queueContent.clientHeight - queueContent.scrollTop > 1);
+  }
+  queueDockElement.addEventListener("scroll", syncQueueOverflow, { passive: true, capture: true });
+
+  // Fixed keyboard delivery; Alt+Enter queues this submission only.
+  let requestedDelivery: MessageDelivery | undefined;
+  function deliveryChoiceOffered(): boolean {
+    return Boolean(projection) && declares("steering") && (isLiveConversationStatus(projection?.status) || (projection?.queued.length ?? 0) > 0);
+  }
+  function sendSupportsHold(): boolean {
+    const draft = input?.value ?? "";
+    return declares("steering") && !sideQuestionOperation(draft) && !localHistoryOperation(draft, commands, declares("reversible-history"));
+  }
+  function syncSendDescription(): void {
+    const touch = document.documentElement.dataset.uiMode === "touch";
+    const sendAction = sideQuestionOperation(input?.value ?? "") ? "Ask side question" : localHistoryOperation(input?.value ?? "", commands, declares("reversible-history")) ? "Send message" : isLiveConversationStatus(projection?.status)
+      ? declares("steering") && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0 ? "Send as steer; hold 2.5 seconds to queue" : declares("steering") ? "Send to queue" : "Queue message"
+      : "Send message";
+    send?.setAttribute("aria-label", sendAction);
+    if (send) send.title = sendAction;
+    const help = document.querySelector<HTMLElement>("#chat-send-help");
+    const hint = document.querySelector<HTMLElement>("#chat-keyboard-hint");
+    const keyboardChoice = deliveryChoiceOffered() && sendSupportsHold() && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0;
+    if (hint) {
+      hint.hidden = !projection || touch || !window.matchMedia("(pointer: fine) and (hover: hover)").matches;
+      hint.textContent = keyboardChoice ? "Enter: steer · Alt+Enter: queue" : "Enter: send · Shift+Enter: new line";
+    }
+    const discovery = document.querySelector<HTMLElement>("#chat-queue-discovery");
+    if (discovery) discovery.hidden = !queueDiscovery.visible(!send?.disabled && isLiveConversationStatus(projection?.status)
+      && sendSupportsHold() && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0
+      && !composer.uploading(activeConversationId() ?? "") && Boolean(input?.value.trim()));
+    const keys = sendSupportsHold() && !isListedCommand(input?.value ?? "") && currentPendingAttachments().length === 0
+      ? `${touch ? "Ctrl+Enter" : "Enter"}: Steer; Alt+Enter: Queue while working`
+      : `${touch ? "Ctrl+Enter" : "Enter"} sends`;
+    if (help) help.textContent = `${sendSupportsHold() ? "Hold Send or Space: after 0.5 seconds, a 2-second queue countdown starts. Release before the countdown sends; release during it or Escape cancels. " : ""}Enter activates Send immediately. In the message field, ${keys}.${touch ? " Enter adds a new line." : ""}`;
+  }
 
   revertedItems?.addEventListener("pointerdown", event => {
     if (event.pointerType === "touch" && (event.target as Element).closest("[data-history-restore]")) event.preventDefault();
@@ -3429,7 +3786,7 @@ export function initChat(api = new ChatApiClient()): void {
 
   revertedItems?.addEventListener("click", event => {
     const target = (event.target as Element).closest<HTMLButtonElement>("[data-history-restore]");
-    if (!target || !projection || submitting || historyMutations.has(projection.conversationId)) return;
+    if (!target || !projection || composer.submitting || composer.historyBusy(projection.conversationId)) return;
     const messageId = target.dataset.historyRestore;
     if (!messageId) return;
     target.disabled = true;
@@ -3463,6 +3820,12 @@ export function initChat(api = new ChatApiClient()): void {
 
   latestButton.addEventListener("click", () => {
     parentScroll.latest();
+  });
+  for (const button of [latestButton, childLatest]) button?.addEventListener("mousedown", event => {
+    // Blurring the touch composer reveals the tab bar and moves Latest before
+    // mouseup. Keep focus, but let the pointer sequence produce its click
+    // (cancelling touch pointerdown can suppress that click in WebKit).
+    if (document.documentElement.getAttribute("data-ui-mode") === "touch" && document.activeElement === input) event.preventDefault();
   });
 
   /**
@@ -3520,12 +3883,12 @@ export function initChat(api = new ChatApiClient()): void {
     catch (error) { announceFailureFor(source)(messageOf(error), true); disableCard(itemId, false); }
   };
 
-  const resolveQuestion = async (source: ChatProjection, itemId: string, outcome: QuestionOutcome) => {
+  const resolveQuestion = async (source: ChatProjection, itemId: string, outcome: QuestionOutcome): Promise<boolean> => {
     const item = source.items.find(candidate => candidate.id === itemId);
-    if (!item || item.type !== "question" || item.status !== "pending") return;
+    if (!item || item.type !== "question" || item.status !== "pending") return false;
     disableCard(itemId, true);
-    try { await api.question(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); }
-    catch (error) { announceFailureFor(source)(messageOf(error), true); disableCard(itemId, false); }
+    try { await api.question(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); return true; }
+    catch (error) { announceFailureFor(source)(messageOf(error), true); disableCard(itemId, false); return false; }
   };
 
   /**
@@ -3536,7 +3899,7 @@ export function initChat(api = new ChatApiClient()): void {
    * the parent's against the parent — which is what keeps the parent
    * answerable while a child is open.
    */
-  const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null, stage: { renderer: TimelineRenderer; rerender: () => void }, scroll: CoordinatedScrollOwner) => {
+  const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null, stage: { renderer: TimelineRenderer; rerender: () => void; beforeFileNavigation?: () => void }, scroll: CoordinatedScrollOwner) => {
     // "Allow always" is confirmed one step deeper, on the same card, where
     // it shows the rule the agent will actually install. The stage is this
     // timeline's own (the drill-down keeps its own renderer), and nothing
@@ -3559,6 +3922,7 @@ export function initChat(api = new ChatApiClient()): void {
     // compatibility click altogether in WebKit. Mouse, pen and touch still
     // activate normally; radios, links and summaries keep ordinary focus.
     container.addEventListener("mousedown", event => {
+      if ((event.target as Element).closest("[data-history-revert]")) keepTouchComposerFocus(event);
       if (!document.documentElement.hasAttribute("data-chat-answering")) return;
       if (!(event.target as Element).closest?.(REQUEST_ANSWER_CONTROLS)) return;
       event.preventDefault();
@@ -3575,19 +3939,25 @@ export function initChat(api = new ChatApiClient()): void {
       const source = sourceProjection();
       if (!source) return;
       if (target.dataset.openConversation) {
-        openChildConversation(target.dataset.openConversation, subagentLabelFor(target.dataset.openConversation, source));
+        const row = target.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId;
+        const task = source ? taskForChild(source.items, target.dataset.openConversation, row) : undefined;
+        openChildConversation(target.dataset.openConversation, subagentLabelFor(target.dataset.openConversation, source), false,
+          task && source ? { conversationId: source.conversationId, taskId: task.taskId, view: "transcript" } : undefined);
         return;
       }
       if (target.dataset.fileRef) {
         const reference = resolveWorkspaceFileReference(target.dataset.fileRef, appState.roots);
-        if (reference) void navigateWorkspaceFileReference(reference);
+        if (reference) {
+          stage.beforeFileNavigation?.();
+          void navigateWorkspaceFileReference(reference);
+        }
         return;
       }
       const itemElement = target.closest<HTMLElement>("[data-chat-item-id]");
       const item = source.items.find(candidate => candidate.id === itemElement?.dataset.chatItemId);
       if (!item || item.type === "assistant_message") return;
       if (item.type === "user_message") {
-        if (target.dataset.historyRevert === undefined || source !== projection || submitting || historyMutations.has(source.conversationId)) return;
+        if (target.dataset.historyRevert === undefined || source !== projection || composer.submitting || composer.historyBusy(source.conversationId)) return;
         const button = target as HTMLButtonElement;
         button.disabled = true;
         void runHistoryOperation("revert", source.conversationId, item.id)
@@ -3606,7 +3976,16 @@ export function initChat(api = new ChatApiClient()): void {
       } else if (item.type === "permission" && target.dataset.permissionOutcome) {
         void resolvePermission(source, item.id, target.dataset.permissionOutcome as PermissionOutcome);
       } else if (item.type === "question" && target.dataset.questionReject !== undefined) {
-        void resolveQuestion(source, item.id, { kind: "rejected" });
+        // A successful rejection retires the form — and the owed-answer line
+        // a required validation error may have left on the status region:
+        // the same guarded cleanup the answer path runs, but retiring the
+        // line on every surface whose record matches — the mirrored card's
+        // line may belong to the parent while the reject runs here. The
+        // card's own item stays bound: the cleanup retires only the lines
+        // this exact question request raised, never one another question —
+        // of another conversation, or a newer one of this one — raised
+        // while the request sat in flight.
+        void resolveQuestion(source, item.id, { kind: "rejected" }).then(resolved => { if (resolved) clearOwedAnswersEverywhere(source, item); });
       }
     });
     container.addEventListener("keydown", event => {
@@ -3627,6 +4006,67 @@ export function initChat(api = new ChatApiClient()): void {
         target.click();
       }
     });
+    // A step change is spoken, not just shown: with all tabs alike and the
+    // panel swapping above the focus point, a screen-reader user otherwise
+    // hears nothing while the question under their hands changes. Spoken to
+    // the surface that owns the form — answering from a subagent drill-down
+    // announces beside that surface's status line, never into it, so a
+    // connection-interruption message and its Reconnect button stand.
+    const speakQuestionStep = (source: ChatProjection, form: HTMLFormElement) => {
+      const speak = source.conversationId === (child?.conversationId ?? null) ? announceQuestionStepChild : announceQuestionStep;
+      const panels = [...form.querySelectorAll<HTMLElement>("[data-question-panel]")];
+      const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
+      const panel = panels[activeIndex];
+      // The step's label names it; a mapping that leaves the label unnamed
+      // falls back to the statement itself rather than announcing a bare
+      // hint (or nothing) for the question that just opened.
+      const label = panel?.querySelector<HTMLElement>(".chat-question-step")?.textContent?.trim().replace(/\s+/g, " ");
+      const statement = panel?.querySelector<HTMLElement>(".chat-question-statement")?.textContent?.trim().replace(/\s+/g, " ");
+      const name = label || statement;
+      speak(name ? `Question ${activeIndex + 1} of ${panels.length}: ${name}` : "");
+    };
+
+    // Retire this conversation's owed-answer line once the step it held back
+    // becomes valid — but only while the line still reads as ours: a newer
+    // unrelated status (an outage, a refusal) is never spoken over. The
+    // interruption owner re-states its message when the blank replaces it.
+    // "Ours" is the exact question request that raised the line, tracked in
+    // the shared per-surface map (`owedAnswerOwners`): the prefix two cards'
+    // messages can share says nothing about who raised it, so retirement
+    // without an ownership check would take down whichever validation is on
+    // the line — another conversation's, or a newer question of this one —
+    // whenever an in-flight resolve lands after it.
+    const clearOwedAnswer = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>) => {
+      const spoken = announceFailureFor(source);
+      const owner = owedAnswerOwners.get(spoken);
+      if (owner?.key !== questionOwnershipKey(source, item)) return;
+      if (spoken.current().startsWith("Still to answer")) {
+        spoken("");
+        owedAnswerOwners.delete(spoken);
+        owner.owner.restoreOwned();
+      }
+    };
+
+    // Resolving the question retires its raised line on EVERY surface whose
+    // ownership record matches — the parent's mirrored card can carry the
+    // line while the answer or reject goes out from the drill-down (and the
+    // reverse). Settling a form's local controls (the per-surface path
+    // above) retires one surface's line and must not reach past it; a
+    // resolution ends the question everywhere, so it matches records by the
+    // exact question request, never by the surface the resolve ran on.
+    // Still guarded by the prefix: a line a newer unrelated status has
+    // displaced — an outage, a refusal — keeps standing, and each retired
+    // line restores its own surface's interruption affordances.
+    const clearOwedAnswersEverywhere = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>) => {
+      const key = questionOwnershipKey(source, item);
+      for (const [spoken, owner] of [...owedAnswerOwners]) {
+        if (owner.key !== key || !spoken.current().startsWith("Still to answer")) continue;
+        spoken("");
+        owedAnswerOwners.delete(spoken);
+        owner.owner.restoreOwned();
+      }
+    };
+
     container.addEventListener("change", event => {
       const input = event.target as HTMLInputElement;
       const form = input.form;
@@ -3661,8 +4101,87 @@ export function initChat(api = new ChatApiClient()): void {
     container.addEventListener("click", event => {
       const tab = (event.target as Element).closest<HTMLButtonElement>("[data-question-tab]");
       if (!tab?.form) return;
+      const source = sourceProjection();
+      // Tab navigation leaves the current panel in whatever state it holds.
+      // The owed-answer line goes stale only once no required step of the
+      // form is outstanding: an optional empty tab-switch with a required
+      // step still empty keeps the message alive — it names what is still
+      // owed, not what was just left.
+      const leaving = tab.form.querySelector<HTMLElement>("[data-question-panel]:not([hidden])");
+      if (source && leaving) {
+        const itemId = tab.form.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId;
+        const item = source.items.find(candidate => candidate.id === itemId);
+        if (item?.type === "question") settleOwedAnswer(source, item, tab.form);
+      }
       showQuestionPanel(tab.form, Number(tab.dataset.questionTab));
+      if (source) speakQuestionStep(source, tab.form);
     });
+    // A required empty stops here with the owed-answer message the final
+    // check also speaks. During a connection interruption the message takes
+    // the status line's text, but the outage's recovery affordance keeps
+    // standing beside it exactly as it stood — attached only when it was
+    // attached to the owned interruption before, never re-attached onto an
+    // unrelated status. Repeated submits count as the known write they are:
+    // while a stream of the surface is down, the affordance stands again on
+    // every press of an empty required step. The message records the exact
+    // question request that raised it (the shared `owedAnswerOwners` map,
+    // keyed per surface): only that question's resolution may retire the
+    // line later.
+    const speakOwedAnswer = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>, message: string) => {
+      const spoken = announceFailureFor(source);
+      const owner = interruptionsOwnerFor(source);
+      owedAnswerOwners.set(spoken, { key: questionOwnershipKey(source, item), owner });
+      const wasRecovering = owner.isShowingOwned();
+      spoken(message, true);
+      if (wasRecovering || owner.hasDown()) owner.keepRecoveryVisible();
+    };
+
+    // Name each owed step: the renderer's step-label selection — the short
+    // label whichever mapping carried it, header on ties, prompt fallback —
+    // the same names the tab strip prints, never a divergent header-first
+    // algorithm that repeats one long header for every step. A field with
+    // neither string reads "the current question" rather than empty.
+    const owedStepNames = (outstanding: number[], item: Extract<ConversationItem, { type: "question" }>) =>
+      outstanding.map(index => questionStepLabel(item.questions[index]!) || "the current question").join(", ");
+
+    // Which of the form's required steps still owe answers — the one
+    // predicate the settlement, the advance gate, and the final validation
+    // all read, so the routes can never disagree about what is owed.
+    const outstandingRequired = (form: HTMLFormElement, item: Extract<ConversationItem, { type: "question" }>) =>
+      collectQuestionAnswers(form).flatMap((answer, index) => answer.length === 0 && !item.questions[index]?.optional ? [index] : []);
+
+    // The owed-answer line follows the form's outstanding required steps as
+    // they stand, wherever an interaction settles it: an optional empty never
+    // retires a required one's line, a satisfied step stops being named, and
+    // the refreshed message is spoken only while the line is still ours — a
+    // newer unrelated status (an outage, a refusal) is never spoken over. Tab
+    // navigation and the Next advance owe the line to the same whole form, so
+    // they settle it together here rather than in diverging copies. Each
+    // raising and refresh records the exact question request that owes the
+    // line (the shared per-surface map), so a resolution landing after the
+    // reader switched conversations — or asked this conversation again — can
+    // never retire another question's line.
+    const settleOwedAnswer = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>, form: HTMLFormElement) => {
+      const outstanding = outstandingRequired(form, item);
+      if (outstanding.length === 0) {
+        clearOwedAnswer(source, item);
+        return;
+      }
+      // A refresh may only touch a line this exact question already owns:
+      // two active forms of two owners share the surface's one status line,
+      // and merely navigating form B — tabs, or the advance past its
+      // optional empty step, with B's required step still outstanding — must
+      // not rewrite the line form A's validation raised, nor steal its
+      // ownership. B's own failed validation (the Next gate, the final
+      // check) is what may take the line over.
+      const spoken = announceFailureFor(source);
+      if (owedAnswerOwners.get(spoken)?.key !== questionOwnershipKey(source, item)) return;
+      // The refresh is spoken only while the line is still ours; a newer
+      // unrelated status is never spoken over.
+      if (!spoken.current().startsWith("Still to answer")) return;
+      speakOwedAnswer(source, item, `Still to answer: ${owedStepNames(outstanding, item)}`);
+    };
+
     container.addEventListener("submit", event => {
       const questionForm = event.target as HTMLFormElement;
       if (!questionForm.matches("form[data-question-form]")) return;
@@ -3673,22 +4192,57 @@ export function initChat(api = new ChatApiClient()): void {
       const panels = [...questionForm.querySelectorAll<HTMLElement>("[data-question-panel]")];
       const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
       // Not on the last step yet: advance instead of submitting. The primary
-      // button is "Next" here, so submitting the form means "go on".
+      // button is "Next" here, so submitting the form means "go on" — but the
+      // step being left must carry its answer first, unless it is optional
+      // and may be left empty freely. A required empty stops here with the
+      // same message the final check speaks, rather than surfacing only at
+      // the end and bouncing the reader back through the wizard (GitHub
+      // review finding on the never-disabling Answer: the check now runs on
+      // the advance path too). Once the step passes, its stale owed-answer
+      // line is retired — only if nothing newer owns the status.
       if (activeIndex < panels.length - 1) {
+        const step = item.questions[activeIndex]!;
+        if (collectQuestionAnswers(questionForm)[activeIndex]!.length === 0 && !step.optional) {
+          // The advance holds on the step just left, but the line names the
+          // whole form's outstanding set, not that step alone: the final
+          // validation may already have listed later required steps, and
+          // repeating Next must not shrink the message to the one the
+          // reader is standing on.
+          // The advance holds on the step just left, but the line names the
+          // whole form's outstanding set, not that step alone: the final
+          // validation may already have listed later required steps, and
+          // repeating Next must not shrink the message to the one the
+          // reader is standing on.
+          const outstanding = outstandingRequired(questionForm, item);
+          speakOwedAnswer(source, item, `Still to answer: ${owedStepNames(outstanding, item)}`);
+          return;
+        }
+        // The advance retires the line only by the whole form's standing —
+        // an optional empty behind Next must not clear what a required step
+        // elsewhere still owes (the same settle the tab path runs).
+        settleOwedAnswer(source, item, questionForm);
         showQuestionPanel(questionForm, activeIndex + 1);
+        speakQuestionStep(source, questionForm);
         return;
       }
       const answers = collectQuestionAnswers(questionForm);
-      // The button is disabled until every step is satisfied, so this only
-      // catches a form submitted some other way (Enter in the free-form field).
-      // An optional question may go unanswered; every other one must not.
-      const missing = answers.flatMap((answer, index) => answer.length === 0 && !item.questions[index]?.optional ? [index] : []);
+      // The primary button stays enabled, so every submit routes through this
+      // check: an optional question may go unanswered; every other one must
+      // not. The form jumps to the first missing panel and says what is owed.
+      const missing = outstandingRequired(questionForm, item);
       if (missing.length > 0) {
         showQuestionPanel(questionForm, missing[0]!);
-        announceFailureFor(source)(`Still to answer: ${missing.map(index => item.questions[index]!.header).filter(Boolean).join(", ")}`, true);
+        speakOwedAnswer(source, item, `Still to answer: ${owedStepNames(missing, item)}`);
         return;
       }
-      void resolveQuestion(source, item.id, { kind: "answered", answers });
+      // Every answer is collected; but the question is not resolved yet —
+      // the lines stay standing while the api call flies, and the guarded
+      // cleanup runs only on success, exactly like the reject path: a
+      // failed answer's own status must not also silently remove the
+      // still-valid validation lines, and a line the same pending request
+      // raises while its answer hangs is the success's to retire on every
+      // surface whose record matches.
+      void resolveQuestion(source, item.id, { kind: "answered", answers }).then(resolved => { if (resolved) clearOwedAnswersEverywhere(source, item); });
     });
   };
 
@@ -3809,7 +4363,11 @@ export function initChat(api = new ChatApiClient()): void {
     // Back to the parent at its live position: it never unmounted, so this is
     // only re-asserting the anchor the timeline was already holding.
     parentScroll.request();
-    timeline.focus({ preventScroll: true });
+    const invoker = childInvoker?.isConnected ? childInvoker : childInvokerSelector ? surface.querySelector<HTMLElement>(childInvokerSelector) : null;
+    if (invoker && invoker.getClientRects().length > 0) invoker.focus({ preventScroll: true });
+    else timeline.focus({ preventScroll: true });
+    childInvoker = null;
+    childInvokerSelector = null;
     // A jump that was waiting on this close lands after the anchor restore,
     // never before it — see the requests-jump handler.
     if (pendingRequestJump !== null) {
@@ -3873,6 +4431,12 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownClosePending = false;
     silentRun.stop();
     const previous = child;
+    if (!previous) {
+      childInvoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const attribute = ["data-worker-item", "data-inspect-task", "data-open-conversation"].find(name => childInvoker?.hasAttribute(name));
+      const row = childInvoker?.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId;
+      childInvokerSelector = attribute ? `${row ? `[data-chat-item-id="${CSS.escape(row)}"] ` : ""}[${attribute}="${CSS.escape(childInvoker!.getAttribute(attribute)!)}"]` : null;
+    }
     previous?.stream?.close();
     previous?.read?.controller.abort();
     const retainedProjection = previous?.conversationId === id ? previous.projection : null;
@@ -3881,7 +4445,7 @@ export function initChat(api = new ChatApiClient()): void {
     // from the layer being refreshed, or — for a transcript opened from the
     // subagents track or the launching row — found by the child id on a
     // running task, so a running subagent gets the strip whichever way in.
-    const owningTask = projection ? runningTaskForChild(projection.items, id) : undefined;
+    const owningTask = projection ? taskForChild(projection.items, id) : undefined;
     const link = task
       ?? (previous?.conversationId === id ? previous.task : undefined)
       ?? (projection && owningTask ? { conversationId: projection.conversationId, taskId: owningTask.taskId, view: "transcript" as const } : undefined);
@@ -3892,7 +4456,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (taskPanel) {
       if (link) {
         const owner = projection?.conversationId === link.conversationId ? projection : null;
-        taskPanel.show(link, owner ? taskById(owner.items, link.taskId) : undefined, stoppingTasks.has(link.taskId));
+        taskPanel.show(link, checkingPresentation.task(owner ? taskById(owner.items, link.taskId, link.itemId) : undefined), stoppingTasks.has(link.taskId));
       } else taskPanel.close();
     }
     // A task's output view has no transcript: the timeline stays out of the
@@ -3944,12 +4508,11 @@ export function initChat(api = new ChatApiClient()): void {
     if (!retainedProjection && chatSurfaceActive()) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
     else childRenderDirty = true;
     reconcileAnswerAfterPaint();
-    // Hidden until this child's own first page says whether more exists —
-    // otherwise a previous subagent's cursor would offer paging for a
-    // transcript that has none.
+    // A refresh retains this child's paging affordance; a different child
+    // waits for its own first page rather than borrowing the previous cursor.
     if (drilldownOlder) {
-      drilldownOlder.hidden = true;
-      drilldownOlder.disabled = false;
+      drilldownOlder.hidden = !retainedProjection?.olderCursor;
+      drilldownOlder.disabled = retainedProjection !== null;
     }
     if (automaticRefresh && retainedProjection && childScroll) cancelForSnapshot(childScroll);
     else childScroll?.cancel();
@@ -3958,14 +4521,47 @@ export function initChat(api = new ChatApiClient()): void {
     if (!automaticRefresh) drilldownBack?.focus();
     if (outputView) return;
     void runChildRead(next, "Loading conversation...", () => openChildConversation(id, label, automaticRefresh, next.task), async signal => {
-      const snapshot = await api.snapshot(id, undefined, signal);
+      let snapshot: ConversationSnapshot | null = null;
+      let delay = REFRESH_RETRY_INITIAL_MS;
+      while (!signal.aborted && generation === childGeneration && child === next) {
+        const held = next.projection;
+        const parentToken = selectionGeneration, parentEpoch = projectionEpoch;
+        const parentId = projection?.conversationId;
+        const historyBusy = parentId !== undefined && composer.historyBusy(parentId);
+        const ownsOwner = () => generation === childGeneration && child === next && parentToken === selectionGeneration && parentEpoch === projectionEpoch
+          && projection?.conversationId === parentId && (parentId !== undefined && composer.historyBusy(parentId)) === historyBusy;
+        // A passive child recovery must not read through the parent's own
+        // in-flight history mutation. Its settled epoch owns the next attempt.
+        if (!historyBusy && held) {
+          const read = await readLoadedConversationRange(held, signal, () => next.projection, ownsOwner);
+          snapshot = read?.isCurrent() ? read.snapshot : null;
+        } else if (!historyBusy) {
+          const first = await api.snapshot(id, undefined, signal);
+          snapshot = ownsOwner() ? first : null;
+        }
+        if (snapshot) break;
+        // Keep this read's lifetime and the retained view across incompatible
+        // verification pages. Closing/switching aborts the owned wait as well
+        // as fetch; no recovery can reopen a departed child.
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); };
+          const timer = setTimeout(done, delay);
+          signal.addEventListener("abort", done, { once: true });
+          if (signal.aborted) done();
+        });
+        delay = Math.min(delay * 2, REFRESH_RETRY_MAX_MS);
+      }
       if (signal.aborted || generation !== childGeneration || child !== next) return;
+      if (!snapshot) return;
+      const readingAnchor = childAnchor.currentAnchor();
       next.projection = projectionFromSnapshot(snapshot, []);
+      if (childScroll) cancelForSnapshot(childScroll);
+      childAnchor.restore(readingAnchor);
       announceChild(snapshot.items.length ? "" : "This subagent has not reported anything yet.");
       renderChild(false);
       next.stream = openChildStream(next, id, label, snapshot.cursor, generation);
       silentRun.follow(isLiveConversationStatus(next.projection.status));
-    });
+    }).finally(() => { if (generation === childGeneration && child === next && drilldownOlder) drilldownOlder.disabled = false; });
   };
 
   // The same paging the parent timeline offers: a subagent's transcript is
@@ -4068,7 +4664,7 @@ export function initChat(api = new ChatApiClient()): void {
   input.addEventListener("input", () => {
     autosize(input);
     const id = activeConversationId();
-    if (id) { presentation.drafts[id] = input.value; save(); }
+    if (id) composer.edit(input.value);
     syncControls();
     renderCommandMenu();
   });
@@ -4079,15 +4675,22 @@ export function initChat(api = new ChatApiClient()): void {
       renderCommandMenu();
       return;
     }
-    if (commandMatch && (event.key === "Enter" || event.key === "Tab") && !event.metaKey && !event.ctrlKey) {
+    if (commandMatch && (event.key === "Tab" || event.key === "Enter" && document.documentElement.dataset.uiMode !== "touch") && !event.metaKey && !event.ctrlKey) {
       event.preventDefault();
       chooseCommand(commandIndex);
       return;
     }
     if (commandMatch && event.key === "Escape") { event.preventDefault(); closeCommandMenu(); return; }
-    const running = isLiveConversationStatus(projection?.status);
+    // ⌥Enter explicitly queues, only while
+    // the choice exists; otherwise it is an ordinary Enter.
+    if (event.key === "Enter" && event.altKey && !event.shiftKey && !event.isComposing && deliveryChoiceOffered()) {
+      event.preventDefault();
+      requestedDelivery = "queue";
+      form.requestSubmit();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing
-      && (event.metaKey || event.ctrlKey || document.documentElement.dataset.uiMode !== "touch" || running)) {
+      && (event.metaKey || event.ctrlKey || document.documentElement.dataset.uiMode !== "touch")) {
       event.preventDefault();
       form.requestSubmit();
     }
@@ -4133,14 +4736,193 @@ export function initChat(api = new ChatApiClient()): void {
   };
   surface.addEventListener("focusin", syncEditingFocus);
   surface.addEventListener("focusout", () => queueMicrotask(syncEditingFocus));
+  send.addEventListener("mousedown", keepTouchComposerFocus);
+  attachButton?.addEventListener("mousedown", keepTouchComposerFocus);
+  const holdVisual = document.createElement("span");
+  holdVisual.className = "chat-hold-upward";
+  holdVisual.setAttribute("aria-hidden", "true");
+  holdVisual.hidden = true;
+  const holdCap = document.createElement("span");
+  holdCap.className = "chat-hold-cap";
+  holdVisual.append(holdCap);
+  const holdOrigin = document.createElement("span");
+  holdOrigin.className = "chat-hold-origin";
+  holdOrigin.setAttribute("aria-hidden", "true");
+  holdOrigin.inert = true;
+  // A viewport-owned visual cannot be clipped by the composer or work sheet.
+  // The inert, zero-size probe shares its fixed containing block, but never
+  // moves with the envelope. Keep both nodes under the same lifecycle owner.
+  const mountHoldPortal = () => {
+    if (!holdOrigin.isConnected) document.body.append(holdOrigin);
+    if (!holdVisual.isConnected) document.body.append(holdVisual);
+  };
+  mountHoldPortal();
+  let holdPointer: number | null = null;
+  let holdBounds: DOMRect | null = null;
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  let holdArmTimer: ReturnType<typeof setTimeout> | null = null;
+  let holdFrame = 0;
+  let suppressPointerClick = false;
+  let ownedSpace = false;
+  let requestedByHold = false;
+  const submitDelivery = (delivery: MessageDelivery) => {
+    requestedDelivery = delivery;
+    form.requestSubmit();
+  };
+  const hold = new HoldToQueue(() => {
+    if (!projection || send.disabled || composer.submitting || cancelling || document.hidden || !document.hasFocus()) return null;
+    const box = send.getBoundingClientRect();
+    return JSON.stringify([selectionGeneration, projection.conversationId, input.value,
+      currentPendingAttachments(), composer.uploading(projection.conversationId), displayedConfiguration(),
+      box.left, box.top, box.width, box.height]);
+  }, delivery => { requestedByHold = delivery === "queue"; submitDelivery(delivery); });
+  const clearHoldVisual = () => {
+    if (holdTimer !== null) clearTimeout(holdTimer);
+    if (holdArmTimer !== null) clearTimeout(holdArmTimer);
+    holdTimer = null;
+    holdArmTimer = null;
+    cancelAnimationFrame(holdFrame);
+    holdVisual.hidden = true;
+    send.classList.remove("is-holding");
+  };
+  const cancelHold = () => {
+    hold.cancel();
+    clearHoldVisual();
+    const pointer = holdPointer;
+    holdPointer = null;
+    holdBounds = null;
+    if (pointer !== null && send.hasPointerCapture(pointer)) send.releasePointerCapture(pointer);
+  };
+  const paintHold = () => {
+    const now = performance.now();
+    const progress = hold.progress(now);
+    if (progress === null) { clearHoldVisual(); return; }
+    if (progress === 1) { hold.check(now); clearHoldVisual(); return; }
+    const box = send.getBoundingClientRect();
+    // Read the stable fixed origin in the same client coordinate space
+    // as Send. Embedded WebKit can report client rects relative to the visual
+    // viewport while fixed CSS coordinates still use the layout viewport.
+    // Copying box.top directly then applies the keyboard pan a second time.
+    // Read before any paint writes: resetting the visible portal to zero
+    // first would synchronously flush layout on every animation frame.
+    const origin = holdOrigin.getBoundingClientRect();
+    const viewportTop = (window.visualViewport?.offsetTop ?? 0) + origin.top;
+    // The full envelope appears only after arming. Its bounds stay fixed;
+    // only the green fill advances, with room reserved above the finger.
+    const extension = Math.min(104, Math.max(0, box.top - viewportTop - 8));
+    holdVisual.style.width = `${box.width}px`;
+    holdVisual.style.height = `${box.height + extension}px`;
+    holdVisual.style.left = `${box.left - origin.left}px`;
+    holdVisual.style.top = `${box.top - extension - origin.top}px`;
+    holdVisual.style.setProperty("--hold-progress", String(progress));
+    holdCap.textContent = `${isLiveConversationStatus(projection?.status) ? "Queue" : "Send"}\n${((1 - progress) * HOLD_COUNTDOWN_MS / 1000).toFixed(1)}s`;
+    holdVisual.hidden = false;
+    send.classList.add("is-holding");
+    holdFrame = requestAnimationFrame(paintHold);
+  };
+  const armHoldVisual = () => {
+    // Keep intent/geometry guards live during the silent delay too. A target
+    // that moves away and back must not turn an invalid gesture into a tap.
+    const validateArming = () => {
+      if (hold.progress(performance.now()) === null) { clearHoldVisual(); return; }
+      holdFrame = requestAnimationFrame(validateArming);
+    };
+    holdFrame = requestAnimationFrame(validateArming);
+    holdArmTimer = setTimeout(() => {
+      holdArmTimer = null;
+      cancelAnimationFrame(holdFrame);
+      paintHold();
+    }, HOLD_ARM_MS);
+    holdTimer = setTimeout(() => { hold.check(performance.now()); clearHoldVisual(); }, HOLD_TOTAL_MS);
+  };
   send.addEventListener("pointerdown", event => {
-    if (event.pointerType === "touch") event.preventDefault();
+    suppressPointerClick = false;
+    if (!sendSupportsHold()) return;
+    mountHoldPortal();
+    if (!event.isPrimary || event.button !== 0 || !hold.begin(event.pointerId, performance.now())) return;
+    event.preventDefault(); // Keep the composing field and mobile keyboard owned.
+    suppressPointerClick = true;
+    holdPointer = event.pointerId;
+    holdBounds = send.getBoundingClientRect();
+    send.setPointerCapture(event.pointerId);
+    armHoldVisual();
   });
-  send.addEventListener("click", async () => {
+  send.addEventListener("pointermove", event => {
+    if (event.pointerId !== holdPointer) return;
+    const box = holdBounds;
+    if (!box) return;
+    if (event.clientX < box.left || event.clientX >= box.right || event.clientY < box.top || event.clientY >= box.bottom) cancelHold();
+  });
+  send.addEventListener("pointerup", event => {
+    if (event.pointerId !== holdPointer) return;
+    hold.release(event.pointerId, performance.now());
+    cancelHold();
+  });
+  send.addEventListener("pointercancel", cancelHold);
+  send.addEventListener("lostpointercapture", cancelHold);
+  send.addEventListener("contextmenu", event => event.preventDefault());
+  send.addEventListener("click", event => {
+    event.preventDefault();
+    if (event.detail > 0 && suppressPointerClick) { suppressPointerClick = false; return; }
+    if (holdPointer !== null) { cancelHold(); return; }
+    submitDelivery("steer");
+  });
+  send.addEventListener("keydown", event => {
+    if (event.key === " " && !event.repeat) ownedSpace = false;
+    if (event.key === " " && sendSupportsHold()) {
+      event.preventDefault();
+      ownedSpace = true;
+      mountHoldPortal();
+      if (event.repeat || holdPointer !== null || !hold.begin(-1, performance.now())) return;
+      holdPointer = -1;
+      armHoldVisual();
+    } else if (event.repeat && event.key === "Enter") event.preventDefault();
+  });
+  send.addEventListener("keyup", event => {
+    if (event.key !== " " || !ownedSpace) return;
+    ownedSpace = false;
+    event.preventDefault(); // Suppress Space's native click, including after Escape.
+    if (holdPointer !== -1) return;
+    hold.release(-1, performance.now());
+    cancelHold();
+  });
+  send.addEventListener("blur", () => { if (holdPointer === -1) cancelHold(); });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || holdPointer === null) return;
+    event.preventDefault(); event.stopImmediatePropagation(); cancelHold();
+  }, true);
+  window.addEventListener("blur", cancelHold);
+  window.addEventListener("pagehide", () => {
+    cancelHold();
+    holdOrigin.remove();
+    holdVisual.remove();
+  });
+  window.addEventListener("pageshow", mountHoldPortal);
+  document.addEventListener("visibilitychange", cancelHold);
+  input.addEventListener("input", cancelHold);
+  // Mobile browsers can adjust a gap tap onto a nearby button. Use the raw
+  // touch coordinates (click/pointer coordinates may already be adjusted)
+  // to suppress only these misses; actual controls keep their native events.
+  sendGroup?.addEventListener("touchstart", event => {
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0]!;
+    const hit = [...sendGroup.querySelectorAll("button")].some(button => {
+      const box = button.getBoundingClientRect();
+      return touch.clientX >= box.left && touch.clientX < box.right
+        && touch.clientY >= box.top && touch.clientY < box.bottom;
+    });
+    if (!hit) { event.preventDefault(); cancelHold(); }
+  }, { passive: false });
+  stop?.addEventListener("mousedown", keepTouchComposerFocus);
+  stop?.addEventListener("click", async () => {
     if (!projection || !isLiveConversationStatus(projection.status) || cancelling) return;
     // Captured for the round trip: a failure landing after a switch belongs
     // to the conversation whose turn was being cancelled.
     const conversationId = projection.conversationId;
+    if (document.documentElement.dataset.uiMode === "touch" && hasLiveWorkers()) {
+      if (!await confirmChatAction("Stop parent?", "Stops the parent and its still-blocking foreground work. Detached workers continue; their later notifications can wake the parent again.", "Stop parent", stop)) return;
+      if (projection?.conversationId !== conversationId || !isLiveConversationStatus(projection.status) || cancelling) return;
+    }
     cancelling = true;
     setComposerError(null, conversationId);
     noteComposer("Cancelling...");
@@ -4154,464 +4936,313 @@ export function initChat(api = new ChatApiClient()): void {
     finally { cancelling = false; syncControls(); }
   });
 
-  const installRestoredDraft = (conversationId: string, draft: RestoredDraft | undefined, updateVisible: boolean) => {
-    const restored = draft ?? { text: "" };
-    const available: PendingAttachment[] = [];
-    const unavailable: MessageAttachment[] = [];
-    for (const attachment of restored.attachments ?? []) {
-      if (attachment.id) {
-        available.push({ ...attachment, id: attachment.id, previewUrl: api.attachmentUrl(attachment.id) });
-      } else {
-        unavailable.push(attachment);
-      }
-    }
-    revokeAttachmentPreviews(pendingAttachments.get(conversationId) ?? []);
-    setPendingAttachments(conversationId, available);
-    setUnavailableAttachments(conversationId, unavailable);
-    presentation.drafts[conversationId] = restored.text;
-    save();
-    if (!updateVisible) return unavailable.length;
-    input.value = restored.text;
-    slashQueryActive = false;
-    autosize(input);
-    renderAttachments();
-    syncControls();
-    input.focus();
-    return unavailable.length;
+  const runHistoryOperation = (operation: HistoryOperation, conversationId: string, messageId?: string) => composer.history(operation, conversationId, messageId);
+
+  const asideButton = document.querySelector<HTMLButtonElement>("#chat-aside-ready");
+  const asideDialog = document.querySelector<HTMLDialogElement>("#chat-aside-dialog");
+  const asideContent = asideDialog?.querySelector<HTMLElement>("#chat-aside-answer");
+  // Page-local reading state, keyed by conversation and answer identity. A new
+  // answer starts at the top; minimising never admits a prompt or loses text.
+  const asidePositions = new Map<string, { answer: unknown; top: number }>();
+  let paintedAside: unknown;
+  let restoreAsideFocus = false;
+  function minimiseAside(reason = "") {
+    if (!asideDialog?.open) return;
+    const id = asideDialog.dataset.conversation;
+    if (id) boundedSet(asidePositions, id, { answer: paintedAside, top: asideDialog.scrollTop }, 200);
+    restoreAsideFocus = reason !== "mode" && asideDialog.contains(document.activeElement);
+    asideDialog.close(reason);
+  }
+  // A native modal/nonmodal dialog cannot change modality in place. Hide on
+  // the shell's real mode event; deliberate reopening chooses the new mode
+  // while retaining the answer/offset, without taking over shell focus.
+  onUiModeChange(() => { minimiseAside("mode"); scheduleRender(); });
+  if (asideContent) wireItemInteractions(asideContent,
+    () => asideDialog?.open && asideDialog.dataset.conversation === projection?.conversationId ? projection : null,
+    { renderer, rerender: () => scheduleRender(false), beforeFileNavigation: () => minimiseAside("file") }, parentScroll);
+  const syncAsideViewport = () => {
+    if (!asideDialog?.open) return;
+    const viewport = window.visualViewport;
+    asideDialog.style.setProperty("--chat-aside-top", `${(viewport?.offsetTop ?? 0) + 12}px`);
+    asideDialog.style.setProperty("--chat-aside-height", `${Math.max(0, (viewport?.height ?? window.innerHeight) - 24)}px`);
+    asideDialog.style.setProperty("--chat-aside-window-height", `${Math.max(0, (viewport?.height ?? window.innerHeight) - 72)}px`);
+    asideDialog.style.setProperty("--chat-aside-bottom", `${(viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight) - 12}px`);
   };
-
-  const historyLabel = (operation: HistoryOperation) => operation[0]!.toUpperCase() + operation.slice(1);
-  const historyRetryInstruction = (operation: HistoryOperation) => operation === "undo" || operation === "redo"
-    ? `Submit /${operation} again`
-    : `Choose ${historyLabel(operation)} message again`;
-  const historyPreservedState = (operation: HistoryOperation) => operation === "undo" || operation === "redo"
-    ? "command and attachments"
-    : "composer and attachments";
-  const historyProgressLabel = (operation: HistoryOperation) => operation === "restore"
-    ? "Restoring..."
-    : `${historyLabel(operation)}ing...`;
-
-  const installChangedHistoryResult = async (operation: HistoryOperation, conversationId: string, result: ReversibleHistoryResult): Promise<boolean> => {
-    const label = historyLabel(operation);
-    retryRequests.delete(conversationId);
-    invalidateAttachmentStaging(conversationId);
-    if (activeConversationId() !== conversationId) {
-      const unavailable = installRestoredDraft(conversationId, result.restoredDraft, false);
-      if (unavailable > 0) {
-        setComposerError(`${unavailable} restored ${unavailable === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.`, conversationId);
-      }
-      historyRetries.delete(conversationId);
-      noteComposer(null);
-      return true;
+  window.visualViewport?.addEventListener("resize", syncAsideViewport);
+  window.visualViewport?.addEventListener("scroll", syncAsideViewport);
+  window.addEventListener("resize", syncAsideViewport);
+  asideButton?.addEventListener("mousedown", keepTouchComposerFocus);
+  asideButton?.addEventListener("click", () => {
+    const id = activeConversationId();
+    const answer = id ? composer.sideAnswer(id) : undefined;
+    if (!projection || !answer || !asideDialog) return;
+    asideDialog.querySelector("#chat-aside-question")!.textContent = answer.question;
+    const content = asideDialog.querySelector<HTMLElement>("#chat-aside-answer")!;
+    content.classList.add("markdown-body");
+    const text = answer.text.trim() || "No text answer returned. The model may have attempted a tool call; side answers do not execute tools.";
+    if (answer.failed) content.textContent = text;
+    else {
+      content.innerHTML = renderChatMarkdown(text);
+      decorateFileLinks(content);
+      decorateChatVisuals(content);
     }
-
-    const refreshed = await refreshSelectedConversation(conversationId);
-    pendingHistoryResyncs.delete(conversationId);
-    if (activeConversationId() !== conversationId) {
-      installRestoredDraft(conversationId, result.restoredDraft, false);
-      historyRetries.delete(conversationId);
-      noteComposer(null);
-      return true;
+    asideDialog.dataset.conversation = id!;
+    asideDialog.returnValue = "";
+    paintedAside = answer;
+    const nonmodal = document.documentElement.dataset.uiMode === "desktop";
+    asideDialog.dataset.presentation = nonmodal ? "window" : "modal";
+    asideDialog.setAttribute("aria-modal", String(!nonmodal));
+    // Native close restoration belongs to the deliberate invoker, not the
+    // touch draft whose focus mousedown preserved until reader activation.
+    asideButton.focus({ preventScroll: true });
+    if (nonmodal) asideDialog.show(); else asideDialog.showModal();
+    syncAsideViewport();
+    document.querySelector<HTMLElement>("#chat-aside-close")?.focus({ preventScroll: true });
+    const saved = asidePositions.get(id!);
+    asideDialog.scrollTop = saved?.answer === answer ? saved.top : 0;
+  });
+  document.querySelector("#chat-aside-close")?.addEventListener("click", () => minimiseAside());
+  asideDialog?.addEventListener("cancel", event => { event.preventDefault(); minimiseAside(); });
+  asideDialog?.addEventListener("keydown", event => {
+    if (event.key === "Escape" && asideDialog.dataset.presentation === "window") {
+      event.preventDefault(); event.stopPropagation(); minimiseAside();
     }
-    if (!refreshed) {
-      historyRefreshRequired.add(conversationId);
-      const message = `${label} completed, but the conversation could not be refreshed. ${historyRetryInstruction(operation)} to reconnect; the ${historyPreservedState(operation)} were kept.`;
-      setComposerError(message, conversationId);
-      noteComposer(message);
-      return false;
-    }
-
-    const unavailable = installRestoredDraft(conversationId, result.restoredDraft, true);
-    const unavailableMessage = unavailable > 0
-      ? `${unavailable} restored ${unavailable === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.`
-      : null;
-    historyRetries.delete(conversationId);
-    setComposerError(unavailableMessage, conversationId);
-    noteComposer(unavailableMessage ? `${label} complete. ${unavailableMessage}` : `${label} complete`);
-    return true;
-  };
-
-  const runHistoryOperation = async (operation: HistoryOperation, conversationId: string, messageId?: string) => {
-    const label = historyLabel(operation);
-    submitting = true;
-    historyMutations.add(conversationId);
-    setComposerError(null, conversationId);
-    noteComposer(historyProgressLabel(operation));
-    closeCommandMenu();
-    syncControls();
-    try {
-      const pending = historyRetries.get(conversationId);
-      if (pending?.result && pending.operation === operation && pending.messageId === messageId) {
-        await installChangedHistoryResult(pending.operation, conversationId, pending.result);
-        return;
-      }
-      if (historyRefreshRequired.has(conversationId)) {
-        const refreshed = await refreshSelectedConversation(conversationId);
-        if (!refreshed) {
-          const message = `The conversation could not be refreshed. ${historyRetryInstruction(operation)} to retry; the ${historyPreservedState(operation)} were kept.`;
-          setComposerError(message, conversationId);
-          noteComposer(message);
-          return;
-        }
-      }
-
-      const retry: { operation: HistoryOperation; messageId?: string; requestId: string; result?: ReversibleHistoryResult } =
-        pending?.operation === operation && pending.messageId === messageId
-          ? pending
-          : { operation, ...(messageId ? { messageId } : {}), requestId: newRequestId() };
-      historyRetries.set(conversationId, retry);
-      const result = operation === "undo" || operation === "redo"
-        ? await api[operation](conversationId, retry.requestId)
-        : await api[operation](conversationId, messageId!, retry.requestId);
-      if (result.outcome !== "changed") {
-        historyRetries.delete(conversationId);
-        if (pendingHistoryResyncs.delete(conversationId)) {
-          const refreshed = await refreshSelectedConversation(conversationId);
-          if (!refreshed && activeConversationId() === conversationId) {
-            historyRefreshRequired.add(conversationId);
-            const message = `${result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo"}, but the conversation could not be refreshed. Submit /${operation} again to reconnect.`;
-            setComposerError(message, conversationId);
-            noteComposer(message);
-            return;
-          }
-        }
-        if (activeConversationId() === conversationId) {
-          noteComposer(result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo");
-        } else {
-          noteComposer(null);
-        }
-        return;
-      }
-      retry.result = result;
-      await installChangedHistoryResult(operation, conversationId, result);
-    } catch (error) {
-      const preserved = historyPreservedState(operation);
-      let message = `${label} failed: ${messageOf(error)}. ${preserved[0]!.toUpperCase()}${preserved.slice(1)} kept.`;
-      if (pendingHistoryResyncs.delete(conversationId)) {
-        const refreshed = await refreshSelectedConversation(conversationId);
-        if (!refreshed && activeConversationId() === conversationId) {
-          historyRefreshRequired.add(conversationId);
-          message += ` The conversation also needs to reconnect; ${historyRetryInstruction(operation)} to retry.`;
-        }
-      }
-      setComposerError(message, conversationId);
-      if (activeConversationId() === conversationId) noteComposer(message);
-      else noteComposer(null);
-    } finally {
-      historyMutations.delete(conversationId);
-      submitting = false;
-      syncControls();
-    }
-  };
+  });
+  asideDialog?.addEventListener("close", () => {
+    const focused = document.activeElement;
+    const mayRestore = focused === document.body || focused === asideButton || asideDialog.contains(focused);
+    if (restoreAsideFocus && mayRestore && asideDialog.returnValue !== "file" && asideDialog.dataset.conversation === activeConversationId() && asideButton && !asideButton.hidden) asideButton.focus({ preventScroll: true });
+    restoreAsideFocus = false;
+  });
 
   form.addEventListener("submit", async event => {
     event.preventDefault();
-    if (!projection || submitting) return;
-    const operation = localHistoryOperation(input.value, commands, declares("reversible-history"));
-    if (operation) {
-      const conversationId = projection.conversationId;
-      if (!commandInventoryAvailable) {
-        submitting = true;
-        noteComposer("Reloading commands...");
-        syncControls();
-        const loaded = await (async () => {
-          if (!contextAgentId) return false;
-          try {
-            commands = await api.commands(contextAgentId);
-            commandInventoryAvailable = true;
-            const cached = agentCatalogs.get(contextAgentId);
-            if (cached) agentCatalogs.set(contextAgentId, { ...cached, commands, commandInventoryAvailable: true });
-            return true;
-          } catch {
-            return false;
-          }
-        })();
-        submitting = false;
-        if (!loaded) {
-          const message = `Chat commands could not be loaded. Submit /${operation} again to retry; the command and attachments were kept.`;
-          setComposerError(message, conversationId);
-          noteComposer(activeConversationId() === conversationId ? message : null);
-          syncControls();
-          return;
-        }
-        if (activeConversationId() !== conversationId) {
-          syncControls();
-          return;
-        }
-      }
-      await runHistoryOperation(operation, conversationId);
-      return;
-    }
-    // In-flight staging is prospective content: an image-only submit during
-    // its own upload waits for the drain below rather than being refused.
-    if (!input.value.trim() && currentPendingAttachments().length === 0 && !attachmentStaging.has(projection.conversationId)) return;
-    const conversationId = projection.conversationId;
-    const text = input.value;
-    // Restoration must not pick between the failed message and edits made
-    // while it was in flight — both are the user's words. The captured
-    // text leads, the newer edits follow as their own line.
-    const restoreDraftText = () => {
-      if (!text.trim()) return;
-      input.value = input.value.trim() ? `${text}\n${input.value}` : text;
-      slashQueryActive = false;
-      autosize(input);
-    };
-    // The same rule for a submission that ends while another conversation is
-    // selected: the switch already stored any newer edits as this
-    // conversation's draft, and the captured text — never sent — must lead
-    // rather than being discarded because the slot is occupied.
-    const mergeStoredDraft = () => {
-      if (!text.trim()) return;
-      const edits = presentation.drafts[conversationId];
-      presentation.drafts[conversationId] = edits?.trim() ? `${text}\n${edits}` : text;
-      save();
-    };
-    const refusalsAtSubmit = attachmentRefusals.get(conversationId) ?? 0;
-    submitting = true;
-    setComposerError(null);
-    // Captured AND cleared before any yield: the textarea stays editable
-    // while the drain below waits, and anything typed then belongs to the
-    // next message — an after-the-wait clear would erase it.
-    input.value = "";
-    slashQueryActive = false;
-    closeCommandMenu();
-    presentation.drafts[conversationId] = "";
-    save();
-    autosize(input);
-    // An upload attached moments before Enter belongs to THIS message:
-    // submission waits for in-flight staging rather than snapshotting a list
-    // the upload has not reached yet (and leaking the image into the next
-    // message).
-    let stagingTail = attachmentStaging.get(conversationId);
-    if (stagingTail) {
-      noteComposer("Uploading images...");
-      // Drain, not snapshot: an intake can append a new chain link while
-      // this await yields, and a snapshot would submit without it.
-      while (stagingTail) {
-        await stagingTail.catch(() => undefined);
-        const next = attachmentStaging.get(conversationId);
-        stagingTail = next === stagingTail ? undefined : next;
-      }
-      // The wait yielded: the user may have switched conversations. The text
-      // belongs to the conversation it was written in, so it becomes that
-      // conversation's draft instead of being sent against the wrong one.
-      if (!projection || projection.conversationId !== conversationId) {
-        mergeStoredDraft();
-        submitting = false;
-        syncControls();
-        return;
-      }
-      // Edits made during the wait are the next draft, not part of this
-      // message; nothing to do — they are already in the input.
-    }
-    // A refusal that landed during the drain is a piece of THIS message
-    // going missing: the user pressed send believing the upload was
-    // included, so the send stops rather than delivering a partial prompt.
-    // The staging path already named the refusal on the error line, and any
-    // successfully staged files stay pending for the corrected retry.
-    if ((attachmentRefusals.get(conversationId) ?? 0) !== refusalsAtSubmit) {
-      restoreDraftText();
-      presentation.drafts[conversationId] = input.value;
-      save();
-      submitting = false;
-      noteComposer("Message not sent; draft kept");
-      renderAttachments();
-      syncControls();
-      return;
-    }
-    // The drain can end with nothing to send: an image-only submission whose
-    // upload was refused has no content left, and the staging path already
-    // explained why on the composer error line.
-    if (!text.trim() && (pendingAttachments.get(conversationId) ?? []).length === 0) {
-      // Restore the (empty) capture only if the user typed nothing meanwhile.
-      if (!input.value.trim() && text) { input.value = text; slashQueryActive = false; autosize(input); }
-      submitting = false;
-      syncControls();
-      return;
-    }
-    // Staged images can outlive the model choice that admitted them: a later
-    // switch to a model without image support disables further intake, but
-    // the send itself must refuse too, or the prompt would carry images the
-    // selected model cannot see and the outcome would be the provider's to
-    // improvise. Same wording as the intake refusal, plus the way out.
-    const support = attachmentModelSupport();
-    if (!support.supported && (pendingAttachments.get(conversationId) ?? []).length > 0) {
-      restoreDraftText();
-      presentation.drafts[conversationId] = input.value;
-      save();
-      submitting = false;
-      setComposerError(`${support.modelName} cannot see images. Remove them or pick a model with image support.`);
-      syncControls();
-      return;
-    }
-    // Captured and cleared optimistically like the text; restored on failure.
-    const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
-    const stagedUnavailableAttachments = [...(unavailableAttachments.get(conversationId) ?? [])];
-    const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
-    submittedAttachmentReserve.set(conversationId, (submittedAttachmentReserve.get(conversationId) ?? 0) + stagedAttachments.length);
-    const releaseAttachmentReserve = () => {
-      const remaining = (submittedAttachmentReserve.get(conversationId) ?? 0) - stagedAttachments.length;
-      if (remaining > 0) submittedAttachmentReserve.set(conversationId, remaining);
-      else submittedAttachmentReserve.delete(conversationId);
-    };
-    const attachmentKey = stagedAttachments.map(entry => entry.id).join("\n");
-    const retry = retryRequests.get(conversationId);
-    const retriedRequest = retry?.text === text && retry.attachments === attachmentKey;
-    const requestId = retriedRequest ? retry!.requestId : newRequestId();
-    const configuration = displayedConfiguration();
-    const selectedModelRecord = declares("models") && configuration.model
-      ? models.find(model => sameModel(model.selection, configuration.model!))
-      : undefined;
-    // A typed model id is not in the list; under an agent that runs typed
-    // ids it travels verbatim (spec: the next prompt runs under that id).
-    const selectedModel = selectedModelRecord?.selection
-      ?? (declares("models") && declares("custom-model-id") && configuration.model ? configuration.model : undefined);
-    const selectedVariant = declares("variants") && configuration.variant && selectedModelRecord?.variants?.includes(configuration.variant)
-      ? configuration.variant
-      : undefined;
-    const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
-    // Captured before the round trip: a queue event that lands while the
-    // acceptance is in flight makes the stream authoritative, and the local
-    // held echo below must then stand down. The epoch catches the same
-    // staleness across a projection reload, where the revision restarts.
-    const queueRevisionAtSubmit = projection.queueRevision;
-    const configurationRevisionAtSubmit = projection.configurationRevision;
-    const projectionEpochAtSubmit = projectionEpoch;
-    // Optimistic send: the message shows immediately and the input clears;
-    // on failure the draft is removed and the text restored.
-    projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
-    setPendingAttachments(conversationId, []);
-    setUnavailableAttachments(conversationId, []);
-    renderAttachments();
-    noteComposer("Sending...");
-    syncControls();
-    // Sending says where the reader wants to be: at the exchange they just
-    // started. Pin to the end so the echo, and the reply that follows it,
-    // land in view — a reader who scrolled up to reread an earlier turn
-    // before pressing Enter is not asking to stay there while the answer
-    // arrives out of sight below the latest-content affordance.
-    parentScroll.latest();
-    latestButton.hidden = true;
-    scheduleRender(true);
-    try {
-      // Marked before the send: the reload's outcome can reach the stream
-      // before the acceptance does. Only a guess from the text — the server
-      // decides whether `/reload` is the built-in or a shadowing config
-      // command or skill — so the acceptance's `operation` settles it; an
-      // extra catalog read from a wrong guess is harmless.
-      const reloading = Boolean(contextAgentId) && /^\/reload(?:\s|$)/.test(text.trim());
-      const reloadEntry = reloading ? { agentId: contextAgentId! } as { agentId: string; messageId?: string } : undefined;
-      if (reloadEntry) pendingReloads.set(conversationId, [...(pendingReloads.get(conversationId) ?? []), reloadEntry]);
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined).catch((error: unknown) => {
-        if (reloadEntry) {
-          const rest = (pendingReloads.get(conversationId) ?? []).filter(entry => entry !== reloadEntry);
-          if (rest.length) pendingReloads.set(conversationId, rest);
-          else pendingReloads.delete(conversationId);
-        }
-        throw error;
-      });
-      if (reloadEntry) {
-        reloadEntry.messageId = accepted.messageId;
-        // Dispatched and not the built-in: nothing to track. A held one is
-        // classified only at delivery, so it stays tracked.
-        if (!accepted.held && accepted.operation !== "reload") {
-          const rest = (pendingReloads.get(conversationId) ?? []).filter(entry => entry !== reloadEntry);
-          if (rest.length) pendingReloads.set(conversationId, rest);
-          else pendingReloads.delete(conversationId);
-        }
-      }
-      retryRequests.delete(conversationId);
-      stagedConfigurations.delete(conversationId);
-      if (accepted.conversation) {
-        conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
-        relabelConversationOption(accepted.conversation);
-        if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
-      }
-      if (projection?.conversationId === conversationId) {
-        // The acceptance's committed configuration stands only while the
-        // stream has not spoken since the request left and the projection
-        // was not reloaded — a configuration event that landed meanwhile
-        // (a reactivated queue head re-asserting its frozen selections, or
-        // this very commit's own event) is at least as new as this
-        // response, and a retried request can carry a receipt replayed
-        // from before all of it. Same authority rule as the queue echo.
-        if (!retriedRequest && projectionEpoch === projectionEpochAtSubmit && projection.configurationRevision === configurationRevisionAtSubmit) {
-          projection = { ...projection, configuration: accepted.configuration };
-        }
-        // A held acceptance moves the draft into the queue dock immediately;
-        // the server's queue event restates the same state and converges. A
-        // dispatched acceptance becomes a timeline item. The echo carries the
-        // pre-flight queue revision so a delivery or removal that outran the
-        // acceptance is not resurrected as a phantom entry — and stands down
-        // entirely after a reload or on a retried request. The echo exists
-        // only to bridge a FRESH acceptance and its queue event: a retry's
-        // response can be a replayed receipt for a message the stream has
-        // since resolved (delivered, or removed by another client) with
-        // nothing durable left to check it against, while anything the first
-        // attempt really held has long been stated by the stream itself.
-        projection = accepted.held
-          ? !retriedRequest && projectionEpoch === projectionEpochAtSubmit
-            ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, queueRevisionAtSubmit)
-            : removeAcceptedDraft(projection, requestId)
-          // A reload's row is published before its acceptance and retired
-          // with its outcome, which can precede the acceptance — even
-          // unobserved by this client, if it was away. It is the stream's
-          // to show, never recreated here.
-          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, { insert: accepted.operation !== "reload" });
-        renderConfiguration();
-        scheduleRender(true);
-      }
-      noteComposer(accepted.held ? "Queued — sends when the agent is ready" : "Message accepted");
-      // Addressed to the submitted conversation, not the selection: the
-      // acceptance may land after a switch, and clearing the selected
-      // conversation's own error would erase an unrelated reason.
-      setComposerError(null, conversationId);
-      // The message is accepted; the local previews have no further use.
-      for (const staged of stagedAttachments) URL.revokeObjectURL(staged.previewUrl);
-      releaseAttachmentReserve();
-    } catch (error) {
-      const message = messageOf(error);
-      announce(message, true);
-      retryRequests.set(conversationId, { text, requestId, attachments: attachmentKey });
-      // The refused message's attachments go back to pending — uploaded bytes
-      // are still stored, so the references stay valid for the retry. The
-      // reserve releases only now that they are pending again, so intake
-      // during the flight could never overfill the restored draft.
-      setPendingAttachments(conversationId, [...stagedAttachments, ...(pendingAttachments.get(conversationId) ?? [])]);
-      setUnavailableAttachments(conversationId, [...stagedUnavailableAttachments, ...(unavailableAttachments.get(conversationId) ?? [])]);
-      releaseAttachmentReserve();
-      if (projection?.conversationId === conversationId) {
-        projection = removeAcceptedDraft(projection, requestId);
-        restoreDraftText();
-        presentation.drafts[conversationId] = input.value;
-        save();
-        renderAttachments();
-        scheduleRender();
-      } else {
-        // Switched away while the request was in flight: the live input now
-        // belongs to another conversation, so the failed text goes back into
-        // the stored draft — ahead of any edits stored by the switch — and
-        // reappears on return.
-        mergeStoredDraft();
-      }
-      submitting = false;
-      // Same addressing as the success clear: a refusal that lands after a
-      // switch waits with its own conversation instead of flashing here.
-      setComposerError(`${message}. Draft restored.`, conversationId);
-      noteComposer("Message not accepted; draft restored");
-      syncControls();
-      return;
-    }
-    submitting = false;
-    syncControls();
+    // Every submission path, including requestSubmit from keyboard shortcuts,
+    // shares the cancellation lock. Consume the one-shot override even when
+    // refusing this attempt, and keep accepted submissions' delivery local
+    // across awaits (such as attachment staging).
+    const submissionDelivery = requestedDelivery;
+    const submissionByHold = requestedByHold;
+    requestedByHold = false;
+    requestedDelivery = undefined;
+    await composer.submit({ delivery: submissionDelivery, byHold: submissionByHold });
   });
+  const workDock = document.querySelector<HTMLElement>("#chat-work-dock");
+  // Secondary native disclosures can change their content without changing
+  // their capped outer box, so ResizeObserver alone cannot discover opening.
+  workDock?.addEventListener("toggle", () => {
+    syncQueueOverflow();
+    syncDesktopWorkLayout();
+  }, true);
+  const prioritizeWorkPane = (event: Event) => {
+    const target = event.target as Element | null;
+    // Header geometry can move when priority changes. Finish the native tap
+    // before reallocating it, otherwise pointerup lands on a different row.
+    if (event.type !== "click" && target?.closest("summary, .chat-queue-header")) return;
+    if (target?.closest("#chat-queue")) workDock?.setAttribute("data-work-active", "queue");
+    else if (target?.closest("#chat-compact-workers")) workDock?.setAttribute("data-work-active", "workers");
+    else if (target?.closest("#chat-reverted, #chat-task-list, #chat-scheduled-wakeups")) workDock?.setAttribute("data-work-active", "history");
+    syncQueueOverflow();
+  };
+  workDock?.addEventListener("pointerdown", prioritizeWorkPane);
+  workDock?.addEventListener("focusin", prioritizeWorkPane);
+  workDock?.addEventListener("click", prioritizeWorkPane, true);
+  function measureSurfaceChromeHeight(container: HTMLElement, dock: HTMLElement, inset: number, transcript?: Element) {
+    return [...container.children].reduce((height, child) => {
+      if (child === dock || (transcript ? child === transcript : child.classList.contains("chat-transcript-area"))) return height;
+      const css = getComputedStyle(child);
+      if (css.display === "none" || ["absolute", "fixed"].includes(css.position)) return height;
+      return height + child.getBoundingClientRect().height + (parseFloat(css.marginTop) || 0) + (parseFloat(css.marginBottom) || 0);
+    }, inset);
+  }
+  function syncExpandedWorkBudget(dock: HTMLElement, minimumWork: number) {
+    if (!surface || !queueDockElement || typeof getComputedStyle !== "function") return;
+    const overlay = document.documentElement.hasAttribute("data-chat-work-expanded");
+    const expanded = !!compactWorkersList?.open && !compactWorkersList.hidden
+      || !queueDockElement.hidden && queueDockElement.dataset.expanded === "true";
+    dock.toggleAttribute("data-work-content-expanded", expanded);
+    if (!expanded && !overlay) {
+      dock.style.removeProperty("--chat-work-expanded-capacity");
+      surface.style.removeProperty("--chat-expanded-reading");
+      return;
+    }
+    const css = getComputedStyle(surface);
+    const fixed = measureSurfaceChromeHeight(surface, dock, (parseFloat(css.paddingTop) || 0) + (parseFloat(css.paddingBottom) || 0));
+    const compactDesktop = document.documentElement.dataset.uiMode === "desktop" && window.matchMedia("(pointer: fine) and (hover: hover)").matches;
+    const available = Math.max(0, surface.clientHeight - fixed);
+    const actionReading = document.documentElement.dataset.uiMode === "desktop" && !overlay ? transcriptActionReading() : 0;
+    const { reading, capacity: inlineCapacity } = expandedWorkBudget(available, minimumWork, compactDesktop ? "desktop" : "comfortable", actionReading);
+    const capacity = overlay && form
+      ? Math.max(0, form.getBoundingClientRect().top - surface.getBoundingClientRect().top)
+      : inlineCapacity;
+    for (const [element, property, value] of [
+      [dock, "--chat-work-expanded-capacity", capacity],
+      [dock, "--chat-work-hard-available", overlay ? capacity : Math.max(0, available - actionReading)],
+      [surface, "--chat-expanded-reading", reading],
+    ] as const) {
+      const pixels = `${value}px`;
+      if (element.style.getPropertyValue(property) !== pixels) element.style.setProperty(property, pixels);
+    }
+  }
+  function transcriptActionReading(): number {
+    if (!timeline) return 0;
+    const action = timeline.querySelector<HTMLElement>(".chat-message-revert");
+    const css = getComputedStyle(timeline);
+    return action ? action.getBoundingClientRect().height
+      + (parseFloat(css.scrollPaddingTop) || 0) + (parseFloat(css.scrollPaddingBottom) || 0) : 0;
+  }
+  function syncDesktopWorkLayout() {
+    if (!surface || !form || !input || !timeline || typeof getComputedStyle !== "function") return;
+    const root = document.documentElement;
+    const dock = surface.querySelector<HTMLElement>("#chat-work-dock");
+    const toggle = surface.querySelector<HTMLButtonElement>("#chat-work-toggle");
+    const close = surface.querySelector<HTMLButtonElement>("#chat-work-close");
+    const transcript = surface.querySelector<HTMLElement>(".chat-transcript-area");
+    if (!dock || !toggle || !close || !transcript) return;
+    const desktop = root.dataset.uiMode === "desktop";
+    if (!desktop) {
+      for (const attribute of ["data-chat-has-work", "data-chat-work-constrained", "data-chat-work-expanded"]) root.removeAttribute(attribute);
+      toggle.hidden = close.hidden = true;
+      return;
+    }
+    if (!dock.hasAttribute("data-work-content-expanded") && !root.hasAttribute("data-chat-work-expanded")) dock.style.removeProperty("--chat-work-hard-available");
+    dock.style.removeProperty("--chat-work-available");
+    const hasWork = [...dock.children].some(child => child !== close && !(child as HTMLElement).hidden && getComputedStyle(child).display !== "none");
+    root.toggleAttribute("data-chat-has-work", hasWork);
+    const fixed = measureSurfaceChromeHeight(surface, dock, 0, transcript);
+    const allocatedReading = dock.hasAttribute("data-work-content-expanded")
+      ? parseFloat(surface.style.getPropertyValue("--chat-expanded-reading")) || 0
+      : parseFloat(getComputedStyle(transcript).minHeight) || 0;
+    // The expanded allocator may yield almost all reading space to work. A
+    // nonzero remainder is not necessarily usable: native scrolling cannot
+    // expose even one transcript action beneath its sticky header/insets.
+    // Compact the inactive pane first; if that still cannot fit, use the
+    // existing desktop work sheet, not overlapping cards.
+    const actionReading = transcriptActionReading();
+    const floor = Math.max(allocatedReading, actionReading);
+    const minimum = Math.max(52, parseFloat(dock.style.getPropertyValue(dock.hasAttribute("data-work-cramped") ? "--chat-work-floor" : "--chat-work-full-floor")) || 0);
+    const constrained = hasWork && surface.clientHeight - fixed - floor < minimum;
+    root.toggleAttribute("data-chat-work-constrained", constrained);
+    if (!constrained) {
+      root.removeAttribute("data-chat-work-expanded");
+      if (document.activeElement === close) (dock.querySelector<HTMLElement>("[data-inspect-task]") ?? input).focus({ preventScroll: true });
+    }
+    const open = constrained && root.hasAttribute("data-chat-work-expanded");
+    toggle.hidden = !constrained || open;
+    close.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+    if (desktop) {
+      dock.style.setProperty("--chat-workers-bottom", `${surface.getBoundingClientRect().bottom - form.getBoundingClientRect().top}px`);
+    }
+  }
+  const expandDesktopWork = (focus = true) => {
+    if (!document.documentElement.hasAttribute("data-chat-work-constrained")) return;
+    document.documentElement.setAttribute("data-chat-work-expanded", "");
+    syncDesktopWorkLayout();
+    syncQueueOverflow();
+    if (focus) surface.querySelector<HTMLElement>("#chat-work-close")?.focus({ preventScroll: true });
+  };
+  const closeDesktopWork = () => {
+    document.documentElement.removeAttribute("data-chat-work-expanded");
+    syncDesktopWorkLayout();
+    syncQueueOverflow();
+    surface.querySelector<HTMLElement>("#chat-work-toggle")?.focus({ preventScroll: true });
+  };
+  surface.querySelector("#chat-work-toggle")?.addEventListener("click", () => expandDesktopWork());
+  surface.querySelector("#chat-work-close")?.addEventListener("click", closeDesktopWork);
+  workDock?.addEventListener("chat-work-reveal", () => {
+    syncQueueOverflow();
+    syncDesktopWorkLayout();
+    expandDesktopWork(false);
+  });
+  const revealWorkFocus = () => {
+      const focused = document.activeElement as HTMLElement | null;
+      if (!focused || !focused.closest("#chat-compact-workers-items, .chat-queue-content, #chat-reverted-items, #chat-task-list-items, #chat-scheduled-wakeups-items") || !workDock?.contains(focused)) return;
+      const css = getComputedStyle(focused);
+      const ring = (parseFloat(css.outlineWidth) || 0) + Math.max(0, parseFloat(css.outlineOffset) || 0);
+      // Native focus scrolling exposes the border box, not its exterior ring.
+      // Correct only this explicit focus move, inside each work scroller.
+      for (let parent = focused.parentElement; parent; parent = parent.parentElement) {
+        if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY)) {
+          const box = focused.getBoundingClientRect();
+          const top = parent.getBoundingClientRect().top + parent.clientTop;
+          const bottom = parent.getBoundingClientRect().top + parent.clientTop + parent.clientHeight - 1;
+          if (box.top - ring < top) parent.scrollTop += Math.floor(box.top - ring - top);
+          else if (box.bottom + ring > bottom) parent.scrollTop += Math.ceil(box.bottom + ring - bottom);
+        }
+        if (parent === workDock) break;
+      }
+  };
+  workDock?.addEventListener("focusin", () => {
+    if (document.activeElement?.closest("#chat-compact-workers-items, .chat-queue-content")) {
+      dockGrowth?.cancel();
+      dockGrowth = null;
+    }
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => requestAnimationFrame(revealWorkFocus));
+  });
+  surface.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !event.defaultPrevented && document.documentElement.hasAttribute("data-chat-work-expanded")) {
+      if (surface.querySelector('dialog[open]:not([data-presentation="window"]), #chat-drilldown:not([hidden])')) return;
+      event.preventDefault(); event.stopPropagation(); closeDesktopWork();
+    }
+  });
+  let dockHeight: number | null = null;
+  let dockGrowth: Animation | null = null;
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
+    if (workDock && document.documentElement.dataset.uiMode === "touch" && !workDock.hasAttribute("data-work-content-expanded")) {
+      // Text enlargement can make fixed chrome taller than its percentage
+      // budget. Secondary work yields before the primary composer does.
+      const visualHeight = window.visualViewport?.height ?? window.innerHeight;
+      const readingBudget = visualHeight * (surface.clientWidth >= 768 && !document.documentElement.hasAttribute("data-chat-wide-short") ? 0.35 : 0.4);
+      // clientHeight includes safe-area padding. Count all in-flow chrome, not
+      // just header/composer, so removing a sheet cannot spend the reading floor.
+      const css = getComputedStyle(surface);
+      const fixed = measureSurfaceChromeHeight(surface, workDock, (parseFloat(css.paddingTop) || 0) + (parseFloat(css.paddingBottom) || 0));
+      // Enlarged replacement safety already permits the reading floor to
+      // yield: its complete warning/batch controls must remain scroll-reachable.
+      // Ordinary enlarged pending work and standard text retain their floor.
+      const enlargedReplacement = parseFloat(getComputedStyle(document.documentElement).fontSize) > 16
+        && queueDockElement.querySelector(".chat-queue-note.is-replacement:not([hidden])") !== null;
+      const available = `${Math.max(0, surface.clientHeight - fixed - (enlargedReplacement ? 48 : Math.max(48, readingBudget)))}px`;
+      if (workDock.style.getPropertyValue("--chat-work-available") !== available) workDock.style.setProperty("--chat-work-available", available);
+      const hardAvailable = `${Math.max(0, surface.clientHeight - fixed)}px`;
+      if (workDock.style.getPropertyValue("--chat-work-hard-available") !== hardAvailable) workDock.style.setProperty("--chat-work-hard-available", hardAvailable);
+    }
+    // Consume this surface's current capacity, not the zero-size measurement
+    // retained while another touch tab hid it. No further resize is guaranteed
+    // after restoring the budget, so overflow must settle in this same pass.
+    syncQueueOverflow();
+    syncDesktopWorkLayout();
+    restorePendingScroll();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(revealWorkFocus);
+    if (workDock && !dockGrowth) {
+      const height = workDock.getBoundingClientRect().height;
+      const previous = dockHeight;
+      dockHeight = height;
+      if (previous !== null && height > previous + 1
+        && document.documentElement.dataset.uiMode === "touch"
+        && !document.activeElement?.closest("#chat-compact-workers-items, .chat-queue-content")
+        && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        // Reserve the final bounded height before revealing new chrome. An
+        // animated layout height interleaves native scroll clamps with prompt
+        // echo removal and can mistake those clamps for reader movement.
+        dockGrowth = workDock.animate({ clipPath: [`inset(0 0 ${height - previous}px 0)`, "inset(0)"] }, { duration: 160, easing: "ease-out" });
+        dockGrowth.onfinish = () => { dockGrowth = null; parentScroll.request(); };
+      }
+    }
     if (!chatSurfaceActive()) return;
     parentScroll.request();
     childScroll?.request();
   }) : null;
   observer?.observe(items);
+  // A hidden constrained dock cannot signal panel resizing itself.
+  observer?.observe(surface);
   observer?.observe(timeline);
+  observer?.observe(queueDockElement);
+  observer?.observe(form);
+  const chatHeader = surface.querySelector<HTMLElement>(".chat-header");
+  if (chatHeader) observer?.observe(chatHeader);
+  if (workDock) observer?.observe(workDock);
   if (drilldownItems) observer?.observe(drilldownItems);
   if (drilldownTimeline) observer?.observe(drilldownTimeline);
   // Only the day being read keeps its pinned label; see pinned-day.ts.
@@ -5212,9 +5843,9 @@ function autosize(input: HTMLTextAreaElement): void {
   input.style.height = `${Math.min(input.scrollHeight, 192)}px`;
 }
 
-function readPresentation(): Presentation {
+function readPresentation(storage: Storage | null): Presentation {
   try {
-    const raw = presentationLocalStorage()?.getItem(PRESENTATION_KEY);
+    const raw = storage?.getItem(PRESENTATION_KEY);
     if (!raw) return structuredClone(EMPTY_PRESENTATION);
     const value = JSON.parse(raw) as Partial<Presentation>;
     return {

@@ -18,8 +18,30 @@
 // child ignores `t` on routes that don't read it.
 
 import type { ServerWebSocket } from "bun";
+import { CHAT_OPERATION_RECEIPT_HEADER } from "../shared/chat-operation-receipt";
+import { HubOperationReceipts } from "./operation-receipts";
 
 import type { RunningSession } from "./backend";
+import { signSessionChatPolicy } from "./backend";
+import { CHAT_ACTION_BODY_BYTES, CHILD_POLICY_HEADER, isChildPolicyAction, type VerifiedChatPolicy } from "./child-policy";
+
+// No principal or policy crosses this degraded channel. Tokens are operation
+// identifiers only, unguessable by another Hub account or workspace caller.
+// Per-running-child keys live only in this Hub's memory, never in credentials.
+const degradedReceipts = new WeakMap<RunningSession, HubOperationReceipts>();
+function degradedReceiptState(session: RunningSession) {
+  let state = degradedReceipts.get(session);
+  if (!state) {
+    state = new HubOperationReceipts();
+    degradedReceipts.set(session, state);
+  }
+  return state;
+}
+
+export function isLocalDiscardAction(method: string, pathname: string, basePath: string): boolean {
+  return method === "POST" && pathname.startsWith(basePath)
+    && /^api\/chat\/conversations\/[^/]+\/queue\/[^/]+\/discard-unconfirmed$/.test(pathname.slice(basePath.length));
+}
 
 // Structural subset of Bun.Server the bridge needs for the handshake.
 export type UpgradableServer = {
@@ -76,6 +98,7 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
   const headers = new Headers();
   for (const [name, value] of request.headers) {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue;
+    if (name.toLowerCase().startsWith("x-uatu-hub-")) continue;
     headers.set(name, value);
   }
   headers.set("host", `${session.endpoint.hostname}:${session.endpoint.port}`);
@@ -95,10 +118,69 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
   return headers;
 }
 
-export async function proxyHttp(request: Request, session: RunningSession): Promise<Response> {
+export async function proxyHttp(request: Request, session: RunningSession, policy?: VerifiedChatPolicy,
+  observeSnapshot?: (conversationId: string, value: unknown) => void): Promise<Response> {
   const requestUrl = new URL(request.url);
   const target = childUrlFor(session, requestUrl);
   const transport = classifyProxyTransport(requestUrl.pathname);
+  const requestHeaders = forwardedHeaders(request, session);
+  let requestBody: BodyInit | null = request.body;
+  let policyUnavailable = false;
+  const localDiscard = isLocalDiscardAction(request.method, requestUrl.pathname, session.basePath);
+  if (policy && (localDiscard || isChildPolicyAction(request.method, requestUrl.pathname, session.basePath))) {
+    const reader = request.body?.getReader();
+    let text = "";
+    try {
+      let bytes = 0;
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      if (reader) for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > CHAT_ACTION_BODY_BYTES) return Response.json({ error: "request body is too large" }, { status: 413 });
+        text += decoder.decode(chunk.value, { stream: true });
+      }
+      text += decoder.decode();
+    } catch { return Response.json({ error: "invalid request body" }, { status: 400 }); }
+    finally { if (reader) void reader.cancel().catch(() => undefined); }
+    if (localDiscard) {
+      // Discard has no correlation echo or automatic policy. Namespace only
+      // its operation ID using the Hub-verified caller, never caller headers.
+      // Preserve malformed IDs for the child's normal closed validator.
+      let body: unknown;
+      try { body = JSON.parse(text); } catch { /* Child owns JSON refusal. */ }
+      if (body && typeof body === "object" && !Array.isArray(body) && "requestId" in body
+        && typeof body.requestId === "string" && body.requestId.length > 0 && body.requestId.length <= 512
+        && !/[\u0000-\u001f\u007f]/.test(body.requestId)) {
+        try {
+          const scoped = await degradedReceiptState(session).identify({ principal: policy.principal, method: request.method, pathname: requestUrl.pathname, requestId: body.requestId }, false);
+          text = JSON.stringify({ ...body, requestId: scoped.token });
+        } catch { return Response.json({ error: "operation receipt capacity unavailable" }, { status: 503, headers: { "cache-control": "no-store" } }); }
+      }
+    } else {
+      const envelope = signSessionChatPolicy(session, { method: request.method, pathname: requestUrl.pathname, body: text }, policy);
+      if (envelope) requestHeaders.set(CHILD_POLICY_HEADER, envelope);
+      else {
+        policyUnavailable = policy.autoBackgroundOnSteer || policy.unavailable === true;
+        // Preserve the original requestId for browser/projection correlation.
+        // Only the server-selected authenticated account selects this opaque
+        // receipt namespace. It carries no automation permission to the child.
+        let body: unknown;
+        try { body = JSON.parse(text); } catch { /* The child's closed validator owns body refusal. */ }
+        if (body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") {
+          const state = degradedReceiptState(session);
+          try {
+            const first = await state.identify({ principal: policy.principal, method: request.method, pathname: requestUrl.pathname, requestId: body.requestId }, policyUnavailable);
+            requestHeaders.set(CHAT_OPERATION_RECEIPT_HEADER, first.token);
+            policyUnavailable = first.unavailable;
+          }
+          catch { return Response.json({ error: "operation receipt capacity unavailable" }, { status: 503, headers: { "cache-control": "no-store" } }); }
+        }
+      }
+    }
+    requestBody = text;
+    requestHeaders.delete("content-length");
+  }
 
   // Downstream abandonment has to reach the child, or a phone that walked out
   // of Wi-Fi mid-stream leaves the workspace holding a subscriber forever.
@@ -132,8 +214,8 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
   try {
     upstream = await fetch(target, {
       method: request.method,
-      headers: forwardedHeaders(request, session),
-      body: request.body,
+      headers: requestHeaders,
+      body: requestBody,
       redirect: "manual",
       signal: upstreamAbort.signal,
     });
@@ -143,7 +225,54 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
   }
 
   statusCategory = statusCategoryOf(upstream.status);
-  if (upstream.status === 200 && upstream.headers.get("content-type")?.includes("text/html")) {
+  // Media must stay byte-for-byte even if a child supplies a compressible
+  // MIME type. Honor no-transform for other representations as well.
+  const noTransform = requestUrl.pathname === `${session.basePath}api/media`
+    || /(?:^|,)\s*no-transform\s*(?:,|$)/i.test(upstream.headers.get("cache-control") ?? "");
+  // Bounded tap on the existing response body, not a tee/background reader:
+  // observes history/initial snapshots without changing bytes or backpressure.
+  // Oversized/invalid content is simply not trusted for retirement.
+  const snapshotPath = request.method === "GET" && requestUrl.pathname.startsWith(session.basePath)
+    ? /^api\/chat\/conversations\/([^/]+)$/.exec(requestUrl.pathname.slice(session.basePath.length)) : null;
+  if (observeSnapshot && snapshotPath && upstream.ok && upstream.body && upstream.headers.get("content-type")?.includes("application/json")) {
+    let conversationId: string | null = null;
+    try { conversationId = decodeURIComponent(snapshotPath[1]!); } catch { /* Child owns malformed-route refusal. */ }
+    if (conversationId !== null) {
+      const id = conversationId; const chunks: Uint8Array[] = []; let bytes = 0; let oversized = false;
+      const tap = new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          bytes += chunk.byteLength;
+          if (bytes > 4 * 1024 * 1024 || chunks.length >= 4096) { oversized = true; chunks.length = 0; }
+          if (!oversized && chunk.byteLength) chunks.push(chunk.slice());
+          controller.enqueue(chunk);
+        },
+        flush() {
+          if (oversized) return;
+          try {
+            const data = new Uint8Array(bytes); let offset = 0;
+            for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+            observeSnapshot(id, JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data)));
+          } catch { /* Personal observation never fails chat delivery. */ }
+          finally { chunks.length = 0; }
+        },
+      });
+      upstream = new Response(upstream.body.pipeThrough(tap), { status: upstream.status, statusText: upstream.statusText, headers: upstream.headers });
+    }
+  }
+  if (policyUnavailable && upstream.ok && upstream.headers.get("content-type")?.includes("application/json")) {
+    try {
+      const value = await upstream.json();
+      const headers = new Headers(upstream.headers);
+      headers.delete("content-length");
+      headers.set("cache-control", "no-store");
+      upstream = Response.json(value && typeof value === "object" && !Array.isArray(value) && value.delivery === "steer"
+        ? { ...value, automaticBackground: "unavailable" } : value, { status: upstream.status, headers });
+    } catch {
+      finish("failed");
+      return Response.json({ error: "Steer outcome unconfirmed; refresh status without repeating it", code: "operation_outcome_unknown" }, { status: 409, headers: { "cache-control": "no-store" } });
+    }
+  }
+  if (!noTransform && upstream.status === 200 && upstream.headers.get("content-type")?.includes("text/html")) {
     upstream = new HTMLRewriter().on("head", { element(head) {
       head.prepend('<meta name="uatu-hub" content="true">', { html: true });
     } }).transform(upstream);
@@ -160,7 +289,8 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
   // describes exactly the bytes we forward, so keep it — length-known
   // responses transit fronting proxies far better than open-ended chunked
   // streams. Only an (unexpected) encoded upstream body invalidates it.
-  const upstreamEncoded = upstream.headers.has("content-encoding");
+  const upstreamEncoded = upstream.headers.has("content-encoding")
+    && upstream.headers.get("content-encoding")?.toLowerCase() !== "identity";
   for (const [name, value] of upstream.headers) {
     const lower = name.toLowerCase();
     if (HOP_BY_HOP.has(lower)) continue;
@@ -177,6 +307,7 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
   const contentLength = Number.parseInt(headers.get("content-length") ?? "", 10);
   const smallBody = Number.isFinite(contentLength) && contentLength <= 1400;
   if (
+    !noTransform &&
     upstream.status === 200 &&
     upstream.body !== null &&
     !smallBody &&
@@ -289,16 +420,10 @@ function cancellableBody(
         }
         controller.enqueue(result.value);
       } catch {
-        // The upstream failure is recorded through the diagnostic sink, which
-        // names only the transport class and status category. The browser
-        // gets a clean end-of-stream, never the error: EventSource treats an
-        // ended stream exactly like a dropped one (onerror, then reconnect),
-        // and the search client reads a stream that ends without `done` as
-        // cut off. Erroring the stream instead would make Bun print the raw
-        // fetch error to stderr — a source excerpt plus the child URL,
-        // brokered token included — which no sink can suppress.
+        // A truncated representation is a failed transfer, never clean EOF.
+        // Do not forward the fetch error: it can contain the credentialed URL.
         finish("failed");
-        controller.close();
+        controller.error(new Error("session response interrupted"));
       }
     },
     cancel(reason) {

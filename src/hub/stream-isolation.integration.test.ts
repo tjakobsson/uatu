@@ -126,6 +126,7 @@ beforeAll(async () => {
   const backend: SessionBackend = {
     start: async (workspace): Promise<RunningSession> => ({
       workspaceId: workspace.id,
+      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath: `/s/${workspace.id}/`,
       endpoint: { hostname: "127.0.0.1", port: child!.port! },
       token: "child-secret",

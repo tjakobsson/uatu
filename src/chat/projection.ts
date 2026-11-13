@@ -1,7 +1,7 @@
 import { mergeAssistantMessage } from "./usage";
 import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, MessageAttachment, QueuedMessage, ReversibleHistoryState } from "./types";
 
-export type AcceptedDraft = { requestId: string; messageId: string; text: string; attachments?: MessageAttachment[] };
+export type AcceptedDraft = { requestId: string; messageId: string; text: string; attachments?: MessageAttachment[]; unconfirmed?: true };
 export type ChatProjection = {
   conversationId: string;
   generation: string;
@@ -159,6 +159,10 @@ export function noteQueuedMessage(current: ChatProjection, held: QueuedMessage, 
 
 export function removeAcceptedDraft(current: ChatProjection, requestId: string): ChatProjection {
   return { ...current, acceptedDrafts: current.acceptedDrafts.filter(item => item.requestId !== requestId) };
+}
+
+export function markDraftUnconfirmed(current: ChatProjection, requestId: string): ChatProjection {
+  return { ...current, acceptedDrafts: current.acceptedDrafts.map(draft => draft.requestId === requestId ? { ...draft, unconfirmed: true } : draft) };
 }
 
 // The server refused a removal because it no longer holds the message: the

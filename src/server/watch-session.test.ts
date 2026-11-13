@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, unlink, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import chokidar from "chokidar";
@@ -333,7 +334,7 @@ describe("watchSession scope", () => {
     expect(DOCUMENT_KEEPALIVE_MS).toBe(15_000);
   });
 
-  test("file scopes reject unknown, ignored, secret-like, and binary document ids", async () => {
+  test("file scopes reject unknown, excluded, and binary document ids but accept secret-like files", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-invalid-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
@@ -354,7 +355,8 @@ describe("watchSession scope", () => {
       await session.start();
       const pinned = (id: string) => session.getStatePayload(null, { scope: { kind: "file", documentId: id }, compareTarget: "base" }).scope.kind === "file";
       expect(pinned(readme)).toBe(true);
-      for (const id of [path.join(tempDirectory, "missing.md"), ignored, secret, binary]) expect(pinned(id)).toBe(false);
+      expect(pinned(secret)).toBe(true);
+      for (const id of [path.join(tempDirectory, "missing.md"), ignored, binary]) expect(pinned(id)).toBe(false);
     } finally { await session.stop(); }
   });
 
@@ -397,6 +399,39 @@ describe("watchSession scope", () => {
     }
   });
 
+  for (const phase of ["startup", "recovery"] as const) test(`a policy edit during ${phase} watcher registration is not lost`, async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-ignore-registration-"));
+    tempDirectories.push(tempDirectory);
+    const readme = path.join(tempDirectory, "README.md");
+    const lockfile = path.join(tempDirectory, "package-lock.json");
+    const uatuJson = path.join(tempDirectory, ".uatu.json");
+    await writeFile(readme, "# Readme\n");
+    await writeFile(lockfile, "{}\n");
+    await writeFile(uatuJson, JSON.stringify({ ignore: { exclude: [] } }));
+    let registrations = 0;
+    const session = createWatchSession([{ kind: "dir", absolutePath: tempDirectory }], true, {
+      usePolling: true,
+      collectRepositories: async () => [],
+      watch: (target, options) => {
+        // The matcher has been read, but this real polling watcher has not
+        // sampled its initial baseline. No later filesystem edit rescues it.
+        if (++registrations === (phase === "startup" ? 1 : 2)) {
+          writeFileSync(uatuJson, JSON.stringify({ ignore: { exclude: ["package-lock.json"] } }));
+        }
+        return chokidar.watch(target, options);
+      },
+    });
+    try {
+      await session.start();
+      if (phase === "recovery") await session.recover();
+      await waitUntil(() => session.getRoots().flatMap(root => root.docs).every(doc => doc.id !== lockfile));
+      expect(session.getRoots().flatMap(root => root.docs).some(doc => doc.id === readme)).toBe(true);
+    } finally { await session.stop(); }
+  });
+
+  // The first edit lands right after start and can precede the polling stat
+  // watcher's baseline; the observer's later check (POLL_BASELINE_SETTLE_MS)
+  // reports it then. Both waits must fit in the test's budget.
   test("editing .uatu.json ignore.exclude at runtime reapplies the new patterns", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-ignore-live-"));
     tempDirectories.push(tempDirectory);
@@ -433,7 +468,7 @@ describe("watchSession scope", () => {
     } finally {
       await session.stop();
     }
-  });
+  }, 15000);
 });
 
 // A deterministic replacement for the scheduler clock (performance.now/
@@ -726,7 +761,10 @@ test("repository failure preserves file progress for scoped subscribers", async 
     expect(unscoped.scope).toEqual({ kind: "folder" });
     expect(scoped.roots[0]!.docs[0]!.revision).toBeGreaterThan(before.roots[0]!.docs[0]!.revision);
     expect(unscoped.roots).toEqual(scoped.roots);
-    expect(unscoped.changedId).toBe(file);
+    // File delivery does not wait for Git-ignore classification. Follow intent
+    // arrives separately once eligibility is known.
+    expect(unscoped.changedId).toBeNull();
+    await waitUntil(() => session.getStatePayload().latestChange?.id === file);
     fail = false;
     repoGate.resolve();
     await Promise.all([pinned.cancel(), folder.cancel()]);

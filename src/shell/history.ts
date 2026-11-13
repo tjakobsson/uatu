@@ -14,7 +14,7 @@ import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
-import { defaultDocumentId, isFollowableFile } from "../shared/types";
+import { defaultDocumentId, isPreviewableFile } from "../shared/types";
 import { appState } from "./state";
 import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId } from "./selection";
 import {
@@ -209,9 +209,9 @@ export function attachPopstateHandler() {
     }
 
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
-    // Documents and previewable images: Back can return to an image Follow
-    // switched to (Rule C) as well as to a document.
-    if (requestedDoc && isFollowableFile(requestedDoc)) {
+    // History can return to documents, images, and paused media previews.
+    // The independent audition session is not replaced by navigation.
+    if (requestedDoc && isPreviewableFile(requestedDoc)) {
       setSelectedId(requestedDoc.id);
       setPreviewMode({ kind: "document" });
       renderSidebar();

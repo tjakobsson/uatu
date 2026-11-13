@@ -1,5 +1,6 @@
 import { tabBarBottomInset } from "../shell/tab-bar";
 import { onUiModeChange } from "../shell/ui-mode";
+import { MEDIA_LAYOUT_EVENT, mediaDockHeight } from "../media/layout";
 
 /** A restored page reports its final metrics a moment after the transition. */
 const RESYNC_SETTLE_MS = 250;
@@ -47,6 +48,7 @@ export class ChatViewportController {
     window.visualViewport?.addEventListener("scroll", this.schedule);
     window.addEventListener("resize", this.schedule);
     document.addEventListener("visibilitychange", this.resync);
+    document.addEventListener(MEDIA_LAYOUT_EVENT, this.schedule);
     window.addEventListener("pageshow", this.resync);
     window.addEventListener("focus", this.resync);
     if (typeof ResizeObserver === "function") {
@@ -64,6 +66,7 @@ export class ChatViewportController {
     window.visualViewport?.removeEventListener("scroll", this.schedule);
     window.removeEventListener("resize", this.schedule);
     document.removeEventListener("visibilitychange", this.resync);
+    document.removeEventListener(MEDIA_LAYOUT_EVENT, this.schedule);
     window.removeEventListener("pageshow", this.resync);
     window.removeEventListener("focus", this.resync);
     this.observer?.disconnect();
@@ -80,17 +83,20 @@ export class ChatViewportController {
     if (viewport && Math.abs((viewport.scale ?? 1) - 1) > 0.01) return;
     const height = viewport?.height ?? window.innerHeight;
     const top = viewport?.offsetTop ?? 0;
-    const metrics = chatViewportMetrics(height, top, window.innerHeight, tabBarBottomInset());
+    const metrics = chatViewportMetrics(height, top, window.innerHeight, tabBarBottomInset(), mediaDockHeight());
     const root = document.documentElement;
     root.toggleAttribute("data-chat-keyboard", metrics.keyboardVisible);
     const touch = root.getAttribute("data-ui-mode") === "touch";
+    root.toggleAttribute("data-chat-compact", touch && metrics.keyboardVisible && height <= 450);
+    root.toggleAttribute("data-chat-short", touch && height <= 450);
+    root.toggleAttribute("data-chat-wide-short", touch && height <= 390 && window.innerWidth >= 600);
     // While a request is being answered the keyboard covers the chrome rather
     // than removing it: the surface keeps its LAYOUT height, so the composer
     // and the pinned tracks slide down underneath the keyboard, still there
     // and back the moment it is dismissed. No tab-bar inset is netted off —
     // the bar is already hidden while a text control has focus.
     const answering = touch && root.hasAttribute("data-chat-answering");
-    const surfaceHeight = answering ? window.innerHeight : metrics.height;
+    const surfaceHeight = answering ? Math.max(0, window.innerHeight - mediaDockHeight()) : metrics.height;
     // What the keyboard covers, so the transcript can reserve it: the part of
     // the surface that lies below the visible band. Independent of the pan,
     // because the surface's top tracks it.
@@ -100,6 +106,13 @@ export class ChatViewportController {
     const pannedOnly = touch && this.lastTop !== null && this.lastTop !== top
       && this.lastHeight === surfaceHeight && this.lastVisualHeight === height;
     if (touch) {
+      this.surface.style.removeProperty("--chat-panel-height");
+      // Normally only transcript/dock bodies scroll: caret reveal must not pan
+      // fixed chrome outside its hard band. The measured physical-minimum
+      // exception deliberately gives the surface native scroll ownership;
+      // viewport/foreground resync must not undo its reader or focus reveal.
+      // Once the exception ends, restore the normal zero-offset contract.
+      if (!this.surface.hasAttribute("data-work-overflow")) this.surface.scrollTop = 0;
       // Rewriting a value the surface already carries re-enters through our own
       // ResizeObserver, so each write has to be a real change.
       if (this.lastTop !== top) this.surface.style.setProperty("--chat-visual-top", `${top}px`);
@@ -110,6 +123,10 @@ export class ChatViewportController {
       this.lastVisualHeight = height;
       this.lastCovered = covered;
     } else {
+      // Desktop's available band is the panel, not a guessed rem fallback
+      // or the window: other shell surfaces can consume part of that height.
+      const panelHeight = `${this.surface.clientHeight}px`;
+      if (this.surface.style.getPropertyValue("--chat-panel-height") !== panelHeight) this.surface.style.setProperty("--chat-panel-height", panelHeight);
       // The desktop shell owns this rectangle, including its safe areas.
       this.surface.style.removeProperty("--chat-visual-top");
       this.surface.style.removeProperty("--chat-visual-height");
@@ -141,10 +158,10 @@ export class ChatViewportController {
   }
 }
 
-export function chatViewportMetrics(visualHeight: number, visualTop: number, layoutHeight: number, tabBarInset: number): { height: number; tabInset: number; keyboardVisible: boolean } {
+export function chatViewportMetrics(visualHeight: number, visualTop: number, layoutHeight: number, tabBarInset: number, playerHeight = 0): { height: number; tabInset: number; keyboardVisible: boolean } {
   const occluded = Math.max(0, layoutHeight - visualTop - visualHeight);
   const tabInset = Math.max(0, tabBarInset - occluded);
   // A platform that pans the page under the keyboard occludes less than the
   // keyboard takes; the layout/visual height difference sees it either way.
-  return { height: Math.max(0, visualHeight - tabInset), tabInset, keyboardVisible: layoutHeight - visualHeight > Math.max(80, tabBarInset) };
+  return { height: Math.max(0, visualHeight - tabInset - playerHeight), tabInset, keyboardVisible: layoutHeight - visualHeight > Math.max(80, tabBarInset) };
 }

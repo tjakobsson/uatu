@@ -66,7 +66,12 @@ Personal workspace-state updates SHALL affect future boot/resume decisions and S
 - **THEN** both fields retain their latest independently written values
 
 ### Requirement: Browsing scope is per client request context
-The watch child SHALL retain the launched watched roots as shared session configuration but MUST NOT retain a mutable browsing scope selected by one client as global session state. Pinning, unpinning, widened search, compare target, state snapshots, SSE subscriptions, diff requests, and search requests SHALL use explicit caller context sufficient to produce that client's view. Browsing scope itself SHALL remain runtime client state and SHALL NOT be included in the initial durable personal-state schema. A CLI single-file launch constraint remains shared and cannot be widened by a client.
+The watch child SHALL retain launched roots as shared configuration but MUST NOT retain one client's mutable browsing scope globally. Pinning/unpinning, widened search, compare target, snapshots, SSE subscriptions, diff and search requests SHALL carry sufficient caller context. Browsing scope SHALL remain runtime client state and SHALL NOT enter the initial durable personal-state schema. The shared CLI single-file launch constraint cannot be widened by a client.
+
+#### Scenario: A client narrows or widens runtime scope
+- **WHEN** browsing scope changes in a client
+- **THEN** scope SHALL remain runtime client state and SHALL NOT enter the initial durable personal-state schema
+- **AND** the shared CLI single-file launch constraint SHALL NOT be widened by a client
 
 #### Scenario: Pinning one client does not narrow another
 - **WHEN** two clients view a folder-scoped workspace
@@ -82,7 +87,12 @@ The watch child SHALL retain the launched watched roots as shared session config
 - **THEN** no client request context can widen the corpus beyond that launch constraint
 
 ### Requirement: Physical presentation remains client-local
-Viewport- and shell-dependent presentation state MUST NOT be authoritative personal Hub state. Sidebar and outline dimensions, terminal width/height/dock, preview split ratios, pane arrangement, zoom, native window state, and native split-browser state SHALL be stored or derived by the current client. Browser presentation keys SHALL be namespaced by workspace/base path so workspaces sharing one Hub origin do not affect one another. macOS-native presentation SHALL remain in native preferences where applicable.
+Viewport- and shell-dependent presentation MUST NOT be authoritative personal Hub state. The current client SHALL store or derive sidebar/outline dimensions, terminal width/height/dock, preview split ratios, pane arrangement, zoom, native window state, and native split-browser state. Presentation storage SHALL retain the isolation rules below.
+
+#### Scenario: A client stores browser or native presentation
+- **WHEN** presentation is persisted
+- **THEN** browser keys SHALL be workspace/base-path-namespaced so workspaces on one Hub origin do not affect each other
+- **AND** macOS-native presentation SHALL remain in native preferences where applicable
 
 #### Scenario: Different clients retain different geometry
 - **WHEN** one user opens the same workspace in a wide macOS Desktop window and a narrow browser
@@ -100,3 +110,254 @@ The client SHALL ignore legacy Uatu semantic preference and terminal reattach-hi
 - **WHEN** a browser upgrades with only legacy Uatu localStorage keys present
 - **THEN** those keys do not determine semantic state or PTY attachment
 - **AND** the client uses Hub state or current defaults
+
+### Requirement: Worker dismissals are private durable account state
+The Hub SHALL persist worker-summary dismissals for the authenticated account, stable workspace, agent-qualified conversation and exact execution. Marks SHALL survive Hub/workspace restarts, synchronize across that account's devices and never apply to another account or execution. Provider history, task lifecycle, navigation and geometry SHALL remain unchanged.
+
+#### Scenario: Same account uses two devices
+- **WHEN** one device successfully dismisses an unavailable execution and another connected device for the same account shows that workspace and conversation
+- **THEN** both converge on the dismissed summary without reload or manual status checking
+- **AND** reconnecting or reopening on that account retrieves the same durable marks
+
+#### Scenario: Accounts and executions are isolated
+- **WHEN** another account views the workspace, or a new execution reuses the same child session
+- **THEN** the first account's old dismissal hides neither the other account's row nor the new execution
+
+### Requirement: Personal dismissal mutations use authenticated scope and atomic storage
+Dismissal reads/writes SHALL derive the account from Hub authentication, validate workspace/conversation/execution scope, reject caller-selected accounts and protect cookie mutations against cross-origin requests. Concurrent dismissals SHALL merge without losing unrelated marks. Successful responses SHALL reflect durable atomic saves; failure SHALL NOT claim synchronization or silently substitute device-local success.
+
+#### Scenario: Concurrent devices dismiss different executions
+- **WHEN** two authorized devices dismiss different executions concurrently
+- **THEN** both durable marks remain present and repeated additions are idempotent
+- **AND** unrelated personal preferences remain unchanged
+
+#### Scenario: Unauthorized or malformed mutation
+- **WHEN** a request selects another account, has invalid or oversized identifiers, targets an unavailable workspace, or violates cookie-origin protection
+- **THEN** the Hub refuses it without a provider mutation or disclosure of another account's marks
+
+#### Scenario: Persistence is unavailable
+- **WHEN** a dismissal cannot be durably stored
+- **THEN** the client reports that it could not save the dismissal and leaves or restores the row
+- **AND** it does not claim cross-device success or treat the failure as a worker failure
+
+#### Scenario: An unsuccessful dismissal is followed by a healthy personal-state read
+- **WHEN** an explicit dismissal POST fails or conflicts and a later authoritative personal-state GET succeeds
+- **THEN** the failed-action feedback remains tied to that dismissal rather than implying the action completed
+- **AND** unrelated reads, automatic retirement and other successful dismissals do not erase it
+- **AND** a new applicable explicit action can supersede the feedback without retaining a stale copy of recovered identity or storage-health guidance
+
+### Requirement: Personal dismissal invalidations do not disclose other accounts
+Connected clients SHALL receive dismissal changes only within their authenticated account and authorized workspace scope, then reconcile authoritative personal state. Personal marks SHALL NOT enter shared workspace activity or conversation payloads. Missed invalidations SHALL recover on reconnect or conversation selection without changing navigation, disclosure choices or focus.
+
+#### Scenario: Workspace is shared by two accounts
+- **WHEN** account A changes a dismissal while A and B subscribe to the same workspace
+- **THEN** only A's authorized clients receive its personal invalidation and can read its marks
+- **AND** B's activity stream, summary visibility and personal-state responses reveal no information about A's dismissal
+
+#### Scenario: Client misses the dismissal update
+- **WHEN** an account reconnects after another device dismissed work
+- **THEN** its authoritative personal-state read converges without replaying any execution mutation
+
+### Requirement: Dismissal storage preserves execution identity through recovery
+Dismissal identity SHALL remain stable through pagination, live/history reconciliation, and restart, never based on child session ID alone or an ambiguous alias. Marks SHALL be bounded with explicit failure, not silent loss of committed dismissals. Verified activity SHALL override stale marks; successful retirement SHALL require a later explicit dismissal. Failed retirement SHALL follow the availability policy below.
+
+#### Scenario: A workspace with dismissal marks is forgotten
+- **WHEN** the workspace is forgotten
+- **THEN** its marks SHALL be cleared for all accounts
+
+#### Scenario: Alias folds or result arrives
+- **WHEN** another representation of the same positively identified execution is recovered
+- **THEN** it retains the same dismissal scope without hiding any unrelated occurrence
+- **AND** an ambiguous identity is not persisted as a broad session-level dismissal
+
+#### Scenario: Notification is dismissed before its launch is known
+- **WHEN** a V2 notification-only row has complete valid native notification identity but no proven launch association
+- **THEN** the user can dismiss that notification using a separate versioned identity scoped to the account, stable workspace and parent conversation
+- **AND** its identity derives from the parent conversation, notification source, native inbox ID and worker ID, not clocks, status or display text
+- **AND** the mark hides only that notification through replay and restart without supplying current activity or Stop authority
+
+#### Scenario: Launch appears without exact notification association proof
+- **WHEN** an exact launch row replaces or accompanies a dismissed provisional notification without positive proof that both identify the same occurrence
+- **THEN** the launch remains visible and does not inherit the notification's dismissal
+- **AND** child/time uniqueness, a UI fold or a shared bare call/task/result identifier does not authorize transfer
+- **AND** no automatic carry-over is claimed while the consumed native data lacks the required proof
+
+#### Scenario: Notification identity is contradictory or incomplete
+- **WHEN** notification source or worker evidence contradicts an earlier notification identity
+- **THEN** the new identity does not inherit the old mark and ambiguous aliases do not converge
+- **AND** incomplete native identity keeps the row visible with dismissal guidance
+- **AND** verified current activity and canonical pending requests retain visibility precedence over provisional marks
+
+#### Scenario: Activity wins a race with dismissal
+- **WHEN** verified activity or a linked blocking request is newer than the state the user dismissed
+- **THEN** that evidence remains visible despite a delayed dismissal response or stale client write
+- **AND** after successful durable retirement, later unavailability does not automatically reactivate the obsolete dismissal
+
+#### Scenario: A partial launch gains its qualified identity
+- **WHEN** an active observation lacks a complete dismissal identity but carries a provider-proven launch reference, later updates prove that same launch's qualified execution identities, and authoritative retirement is confirmed after that resolution
+- **THEN** the client can clear the matched identity fence and guidance automatically without reopening the conversation
+- **AND** the launch reference is never persisted as a dismissal key, treated as an execution alias or used as Stop authorization
+
+#### Scenario: Launch continuity or retirement remains unproven
+- **WHEN** the reference is absent, names a different native launch, or cannot be matched to a post-resolution authoritative retirement acknowledgment
+- **THEN** affected work remains visible with identity or storage guidance rather than reviving old dismissal marks
+- **AND** row, call or child identifiers, display clocks, stream generation and UI folding alone do not establish continuity
+- **AND** stale responses, unrelated qualified workers and failed writes do not discharge the unresolved fence
+
+#### Scenario: Retirement storage fails while activity returns
+- **WHEN** the Hub cannot confirm persistence of retirement for an old dismissal
+- **THEN** verified activity, transcript content and canonical pending requests remain available without waiting for that save
+- **AND** the client reports the personal-state storage failure without treating it as a worker failure
+- **AND** an old dismissal may reapply only to an unavailable row after restart during that failure; it never hides currently verified activity or pending requests
+
+#### Scenario: Workspace is forgotten or storage is full
+- **WHEN** the workspace is forgotten
+- **THEN** all accounts' dismissal marks for that stable workspace are removed through the forget lifecycle
+- **AND** when the mark budget cannot accept a new dismissal, it refuses that write explicitly instead of silently evicting committed marks
+
+### Requirement: Personal Files state supports Recent and ignored visibility
+Personal workspace state SHALL accept All/Recent/Changed Files views and boolean Show ignored files. Existing All/Changed records SHALL retain meaning and unrelated fields. Missing view SHALL default to All; missing ignored visibility SHALL use explicit legacy session/project defaults, otherwise show. Stored personal visibility SHALL override initial defaults. Updates SHALL follow the validation and isolation rules below.
+
+#### Scenario: Files choices are partially updated
+- **WHEN** a client saves Files view or ignored visibility
+- **THEN** partial updates SHALL persist per authenticated user/workspace without altering another open client's current view or visibility
+- **AND** invalid new values SHALL be rejected without changing persisted state
+
+#### Scenario: Recent is restored on another client
+- **WHEN** a user saves Recent and later opens the same workspace on another device
+- **THEN** that device starts Files in Recent
+- **AND** an explicit preview URL still determines the preview independently
+
+#### Scenario: Existing records retain their meaning
+- **WHEN** an existing record contains Changed but no ignored-visibility field
+- **THEN** Changed is restored and ignored visibility uses the documented initial default
+- **AND** the saved document, Follow, compare target, preview mode, and PTY reference remain intact
+
+#### Scenario: Ignored visibility remains independent between open clients
+- **WHEN** one client saves Show ignored files as off
+- **THEN** another already-open client retains its current visibility and playback
+- **AND** a later client boot restores the saved off preference
+
+#### Scenario: An invalid update is rejected
+- **WHEN** a client supplies an unknown Files view or a non-boolean ignored visibility
+- **THEN** the personal-state API refuses the update without changing any saved fields
+
+#### Scenario: Conflicting root defaults do not prevent personal restoration
+- **WHEN** watched roots have conflicting explicit respectGitignore defaults
+- **THEN** the session remains available and a saved personal showIgnored preference takes precedence
+- **AND** without that preference --no-gitignore selects show, otherwise any root's explicit true selects hide, independently of root order
+
+#### Scenario: Runtime audition data is not personal state
+- **WHEN** a user plays a clip, seeks, or changes the temporary media-type filter
+- **THEN** media bytes, playback position, active playback, and audition ordering are not written into the personal workspace-state record
+
+### Requirement: Explicit worker dismissal batches are conditional and atomic
+
+The Hub SHALL accept a bounded explicit set of exact execution identities with independent expected revisions for one account/workspace/conversation. Successful batches SHALL atomically persist all selected dismissals before success and publish one presentation outcome, not a per-worker countdown. Conditional refusal, storage failure, and concurrent activity SHALL follow the rules below.
+
+#### Scenario: Batch validation or persistence cannot authorize every dismissal
+- **WHEN** a batch contains duplicate targets, stale revisions, unverified identities, or positive active evidence
+- **THEN** it SHALL NOT produce a partially dismissed batch, and trusted positive activity SHALL continue retiring old marks even if dismissal is refused
+
+#### Scenario: Trusted positive activity retires old marks regardless of save outcome
+- **WHEN** trusted positive activity is received, whether a dismissal succeeds, is refused, or is not being saved
+- **THEN** it SHALL continue retiring old marks
+
+#### Scenario: A valid or invalid dismissal batch encounters storage failure
+- **WHEN** storage fails while saving a dismissal batch, including an otherwise valid batch
+- **THEN** prior durable dismissals SHALL be retained and uncertainty reported without claiming success
+
+#### Scenario: Selection or activity changes during any batch save
+- **WHEN** selection changes or activity occurs during a dismissal save
+- **THEN** existing visibility fences SHALL remain in force regardless of the batch's validation outcome
+
+#### Scenario: Large finished group beside unresolved work
+- **WHEN** a user dismisses 285 finished workers beside five unresolved workers
+- **THEN** one bulk save dismisses the eligible exact occurrences together
+- **AND** the unresolved workers, active requests and underlying history remain unchanged
+- **AND** reopening the conversation preserves successful dismissals
+
+#### Scenario: Concurrent activity or stale revision
+- **WHEN** any selected occurrence becomes active or its expected revision becomes stale before the batch's conditional validation
+- **THEN** none of the selected dismissal changes is partially applied
+- **AND** verified activity continues overriding old marks for every affected account
+
+#### Scenario: Activity during persistence
+- **WHEN** positive activity arrives after conditional validation while an atomic save is in flight
+- **THEN** the existing observation authority retires the affected saved marks durably
+- **AND** the observing client keeps those active occurrences visible
+
+#### Scenario: Request abandonment during first persistence
+- **WHEN** a first batch save is in flight and its request is abandoned
+- **AND** positive activity arrives before or after abandonment while persistence continues
+- **THEN** the disk operation retains independent observation ownership until it drains
+- **AND** any committed affected marks are durably retired rather than remaining hidden after reload
+
+#### Scenario: Durable write failure
+- **WHEN** the batch cannot be durably saved
+- **THEN** the client reports failure, retains or restores all affected rows and does not claim cross-device success
+
+### Requirement: Dismissal evidence is compact and completely authoritative
+
+Dismissal SHALL use a complete current authoritative worker projection without transporting ordinary transcript text, prompts, or tool output. Compact evidence SHALL preserve exact occurrence identities, aliases, launcher reconciliation, and positive-activity semantics across all source pages. Unsafe evidence SHALL fail closed under the rules below.
+
+#### Scenario: Transcript volume never relaxes evidence safety bounds
+- **WHEN** dismissal evidence is constructed or checked at any transcript volume, including valid evidence
+- **THEN** existing evidence-count, identifier, and storage safety bounds SHALL NOT be relaxed to accommodate transcript volume
+
+#### Scenario: Evidence is incomplete or exceeds safety bounds
+- **WHEN** dismissal evidence is incomplete, contradictory, changed, malformed, or over-capacity
+- **THEN** it SHALL fail closed rather than authorize dismissal
+- **AND** existing evidence-count, identifier, and storage safety bounds SHALL NOT be relaxed for transcript volume
+
+#### Scenario: Long transcript and large output
+- **WHEN** a complete authoritative source contains the selected finished workers alongside more than twenty display-history pages or a tool output larger than four MiB
+- **THEN** dismissal reads one compact worker-evidence outcome without serializing the transcript pages or output
+- **AND** evidence coverage is proven before any dismissal is authorized
+
+#### Scenario: Incomplete source
+- **WHEN** authoritative source completeness or currentness cannot be established within its bounded read
+- **THEN** dismissal fails visibly and no selected dismissal is applied
+
+### Requirement: Personal worker dismissal resource supports bounded bulk writes
+
+The versioned personal worker dismissal resource SHALL support a closed bulk request for one conversation and a nonempty bounded list of unique exact execution identities with expected revisions. Account/workspace SHALL come only from existing authenticated routing. Singleton dismiss and retirement requests SHALL remain supported. Bulk validation and responses SHALL follow the rules below.
+
+#### Scenario: A bulk write is validated and answered
+- **WHEN** the resource receives a bulk-dismissal request
+- **THEN** documented count/byte bounds SHALL apply, and malformed, oversized, stale, foreign, unavailable, or over-capacity requests SHALL be rejected without partial dismissal
+- **AND** responses and private invalidations SHALL retain existing account isolation and no-store semantics
+
+#### Scenario: Singleton and bulk resource deliveries preserve account isolation
+- **WHEN** the worker-dismissal resource emits a response or private invalidation, for singleton, retirement, or bulk requests
+- **THEN** it SHALL retain existing account isolation and no-store semantics
+
+#### Scenario: The bulk-dismissal contract is read before any request
+- **WHEN** the bulk-dismissal resource contract is consulted
+- **THEN** it SHALL document count and byte bounds for bulk writes
+
+#### Scenario: One bulk response
+- **WHEN** an authorized caller submits a valid eligible group
+- **THEN** one response confirms the durable state for the whole group after a single atomic save
+- **AND** another account's state is not disclosed or altered by the dismissal
+
+#### Scenario: Invalid bulk request
+- **WHEN** a request contains duplicate targets, mixed unsupported fields, no targets, excess targets or an oversized body
+- **THEN** the resource returns its documented validation or size failure before reading authoritative evidence or mutating dismissal state
+
+### Requirement: Dismissal evidence fetch permits the covered-history budget
+
+The Hub SHALL allow 30 seconds for child worker-evidence fetching, accommodating the default 25-second covered-history budget plus transport margin. This fetch deadline SHALL NOT be represented as an end-to-end response guarantee including lifecycle queues, runtime initialization and persistence. Evidence failure SHALL retain existing fail-closed behavior, authenticated private scope, revision checks and no-store semantics.
+
+#### Scenario: Any valid response within the fetch deadline follows normal checks
+- **WHEN** a valid evidence response arrives after the former 10-second deadline but within the fetch deadline
+- **THEN** it SHALL proceed through normal validation and reconciliation
+
+#### Scenario: Valid evidence takes more than ten seconds
+- **WHEN** valid authoritative evidence arrives after 10.2 seconds with other read prerequisites satisfied
+- **THEN** the authenticated personal-dismissal read succeeds instead of failing at the former deadline
+- **AND** no provider mutation or evidence-validation bypass occurs
+
+#### Scenario: Evidence remains unavailable
+- **WHEN** complete authoritative evidence cannot be obtained within its bounded fetch
+- **THEN** dismissal fails without treating browser-cached marks as authoritative or replaying dismissal writes

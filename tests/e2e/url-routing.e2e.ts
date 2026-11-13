@@ -136,7 +136,7 @@ test("direct-link to a doc outside the file-scoped session renders the single-fi
     };
   }, workspacePath("README.md"));
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("1 file");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "1 file");
 
   // Now navigate to a doc outside the file-scope. The server returns the
   // SPA shell because the doc exists in the unscoped index (the original
@@ -150,7 +150,7 @@ test("direct-link to a doc outside the file-scoped session renders the single-fi
   await expect(page.locator("#preview")).toHaveClass(/empty/);
 
   // Sidebar still shows only the scoped file.
-  await expect(page.locator("#document-count")).toHaveText("1 file");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "1 file");
   await expect(treeRow(page, "README.md")).toBeVisible();
   await expect(treeRow(page, "guides/setup.md")).toHaveCount(0);
 });

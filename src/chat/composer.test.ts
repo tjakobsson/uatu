@@ -1,0 +1,691 @@
+import { expect, test } from "bun:test";
+import { Composer, type ComposerConversation, type ComposerPresentation, type ComposerTransport } from "./composer";
+import { ChatTransportError } from "./client";
+import { ConversationProjection } from "./adapter";
+import { ConversationReplay } from "./replay";
+import { IdempotencyReceipts } from "./receipts";
+import { applyChatEvent } from "./projection";
+import type { ChatProjection } from "./projection";
+import type { ConversationSnapshot, MessageAttachment, QueuedMessage, ReversibleHistoryResult } from "./types";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const image = (name = "image.png") => new File(["image"], name, { type: "image/png" });
+const acceptance = (extra: Partial<Awaited<ReturnType<ComposerTransport["prompt"]>>> = {}) => ({ messageId: "message-1", pending: false, delivery: "queue" as const, configuration: {}, ...extra });
+const entry = (extra: Partial<QueuedMessage> = {}): QueuedMessage => ({ id: "native-original", text: "Pending", queuedAt: 1, delivery: "steer", ...extra });
+const terminalEvent = () => ({ type: "conversation.queue" as const, conversationId: "one", generation: "g", sequence: 1, queued: [], change: { kind: "delivered" as const, messageId: "native-original" } });
+
+function fixture(overrides: Partial<ComposerTransport> = {}) {
+  let selected = "one", epoch = 0, cancelling = false, count = 0;
+  let projection: ChatProjection = { conversationId: "one", generation: "g", sequence: 0, cursor: "", status: "running", items: [], queued: [], acceptedDrafts: [], queueRevision: 0, configurationRevision: 0 };
+  const texts = new Map<string, string>();
+  const steering = new Map<string, boolean>();
+  const released: string[] = [], created: string[] = [], prompts: Parameters<ComposerTransport["prompt"]>[] = [];
+  const errors: Array<[string | null, string | undefined]> = [], notes: Array<string | null> = [];
+  let refresh: ComposerConversation["refresh"] = async () => true;
+  const transport: ComposerTransport = {
+    prompt: async (...args) => { prompts.push(args); return acceptance(); },
+    uploadAttachment: async () => ({ id: `upload-${++count}`, mimeType: "image/png", sizeBytes: 5 }),
+    attachmentUrl: id => `/attachment/${id}`,
+    generate: async () => ({ text: "Answer" }), removeQueued: async () => ({ removed: true }),
+    changeDelivery: async (_id, messageId, _request, delivery) => ({ messageId, delivery }),
+    sendNow: async (_id, messageId) => ({ messageId, delivery: "steer" }),
+    discardUnconfirmedSteer: async () => ({ discarded: true, outcomeUnconfirmed: true }),
+    undo: async () => ({ outcome: "nothing-to-undo", state: { canUndo: false, canRedo: false, staged: false, revertedMessages: [] } }),
+    redo: async () => ({ outcome: "nothing-to-redo", state: { canUndo: false, canRedo: false, staged: false, revertedMessages: [] } }),
+    revert: async () => { throw new Error("unused"); }, restore: async () => { throw new Error("unused"); },
+    ...overrides,
+  };
+  const context: ComposerConversation = {
+    selected: () => selected, read: () => projection, write: value => { projection = value; }, epoch: () => epoch,
+    cancelling: () => cancelling, declares: capability => capability !== "steering" || (steering.get(selected) ?? true), commands: () => [], commandsAvailable: () => true,
+    reloadCommands: async () => true, agentId: () => "agent", refreshCommands: () => {},
+    configuration: () => ({ value: {}, stage: undefined }), consumeConfiguration: () => {},
+    imageSupport: () => ({ supported: true }), refresh: (id, pending) => refresh(id, pending),
+  };
+  const presentation: ComposerPresentation = {
+    changed: () => {}, error: (text, id) => { errors.push([text, id]); }, note: text => { notes.push(text); },
+    announce: () => {}, accepted: () => {}, heldByHold: () => {},
+  };
+  const composer = new Composer(context, transport, { read: id => texts.get(id) ?? "", write: (id, text) => { texts.set(id, text); } }, presentation, {
+    create: () => { const url = `blob:preview-${created.length}`; created.push(url); return url; },
+    release: url => { released.push(url); }, id: () => `request-${++count}`,
+  });
+  return { composer, context, transport, presentation, texts, prompts, errors, notes, released, created, steering,
+    projection: () => projection,
+    setProjection: (value: Partial<ChatProjection>) => { projection = { ...projection, ...value }; },
+    select: (id: string) => { selected = id; projection = { ...projection, conversationId: id }; },
+    reload: () => { epoch++; }, cancel: (value: boolean) => { cancelling = value; },
+    refresh: (value: ComposerConversation["refresh"]) => { refresh = value; },
+  };
+}
+
+test("ordinary send captures once, accepts without consuming newer text and releases previews", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>();
+  const f = fixture(); f.transport.prompt = async (...args) => { f.prompts.push(args); return response.promise; };
+  f.composer.edit("Original"); await f.composer.attach([image()]);
+  const sent = f.composer.submit();
+  expect(f.texts.get("one")).toBe(""); expect(f.composer.submitting).toBe(true);
+  f.composer.edit("Newer"); response.resolve(acceptance()); await sent;
+  expect(f.texts.get("one")).toBe("Newer"); expect(f.prompts[0]![2]).toBe("Original");
+  expect(f.prompts[0]![6]).toEqual([{ id: "upload-1", name: "image.png", mimeType: "image/png" }]);
+  expect(f.released).toEqual(f.created); expect(f.projection().items).toHaveLength(1);
+});
+
+test("a cached direct retry after oversized recovery retains its original insertion authority", async () => {
+  const f = fixture();
+  f.steering.set("one", false);
+  const receipts = new IdempotencyReceipts({ maxEntries: 8, maxBytes: 64 * 1024, ttlMs: 60_000 });
+  const retryResponse = deferred<void>();
+  const replay = new ConversationReplay("g", "one", 1024 * 1024), server = new ConversationProjection(replay);
+  const subscription = replay.handoff(() => null).subscription, iterator = subscription[Symbol.asyncIterator]();
+  let providerPrompts = 0, acknowledged = 0, consumed = 0, unpaused = 0;
+  f.presentation.accepted = () => { acknowledged++; };
+  f.context.consumeConfiguration = () => { consumed++; };
+  f.transport.sendNow = async () => { unpaused++; return { messageId: "held", delivery: "steer" }; };
+  f.transport.prompt = async (...args) => {
+    f.prompts.push(args);
+    const receipt = await receipts.run(`${args[0]}:prompt:${args[1]}`, async () => {
+      const messageId = `message-${++providerPrompts}`;
+      server.upsert({ id: `message:${messageId}`, type: "user_message", createdAt: providerPrompts, text: args[2] });
+      return acceptance({ messageId, configuration: { mode: "original" } });
+    });
+    if (f.prompts.length === 1) throw new ChatTransportError("Accepted response was lost", 502);
+    if (f.prompts.length === 2) await retryResponse.promise;
+    return receipt;
+  };
+  try {
+    f.composer.edit("Original"); await f.composer.attach([image("original.png")]);
+    await f.composer.submit();
+    expect(providerPrompts).toBe(1);
+    expect(f.texts.get("one")).toBe("Original");
+    expect(f.composer.pendingAttachments()).toHaveLength(1);
+    expect(f.released).toEqual([]);
+    const native = (await iterator.next()).value!;
+    const applied = applyChatEvent(f.projection(), native, replay.latestCursor());
+    f.context.write(applied.projection); f.composer.observe(native, applied.outcome === "applied");
+    const workers = Array.from({ length: 225 }, (_, n) => ({ id: `worker:${n}`, type: "background_task" as const, createdAt: n + 2,
+      taskId: `worker:${n}`, description: `Worker ${n}`, status: "completed" as const, summary: "x".repeat(4096) }));
+    server.recover([{ kind: "remove", itemId: "message:message-1" }, ...workers.map(item => ({ kind: "upsert" as const, item }))]);
+    const marker = (await iterator.next()).value!;
+    expect(marker).toMatchObject({ type: "resync", reason: "conversation-rewritten" });
+    expect((await iterator.next()).done).toBe(true);
+    expect(applyChatEvent(f.projection(), marker).outcome).toBe("resync");
+    const queued = [entry({ id: "held", delivery: "queue", paused: true })];
+    const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "idle" },
+      generation: "g", cursor: replay.latestCursor(), configuration: { mode: "fresh" }, items: server.items(), queued };
+    f.context.write(f.composer.acceptSnapshot(snapshot, f.projection().acceptedDrafts)); f.reload();
+    expect(f.projection().removedIds ?? []).toEqual([]);
+    const retried = f.composer.submit();
+    f.composer.edit("Newer private draft"); await f.composer.attach([image("newer.png")]);
+    retryResponse.resolve(); await retried;
+    expect(f.prompts).toHaveLength(2);
+    expect(f.prompts[1]![1]).toBe(f.prompts[0]![1]);
+    expect(f.prompts[1]![6]).toEqual(f.prompts[0]![6]);
+    expect(providerPrompts).toBe(1);
+    expect(receipts.size()).toBe(1);
+    expect(f.projection().items).toHaveLength(225);
+    expect(f.projection().items.some(item => item.id === "message:message-1")).toBe(false);
+    expect(f.projection().acceptedDrafts).toEqual([]);
+    expect(f.projection().configuration).toEqual({ mode: "fresh" });
+    expect(f.projection().queued).toEqual(queued);
+    expect(f.texts.get("one")).toBe("Newer private draft");
+    expect(f.composer.pendingAttachments().map(item => item.name)).toEqual(["newer.png"]);
+    expect(f.released).toEqual([f.created[0]!]);
+    expect(acknowledged).toBe(1); expect(consumed).toBe(1); expect(unpaused).toBe(0);
+    // Once the logical retry settles, a genuinely new draft gets a new
+    // request and current insertion authority, not the old receipt's fence.
+    await f.composer.submit();
+    expect(providerPrompts).toBe(2);
+    expect(f.prompts).toHaveLength(3);
+    expect(f.prompts[2]![1]).not.toBe(f.prompts[0]![1]);
+    expect(f.projection().items).toContainEqual(expect.objectContaining({ id: "message:message-2", text: "Newer private draft" }));
+    expect(f.projection().items.some(item => item.id === "message:message-1")).toBe(false);
+    expect(acknowledged).toBe(2); expect(unpaused).toBe(0);
+    expect(f.released).toEqual(f.created);
+  } finally { retryResponse.resolve(); subscription.cancel(); f.composer.dispose(); }
+});
+
+for (const replacement of ["none", "present", "generation", "switch-and-return", "repeated-loss", "new-draft"] as const) test(`idempotent direct retry retains its first attempt's authority: ${replacement}`, async () => {
+  const f = fixture(); f.steering.set("one", false);
+  const receipts = new IdempotencyReceipts({ maxEntries: 8, maxBytes: 64 * 1024, ttlMs: 60_000 });
+  let providerPrompts = 0, acknowledged = 0;
+  f.presentation.accepted = () => { acknowledged++; };
+  f.transport.prompt = async (...args) => {
+    f.prompts.push(args);
+    const receipt = await receipts.run(`${args[0]}:prompt:${args[1]}`, async () => acceptance({ messageId: `message-${++providerPrompts}` }));
+    if (f.prompts.length === 1 || replacement === "repeated-loss" && f.prompts.length === 2) throw new ChatTransportError("Response lost", 502);
+    return receipt;
+  };
+  f.composer.edit("Original"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("Original");
+  if (replacement === "switch-and-return") {
+    f.select("two"); f.reload(); f.composer.edit("Other draft"); f.select("one"); f.reload();
+  } else if (replacement === "generation") f.setProjection({ generation: "new-generation" });
+  else if (replacement !== "none") f.reload();
+  if (replacement === "present") f.setProjection({ items: [{ id: "message:message-1", type: "user_message", createdAt: 1, text: "Authoritative native prompt" }] });
+  if (replacement === "repeated-loss") { await f.composer.submit(); f.reload(); }
+  if (replacement === "new-draft") f.composer.edit("Different request");
+  const sent = f.composer.submit(); f.composer.edit("Newer"); await sent;
+  expect(acknowledged).toBe(1);
+  expect(providerPrompts).toBe(replacement === "new-draft" ? 2 : 1);
+  expect(f.texts.get("one")).toBe("Newer");
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  if (replacement === "new-draft") {
+    expect(f.prompts.at(-1)![1]).not.toBe(f.prompts[0]![1]);
+    expect(f.projection().items).toContainEqual(expect.objectContaining({ id: "message:message-2", text: "Different request" }));
+  } else {
+    expect(f.prompts.every(args => args[1] === f.prompts[0]![1])).toBe(true);
+    if (replacement === "none" || replacement === "present") expect(f.projection().items).toEqual([expect.objectContaining({ id: "message:message-1",
+      text: replacement === "present" ? "Authoritative native prompt" : "Original", requestId: f.prompts[0]![1] })]);
+    else expect(f.projection().items).toEqual([]);
+  }
+  if (replacement === "switch-and-return") expect(f.texts.get("two")).toBe("Other draft");
+});
+
+test("an oversized prepared recovery cannot let a delayed direct acknowledgement resurrect its excluded prompt", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>();
+  const f = fixture();
+  f.transport.prompt = async (...args) => { f.prompts.push(args); return response.promise; };
+  let receipts = 0, consumed = 0, releasedQueue = 0;
+  f.presentation.accepted = () => { receipts++; };
+  f.context.consumeConfiguration = () => { consumed++; };
+  f.transport.sendNow = async () => { releasedQueue++; return { messageId: "unrelated", delivery: "steer" }; };
+  const replay = new ConversationReplay("g", "one", 1024 * 1024);
+  const server = new ConversationProjection(replay);
+  const subscription = replay.handoff(() => null).subscription;
+  const iterator = subscription[Symbol.asyncIterator]();
+  const ordinary = new ConversationReplay("g", "one", 1024 * 1024);
+  const incremental = ordinary.handoff(() => null).subscription;
+  try {
+    f.composer.edit("Original");
+    await f.composer.attach([image("original.png")]);
+    const sent = f.composer.submit();
+    // The provider published the accepted prompt before its HTTP receipt
+    // returned. A missed external revert then excludes that same message.
+    server.upsert({ id: "message:message-1", type: "user_message", createdAt: 1, text: "Original" });
+    const native = (await iterator.next()).value!;
+    const applied = applyChatEvent(f.projection(), native, replay.latestCursor());
+    f.context.write(applied.projection);
+    f.composer.observe(native, applied.outcome === "applied");
+    const workers = Array.from({ length: 225 }, (_, n) => ({ id: `worker:${n}`, type: "background_task" as const, createdAt: 2 + n,
+      taskId: `worker:${n}`, description: `Worker ${n}`, status: "completed" as const, summary: "x".repeat(4096) }));
+    // The old incremental queue accommodates this actual publication. The
+    // prepared producer's bounded policy instead withholds the whole batch.
+    ordinary.publish({ type: "item.remove", itemId: "message:message-1" });
+    for (const item of workers) ordinary.publish({ type: "item.upsert", item });
+    expect(ordinary.subscriberCount()).toBe(1);
+    server.recover([{ kind: "remove", itemId: "message:message-1" }, ...workers.map(item => ({ kind: "upsert" as const, item }))]);
+    const marker = (await iterator.next()).value!;
+    expect(marker).toMatchObject({ type: "resync", reason: "conversation-rewritten" });
+    const invalidated = applyChatEvent(f.projection(), marker, replay.latestCursor());
+    expect(invalidated.outcome).toBe("resync");
+    f.context.write(invalidated.projection);
+    expect((await iterator.next()).done).toBe(true);
+    expect(f.projection().removedIds ?? []).toEqual([]);
+    const queued = [entry({ id: "unrelated", delivery: "queue", text: "Do not release", paused: true })];
+    const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "idle" },
+      generation: "g", cursor: replay.latestCursor(), configuration: { mode: "fresh" }, items: server.items(), queued };
+    f.context.write(f.composer.acceptSnapshot(snapshot, f.projection().acceptedDrafts));
+    f.reload();
+    expect(f.projection().items).toHaveLength(225);
+    expect(f.projection().removedIds ?? []).toEqual([]);
+    f.composer.edit("Newer private draft");
+    await f.composer.attach([image("newer.png")]);
+    response.resolve(acceptance({ configuration: { mode: "obsolete" } }));
+    await sent;
+    expect(f.projection().items.some(item => item.id === "message:message-1")).toBe(false);
+    expect(f.projection().items).toHaveLength(225);
+    expect(f.projection().acceptedDrafts).toEqual([]);
+    expect(f.projection().configuration).toEqual({ mode: "fresh" });
+    expect(f.projection().queued).toEqual(queued);
+    expect(f.texts.get("one")).toBe("Newer private draft");
+    expect(f.composer.pendingAttachments().map(item => item.name)).toEqual(["newer.png"]);
+    expect(f.released).toEqual([f.created[0]!]);
+    expect(receipts).toBe(1);
+    expect(consumed).toBe(1);
+    expect(releasedQueue).toBe(0);
+    expect(f.prompts).toHaveLength(1);
+    expect(f.composer.submitting).toBe(false);
+  } finally { subscription.cancel(); incremental.cancel(); f.composer.dispose(); }
+});
+
+for (const replacement of ["none", "absent", "present", "generation", "switch-and-return"] as const) test(`direct acknowledgement retains acceptance but inserts only with current presentation authority: ${replacement}`, async () => {
+  const response = deferred<ReturnType<typeof acceptance>>();
+  const f = fixture();
+  f.transport.prompt = async (...args) => { f.prompts.push(args); return response.promise; };
+  let receipts = 0;
+  f.presentation.accepted = () => { receipts++; };
+  f.composer.edit("Original");
+  await f.composer.attach([image()]);
+  const sent = f.composer.submit();
+  f.composer.edit("Newer");
+  if (replacement === "switch-and-return") {
+    f.select("two"); f.reload(); f.composer.edit("Other conversation draft");
+    f.select("one");
+  }
+  if (replacement !== "none") {
+    const snapshot: ConversationSnapshot = { conversation: { id: "one", title: "one", createdAt: 1, updatedAt: 1, status: "idle" },
+      generation: replacement === "generation" ? "new-generation" : "g", cursor: "fresh", configuration: {},
+      items: replacement === "present" ? [{ id: "message:message-1", type: "user_message", createdAt: 1, text: "Authoritative native prompt" }] : [] };
+    f.context.write(f.composer.acceptSnapshot(snapshot, f.projection().acceptedDrafts));
+    // Also exercise a changed generation independently of the epoch fence.
+    if (replacement !== "generation") f.reload();
+  }
+  response.resolve(acceptance());
+  await sent;
+  expect(receipts).toBe(1);
+  expect(f.prompts).toHaveLength(1);
+  expect(f.texts.get("one")).toBe("Newer");
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.released).toEqual(f.created);
+  if (replacement === "none" || replacement === "present") {
+    expect(f.projection().items).toHaveLength(1);
+    expect(f.projection().items[0]).toMatchObject({ id: "message:message-1", text: replacement === "present" ? "Authoritative native prompt" : "Original",
+      requestId: f.prompts[0]![1], attachments: f.prompts[0]![6] });
+  } else expect(f.projection().items).toEqual([]);
+  if (replacement === "switch-and-return") expect(f.texts.get("two")).toBe("Other conversation draft");
+});
+
+for (const delivery of ["queue", "steer"] as const) test(`a pre-replacement pending ${delivery} receipt cannot recreate an absent queue entry`, async () => {
+  const response = deferred<ReturnType<typeof acceptance>>();
+  const f = fixture({ prompt: () => response.promise });
+  let receipts = 0;
+  f.presentation.accepted = () => { receipts++; };
+  f.composer.edit("Original");
+  const sent = f.composer.submit();
+  const queued = [entry({ id: "unrelated", delivery: "queue", paused: true })];
+  f.setProjection({ queued }); f.reload(); f.composer.edit("Newer");
+  response.resolve(acceptance({ pending: true, delivery }));
+  await sent;
+  expect(receipts).toBe(1);
+  expect(f.projection().queued).toEqual(queued);
+  expect(f.projection().items).toEqual([]);
+  expect(f.projection().acceptedDrafts).toEqual([]);
+  expect(f.texts.get("one")).toBe("Newer");
+});
+
+test("refusal restores capture before newer edits and reuses original request and uploaded refs", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>(); const f = fixture();
+  f.transport.prompt = async (...args) => { f.prompts.push(args); return response.promise; };
+  f.composer.edit("Original"); await f.composer.attach([image()]); const sent = f.composer.submit();
+  f.composer.edit("Newer"); response.reject(new ChatTransportError("Refused", 400)); await sent;
+  expect(f.texts.get("one")).toBe("Original\nNewer"); expect(f.released).toEqual([]);
+  expect(f.composer.pendingAttachments()).toHaveLength(1);
+  f.composer.edit("Original"); f.transport.prompt = async (...args) => { f.prompts.push(args); return acceptance(); };
+  await f.composer.submit(); expect(f.prompts[1]![1]).toBe(f.prompts[0]![1]); expect(f.released).toEqual(f.created);
+});
+
+test("unknown primary retains uncertain input, never restores it as a sendable draft or replays", async () => {
+  const f = fixture({ prompt: async () => { throw new ChatTransportError("Unknown", 502); } });
+  f.composer.edit("Original"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe(""); expect(f.projection().acceptedDrafts[0]?.unconfirmed).toBe(true);
+  expect(f.composer.feedback("one").toLowerCase()).toContain("do not repeat");
+  expect(f.composer.acceptedDrafts("one")[0]?.text).toBe("Original");
+});
+
+test("upload drain includes appended intake but leaves newly typed words for the next draft", async () => {
+  const first = deferred<{ id: string; mimeType: string; sizeBytes: number }>(); let uploads = 0;
+  const f = fixture({ uploadAttachment: async () => ++uploads === 1 ? first.promise : { id: "second", mimeType: "image/png", sizeBytes: 5 } });
+  f.composer.edit("Original"); const intake = f.composer.attach([image("first.png")]); const sent = f.composer.submit();
+  f.composer.edit("Newer"); const appended = f.composer.attach([image("second.png")]);
+  first.resolve({ id: "first", mimeType: "image/png", sizeBytes: 5 }); await Promise.all([intake, sent, appended]);
+  expect(f.prompts[0]![6]?.map(a => a.id)).toEqual(["first", "second"]); expect(f.texts.get("one")).toBe("Newer");
+});
+
+test("refusal during drain prevents partial send and preserves successfully uploaded references", async () => {
+  const upload = deferred<{ id: string; mimeType: string; sizeBytes: number }>();
+  const f = fixture({ uploadAttachment: () => upload.promise }); f.composer.edit("Original");
+  const attached = f.composer.attach([image()]); const sent = f.composer.submit(); f.composer.edit("Newer");
+  f.composer.noteAttachmentRefusal("one"); upload.resolve({ id: "first", mimeType: "image/png", sizeBytes: 5 }); await Promise.all([attached, sent]);
+  expect(f.prompts).toHaveLength(0); expect(f.texts.get("one")).toBe("Original\nNewer"); expect(f.composer.pendingAttachments()).toHaveLength(1);
+});
+
+test("switch during upload restores only the originating draft without sending", async () => {
+  const upload = deferred<{ id: string; mimeType: string; sizeBytes: number }>(); const f = fixture({ uploadAttachment: () => upload.promise });
+  f.composer.edit("Original"); const attached = f.composer.attach([image()]); const sent = f.composer.submit();
+  f.texts.set("one", "Newer"); f.select("two"); f.composer.edit("Other"); upload.resolve({ id: "first", mimeType: "image/png", sizeBytes: 5 }); await Promise.all([attached, sent]);
+  expect(f.prompts).toHaveLength(0); expect(f.texts.get("one")).toBe("Original\nNewer"); expect(f.texts.get("two")).toBe("Other");
+  expect(f.composer.pendingAttachments("one")).toHaveLength(1);
+});
+
+test("inflight attachment reserve prevents restored draft overflowing the eight-image limit", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>(); const f = fixture({ prompt: () => response.promise });
+  await f.composer.attach(Array.from({ length: 8 }, () => image())); f.composer.edit("Original"); const sent = f.composer.submit();
+  await f.composer.attach([image("ninth.png")]); response.reject(new ChatTransportError("Refused", 400)); await sent;
+  expect(f.composer.pendingAttachments()).toHaveLength(8); expect(f.errors.some(([message]) => message?.includes("at most 8"))).toBe(true);
+});
+
+test("an invalid image whose name starts with capacity wording does not stop later intake", async () => {
+  const uploaded: Blob[] = [], valid = image("valid.png");
+  const f = fixture({ uploadAttachment: async (_id, file) => { uploaded.push(file); return { id: "valid", mimeType: "image/png", sizeBytes: 5 }; } });
+  await f.composer.attach([new File(["text"], "A message.txt", { type: "text/plain" }), valid]);
+  expect(uploaded).toEqual([valid]);
+  expect(f.composer.pendingAttachments().map(attachment => attachment.name)).toEqual(["valid.png"]);
+  expect(f.errors).toEqual([["A message.txt is not a supported image (PNG, JPEG, GIF, WebP).", "one"]]);
+});
+
+test("capacity stops intake once, keeps eight uploaded images and refuses a partial send during drain", async () => {
+  const f = fixture(); f.composer.edit("Original");
+  const intake = f.composer.attach(Array.from({ length: 10 }, (_, index) => image(`${index}.png`)));
+  const sent = f.composer.submit(); f.composer.edit("Newer"); await Promise.all([intake, sent]);
+  expect(f.composer.pendingAttachments().map(attachment => attachment.name)).toEqual(["0.png", "1.png", "2.png", "3.png", "4.png", "5.png", "6.png", "7.png"]);
+  expect(f.errors.filter(([message]) => message?.includes("at most 8"))).toEqual([["A message can carry at most 8 images.", "one"]]);
+  expect(f.prompts).toEqual([]); expect(f.texts.get("one")).toBe("Original\nNewer"); expect(f.released).toEqual([]);
+});
+
+test("fresh receipt cannot resurrect a queue entry after the stream or projection reload", async () => {
+  for (const reload of [false, true]) {
+    const response = deferred<ReturnType<typeof acceptance>>(); const f = fixture({ prompt: () => response.promise }); f.composer.edit("Original"); const sent = f.composer.submit();
+    if (reload) f.reload(); else f.setProjection({ queueRevision: 1 });
+    response.resolve(acceptance({ pending: true })); await sent;
+    expect(f.projection().queued).toEqual([]); expect(f.projection().acceptedDrafts).toEqual([]);
+  }
+});
+
+test("pending Edit waits for withdrawal then merges latest originating text and attachments", async () => {
+  const removed = deferred<{ removed: boolean }>(); const f = fixture({ removeQueued: () => removed.promise });
+  f.setProjection({ queued: [entry({ attachments: [{ id: "stored", name: "old.png", mimeType: "image/png" }] })] });
+  f.composer.edit("Draft"); const edited = f.composer.pending("native-original", "edit");
+  expect(f.texts.get("one")).toBe("Draft"); f.composer.edit("Newer"); removed.resolve({ removed: true }); await edited;
+  expect(f.texts.get("one")).toBe("Pending\nNewer"); expect(f.composer.pendingAttachments()[0]?.previewUrl).toBe("/attachment/stored");
+  f.composer.removeAttachment(f.composer.pendingAttachments()[0]!); expect(f.released).toEqual([]);
+});
+
+test("pending Edit appends available references and unavailable placeholders in their original order without owning stored URLs", async () => {
+  const f = fixture(); await f.composer.attach([image("draft.png")]); f.composer.edit("Draft");
+  const previousMissing: MessageAttachment = { name: "previous-missing.png", mimeType: "image/png" };
+  f.setProjection({ queued: [entry({ text: "Previous", attachments: [previousMissing] })] }); await f.composer.pending("native-original", "edit");
+  const first = { id: "first", name: "first.png", mimeType: "image/png" };
+  const missing: MessageAttachment = { name: "missing.png", mimeType: "image/png" };
+  const second = { id: "second", name: "second.png", mimeType: "image/png" };
+  f.setProjection({ queued: [entry({ attachments: [first, missing, second] })] }); await f.composer.pending("native-original", "edit");
+  expect(f.texts.get("one")).toBe("Pending\nPrevious\nDraft");
+  expect(f.composer.pendingAttachments()).toEqual([
+    { id: "upload-1", name: "draft.png", mimeType: "image/png", previewUrl: "blob:preview-0" },
+    { ...first, previewUrl: "/attachment/first" }, { ...second, previewUrl: "/attachment/second" },
+  ]);
+  expect(f.composer.unavailableAttachments()).toEqual([previousMissing, missing]); expect(f.released).toEqual([]);
+  f.composer.removeAttachment(f.composer.pendingAttachments()[1]!); expect(f.released).toEqual([]);
+  f.composer.dispose(); expect(f.released).toEqual(["blob:preview-0"]);
+});
+
+test("explicit terminal evidence before unknown withdrawal prevents recreating uncertain ownership", async () => {
+  const removed = deferred<{ removed: boolean }>(); const f = fixture({ removeQueued: () => removed.promise });
+  f.setProjection({ queued: [entry()] }); const result = f.composer.pending("native-original", "remove");
+  f.composer.observe(terminalEvent(), true); f.setProjection({ queued: [] }); removed.reject(new ChatTransportError("Unknown", 502)); await result;
+  expect(f.composer.withdrawalRetries("one")).toBeUndefined(); expect(f.composer.feedback("one")).toBe("");
+});
+
+test("withdrawal uncertainty permits cancellation-only retry against the original native ID", async () => {
+  const ids: string[] = []; let attempts = 0; const f = fixture({ removeQueued: async (_id, messageId) => { ids.push(messageId); if (++attempts === 1) throw new ChatTransportError("Unknown", 502); return { removed: true }; } });
+  f.setProjection({ queued: [entry()] }); f.composer.edit("Private"); await f.composer.pending("native-original", "edit");
+  expect(f.composer.pending("native-original", "edit")).toBeUndefined(); expect(f.texts.get("one")).toBe("Private");
+  await f.composer.pending("native-original", "remove"); expect(ids).toEqual(["native-original", "native-original"]); expect(f.projection().queued).toEqual([]);
+});
+
+test("discard confirmation is single-use, rechecks token and never invokes native removal", async () => {
+  let discarded = 0, removed = 0; const f = fixture({ discardUnconfirmedSteer: async () => { discarded++; return { discarded: true, outcomeUnconfirmed: true }; }, removeQueued: async () => { removed++; return { removed: true }; } });
+  f.setProjection({ queued: [entry({ unconfirmed: true, admissionUncertaintyId: "token" })] }); f.composer.edit("Private");
+  const stale = f.composer.pending("native-original", "discard"); expect(stale && "confirm" in stale).toBe(true);
+  f.setProjection({ queued: [entry({ unconfirmed: true, admissionUncertaintyId: "new-token" })] });
+  if (stale && "confirm" in stale) await stale.confirm(); expect(discarded).toBe(0);
+  const question = f.composer.pending("native-original", "discard");
+  if (question && "confirm" in question) { await question.confirm(); await question.confirm(); }
+  expect(discarded).toBe(1); expect(removed).toBe(0); expect(f.texts.get("one")).toBe("Private"); expect(f.composer.feedback("one")).toContain("did not cancel or resend");
+});
+
+test("confirmation after selection changes cannot mutate the old pending entry", async () => {
+  let discarded = 0; const f = fixture({ discardUnconfirmedSteer: async () => { discarded++; return { discarded: true, outcomeUnconfirmed: true }; } });
+  f.setProjection({ queued: [entry({ unconfirmed: true, admissionUncertaintyId: "token" })] });
+  const question = f.composer.pending("native-original", "discard"); f.select("two");
+  if (question && "confirm" in question) await question.confirm(); expect(discarded).toBe(0);
+});
+
+test("conversion preserves draft and leaves queue state to committed evidence", async () => {
+  let converted = ""; const f = fixture({ changeDelivery: async (_id, messageId, _request, delivery) => { converted = `${messageId}:${delivery}`; return { messageId: "new-handle", delivery }; } });
+  f.setProjection({ queued: [entry({ delivery: "queue" })] }); f.composer.edit("Private"); await f.composer.pending("native-original", "steer");
+  expect(converted).toBe("native-original:steer"); expect(f.texts.get("one")).toBe("Private"); expect(f.projection().queued[0]?.id).toBe("native-original");
+});
+
+for (const action of ["steer", "send-now"] as const) {
+  for (const status of [undefined, 502]) {
+    test(`${action} keeps initiating steering uncertainty after switching to a nonsteering conversation (${status ?? "no status"})`, async () => {
+      const response = deferred<Awaited<ReturnType<ComposerTransport["sendNow"]>>>();
+      const mutations: unknown[][] = [], reads: string[] = [];
+      const f = fixture({
+        changeDelivery: async (...args) => { mutations.push(args); return response.promise; },
+        sendNow: async (...args) => { mutations.push(args); return response.promise; },
+      });
+      f.steering.set("two", false);
+      f.refresh(async id => { reads.push(id); return true; });
+      f.setProjection({ queued: [entry({ delivery: "queue" })] }); f.composer.edit("Original draft");
+      const result = f.composer.pending("native-original", action);
+      f.select("two"); f.setProjection({ queued: [] }); f.composer.edit("Other draft");
+      const other = f.projection();
+      response.reject(new ChatTransportError("Response lost", status)); await result;
+      expect(reads).toEqual(["one"]);
+      expect(f.composer.feedback("one")).toContain(action === "steer" ? "Queue → Steer" : "Send now");
+      expect(f.composer.feedback("one")).toContain("Status checked; acceptance still unconfirmed");
+      expect(f.composer.feedback("one")).toContain("Do not repeat");
+      expect(f.composer.feedback("two")).toBe("");
+      expect(f.texts.get("one")).toBe("Original draft"); expect(f.texts.get("two")).toBe("Other draft");
+      expect(f.projection()).toBe(other); expect(f.prompts).toEqual([]);
+      expect(mutations).toEqual([["one", "native-original", expect.any(String), ...(action === "steer" ? ["steer"] : [])]]);
+      expect(f.composer.pendingActions("one")).toBeUndefined();
+    });
+
+    test(`${action} does not manufacture steering uncertainty after leaving a nonsteering conversation (${status ?? "no status"})`, async () => {
+      const response = deferred<Awaited<ReturnType<ComposerTransport["sendNow"]>>>();
+      let mutations = 0; const reads: string[] = [];
+      const f = fixture({
+        changeDelivery: async () => { mutations++; return response.promise; },
+        sendNow: async () => { mutations++; return response.promise; },
+      });
+      f.steering.set("one", false); f.refresh(async id => { reads.push(id); return true; });
+      f.setProjection({ queued: [entry({ delivery: "queue" })] }); f.composer.edit("Original draft");
+      const result = f.composer.pending("native-original", action);
+      f.select("two"); f.composer.edit("Other draft");
+      response.reject(new ChatTransportError("Refused", status)); await result;
+      expect(reads).toEqual([]); expect(mutations).toBe(1);
+      expect(f.composer.feedback("one")).toBe(""); expect(f.composer.feedback("two")).toBe("");
+      expect(f.texts.get("one")).toBe("Original draft"); expect(f.texts.get("two")).toBe("Other draft");
+    });
+  }
+}
+
+test("paused Send now captures steering eligibility before presentation can switch conversations", async () => {
+  const response = deferred<Awaited<ReturnType<ComposerTransport["sendNow"]>>>();
+  const f = fixture({ sendNow: () => response.promise }); const reads: string[] = [];
+  f.steering.set("two", false); f.refresh(async id => { reads.push(id); return false; });
+  f.setProjection({ queued: [entry({ paused: true })] }); f.composer.edit("Original draft");
+  f.presentation.changed = change => { if (change === "pending") f.select("two"); };
+  const result = f.composer.pending("native-original", "send-now");
+  response.reject(new ChatTransportError("Response lost")); await result;
+  expect(reads).toEqual(["one"]);
+  expect(f.composer.feedback("one")).toContain("Status check unavailable; acceptance unconfirmed");
+  expect(f.composer.feedback("two")).toBe(""); expect(f.texts.get("one")).toBe("Original draft");
+});
+
+test("side question failure preserves newer text and never enters ordinary admission", async () => {
+  const answer = deferred<{ text: string }>(); const f = fixture({ generate: () => answer.promise });
+  f.composer.edit("/btw Why?"); const asking = f.composer.submit(); f.composer.edit("Newer"); answer.reject(new Error("Unavailable")); await asking;
+  expect(f.texts.get("one")).toBe("Newer"); expect(f.composer.sideAnswer("one")?.failed).toBe(true); expect(f.prompts).toHaveLength(0);
+});
+
+for (const [operation, label, instruction, preserved] of [
+  ["undo", "Undo", "Submit /undo again", "command and attachments"],
+  ["redo", "Redo", "Submit /redo again", "command and attachments"],
+  ["revert", "Revert", "Choose Revert message again", "composer and attachments"],
+  ["restore", "Restore", "Choose Restore message again", "composer and attachments"],
+] as const) {
+  test(`${operation} completed refresh failure keeps input and retries only the read`, async () => {
+    const f = fixture();
+    const mutations: unknown[][] = [], reads: string[] = [];
+    f.transport[operation] = async (...args: unknown[]) => {
+      mutations.push(args);
+      return { outcome: "changed", state: { canUndo: true, canRedo: true, staged: true, revertedMessages: [] }, restoredDraft: { text: "Restored" } };
+    };
+    await f.composer.attach([image()]);
+    const attachments = [...f.composer.pendingAttachments("one")];
+    const draft = operation === "undo" || operation === "redo" ? `/${operation}` : "Original draft";
+    f.composer.edit(draft);
+    const messageId = operation === "revert" || operation === "restore" ? "target" : undefined;
+    const run = () => messageId ? f.composer.history(operation, "one", messageId) : f.composer.submit();
+    f.refresh(async id => { reads.push(id); return false; });
+    await run();
+    const message = `${label} completed, but the conversation could not be refreshed. ${instruction} to reconnect; the ${preserved} were kept.`;
+    expect(f.errors.at(-1)).toEqual([message, "one"]);
+    expect(f.notes.at(-1)).toBe(message);
+    expect(f.texts.get("one")).toBe(draft);
+    expect(f.composer.pendingAttachments("one")).toEqual(attachments);
+    expect(f.released).toEqual([]);
+    expect(f.composer.needsHistoryRefresh("one")).toBe(true);
+    await run();
+    expect(mutations).toEqual([["one", ...(messageId ? [messageId] : []), expect.any(String)]]);
+    expect(reads).toEqual(["one", "one"]);
+    expect(f.texts.get("one")).toBe(draft);
+    expect(f.composer.pendingAttachments("one")).toEqual(attachments);
+    f.refresh(async id => { reads.push(id); return true; });
+    await run();
+    expect(mutations).toHaveLength(1);
+    expect(reads).toEqual(["one", "one", "one"]);
+    expect(f.texts.get("one")).toBe("Restored");
+    expect(f.released).toEqual(f.created);
+  });
+
+  test(`${operation} refuses a new mutation when the required history refresh fails`, async () => {
+    const f = fixture();
+    // A different completed operation establishes the reconnect requirement.
+    const seed = operation === "undo" ? "redo" : "undo";
+    f.transport[seed] = async () => ({ outcome: "changed", state: { canUndo: true, canRedo: true, staged: true, revertedMessages: [] } });
+    f.refresh(async () => false);
+    await f.composer.history(seed, "one");
+    let mutations = 0;
+    f.transport[operation] = async () => { mutations++; throw new Error("Must not mutate before refresh"); };
+    await f.composer.attach([image()]);
+    const attachments = [...f.composer.pendingAttachments("one")];
+    const draft = operation === "undo" || operation === "redo" ? `/${operation}` : "Original draft";
+    f.composer.edit(draft);
+    if (operation === "undo" || operation === "redo") await f.composer.submit();
+    else await f.composer.history(operation, "one", "target");
+    const message = `The conversation could not be refreshed. ${instruction} to retry; the ${preserved} were kept.`;
+    expect(f.errors.at(-1)).toEqual([message, "one"]);
+    expect(f.notes.at(-1)).toBe(message);
+    expect(mutations).toBe(0);
+    expect(f.texts.get("one")).toBe(draft);
+    expect(f.composer.pendingAttachments("one")).toEqual(attachments);
+    expect(f.released).toEqual([]);
+    expect(f.prompts).toEqual([]);
+  });
+}
+
+test("history result survives failed refresh; retry refreshes without another mutation and replaces newer draft", async () => {
+  let mutations = 0; const result: ReversibleHistoryResult = { outcome: "changed", state: { canUndo: false, canRedo: true, staged: true, revertedMessages: [] }, restoredDraft: { text: "Restored", attachments: [{ id: "stored", name: "restored.png", mimeType: "image/png" }] } };
+  const f = fixture({ undo: async () => { mutations++; return result; } }); await f.composer.attach([image()]); f.composer.edit("/undo");
+  f.refresh(async () => false); await f.composer.submit(); expect(f.texts.get("one")).toBe("/undo"); expect(f.released).toEqual([]);
+  f.composer.edit("Newer"); f.refresh(async () => true); await f.composer.history("undo", "one");
+  expect(mutations).toBe(1); expect(f.texts.get("one")).toBe("Restored"); expect(f.released).toEqual(f.created); expect(f.composer.pendingAttachments()[0]?.id).toBe("stored");
+});
+
+test("history replaces available references and unavailable placeholders while releasing only replaced owned previews", async () => {
+  const f = fixture(); await f.composer.attach([image("draft.png")]);
+  f.setProjection({ queued: [entry({ attachments: [{ id: "old", name: "old.png", mimeType: "image/png" }, { name: "old-missing.png", mimeType: "image/png" }] })] });
+  await f.composer.pending("native-original", "edit");
+  const first = { id: "first", name: "first.png", mimeType: "image/png" };
+  const missing: MessageAttachment = { name: "missing.png", mimeType: "image/png" };
+  const second = { id: "second", name: "second.png", mimeType: "image/png" };
+  f.transport.undo = async () => ({ outcome: "changed", state: { canUndo: false, canRedo: true, staged: true, revertedMessages: [] }, restoredDraft: { text: "Restored", attachments: [first, missing, second] } });
+  await f.composer.history("undo", "one");
+  expect(f.texts.get("one")).toBe("Restored");
+  expect(f.composer.pendingAttachments()).toEqual([{ ...first, previewUrl: "/attachment/first" }, { ...second, previewUrl: "/attachment/second" }]);
+  expect(f.composer.unavailableAttachments()).toEqual([missing]); expect(f.released).toEqual(["blob:preview-0"]);
+  f.composer.dispose(); expect(f.released).toEqual(["blob:preview-0"]);
+});
+
+test("history invalidates late uploads and preserves another conversation's draft", async () => {
+  const upload = deferred<{ id: string; mimeType: string; sizeBytes: number }>(), history = deferred<ReversibleHistoryResult>();
+  const f = fixture({ uploadAttachment: () => upload.promise, undo: () => history.promise }); const attaching = f.composer.attach([image()]);
+  f.composer.edit("/undo"); const undoing = f.composer.submit(); f.select("two"); f.composer.edit("Other");
+  history.resolve({ outcome: "changed", state: { canUndo: false, canRedo: true, staged: true, revertedMessages: [] }, restoredDraft: { text: "Restored" } }); await undoing;
+  upload.resolve({ id: "late", mimeType: "image/png", sizeBytes: 5 }); await attaching;
+  expect(f.texts.get("one")).toBe("Restored"); expect(f.texts.get("two")).toBe("Other"); expect(f.created).toEqual([]);
+});
+
+test("dispose releases inflight previews exactly once without cancelling or replaying input", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>(); const f = fixture({ prompt: () => response.promise }); await f.composer.attach([image()]);
+  f.composer.edit("Original"); const sent = f.composer.submit(); f.composer.dispose(); response.resolve(acceptance()); await sent;
+  expect(f.released).toEqual(f.created); expect(f.released).toHaveLength(1);
+});
+
+test("accepted primary remains accepted when automatic backgrounding failed", async () => {
+  const f = fixture({ prompt: async () => acceptance({ automaticBackground: "failed", delivery: "steer", pending: true }) }); f.composer.edit("Original"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe(""); expect(f.projection().queued).toHaveLength(1); expect(f.composer.feedback("one")).toContain("steer was not repeated");
+});
+
+test("cancel lock refuses submission without leaking explicit queue intent", async () => {
+  const f = fixture(); f.composer.edit("Original"); f.cancel(true); await f.composer.submit({ delivery: "queue" });
+  expect(f.texts.get("one")).toBe("Original"); f.cancel(false); await f.composer.submit(); expect(f.prompts[0]![7]).toBe("steer");
+});
+
+test("configuration is captured after drain, newer streamed configuration wins, and original stage is consumed by identity", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>(); const f = fixture({ prompt: async (...args) => { f.prompts.push(args); return response.promise; } });
+  const firstStage = { mode: "first" }, newerStage = { mode: "newer" };
+  let stage = firstStage;
+  f.context.configuration = () => ({ value: stage, stage });
+  const consumed: string[] = [];
+  f.context.consumeConfiguration = (id, captured) => { if (captured === stage) consumed.push(id); };
+  f.composer.edit("Original"); const sent = f.composer.submit({ delivery: "queue" });
+  stage = newerStage; f.setProjection({ configurationRevision: 1, configuration: { mode: "streamed" } });
+  response.resolve(acceptance({ configuration: firstStage })); await sent;
+  expect(f.prompts[0]![4]).toBe("first"); expect(f.projection().configuration?.mode).toBe("streamed"); expect(consumed).toEqual([]);
+});
+
+test("uncertain attachment-bearing replacement retains original refs but releases only its preview", async () => {
+  const response = deferred<ReturnType<typeof acceptance>>(); const f = fixture({ prompt: () => response.promise });
+  f.setProjection({ reversibleHistory: { canUndo: false, canRedo: true, staged: true, revertedMessages: [] } });
+  await f.composer.attach([image()]); f.composer.edit("Original"); const sent = f.composer.submit(); f.composer.edit("Newer");
+  await f.composer.attach([image("newer.png")]); response.reject(new ChatTransportError("Unknown", undefined, "operation_outcome_unknown")); await sent;
+  expect(f.texts.get("one")).toBe("Newer"); expect(f.released).toEqual([f.created[0]!]);
+  expect(f.composer.acceptedDrafts("one")[0]?.attachments?.[0]?.id).toBe("upload-1");
+  expect(f.composer.pendingAttachments()[0]?.name).toBe("newer.png");
+});
+
+test("terminal fence rejects stale recovery rows but an incomplete snapshot is not settlement evidence", async () => {
+  const removed = deferred<{ removed: boolean }>(); const read = deferred<boolean>(); const f = fixture({ removeQueued: () => removed.promise });
+  f.setProjection({ queued: [entry({ delivery: "queue" })] });
+  let pending: Parameters<ComposerConversation["refresh"]>[1];
+  f.refresh(async (_id, action) => { pending = action; return read.promise; });
+  const result = f.composer.pending("native-original", "remove"); removed.reject(new ChatTransportError("Conflict", 409));
+  await Promise.resolve(); await Promise.resolve();
+  expect(pending).toBeDefined(); f.composer.observe(terminalEvent(), true);
+  const snapshot = { conversation: { id: "one" }, queued: [entry()] } as ConversationSnapshot;
+  expect(f.composer.checkedSnapshot("one", snapshot, pending).queued).toEqual([]);
+  expect(() => f.composer.checkedSnapshot("one", { conversation: { id: "one" } } as ConversationSnapshot, pending)).toThrow("did not include");
+  read.resolve(true); await result;
+});
+
+test("side answer completion remains page-local to its originating conversation", async () => {
+  const answer = deferred<{ text: string }>(); const f = fixture({ generate: () => answer.promise });
+  f.composer.edit("/btw Why?"); const asking = f.composer.submit(); f.select("two"); f.composer.edit("Other draft");
+  answer.resolve({ text: "Because" }); await asking;
+  expect(f.composer.sideAnswer("one")?.text).toBe("Because"); expect(f.composer.sideAnswer("two")).toBeUndefined(); expect(f.texts.get("two")).toBe("Other draft");
+});
+
+test("history no-op keeps command and attachments, redo replacement owns new resources", async () => {
+  const f = fixture(); await f.composer.attach([image()]); f.composer.edit("/undo"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("/undo"); expect(f.composer.pendingAttachments()).toHaveLength(1); expect(f.released).toEqual([]);
+  f.transport.redo = async () => ({ outcome: "changed", state: { canUndo: true, canRedo: false, staged: false, revertedMessages: [] }, restoredDraft: { text: "Restored", attachments: [{ name: "unavailable.png", mimeType: "image/png" }] } });
+  f.composer.edit("/redo"); await f.composer.submit();
+  expect(f.texts.get("one")).toBe("Restored"); expect(f.composer.unavailableAttachments()).toHaveLength(1); expect(f.released).toEqual(f.created);
+});
+
+test("dispose invalidates uploading intake without manufacturing previews or sending", async () => {
+  const upload = deferred<{ id: string; mimeType: string; sizeBytes: number }>(); const f = fixture({ uploadAttachment: () => upload.promise });
+  const attaching = f.composer.attach([image()]); f.composer.edit("Original"); const sent = f.composer.submit();
+  f.composer.dispose(); upload.resolve({ id: "late", mimeType: "image/png", sizeBytes: 5 }); await Promise.all([attaching, sent]);
+  expect(f.created).toEqual([]); expect(f.prompts).toEqual([]);
+});

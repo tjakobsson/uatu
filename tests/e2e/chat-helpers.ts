@@ -19,9 +19,35 @@ export async function openChatPanel(page: Page): Promise<void> {
   await expect(page.locator("#chat-timeline")).toBeVisible();
 }
 
+/** Deliberately reveal the canonical worker card before inspecting a row. */
+export async function openChatWorkers(page: Page): Promise<void> {
+  const card = page.locator("#chat-compact-workers");
+  await expect(card).toBeAttached();
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const reveal = page.locator("#chat-work-toggle");
+  if (await reveal.isVisible()) await reveal.click();
+  await expect(card).toBeVisible();
+  if (await card.getAttribute("open") === null) {
+    const summary = card.locator(":scope > summary");
+    if (await page.locator("html").getAttribute("data-ui-mode") === "touch") await summary.tap();
+    else await summary.click();
+  }
+  await expect(card).toHaveAttribute("open", "");
+}
+
+/** Reveal pending actions under either UI-mode disclosure policy. */
+export async function openChatPending(page: Page): Promise<void> {
+  const toggle = page.locator("[data-pending-toggle]");
+  await expect(toggle).toHaveAttribute("aria-expanded", /^(true|false)$/);
+  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+}
+
 export async function openChatConfiguration(page: Page): Promise<void> {
   const dialog = page.locator("#chat-configuration-dialog");
-  if (!await dialog.isVisible()) await page.locator("#chat-configuration-trigger").click();
+  if (!await dialog.isVisible()) {
+    await page.locator("#chat-configuration-trigger").click();
+  }
   await expect(dialog).toBeVisible();
 }
 

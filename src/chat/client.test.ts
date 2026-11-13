@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { resetAppBasePathForTests } from "../shared/app-url";
 import type { LiveSubscription, LiveSubscriptionKey } from "../shared/live-protocol";
 import type { LiveChannel, LiveTopicConsumer } from "../shell/live-channel";
-import { ChatApiClient, ChatConnectionInterruptedError } from "./client";
+import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError } from "./client";
 
 const originalDocument = Reflect.get(globalThis, "document");
 
@@ -12,6 +12,56 @@ afterEach(() => {
 });
 
 describe("chat API client", () => {
+  test("discard posts only the scoped uncertainty token and requires an explicit unknown-outcome acknowledgement", async () => {
+    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
+    resetAppBasePathForTests();
+    const calls: Array<{ url: string; method: string | undefined; body: unknown }> = [];
+    const client = new ChatApiClient(async (url, init) => {
+      calls.push({ url: String(url), method: init?.method, body: JSON.parse(String(init?.body)) });
+      return Response.json({ discarded: true, outcomeUnconfirmed: true });
+    });
+    expect(await client.discardUnconfirmedSteer("opencode:c/1", "pending/1", "discard-1", "token-1")).toEqual({ discarded: true, outcomeUnconfirmed: true });
+    expect(calls).toEqual([{ url: "/s/work/api/chat/conversations/opencode%3Ac%2F1/queue/pending%2F1/discard-unconfirmed", method: "POST", body: { requestId: "discard-1", uncertaintyId: "token-1" } }]);
+    for (const body of [null, {}, { removed: true }, { discarded: true }, { discarded: true, outcomeUnconfirmed: false }, { discarded: "true", outcomeUnconfirmed: true }, { discarded: true, outcomeUnconfirmed: true, cancelled: true }]) {
+      await expect(new ChatApiClient(async () => Response.json(body)).discardUnconfirmedSteer("c", "m", "r", "u")).rejects.toBeInstanceOf(ChatTransportError);
+    }
+  });
+  test("native side answers use qualified base paths and closed responses without retry", async () => {
+    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
+    resetAppBasePathForTests();
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const client = new ChatApiClient((async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return Response.json({ text: "Side answer" });
+    }) as typeof fetch);
+    expect(await client.generate("opencode:c/1", "side", "Why?")).toEqual({ text: "Side answer" });
+    expect(calls).toEqual([{ url: "/s/work/api/chat/conversations/opencode%3Ac%2F1/aside", body: { requestId: "side", question: "Why?" } }]);
+    for (const body of [{ text: 1 }, { text: "answer", history: true }, {}]) {
+      await expect(new ChatApiClient(async () => Response.json(body)).generate("opencode:c", "side", "Why?")).rejects.toBeInstanceOf(ChatTransportError);
+    }
+  });
+  test("automatic background outcomes preserve accepted primary fields on prompt and delivery actions", async () => {
+    for (const automaticBackground of ["not-needed", "accepted", "unavailable", "failed", "unknown"] as const) {
+      const client = new ChatApiClient(async () => Response.json({ messageId: "message", pending: true, delivery: "steer", configuration: {}, automaticBackground }));
+      expect(await client.prompt("opencode:parent", "request", "steer", undefined, undefined, undefined, undefined, "steer"))
+        .toEqual({ messageId: "message", pending: true, delivery: "steer", configuration: {}, automaticBackground });
+      expect(await client.changeDelivery("opencode:parent", "message", "switch", "steer")).toEqual({ messageId: "message", delivery: "steer", automaticBackground });
+      expect(await client.sendNow("opencode:parent", "message", "resume")).toEqual({ messageId: "message", delivery: "steer", automaticBackground });
+    }
+    const malformed = new ChatApiClient(async () => Response.json({ messageId: "message", delivery: "steer", automaticBackground: "finished-all-workers" }));
+    await expect(malformed.sendNow("opencode:parent", "message", "resume")).rejects.toBeInstanceOf(ChatTransportError);
+  });
+  test("explicit backgrounding uses the qualified base path and never replays an unknown response", async () => {
+    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
+    resetAppBasePathForTests();
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const client = new ChatApiClient((async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return Response.json({ error: "Outcome unknown", code: "operation_outcome_unknown" }, { status: 409 });
+    }) as typeof fetch);
+    await expect(client.backgroundBlockingWork("opencode:c/1", "r1")).rejects.toMatchObject({ status: 409, code: "operation_outcome_unknown" });
+    expect(calls).toEqual([{ url: "/s/work/api/chat/conversations/opencode%3Ac%2F1/background", body: { requestId: "r1" } }]);
+  });
   test("read deadlines release even fetchers and bodies that ignore cancellation", async () => {
     let signal: AbortSignal | null | undefined;
     const hanging = new ChatApiClient(async (_url, init) => {
@@ -89,6 +139,42 @@ describe("chat API client", () => {
       model: { providerId: "anthropic", modelId: "claude" },
     });
     expect(requests[6]!.init?.method).toBe("PATCH");
+  });
+
+  test("sends a delivery with a prompt, switches and sends pending messages now, and carries the already-delivered code (opencode-v2-steering)", async () => {
+    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
+    resetAppBasePathForTests();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = new ChatApiClient((async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init });
+      if (String(url).endsWith("/prompts")) return Response.json({ messageId: "msg_1", pending: true, delivery: "steer", configuration: {} }, { status: 202 });
+      if (String(url).endsWith("/send-now")) return Response.json({ messageId: "msg_2", delivery: "steer" });
+      if (String(url).includes("/queue/late")) return Response.json({ error: "the message was already delivered", code: "steer-already-delivered" }, { status: 409 });
+      return Response.json({ messageId: "held-9", delivery: "queue" });
+    }) as typeof fetch);
+    expect(await client.prompt("c/1", "r1", "steer this", undefined, undefined, undefined, undefined, "steer")).toEqual({ messageId: "msg_1", pending: true, delivery: "steer", configuration: {} });
+    expect(JSON.parse(requests[0]!.init!.body as string)).toEqual({ requestId: "r1", text: "steer this", delivery: "steer" });
+    expect(await client.changeDelivery("c/1", "msg_1", "r2", "queue")).toEqual({ messageId: "held-9", delivery: "queue" });
+    expect(requests[1]).toMatchObject({ url: "/s/work/api/chat/conversations/c%2F1/queue/msg_1", init: { method: "PATCH" } });
+    expect(JSON.parse(requests[1]!.init!.body as string)).toEqual({ requestId: "r2", delivery: "queue" });
+    expect(await client.sendNow("c/1", "held-9", "r3")).toEqual({ messageId: "msg_2", delivery: "steer" });
+    expect(requests[2]).toMatchObject({ url: "/s/work/api/chat/conversations/c%2F1/queue/held-9/send-now", init: { method: "POST" } });
+    expect(JSON.parse(requests[2]!.init!.body as string)).toEqual({ requestId: "r3" });
+    const late = await client.removeQueued("c/1", "late", "r4").catch(error => error as ChatTransportError);
+    expect(late).toBeInstanceOf(ChatTransportError);
+    expect(late).toMatchObject({ status: 409, code: "steer-already-delivered" });
+  });
+
+  test("requires a removal acknowledgement before editing can restore withdrawn input", async () => {
+    for (const value of [null, {}, { removed: "true" }, { removed: false }]) {
+      const client = new ChatApiClient(async () => Response.json(value));
+      const error = await client.removeQueued("one", "native-original", "request").catch(error => error);
+      expect(error).toBeInstanceOf(ChatTransportError);
+      expect(error.status).toBeUndefined();
+      expect(error.message).toContain("invalid removal acknowledgement");
+    }
+    const client = new ChatApiClient(async () => Response.json({ removed: true }));
+    expect(await client.removeQueued("one", "native-original", "request")).toEqual({ removed: true });
   });
 
   test("posts reversible-history receipts through the base path and validates their results", async () => {
@@ -184,7 +270,7 @@ describe("chat API client", () => {
     expect(channel.entries[0]!.closed).toBe(true);
   });
 
-  test("a topic resync detaches the subscription and hands the owner the child's reason", () => {
+  test.each(["retention-gap", "conversation-rewritten"] as const)("a %s topic resync detaches the subscription and hands the owner the child's reason", reason => {
     const channel = new FakeChannel();
     const client = new ChatApiClient(fetch, () => channel);
     const reasons: unknown[] = [];
@@ -193,14 +279,35 @@ describe("chat API client", () => {
       resync: reason => reasons.push(reason?.reason ?? null),
       error: () => {},
     });
-    channel.entries[0]!.consumer.resync?.({ generation: "g", sequence: 0, conversationId: "c1", type: "resync", reason: "retention-gap" }, 1);
-    expect(reasons).toEqual(["retention-gap"]);
+    channel.entries[0]!.consumer.resync?.({ generation: "g", sequence: 0, conversationId: "c1", type: "resync", reason }, 1);
+    expect(reasons).toEqual([reason]);
     expect(channel.entries[0]!.closed).toBe(true);
 
     // A resync with no usable payload still resyncs.
     client.stream("c2", "cursor-1", { event: () => {}, resync: reason => reasons.push(reason ?? null), error: () => {} });
     channel.entries[1]!.consumer.resync?.(undefined, 1);
-    expect(reasons).toEqual(["retention-gap", null]);
+    expect(reasons).toEqual([reason, null]);
+  });
+
+  test("conversation-rewritten recovery reads a snapshot and reattaches from its cursor without a mutation", async () => {
+    const channel = new FakeChannel();
+    const reads: Array<{ url: string; method: string }> = [];
+    const client = new ChatApiClient(async (url, init) => {
+      reads.push({ url: String(url), method: init?.method ?? "GET" });
+      return Response.json(snapshot());
+    }, () => channel);
+    let recovery: Promise<void> | undefined;
+    let data = 0;
+    const handlers = { event: () => { data += 1; }, error: () => {}, resync: () => {
+      recovery = client.snapshot("c/1").then(current => { client.stream("c/1", current.cursor, handlers); });
+    } };
+    client.stream("c/1", "old-cursor", handlers);
+    channel.entries[0]!.consumer.resync?.({ generation: "g", sequence: 10, conversationId: "c/1", type: "resync", reason: "conversation-rewritten" }, 1);
+    await recovery;
+    expect(reads).toEqual([{ url: "/api/chat/conversations/c%2F1?limit=50", method: "GET" }]);
+    expect(channel.entries[0]!.closed).toBe(true);
+    expect(channel.entries[1]!.cursor).toBe("cursor");
+    expect(data).toBe(0);
   });
 
   test("the first drop is silent, a persisting outage announces, and the topic's ready clears it", () => {

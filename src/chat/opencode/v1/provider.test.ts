@@ -1,8 +1,208 @@
 import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
+import type { SessionIdle, SessionNextTextEnded, SessionStatus2 } from "@opencode-ai/sdk/v2/types";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { normalizePersistedConversationConfiguration, quietCancellation, resolveNewConversationConfiguration, OpenCodeV1Provider, stableProviderId } from "./provider";
 import { ReversibleHistoryTargetError } from "../../provider";
+import { ChatAdapter } from "../../adapter";
+import { MultiAgentChatService } from "../../agents";
+import { VisualReadError, VisualStore } from "../../visual-store";
+import type { WorkspaceChatService } from "../../service";
+import type { AssistantMessageItem, ChatEvent, ConversationItem } from "../../types";
+import type { NormalizedProviderEvent } from "../../provider";
+import { isVisualTurnLive, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity } from "../normalization-types";
+
+// Acknowledgement is at the raw source consumer, before merge deduplication.
+// Normalized-event acknowledgements below separately fence projection commits.
+function controlledEventSource() {
+  const queued: Array<{ value: Record<string, unknown>; consumed: () => void }> = [];
+  let wake = Promise.withResolvers<void>();
+  let ended = false;
+  return {
+    send(value: Record<string, unknown>): Promise<void> {
+      const consumed = Promise.withResolvers<void>();
+      queued.push({ value, consumed: consumed.resolve }); wake.resolve();
+      return consumed.promise;
+    },
+    close() { ended = true; wake.resolve(); },
+    stream: { async *[Symbol.asyncIterator]() {
+      while (!ended || queued.length) {
+        const next = queued.shift();
+        if (next) { yield next.value; next.consumed(); continue; }
+        await wake.promise; wake = Promise.withResolvers<void>();
+      }
+    } },
+  };
+}
+
+test.each([
+  { gap: "ordered", completion: "status-first" }, { gap: "blocked-capture", completion: "status-first" },
+  { gap: "ordered", completion: "idle-first-after-reconnect" }, { gap: "blocked-capture", completion: "idle-first-after-reconnect" },
+  { gap: "ordered", completion: "idle-first-with-missing-alias" }, { gap: "blocked-capture", completion: "idle-first-with-missing-alias" },
+  { gap: "ordered", completion: "failed" },
+] as const)("source-local V1 idle proof survives dedup and a $gap gap without consuming the new turn retry ($completion)", async ({ gap, completion }) => {
+  const root = path.join(os.tmpdir(), "opencode");
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(path.join(root, "v1-idle-alias-"));
+  const sessionID = "ses_alias";
+  let native = controlledEventSource(), classic = controlledEventSource();
+  const rawMessages: Array<Record<string, unknown>> = [];
+  const client = {
+    session: {
+      get: async () => ({ data: { ...session(sessionID), directory: "/workspace", metadata: { "uatu.transport": "compatibility" } } }),
+      messages: async () => ({ data: rawMessages }),
+    },
+    event: { subscribe: async () => ({ stream: classic.stream }) },
+    v2: {
+      session: {
+        get: async () => ({ error: {}, response: { status: 404 } }),
+        messages: async () => ({ data: { data: [], cursor: {} } }),
+      },
+      event: { subscribe: async () => ({ stream: native.stream }) },
+    },
+  } as unknown as OpencodeClient;
+  const provider = new OpenCodeV1Provider(client, "/workspace");
+  const adapter = new ChatAdapter({ provider, workspacePath: "/workspace", generation: "g", coalesceWindowMs: 0 });
+  const projection = adapter.projectionForTests(sessionID);
+  let nextEvent: ReturnType<typeof Promise.withResolvers<NormalizedProviderEvent>> | undefined;
+  const consume = async () => {
+    for await (const event of provider.events(new AbortController().signal)) {
+      for (const update of event.updates) projection.apply(update);
+      const waiting = nextEvent; nextEvent = undefined; waiting?.resolve(event);
+    }
+  };
+  let consuming = consume();
+  void consuming.catch(error => { nextEvent?.reject(error); });
+  const send = async (source: ReturnType<typeof controlledEventSource>, event: Record<string, unknown>, duplicate = false) => {
+    if (duplicate) { await source.send(event); return; }
+    const waiting = Promise.withResolvers<NormalizedProviderEvent>(); nextEvent = waiting;
+    await source.send(event);
+    return waiting.promise;
+  };
+  const status = (id: string, type: "idle" | "busy") => ({ id, type: "session.status" as const, data: { sessionID, status: { type } } } satisfies SessionStatus2);
+  const mirror = (event: SessionStatus2) => ({ id: event.id, type: event.type, properties: event.data });
+  const idle = (id: string) => ({ id, type: "session.idle" as const, data: { sessionID } } satisfies SessionIdle);
+  const text = (id: string, timestamp: number): SessionNextTextEnded => ({ id: `event-${id}`, type: "session.next.text.ended", data: {
+    sessionID, timestamp, assistantMessageID: `message-${id}`, textID: id, text: `![${id}](${id}.png)`,
+  } });
+  const persist = (id: string, timestamp: number) => rawMessages.push({ info: { id: `message-${id}`, role: "assistant", time: { created: timestamp } }, parts: [{ id, type: "text", text: `![${id}](${id}.png)`, time: { start: timestamp, end: timestamp + 1 } }] });
+  const readEntered = Promise.withResolvers<void>(), releaseRead = Promise.withResolvers<void>();
+  const original = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  let available = false;
+  const reads: Record<string, number> = {};
+  const store = new VisualStore("/workspace", directory);
+  store.setReader(async source => {
+    reads[source] = (reads[source] ?? 0) + 1;
+    if (gap === "blocked-capture" && source === "current.png" && reads[source] === 1) { readEntered.resolve(); await releaseRead.promise; }
+    if (!available) throw new VisualReadError(true);
+    return original;
+  });
+  const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: async () => {} } as unknown as WorkspaceChatService;
+  const router = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+  let attach: Awaited<ReturnType<MultiAgentChatService["subscribe"]>> | undefined;
+  let restarted: MultiAgentChatService | undefined;
+  let draining: Promise<ChatEvent[]> | undefined;
+  const answer = (page: { items: ConversationItem[] }, id: string) => page.items.find(item => item.id === `part:${id}`) as AssistantMessageItem;
+  try {
+    attach = await router.subscribe(`opencode:${sessionID}`);
+    const iterator = attach.events[Symbol.asyncIterator]();
+    const drain = async () => {
+      const marker = projection.replay.publish({ type: "conversation.configuration", configuration: {} });
+      const received: ChatEvent[] = [];
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) throw new Error("source ended before projection barrier");
+        if (next.value.type === marker.type && next.value.sequence === marker.sequence) return received;
+        received.push(next.value);
+      }
+    };
+    // Payloads follow the installed 1.19.5 SDK contracts. Upstream status.ts
+    // publishes Status(idle), then Idle; event-v2-bridge.ts preserves event.id
+    // on the compatibility copy. Both source consumers must observe the first
+    // frame, including the copy that mergeProviderEvents will deduplicate.
+    // https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/status.ts
+    // https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/event-v2-bridge.ts
+    await send(native, status("old-busy", "busy"));
+    await send(classic, mirror(status("old-busy", "busy")), true);
+    persist("old", 1); await send(native, text("old", 1)); await drain();
+    await send(native, status("old-end", "idle")); await drain();
+    await send(classic, mirror(status("old-end", "idle")), true);
+    expect(reads).toEqual({ "old.png": 2 });
+    await send(native, status("new-busy", "busy"));
+    persist("current", 10); await send(native, text("current", 10));
+    draining = drain();
+    if (gap === "blocked-capture") await readEntered.promise; else await draining;
+    // The lagging source has NOT observed new-busy yet. Its idle alias belongs
+    // to an idle status already projected, not to the new pending image.
+    const alias = await send(classic, { id: "old-alias", type: "session.idle", properties: { sessionID } });
+    const aliasUpdate = alias!.updates.find(update => update.kind === "status")!;
+    expect((aliasUpdate as typeof aliasUpdate & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBe(true);
+    releaseRead.resolve(); await draining;
+    const aliased = await drain();
+    const aliasStatus = aliased.find(event => event.type === "conversation.status")!;
+    expect(JSON.parse(JSON.stringify(aliasStatus))).toMatchObject({ type: "conversation.status", status: "completed" });
+    expect(isVisualTurnLive(aliasStatus as Extract<ChatEvent, { type: "conversation.status" }> & OpenCodeCompletionAlias)).toBe(true);
+    expect(aliased.some(event => event.type === "resync")).toBe(false);
+    expect(reads).toEqual({ "old.png": 2, "current.png": 1 });
+    // Read behind the queued alias too, before any running-resume frame. The
+    // snapshot must preserve live visual evidence despite public completed.
+    const behind = await router.history(`opencode:${sessionID}`);
+    expect(answer(behind, "current").visuals?.[0]?.status).toBe("pending");
+    expect(answer(behind, "old").visuals?.[0]?.status).toBe("unavailable");
+    await send(classic, mirror(status("new-busy", "busy")), true);
+    await send(native, status("resume", "busy")); await drain();
+    expect(reads).toEqual({ "old.png": 2, "current.png": 1 });
+    available = true;
+    if (completion === "idle-first-after-reconnect" || completion === "idle-first-with-missing-alias") {
+      // Actual source startup can fall between Status and Idle publication.
+      // A fresh source with no witnessed predecessor cannot claim an alias.
+      if (completion === "idle-first-after-reconnect") {
+        native.close(); classic.close(); await consuming;
+        native = controlledEventSource(); classic = controlledEventSource();
+        consuming = consume(); void consuming.catch(error => { nextEvent?.reject(error); });
+      }
+      // The native source never received old-alias. Its witnessed new-busy
+      // must retire the previous idle-status proof, not save a retry credit
+      // that could swallow this idle-first completion if a frame is absent.
+      const genuine = await send(native, idle("genuine-idle-first"));
+      const update = genuine!.updates.find(update => update.kind === "status")!;
+      expect((update as typeof update & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBeUndefined();
+    } else if (completion === "failed") {
+      await send(native, { id: "terminal-error", type: "session.error", data: { sessionID, error: { message: "Failed after file creation" } } });
+    } else {
+      await send(native, status("new-end", "idle"));
+      await send(classic, mirror(status("new-end", "idle")), true);
+    }
+    const terminal = await drain();
+    expect(terminal.filter(event => event.type === "resync")).toHaveLength(1); // No future event needed for the retry.
+    expect(reads).toEqual({ "old.png": 2, "current.png": 2 });
+    const completed = await router.history(`opencode:${sessionID}`);
+    const ready = answer(completed, "current");
+    expect(ready.visuals?.[0]?.status).toBe("ready");
+    expect((await router.resolveVisual(ready.visuals![0]!.id!))?.bytes).toEqual(original);
+    if (completion === "status-first") {
+      await send(native, idle("new-alias"));
+      await send(classic, { id: "new-alias", type: "session.idle", properties: { sessionID } }, true);
+      expect((await drain()).some(event => event.type === "resync")).toBe(false);
+    }
+    const reloadedStore = new VisualStore("/workspace", directory);
+    reloadedStore.setReader(async () => { throw new Error("reload must not capture future-turn bytes"); });
+    restarted = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: reloadedStore, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    const reloaded = await restarted.history(`opencode:${sessionID}`);
+    expect(answer(reloaded, "current").visuals).toEqual(ready.visuals);
+    expect(answer(reloaded, "old").visuals?.[0]?.status).toBe("unavailable");
+    expect((await restarted.resolveVisual(ready.visuals![0]!.id!))?.bytes).toEqual(original);
+    expect(reads).toEqual({ "old.png": 2, "current.png": 2 });
+  } finally {
+    releaseRead.resolve(); native.close(); classic.close();
+    await draining?.catch(() => undefined); await consuming.catch(() => undefined);
+    attach?.events.cancel(); await restarted?.dispose(); await router.dispose(); await adapter.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 describe("OpenCode v2 identity policy", () => {
   test("declares durable conversation rename support", () => {
@@ -13,6 +213,10 @@ describe("OpenCode v2 identity policy", () => {
     expect(provider.describe().capabilities).not.toContain("background-tasks");
     expect(provider.describe().capabilities).not.toContain("scheduled-wakeups");
     expect(provider.describe().capabilities).not.toContain("custom-model-id");
+    // Steering and Send now belong to the 2.x inbox and to Claude Code; the
+    // deprecated 1.x stack is left exactly as it was (opencode-v2-steering D2).
+    expect(provider.describe().capabilities).not.toContain("steering");
+    expect(provider.describe().capabilities).not.toContain("send-now");
   });
 
   test("normalizes native and compatibility persisted configuration without inventing fields", () => {
@@ -164,7 +368,7 @@ describe("OpenCode v2 identity policy", () => {
           all: [
             { id: "unused", name: "Unused", models: { hidden: { id: "hidden", name: "Hidden" } } },
             { id: "openai", name: "OpenAI", models: { sol: { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", variants: { high: {}, xhigh: {} }, limit: { context: 200000 } } } },
-            { id: "opencode", name: "OpenCode", models: { free: { id: "free", name: "Free" } } },
+            { id: "opencode", name: "OpenCode", models: { free: { id: "free", name: "Free" }, terra: { id: "gpt-5.5", name: "GPT-5.5", limit: { context: 400000, input: 272000, output: 128000 } } } },
           ],
         } }),
       },
@@ -174,6 +378,9 @@ describe("OpenCode v2 identity policy", () => {
     expect(await provider.listModels()).toEqual([
       { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol", variants: ["high", "xhigh"], contextLimit: 200000, contextWindow: { source: "catalog", freshness: "current" } },
       { selection: { providerId: "opencode", modelId: "free" }, provider: "OpenCode", name: "Free" },
+      // The prompt limit the server sends (absent from the 1.x SDK type) is
+      // the window; the larger total capacity rides beside it.
+      { selection: { providerId: "opencode", modelId: "gpt-5.5" }, provider: "OpenCode", name: "GPT-5.5", contextLimit: 272000, contextWindow: { source: "catalog", freshness: "current", kind: "effective", capacity: 400000 } },
     ]);
     // The variants capability is declared now that listModels reports variants.
     expect(provider.describe().capabilities).toContain("variants");
@@ -721,6 +928,54 @@ describe("history across both OpenCode message stores", () => {
 
   const classic = (id: string, created: number) => ({ info: { id, role: "user", time: { created } }, parts: [] });
   const modern = (id: string, created: number) => ({ id, type: "user", time: { created }, text: "hi" });
+
+  test("classic parent users and API finish reasons do not invent persisted execution boundaries", async () => {
+    const reply = (id: string, parentID: string, created: number, finish: string) => ({
+      info: { id, role: "assistant", parentID, time: { created, completed: created + 1 }, finish },
+      parts: [{ id: `${id}-text`, type: "text", text: "![Image](later.png)" }],
+    });
+    const legacy = [classic("prompt", 1), reply("tool-step", "prompt", 2, "tool-calls"),
+      classic("steer", 4), reply("steered-step", "steer", 5, "tool-calls"), reply("stop", "steer", 7, "stop")];
+    const provider = new OpenCodeV1Provider(client([{ data: [] }], legacy), "/workspace");
+    const page = await provider.listMessages("ses_history", { limit: 1 });
+    expect(page.items.find(item => item.id === "part:stop-text")).toMatchObject({ completedAt: 8 });
+    expect(page.completeItems?.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+    const older = await provider.listMessages("ses_history", { limit: 2, cursor: page.nextCursor });
+    expect(older.items.find(item => item.id === "part:steered-step-text")).toMatchObject({ completedAt: 6 });
+    expect(older.items.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+    expect((await provider.listMessages("ses_history", { limit: 100 })).accounting).toEqual([]);
+  });
+
+  test("cold classic completed tool-call history keeps the conservative sealed fallback through history and attach", async () => {
+    const root = path.join(os.tmpdir(), "opencode");
+    await mkdir(root, { recursive: true });
+    const directory = await mkdtemp(path.join(root, "classic-execution-fallback-"));
+    // This is the known 1.x limitation, not a claim that parentID identifies
+    // the active execution: even a current completed API step stays terminal
+    // on a cold read without native execution-end evidence.
+    const legacy = [classic("prompt", 1), {
+      info: { id: "tool-step", role: "assistant", parentID: "prompt", time: { created: 2, completed: 3 }, finish: "tool-calls" },
+      parts: [{ id: "tool-text", type: "text", text: "![Image](later.png)" }],
+    }, classic("steer", 4)];
+    const provider = new OpenCodeV1Provider(client([{ data: [] }], legacy), "/workspace");
+    const adapter = new ChatAdapter({ provider, workspacePath: "/workspace" });
+    adapter.projectionForTests("ses_history").statusUpdate("running");
+    let available = false, reads = 0;
+    const store = new VisualStore("/workspace", directory);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]); });
+    const service = { history: adapter.history.bind(adapter), subscribe: adapter.subscribe.bind(adapter), dispose: async () => {} } as unknown as WorkspaceChatService;
+    const router = new MultiAgentChatService({ workspacePath: "/workspace", visualStore: store, agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service }] });
+    try {
+      const first = await router.history("opencode:ses_history");
+      const answer = first.items.find(item => item.id === "part:tool-text") as AssistantMessageItem;
+      expect(answer.visuals?.[0]?.status).toBe("unavailable");
+      available = true;
+      const attach = await router.subscribe("opencode:ses_history"); attach.events.cancel();
+      expect((attach.snapshot.items.find(item => item.id === answer.id) as AssistantMessageItem).visuals).toEqual(answer.visuals);
+      expect((await router.history("opencode:ses_history")).items.find(item => item.id === answer.id)).toMatchObject({ visuals: answer.visuals });
+      expect(reads).toBe(1); // Never reinterpret parent/steer rows to capture later bytes.
+    } finally { await router.dispose(); await adapter.dispose(); await rm(directory, { recursive: true, force: true }); }
+  });
 
   test("reads the classic store when the v2 store is empty for a session", async () => {
     const provider = new OpenCodeV1Provider(client([{ data: [] }], [classic("msg_b", 2), classic("msg_a", 1)]), "/workspace");

@@ -1,0 +1,64 @@
+{
+  "narrow": {
+    "statement": {
+      "text": "Q1 — Priorities optionalBefore I continue refactoring the re",
+      "lines": 8,
+      "scrollWidth": 338,
+      "clientWidth": 338
+    },
+    "statementStyle": {
+      "srOnly": false,
+      "element": "legend"
+    },
+    "clippingAncestor": null,
+    "tabs": [
+      {
+        "label": "Q1 — Priorities, answered",
+        "lines": 1,
+        "marker": "none"
+      },
+      {
+        "label": "Q2 — Priorities, answered",
+        "lines": 1,
+        "marker": "none"
+      },
+      {
+        "label": "Q3 — Priorities, answered",
+        "lines": 1,
+        "marker": "none"
+      },
+      {
+        "label": "Q4 — Priorities, answered",
+        "lines": 1,
+        "marker": "none"
+      }
+    ],
+    "options": [
+      {
+        "option": "Timeline renderingHow to",
+        "inputType": "radio",
+        "indicatorVisible": true
+      },
+      {
+        "option": "Usage readoutsToken and ",
+        "inputType": "radio",
+        "indicatorVisible": true
+      },
+      {
+        "option": "Terminal paletteANSI col",
+        "inputType": "radio",
+        "indicatorVisible": true
+      },
+      {
+        "option": "Find in surface⌘F matchi",
+        "inputType": "radio",
+        "indicatorVisible": true
+      },
+      {
+        "option": "Type your own answer",
+        "inputType": "radio",
+        "indicatorVisible": true
+      }
+    ]
+  }
+}

@@ -34,9 +34,13 @@ import {
 } from "./layout";
 import { renderImagePreview } from "./image";
 import { imageSources, refreshImageRevisions } from "./image-revision";
+import { observePreviewSvgImages, preparePreviewHtml } from "./svg-images";
 import { canEmbedImages, createEmbeddedImagesLearner, recordEmbeddedImages, type EmbeddedImagesLookup } from "./embedded-images";
 import { fetchWithinBudget } from "../shell/bounded-fetch";
 import { isViewableImageName } from "../shared/viewable-image";
+import { mediaKind } from "../shared/media";
+import { renderMediaPreview, releaseMediaPreview } from "../media/preview";
+import { documentIndex } from "../shell/document-state";
 import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
 import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
@@ -197,6 +201,7 @@ export async function applyDocumentPayload(
     );
   }
   if (!isCurrent()) return;
+  releaseMediaPreview();
   // Common header / title updates are payload-driven and identical across
   // single and split layouts.
   setPreviewMode({ kind: "document" });
@@ -271,8 +276,9 @@ export async function renderSinglePayload(
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
-  previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
+  previewElement.replaceChildren(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(payload.html)));
   refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
+  observePreviewSvgImages(previewElement);
   // For markdown / asciidoc, mount the inline layout chooser above the
   // preview body so users can switch between Single / Side by side /
   // Stacked from beside the content — same pattern as the diff view's
@@ -401,11 +407,12 @@ export async function renderSplitPayloads(
   const renderedPane = document.createElement("div");
   renderedPane.className = "preview-pane preview-pane-rendered markdown-body";
   renderedPane.setAttribute("data-split-side", "rendered");
-  renderedPane.innerHTML = cardHtml + replaceMermaidCodeBlocks(renderedPayload.html);
+  renderedPane.append(preparePreviewHtml(cardHtml + replaceMermaidCodeBlocks(renderedPayload.html)));
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
   refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
+  observePreviewSvgImages(previewElement);
 
   attachMetadataCardToggleListener(renderedPane);
   // Lazy install (resolves on setup, diagrams stream in) — see the
@@ -501,6 +508,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // Skipping the /api/document fetch also avoids the misleading 4xx error
   // path that used to surface as "The selected file no longer exists."
   const doc = findDocumentById(documentId);
+  releaseMediaPreview();
   if (!doc) {
     documentLoadRetry.settle();
     renderUnavailableDocument(documentId);
@@ -510,7 +518,9 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   if (doc.kind === "binary") {
     documentLoadRetry.settle();
     syncFileFactsStrip({ kind: "hidden" });
-    if (isViewableImageName(doc.name)) {
+    if (mediaKind(doc.name)) {
+      renderMediaPreview(doc, documentIndex.epoch);
+    } else if (isViewableImageName(doc.name)) {
       renderImagePreview(doc);
     } else {
       renderBinaryUnavailable(doc);

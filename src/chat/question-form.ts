@@ -52,18 +52,23 @@ export function syncQuestionForm(form: HTMLFormElement): void {
   const panels = [...form.querySelectorAll<HTMLElement>("[data-question-panel]")];
   if (panels.length === 0) return;
   const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
-  // An optional question counts as answered when left empty.
-  const answered = panels.map(panel => panelAnswers(panel).length > 0 || panel.dataset.questionOptional === "true");
+  // A tab's tick states a real choice: an optional question left empty is
+  // answerable as-is, but a tick for having made no selection would read as
+  // if the form had been answered for you (GitHub #520 — every step of an
+  // all-optional form wore a tick from the start).
+  const selections = panels.map(panel => panelAnswers(panel).length > 0);
   form.querySelectorAll<HTMLButtonElement>("[data-question-tab]").forEach((tab, index) => {
     tab.setAttribute("aria-selected", String(index === activeIndex));
     tab.classList.toggle("is-active", index === activeIndex);
-    tab.classList.toggle("is-answered", answered[index] === true);
+    tab.classList.toggle("is-answered", selections[index] === true);
   });
   const primary = form.querySelector<HTMLButtonElement>("[data-question-primary]");
   if (!primary) return;
+  // The primary button never disables: an unanswered step is caught by the
+  // submit path, which jumps to the missing panel and says what is still
+  // owed — a greyed button named nobody and could not even be asked why.
   const last = activeIndex === panels.length - 1;
   primary.textContent = last ? "Answer" : "Next";
-  primary.disabled = last ? answered.some(value => !value) : !answered[activeIndex];
 }
 
 export function showQuestionPanel(form: HTMLFormElement, index: number): void {

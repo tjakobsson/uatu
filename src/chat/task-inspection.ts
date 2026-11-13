@@ -11,6 +11,7 @@
 // Timers are injected so the lifecycle can be tested without waiting.
 
 import { formatTokens } from "./usage";
+import { workerCanStop, workerExecutionClockRuns, workerState, workerStateLabel } from "./worker-state";
 import type { BackgroundTaskItem, BackgroundTaskOutput, BackgroundTaskUsage, ConversationItem } from "./types";
 
 /** Where selecting a running task's row leads. */
@@ -26,9 +27,20 @@ export type TaskInspection =
  * taken a timeline row.
  */
 export function taskInspection(task: BackgroundTaskItem): TaskInspection | undefined {
-  if (task.status !== "running") return undefined;
   if (task.childConversationId) return { view: "transcript", conversationId: task.childConversationId };
+  if (task.status !== "running" && !task.outputFile) return undefined;
   return { view: "output" };
+}
+
+/** Historical children are not picker entries; their task link survives settlement. */
+export function taskForChild(items: readonly ConversationItem[], childId: string, sourceItemId?: string): BackgroundTaskItem | undefined {
+  const tasks = items.filter((item): item is BackgroundTaskItem => item.type === "background_task" && item.childConversationId === childId);
+  if (sourceItemId) {
+    const exact = tasks.find(item => item.id === sourceItemId || sourceItemId === `tool:${item.toolUseId}`
+      || item.toolUseIds?.some(call => sourceItemId === `tool:${call}`));
+    if (exact) return exact;
+  }
+  return tasks.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))[0];
 }
 
 /** The running task that a child transcript belongs to, if any. */
@@ -36,8 +48,9 @@ export function runningTaskForChild(items: readonly ConversationItem[], conversa
   return items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.status === "running" && item.childConversationId === conversationId);
 }
 
-export function taskById(items: readonly ConversationItem[], taskId: string): BackgroundTaskItem | undefined {
-  return items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === taskId);
+export function taskById(items: readonly ConversationItem[], taskId: string, itemId?: string): BackgroundTaskItem | undefined {
+  const tasks = items.filter((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === taskId);
+  return itemId === undefined ? tasks.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))[0] : tasks.find(item => item.id === itemId);
 }
 
 /** "0:07" / "1:05" / "1:02:03" — a clock, since the strip is watched rather than read once. */
@@ -49,23 +62,28 @@ export function formatTaskElapsed(ms: number): string {
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds % 60)}` : `${minutes}:${pad(seconds % 60)}`;
 }
 
-/** "13.1k tokens · 1 tool use", as the agent's progress reports it. */
-export function taskUsageLabel(usage: BackgroundTaskUsage): string {
-  const uses = usage.toolUses === 1 ? "1 tool use" : `${usage.toolUses} tool uses`;
-  return `${formatTokens(usage.totalTokens)} tokens · ${uses}`;
+/** "1 tool use" / "3 tool uses" — the count beside the token figure. */
+export function taskUsesLabel(usage: BackgroundTaskUsage): string {
+  return usage.toolUses === 1 ? "1 tool use" : `${usage.toolUses} tool uses`;
 }
 
-/** "finished · <summary>" / "failed" / "stopped": the strip's last line once the task settles. */
+/** "13.1k tokens · 1 tool use", as the agent's progress reports it. */
+export function taskUsageLabel(usage: BackgroundTaskUsage): string {
+  return `${formatTokens(usage.totalTokens)} tokens · ${taskUsesLabel(usage)}`;
+}
+
+/** Outcome only: the report body belongs to the canonical timeline result. */
 export function taskSettledLabel(task: BackgroundTaskItem): string {
-  const word = task.status === "completed" ? "finished" : task.status === "failed" ? "failed" : task.status === "stopped" ? "stopped" : "running";
-  const summary = task.summary?.trim();
-  return summary ? `${word} · ${summary}` : word;
+  return workerStateLabel(task.status, task.stateUncertain, task.activity);
 }
 
 // How often the output pane re-reads the tail while the task runs. The file
 // is what the model itself reads through TaskOutput, so a two-second cadence
 // keeps the view honest without a stream (design D7, non-goal: streaming).
 export const TASK_OUTPUT_REFRESH_MS = 2_000;
+
+/** Shell Stop removes the retained job, not just a possibly ended process. */
+export const SHELL_WORKER_STOP_WARNING = "Stopping also deletes this job’s saved record and output—even if it has already finished. Uatu may lose the final result, and the output won’t be available after reload. OpenCode may show “Failed” instead of “Cancelled”. Your project files are not deleted.";
 
 // A read that fails is not retried at the full cadence for as long as the
 // task runs: each consecutive failure doubles the wait, up to this cap, and
@@ -109,7 +127,7 @@ export type TaskInspectionOptions = {
   timers?: TaskInspectionTimers;
 };
 
-export type OpenTaskInspection = { conversationId: string; taskId: string; view: TaskInspection["view"] };
+export type OpenTaskInspection = { conversationId: string; taskId: string; itemId?: string; view: TaskInspection["view"] };
 
 export class TaskInspectionPanel {
   private readonly hosts: TaskInspectionHosts;
@@ -161,7 +179,7 @@ export class TaskInspectionPanel {
 
   /** Shows the panel for a task; `sync` then keeps it current. */
   show(link: OpenTaskInspection, task: BackgroundTaskItem | undefined, stopping = false): void {
-    if (this.current && (this.current.taskId !== link.taskId || this.current.view !== link.view)) this.close();
+    if (this.current && (this.current.conversationId !== link.conversationId || this.current.taskId !== link.taskId || this.current.itemId !== link.itemId || this.current.view !== link.view)) this.close();
     this.current = link;
     this.following = true;
     this.outputFailures = 0;
@@ -183,20 +201,22 @@ export class TaskInspectionPanel {
    */
   sync(task: BackgroundTaskItem | undefined, stopping = false): void {
     if (!this.current) return;
+    const previousTask = this.task;
     const wasRunning = this.task?.status === "running";
     this.task = task;
     const running = task?.status === "running";
+    const clockRunning = task !== undefined && workerExecutionClockRuns(task);
     const signature = task
-      ? [task.taskId, task.status, task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
+      ? [task.id, task.taskId, task.childConversationId ?? "", task.outputFile ?? "", task.status, task.stateUncertain ? "uncertain" : "", JSON.stringify(task.activity), JSON.stringify(task.control), task.description, task.subagentType ?? "", task.progress ?? "", task.summary ?? "", task.usage ? `${task.usage.totalTokens}/${task.usage.toolUses}` : "", stopping ? "stopping" : ""].join("\u0001")
       : "";
     if (signature !== this.painted) {
       this.painted = signature;
-      this.paintStrip(task, stopping);
+      this.paintStrip(task, stopping, previousTask);
     }
-    if (running && this.elapsedTimer === null) {
+    if (clockRunning && this.elapsedTimer === null) {
       this.elapsedTimer = this.timers.setInterval(() => this.tickElapsed(), 1_000);
     }
-    if (!running && this.elapsedTimer !== null) {
+    if (!clockRunning && this.elapsedTimer !== null) {
       this.timers.clearInterval(this.elapsedTimer);
       this.elapsedTimer = null;
     }
@@ -231,15 +251,28 @@ export class TaskInspectionPanel {
     this.hosts.outputNote.hidden = true;
   }
 
-  private paintStrip(task: BackgroundTaskItem | undefined, stopping: boolean): void {
+  private paintStrip(task: BackgroundTaskItem | undefined, stopping: boolean, previousTask: BackgroundTaskItem | undefined): void {
     const strip = this.hosts.strip;
+    const document = strip.ownerDocument;
+    // Metadata can repaint a settled strip after modal focus restoration.
+    // Retain only the focused action's exact equivalent on this execution;
+    // a composer, modal, or another inspection never grants focus ownership.
+    const focused = document.activeElement;
+    const sameExecution = task && previousTask && task.id === previousTask.id && task.taskId === previousTask.taskId
+      && task.activity?.executionId === previousTask.activity?.executionId
+      && task.activity?.launchRef === previousTask.activity?.launchRef
+      && task.childConversationId === previousTask.childConversationId && task.outputFile === previousTask.outputFile;
+    const action = sameExecution && focused && strip.contains(focused)
+      ? focused.hasAttribute("data-task-result") ? "data-task-result" : focused.hasAttribute("data-stop-task") ? "data-stop-task" : null
+      : null;
+    const target = action ? focused?.getAttribute(action) : null;
     if (!task) {
       strip.hidden = true;
       strip.replaceChildren();
       return;
     }
     strip.dataset.taskId = task.taskId;
-    strip.dataset.taskState = task.status === "running" ? "running" : "settled";
+    strip.dataset.taskState = task.status !== "running" ? "settled" : workerExecutionClockRuns(task) ? "running" : "unresolved";
     strip.classList.toggle("is-settled", task.status !== "running");
     const line = document.createElement("div");
     line.className = "chat-drilldown-task-line";
@@ -257,19 +290,28 @@ export class TaskInspectionPanel {
     // A foreground run (a typed command's) is the turn's own work: the turn's
     // Cancel stops it, and the per-task stop the CLI offers is for background
     // work only, so the strip offers none.
-    if (task.status === "running" && task.foreground !== true) {
+    const canStop = workerCanStop(task);
+    if (task.status === "running" && task.foreground !== true && (canStop || task.control !== undefined && workerState(task.status, task.stateUncertain, task.activity) === "working")) {
       const stop = document.createElement("button");
       stop.type = "button";
       stop.className = "chat-task-stop";
       stop.dataset.stopTask = task.taskId;
-      stop.textContent = stopping ? "Stopping…" : "Stop";
-      stop.disabled = stopping;
-      stop.setAttribute("aria-label", `Stop ${task.description}`);
+      stop.dataset.stopItem = task.id;
+      const nativeWorker = task.taskType === "agent" || task.taskType === "shell";
+      stop.textContent = stopping ? "Stopping…" : nativeWorker ? "Stop worker" : "Stop";
+      stop.disabled = stopping || !canStop;
+      stop.setAttribute("aria-label", nativeWorker ? `Stop worker: ${task.description}` : `Stop ${task.description}`);
       line.append(stop);
     }
     const facts = document.createElement("div");
     facts.className = "chat-drilldown-task-facts";
-    if (task.status === "running") {
+    if (task.status === "running" && !workerExecutionClockRuns(task)) {
+      facts.textContent = workerStateLabel(task.status, task.stateUncertain, task.activity);
+      if (task.activity?.kind === "ended" && task.activity.endedAt !== undefined) {
+        facts.append(` · Ended ${new Date(task.activity.endedAt).toLocaleString()}`);
+      }
+    } else if (task.status === "running") {
+      if (task.activity) facts.append("Working · ");
       const elapsed = document.createElement("span");
       elapsed.className = "chat-drilldown-task-elapsed";
       elapsed.dataset.taskElapsed = "";
@@ -285,6 +327,10 @@ export class TaskInspectionPanel {
         const usage = document.createElement("span");
         usage.className = "chat-drilldown-task-usage";
         usage.textContent = taskUsageLabel(task.usage);
+        // The compact figure shortcuts a billion-scale run to "1.0B" —
+        // nearly 50M tokens of rounding — so the exact count stays one
+        // hover away, the pairing every other token figure keeps.
+        usage.title = `${task.usage.totalTokens.toLocaleString()} tokens · ${taskUsesLabel(task.usage)}`;
         facts.append(usage);
       }
     } else {
@@ -292,14 +338,36 @@ export class TaskInspectionPanel {
       settled.className = "chat-drilldown-task-settled";
       settled.textContent = taskSettledLabel(task);
       facts.append(settled);
+      const result = document.createElement("button");
+      result.type = "button";
+      result.className = "chat-secondary-button";
+      result.dataset.taskResult = task.id;
+      result.textContent = "View worker result";
+      facts.append(result);
     }
     strip.replaceChildren(line, facts);
+    if (canStop && task.taskType === "shell") {
+      const warning = document.createElement("p");
+      warning.className = "chat-drilldown-task-control-reason";
+      warning.textContent = SHELL_WORKER_STOP_WARNING;
+      strip.append(warning);
+    }
+    if (task.status === "running" && !canStop && task.foreground !== true) {
+      const reason = document.createElement("p");
+      reason.className = "chat-drilldown-task-control-reason";
+      reason.textContent = task.control?.reason ?? "Stop unavailable: this execution's control proof is unverified";
+      strip.append(reason);
+    }
     strip.hidden = false;
+    if (action && target && document.activeElement === document.body && strip.getClientRects().length > 0) {
+      const equivalent = strip.querySelector<HTMLButtonElement>(`[${action}]`);
+      if (equivalent?.getAttribute(action) === target && !equivalent.disabled) equivalent.focus({ preventScroll: true });
+    }
   }
 
   private tickElapsed(): void {
     const task = this.task;
-    if (!task || task.status !== "running") return;
+    if (!task || !workerExecutionClockRuns(task)) return;
     const readout = this.hosts.strip.querySelector<HTMLElement>("[data-task-elapsed]");
     if (readout) readout.textContent = formatTaskElapsed(this.now() - task.createdAt);
   }
@@ -358,7 +426,9 @@ export class TaskInspectionPanel {
   private paintOutput(output: BackgroundTaskOutput | null): void {
     const { outputText, outputNote } = this.hosts;
     if (!output) {
-      outputNote.textContent = "Output not yet available";
+      outputNote.textContent = this.task?.taskType === "shell"
+        ? "Output unavailable from the provider. Already received output remains here; it may be lost after reload."
+        : "Output not yet available";
       outputNote.hidden = false;
       return;
     }

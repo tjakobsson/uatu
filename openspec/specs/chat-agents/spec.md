@@ -48,14 +48,11 @@ than served by another agent.
 - **AND** a client can present the agent without loading the conversation
 
 ### Requirement: Users choose an agent when starting a conversation
-When more than one agent is offered, starting a conversation SHALL let the
-user choose among the offered agents before the conversation exists, and
-the choice SHALL be presented with each agent's availability so an
-unavailable agent is explained rather than hidden. The workspace SHALL
-apply a stable default (the user's most recently used agent, then the
-server's default) so a user who never chooses gets a working conversation.
-Opening an existing conversation SHALL NOT require or offer an agent
-choice.
+When multiple agents are offered, conversation creation SHALL allow agent choice before creation, with availability explained rather than hidden. A stable default SHALL support creation without a choice; existing conversations SHALL NOT require or offer agent choice.
+
+#### Scenario: Creation defaults follow recent use before server preference
+- **WHEN** a user starts a conversation without choosing an agent
+- **THEN** the workspace SHALL default to the user's most recently used agent, then the server's default, so the user gets a working conversation
 
 #### Scenario: Creation offers the available agents
 - **WHEN** a user starts a new conversation in a workspace offering two agents
@@ -99,18 +96,23 @@ and its outage MUST NOT hide or delay another agent's entries.
 - **THEN** the other agent's conversations remain listed
 
 ### Requirement: One chat surface serves every agent
-The chat surface — timeline, composer, queue, configuration picker,
-interaction cards, and announcements — SHALL be shared across agents, with
-per-agent differences expressed only through declared capabilities and
-agent-specific timeline content. An agent-specific control or timeline
-presentation SHALL appear only for conversations whose owning agent
-declares the capability behind it, and its absence for another agent
-SHALL be a normal state rather than an error.
+Agents SHALL share the timeline, composer, queue, configuration picker, interaction cards, and announcements. Differences SHALL arise only from declared capabilities and agent-specific timeline content; unsupported controls SHALL be normally absent, not errors.
+
+#### Scenario: Capability declarations gate agent-specific controls and timeline presentation
+- **WHEN** a conversation's agent-specific controls or timeline presentation are rendered
+- **THEN** they SHALL appear only if its owning agent declares the underlying capability, with absence normal rather than erroneous for another agent
+- **AND** queue steer delivery SHALL require `steering`, and Send now SHALL require `send-now`
 
 #### Scenario: Capability differences change controls, not the surface
 - **WHEN** a user switches between a conversation whose agent declares reversible history and one whose agent does not
 - **THEN** the same chat surface presents both
 - **AND** the undo controls appear only in the conversation whose agent declares them
+
+#### Scenario: Steering appears only for an agent that declares it
+- **WHEN** a user switches between a running OpenCode 2.x conversation and a running Claude Code conversation
+- **THEN** the same composer and dock present both
+- **AND** the steer delivery choice and Steer entries appear only in the OpenCode 2.x conversation
+- **AND** busy submissions in the Claude Code conversation are queued as before
 
 ### Requirement: Inventory changes ride the brokered stream
 When a session is served through the hub, the merged conversation inventory's invalidation signal SHALL be delivered as the `inventory` topic of the hub's brokered live stream, and the chat surface MUST NOT open a separate connection for it. The signal SHALL keep its meaning — the client re-reads the authoritative inventory — and one agent's outage MUST NOT withhold the signal for another agent's changes.
@@ -122,7 +124,13 @@ When a session is served through the hub, the merged conversation inventory's in
 
 ### Requirement: Chat navigation remains responsive across agents
 
-Claude Code and OpenCode conversations SHALL use the same responsiveness and loading-feedback behavior. Returning to an already loaded Chat surface SHALL display retained content without waiting for a conversation-list refresh, optional catalogs, or a new transcript request. A required resynchronization SHALL preserve that content with an updating indication until current content is available. Hidden Chat activity MUST NOT prevent interaction with Files, Preview, or Terminal. Returning to Chat SHALL preserve drafts, pending attachments, expanded activity, and the prior reading anchor, or follow the latest output if previously pinned.
+Claude Code and OpenCode SHALL share responsiveness and loading feedback. Returning to loaded Chat SHALL immediately display retained content and preserve user context; hidden Chat activity MUST NOT block Files, Preview, or Terminal.
+
+#### Scenario: Returning to retained Chat preserves content and interaction state
+- **WHEN** a previously loaded Chat surface is reopened
+- **THEN** it SHALL show retained content without waiting for conversation-list refresh, optional catalogs, or a new transcript request
+- **AND** required resynchronization SHALL retain content with an updating indication until current content is available
+- **AND** drafts, pending attachments, expanded activity, and prior reading anchor SHALL remain, or latest output SHALL be followed if previously pinned
 
 #### Scenario: Return while the network is slow
 - **WHEN** an already loaded conversation is hidden behind another touch tab and the user returns while inventory reconciliation is delayed
@@ -141,9 +149,21 @@ Claude Code and OpenCode conversations SHALL use the same responsiveness and loa
 
 ### Requirement: Slow Chat reads expose their progress and recovery
 
-Opening a conversation, loading older history, and retrying a failed read SHALL acknowledge the action immediately. An operation still pending after 200 milliseconds SHALL expose an accessible loading indication naming the operation. Once shown, a progress indication SHALL remain visible for at least 300 milliseconds unless its surface is dismissed. Feedback MUST NOT shift the reading position, erase retained content during refresh, or clear unrelated agent or connection errors. Reduced-motion users SHALL receive the same state information without continuous animation. Completion SHALL mean that the requested content is available for interaction, not merely that bytes arrived.
+Conversation opening, older-history loading, and read retries SHALL acknowledge immediately, expose accessible delayed progress, and provide finite documented deadlines and actionable read recovery. Feedback SHALL preserve retained content, reading position, and unrelated errors; retry MUST NOT repeat mutations.
 
-Obsolete reads SHALL stop controlling feedback when the user navigates elsewhere. Reads SHALL have finite documented deadlines, with actionable timeout or failure feedback and a read retry. Retrying a read MUST NOT create a conversation, resend a prompt, or repeat another mutation.
+#### Scenario: Reads expose progress through interactive completion
+- **WHEN** a conversation opening, older-history loading or read retry starts, remains pending or completes
+- **THEN** the action is acknowledged immediately, and if still pending after 200 milliseconds an accessible indication names the operation and remains at least 300 milliseconds once shown unless its surface is dismissed
+- **AND** feedback MUST NOT shift reading position, erase retained content during refresh, or clear unrelated agent/connection errors
+- **AND** reduced-motion users SHALL get the same state information without continuous animation
+- **AND** completion SHALL mean content is available for interaction, not just received bytes
+
+#### Scenario: Obsolete or failed reads lose feedback ownership without replaying writes
+- **WHEN** navigation makes a read obsolete
+- **THEN** it SHALL stop controlling feedback
+- **WHEN** a read fails or exceeds its finite documented deadline
+- **THEN** it SHALL give actionable timeout/failure feedback and read retry
+- **AND** retry MUST NOT create a conversation, resend a prompt, or repeat any mutation
 
 #### Scenario: Fast read avoids a progress flash
 - **WHEN** a read completes before 200 milliseconds
@@ -168,9 +188,18 @@ Obsolete reads SHALL stop controlling feedback when the user navigates elsewhere
 
 ### Requirement: Long-chat improvements are verified without losing interaction behavior
 
-Responsiveness SHALL be validated with equivalent short and long workloads for both agents, measuring warm surface switching, cold conversation opening, older-history loading, streaming, and resume separately. Validation SHALL distinguish server/read duration from browser presentation duration and record the browser, hardware, workload, and throttling settings. Under the documented controlled profile, warm touch-tab return to retained content SHALL meet a p95 target of 200 milliseconds. Delayed data requests MUST NOT determine that warm-return duration.
+Both agents' responsiveness SHALL be measured with equivalent short/long workloads and separate server/read and browser-presentation timing. Warm touch-tab return under the documented controlled profile SHALL meet p95 200 milliseconds without delayed requests determining the duration or losing completed content and interactions.
 
-Optimized presentation SHALL preserve find over loaded history, copy actions, file links, accessible reading order, answerable requests, and stable scrolling. Completed content MUST NOT be silently dropped to meet the responsiveness target.
+#### Scenario: Controlled responsiveness evidence covers each navigation workload
+- **WHEN** responsiveness is validated for both agents
+- **THEN** equivalent short/long workloads SHALL measure warm surface switching, cold opening, older-history loading, streaming, and resume separately
+- **AND** evidence SHALL distinguish server/read from browser presentation duration and record browser, hardware, workload, and throttling settings
+- **AND** documented controlled-profile warm touch-tab retained-content return SHALL meet p95 200 milliseconds, independent of delayed data requests
+
+#### Scenario: Presentation optimization preserves loaded content functionality
+- **WHEN** long-chat presentation is optimized
+- **THEN** find over loaded history, copy, file links, accessible reading order, answerable requests, and stable scrolling SHALL remain
+- **AND** completed content MUST NOT be silently dropped to reach the target
 
 #### Scenario: Compare both agents under controlled load
 - **WHEN** the same recorded workload and device profile are run against Claude Code and OpenCode
@@ -183,24 +212,21 @@ Optimized presentation SHALL preserve find over loaded history, copy actions, fi
 - **AND** the result's copy actions and file links remain usable
 
 ### Requirement: The conversation chooser groups conversations by the day of their last activity
-The conversation chooser SHALL file every agent's conversations alike
-under a heading for the reader's local calendar day of each conversation's
-last activity, as the agent reports it. Headings SHALL appear newest day
-first, with conversations newest first within a day. A heading SHALL read
-"Today" or "Yesterday" for those days, and otherwise the short weekday and
-the ISO date (`YYYY-MM-DD`), such as "Sun 2026-09-20", matching the
-timeline's day separators. Days and times SHALL be those of the reader's
-time zone; weekday names MAY follow the reader's locale, but dates and times
-SHALL NOT. Each entry SHALL show the 24-hour clock time (`HH:MM`,
-zero-padded, never AM/PM) of its last activity after its title and, where the workspace offers several agents,
-its agent. A last-activity time later than the reader's clock SHALL be read
-as now. A conversation whose agent reports no usable time (none, or a
-placeholder before the year 2001) SHALL show no time and SHALL be listed
-after the dated days, under an "Undated" heading when any other
-conversation is dated and without a heading otherwise. When the reader's
-local day changes while the chooser is shown, its headings SHALL be
-relabelled without waiting for the inventory to change. Grouping SHALL NOT
-change which conversation is selected.
+The chooser SHALL group all agents' conversations alike by the reader's local day of agent-reported last activity, newest days and entries first. It SHALL use consistent day/time labels, handle future and undated activity, and relabel at local day rollover without changing selection.
+
+#### Scenario: Dated chooser entries use local days and locale-independent numeric formats
+- **WHEN** dated conversations are listed
+- **THEN** headings SHALL be "Today", "Yesterday", or short weekday plus ISO `YYYY-MM-DD`, e.g. "Sun 2026-09-20", matching timeline day separators
+- **AND** days/times SHALL use the reader's time zone; only weekday names MAY follow locale, never dates/times
+- **AND** each entry SHALL show last-activity zero-padded 24-hour `HH:MM`, never AM/PM, after title and, in multi-agent workspaces, agent
+- **AND** future last activity SHALL be read as now
+
+#### Scenario: Undated activity and midnight rollover preserve chooser selection
+- **WHEN** an agent supplies no usable time, including none or a placeholder before 2001
+- **THEN** the conversation SHALL show no time and follow dated days under "Undated" if any are dated, otherwise without a heading
+- **WHEN** the reader's local day changes with the chooser open
+- **THEN** headings SHALL relabel without waiting for inventory changes
+- **AND** grouping SHALL NOT change selection
 
 #### Scenario: Conversations from different days are grouped
 - **WHEN** a workspace holds conversations last active today, yesterday, and three days ago
@@ -238,15 +264,11 @@ change which conversation is selected.
 - **THEN** it shows the same day headings and entries as on desktop
 
 ### Requirement: Chat times are 24-hour and chat dates are ISO in every locale
-Every time the chat surface shows, for every agent — including the usage
-readout's "as of" time, the conversation cost's "since" time, a scheduled
-wakeup's fire time in the composer, its list and the timeline, the hover
-time of a timeline item, and a shell output window's completion time —
-SHALL be a 24-hour clock time (`HH:MM`, zero-padded, never AM/PM) in the
-reader's time zone, whatever the reader's locale. Where a date is shown
-with it, the date SHALL be the ISO date (`YYYY-MM-DD`) after the short
-weekday, such as "Sun 2026-09-20 19:43"; only weekday names MAY follow the
-reader's locale.
+Every agent's chat times SHALL use zero-padded 24-hour `HH:MM`, never AM/PM, in the reader's time zone regardless of locale. Dates SHALL follow short weekday with ISO `YYYY-MM-DD`, e.g. "Sun 2026-09-20 19:43"; only weekday names MAY follow locale.
+
+#### Scenario: Every chat time-bearing surface uses the shared format
+- **WHEN** chat shows a usage "as of", cost "since", scheduled-wakeup fire time in composer/list/timeline, timeline-item hover time, or shell-output completion time
+- **THEN** it SHALL use the same reader-time-zone, zero-padded 24-hour time and, when shown, short-weekday/ISO date format for every agent
 
 #### Scenario: The usage readout's time is 24-hour
 - **WHEN** the reader's browser locale uses a 12-hour clock and the plan usage was read at 7:43 in the evening
@@ -261,20 +283,19 @@ reader's locale.
 - **THEN** its hover text reads the short weekday, "2026-09-20", and "19:43", such as "Sun 2026-09-20 19:43"
 
 ### Requirement: An agent without a usable login says so
-A running agent SHALL report, as part of its availability, whether it has a
-usable login: for Claude Code, whether any login or key is in effect; for
-OpenCode, whether at least one model provider is logged in or a model that
-needs no login is offered. A ready agent
-with no usable login SHALL remain ready: its conversations SHALL stay
-readable and selectable, and the missing login SHALL NOT be reported as a
-startup failure. While no usable login is in effect, the chat SHALL say so
-where a new conversation with that agent is started and in the composer of
-that agent's conversations, naming the agent and how to log in. A turn that
-fails because the agent's login is missing, expired, or rejected SHALL be
-presented as a login failure with the agent's own message kept as detail,
-not as an unexplained error. The login state SHALL be re-read when Agent
-accounts reports a change, and SHALL clear without a restart once a login is
-in effect.
+A running agent SHALL report usable-login availability independently of startup readiness. Missing login SHALL preserve readable/selectable conversations and produce agent-specific login guidance and failure explanations, clearing after login without restart.
+
+#### Scenario: Ready agents report login availability without startup failure
+- **WHEN** a running agent reports availability
+- **THEN** Claude Code SHALL report whether any login/key is effective; OpenCode SHALL report whether a provider is logged in or a no-login model is offered
+- **AND** a ready agent lacking usable login SHALL remain ready with readable/selectable conversations and SHALL NOT report startup failure
+- **AND** new-conversation entry and that agent's composers SHALL name the agent and how to log in while login is missing
+
+#### Scenario: Login failures and account changes update actionable feedback
+- **WHEN** a turn fails due to missing, expired, or rejected login
+- **THEN** it SHALL appear as login failure with the agent's own message as detail, not unexplained error
+- **WHEN** Agent accounts reports change
+- **THEN** login state SHALL be reread and missing-login state SHALL clear without restart once login is effective
 
 #### Scenario: New Claude conversation without a login
 - **WHEN** Claude Code is installed and ready but has no usable login and the user starts a Claude conversation
@@ -292,3 +313,90 @@ in effect.
 #### Scenario: Login clears the notice
 - **WHEN** a user logs in to the agent while its conversation is open
 - **THEN** the notice disappears and the composer can send without reloading the page
+
+### Requirement: Internal worker evidence read excludes transcript payloads
+
+The workspace child SHALL expose a compact versioned authoritative worker-evidence read for one agent-qualified conversation through existing authenticated internal routing. It SHALL NOT expose ordinary conversation content or account dismissal marks and SHALL fail rather than return unsafe evidence; the Hub SHALL validate results before use.
+
+#### Scenario: Compact worker proof requires complete validated source coverage
+- **WHEN** internal worker evidence is read
+- **THEN** complete current source coverage and launcher relationships SHALL be established before returning only exact worker identities, evidence signatures, and active/dismissible facts
+- **AND** truncated, malformed, contradictory, changed, or over-capacity evidence SHALL fail rather than succeed
+- **AND** the Hub SHALL validate version, selected conversation, completeness, bounds, and every evidence field before use
+
+#### Scenario: Complete native history
+- **WHEN** the provider supplies a complete current source containing a long transcript and large tool outputs
+- **THEN** the internal read projects bounded worker facts from that source once without display-history pagination or output serialization
+
+#### Scenario: Failed or truncated source
+- **WHEN** the provider supplies only incomplete pages and complete coverage cannot be proven within the existing bounded fallback
+- **THEN** the read reports unavailable instead of returning an empty or partial successful worker set
+
+#### Scenario: Page-scoped provenance cannot be combined safely
+- **WHEN** a fallback page carries association, origin, hidden-result, fallback, revert or accounting provenance without complete-source coverage
+- **THEN** the read refuses that fallback rather than discarding provenance and authorizing a contradictory worker dismissal
+
+#### Scenario: Contradictory duplicate worker source identities
+- **WHEN** one current source contains conflicting lifecycle, occurrence or association facts for the same worker row or shared exact execution alias
+- **THEN** the read refuses before normalization or deduplication can discard positive activity
+- **AND** compatible duplicate observations and independently owned later recovery updates retain their established identity behavior
+
+#### Scenario: Retained cache or missing recovery is weaker than current source
+- **WHEN** a current source carries positive or nondismissible worker evidence but retained projection rows or empty/failed recovery carry weaker information
+- **THEN** compact evidence preserves the current source evidence or fails unavailable
+- **AND** no intermediate deduplication, weak supersession or late cache overwrite authorizes dismissal by discarding that evidence
+
+#### Scenario: Shared exact aliases disagree on immutable occurrence facts
+- **WHEN** rows sharing an exact execution alias disagree on known task, child, launcher, result or launch-reference facts
+- **THEN** the read refuses even if their lifecycle signatures match
+- **AND** unknown intermediate rows and alias-group bridges cannot erase prior known facts
+- **AND** explicitly supported compatible legacy alias enrichment remains available
+
+#### Scenario: Native canonical history enriches a call-scoped launcher key
+- **WHEN** native history proves multiple launch calls share exact execution aliases and a larger canonical launcher/alias set fully contains an old call-scoped row
+- **AND** both rows independently permit dismissal and the old row is running/unavailable without a result, request or end fact
+- **AND** native parent/child scope, task-key recipes, launcher anchoring and known generation/launch-reference facts agree
+- **THEN** compact evidence discards only that certified abstaining shadow before strict shared-alias cohort validation
+- **AND** it does not discard positive or nondismissible activity, conflicting outcomes, same-row conflicts or missing supplemental coverage
+- **AND** the projection grants no worker-completion or Stop authority
+
+### Requirement: Recovered conversation publication preserves authority
+Recovered conversation state SHALL be admitted as a coherent commit under current source and mutation ownership. A stale or superseded read MUST NOT overwrite newer native facts or advance delivery state. Controlling publication size MUST NOT weaken activity evidence, worker execution identity, or dismissal conflict checks.
+
+#### Scenario: New native evidence arrives during a recovery read
+- **WHEN** a recovery read overlaps a newer worker update or removal
+- **THEN** recovery preserves the newer owned fact
+- **AND** delivery cannot restore a removed execution or its mutation authority from stale source data
+
+#### Scenario: Recovery loses ownership before commit
+- **WHEN** a read's stream generation, projection, source coverage or mutation ownership is superseded before admission
+- **THEN** that result cannot change conversation state or its stream cursor
+- **AND** it cannot issue a resync on behalf of the superseded result
+
+#### Scenario: Equivalent presentation has different private evidence
+- **WHEN** a valid read refreshes private worker proof without changing effective displayed values
+- **THEN** the proof is handled under existing authority rules
+- **AND** avoiding redundant publication does not grant dismissal or activity authority absent from that proof
+
+### Requirement: Bulk snapshot recovery converges on current conversation state
+When bulk recovery requires a fresh snapshot, that snapshot SHALL represent the complete admitted state and its cursor. Reattaching from it SHALL resume later updates without regenerating invalidation solely because the same source is read again. Read recovery MUST NOT repeat mutations or discard retained drafts and reading position.
+
+#### Scenario: Oversized recovery is followed by unchanged reads
+- **WHEN** a client obtains the post-commit snapshot, reattaches, and three further reads return equivalent effective state
+- **THEN** those unchanged reads cause no additional resync or unavailability
+- **AND** a later native update is delivered and applied once in order
+
+#### Scenario: A snapshot is requested during a bulk commit
+- **WHEN** a snapshot or subscription is observed at a bulk publication boundary
+- **THEN** it names either the complete prior state or the complete admitted state with the matching cursor
+- **AND** it cannot expose a partially admitted batch as current
+
+#### Scenario: A bulk commit cannot complete
+- **WHEN** recovery preparation or admission fails
+- **THEN** no partial recovery batch is announced as committed
+- **AND** a subsequent valid recovery can proceed without stranded publication state
+
+#### Scenario: Activity and private dismissals coexist with recovery
+- **WHEN** a conversation with working tasks, terminal tasks, fresh activity and existing account-private dismissal marks recovers
+- **THEN** their existing activity and dismissal eligibility rules remain unchanged
+- **AND** recovery neither replays a dismissal mutation nor accepts a conflict merely because execution generation changed

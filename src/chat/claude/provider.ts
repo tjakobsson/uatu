@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { boundedSet } from "../../shared/bounded-map";
+import { CHAT_PRESENTATION_GUIDANCE } from "../presentation-guidance";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../history-reuse";
 
 import type {
@@ -18,7 +19,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ContextWindowItem, ContextWindowMetadata, ConversationItem, ScheduledWakeupItem } from "../types";
+import type { ContextWindowItem, ContextWindowMetadata, ConversationItem, MessageDelivery, ScheduledWakeupItem } from "../types";
 import { claudeWindowAnswer, type ClaudeWindowAnswer, type WindowDiagnostic } from "./context-window";
 import { ScheduledWakeupUnavailableError } from "../provider";
 import { LOGIN_FAILED_NOTICE_CODE, TASK_OUTPUT_TAIL_MAX_BYTES, type AgentUsageReport, type BackgroundTaskOutput, type ChatAgent, type ChatLoginState, type ChatCommand, type ChatMode, type ChatModel, type ConversationConfiguration, type ModelSelection, type PermissionRequest, type PlanExtraUsage, type PlanModelWindow, type PlanUtilization, type PlanUtilizationWindow, type QuestionRequest, type ReversibleHistoryResult, type ReversibleHistoryState, type SessionModelTotals, type SessionTotals, type StructuredQuestion, type UsageReadMode, type UsageReadResult } from "../types";
@@ -109,10 +110,10 @@ export type ClaudeQueryInput = {
     perTaskStopAffordance?: boolean;
     /**
      * In-process hook callbacks (structurally the SDK's `hooks` option):
-     * `Stop` carries the session's crons, `UserPromptSubmit` names a prompt
-     * the CLI submits by itself (scheduled wakeups, D1/D4).
+     * `SessionStart` adds presentation context without replacing native prompts;
+     * `Stop` carries crons; `UserPromptSubmit` names scheduled wakeups (D1/D4).
      */
-    hooks?: Partial<Record<"Stop" | "UserPromptSubmit", Array<{ hooks: Array<(input: Record<string, unknown>, toolUseID: string | undefined, options: { signal: AbortSignal }) => Promise<{ continue: true } | { decision: "block"; reason: string }>> }>>>;
+    hooks?: Partial<Record<"SessionStart" | "Stop" | "UserPromptSubmit", Array<{ hooks: Array<(input: Record<string, unknown>, toolUseID: string | undefined, options: { signal: AbortSignal }) => Promise<{ continue: true; hookSpecificOutput?: { hookEventName: "SessionStart"; additionalContext: string } } | { decision: "block"; reason: string }>> }>>>;
     /**
      * A model-written one-line progress summary on an agent task's
      * `task_progress` (~30 s cadence), so a running subagent's row can say
@@ -798,7 +799,10 @@ export class ClaudeProvider implements ChatProvider {
     return {
       id: "claude",
       name: "Claude Code",
-      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "scheduled-wakeups", "conversation-rename", "usage"],
+      // `send-now` without `steering`: a dormant or idle queue's message can
+      // be dispatched ahead of the rest, but the SDK has no inbox to deliver
+      // into a running turn (opencode-v2-steering D2).
+      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "scheduled-wakeups", "conversation-rename", "usage", "send-now"],
       permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
     };
   }
@@ -1328,7 +1332,10 @@ export class ClaudeProvider implements ChatProvider {
     }
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  // `delivery` is accepted for the seam's sake and not read: this agent does
+  // not declare `steering`, so the adapter never asks it to steer, and every
+  // prompt it receives is a dispatch onto an idle session.
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     await this.restoreDurableState();
     if (this.disposed) throw new Error("Claude provider is disposed");
     if (parseSubagentId(sessionId)) throw new Error("a subagent transcript is read-only");
@@ -1734,6 +1741,12 @@ export class ClaudeProvider implements ChatProvider {
         supportedDialogKinds: [...CLAUDE_SUPPORTED_DIALOG_KINDS],
         perTaskStopAffordance: true,
         hooks: {
+          // Additional context preserves recorded custom system prompts/appends.
+          // No matcher: also restore the hints after resume, fork, or compaction.
+          SessionStart: [{ hooks: [async () => ({
+            continue: true as const,
+            hookSpecificOutput: { hookEventName: "SessionStart" as const, additionalContext: CHAT_PRESENTATION_GUIDANCE },
+          })] }],
           Stop: [{ hooks: [observe((session, input) => this.trackWakeups(session, input))] }],
           UserPromptSubmit: [{ hooks: [async (input: Record<string, unknown>) => {
             try {

@@ -7,6 +7,31 @@ import type { CoverageAnnotations } from "../coverage-annotations";
  * event names that the two mappers treat differently. A key ending in `*`
  * gives the reason for every ignored entry under that prefix; the most
  * specific key wins.
+ *
+ * The 2.x inbox needs no reason any more (opencode-v2-steering D3, D4): the
+ * user's entries are the dock's pending steers until `session.inbox.delivered`
+ * puts the message on the timeline, and `cancelled` and `delivery.changed`
+ * move the dock. The report has no operations axis, so the inbox operations
+ * are recorded here: `session.inbox.list` (reconcile on attach and reconnect),
+ * `session.inbox.cancel` (withdraw a steer), and `session.interrupt` with
+ * `resume` are used; `session.inbox.update` is deliberately not — switching
+ * delivery through it would leave the message in OpenCode's queue, where it
+ * loses the configuration frozen at submission (D1).
+ *
+ * V2 native background work additionally uses `session.background` (all
+ * eligible parent blockers), `session.active`/`session.get`/`message.list`
+ * and all synthetic `session.inbox.list` entries for read-only recovery.
+ * Verified personal Hub steering may make one `session.background` call
+ * after acknowledged native prompt/resume; it adds no job-start automation
+ * or SDK endpoint. Composite unknowns retain receipts and reconcile read-only.
+ * `/btw` separately uses native `session.generate`: one inference from current
+ * context, no prompt admission, interruption or agent tool execution loop.
+ * `session.interrupt({resume:false})` targets a verified child occurrence;
+ * `shell.get`/`shell.output`/`shell.remove` inspect or remove owned shell work.
+ * Removal deletes output and may fail pending capture; neither shell exit nor
+ * deletion establishes a terminal worker result. Source-shaped synthetic
+ * metadata establishes that outcome. No generic jobs endpoint, synthetic
+ * injection, explicit parent resume or shell-list polling is used.
  */
 export const openCodeCoverageAnnotations: CoverageAnnotations = {
   reasons: {
@@ -23,7 +48,6 @@ export const openCodeCoverageAnnotations: CoverageAnnotations = {
 
     // Session bookkeeping with nothing new for the timeline.
     "2.x:session.usage.*": "The session's running total; per-message figures ride session.step.ended.",
-    "2.x:session.inbox.*": "Delivery bookkeeping for a prompt already shown when session.inbox.enqueued accepted it.",
     "2.x:session.instructions.updated": "Which instruction files the session loaded; uatu does not present the agent's system context.",
     "2.x:session.viewed": "A client marked the session read; nothing happened in the conversation.",
     "2.x:session.permissions": "The session's standing permission rules; each request arrives as permission.asked.",
@@ -34,7 +58,7 @@ export const openCodeCoverageAnnotations: CoverageAnnotations = {
     "1.x:pty.*": "Terminal sessions on the OpenCode server, not the conversation's; the agent's shell runs arrive as session.next.shell.* events.",
     "2.x:pty.*": "Terminal sessions on the OpenCode server, not the conversation's; the agent's shell runs arrive as session.shell.* events.",
     "2.x:persistent-pty.*": "Terminal sessions on the OpenCode server, not the conversation's; the agent's shell runs arrive as session.shell.* events.",
-    "2.x:shell.*": "Terminal sessions on the OpenCode server, not the conversation's; the agent's shell runs arrive as session.shell.* events.",
+    "2.x:shell.*": "Shell registry/process edges are not background job settlement: confirmed results arrive as correlated source:shell synthetic inbox/history metadata. Owned shell get/output/remove operations support inspection and Stop; deletion can remove final capture, not guarantee cancellation.",
     "1.x:mcp.*": "MCP server bookkeeping; MCP tool calls themselves arrive as tool events.",
     "2.x:mcp.*": "MCP server bookkeeping; MCP tool calls themselves arrive as tool events.",
     "1.x:server.*": "Server connection lifecycle; uatu tracks the server through its own connection.",

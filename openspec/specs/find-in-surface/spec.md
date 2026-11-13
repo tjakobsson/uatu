@@ -55,15 +55,17 @@ an act about the document. The initial value SHALL be `preview`.
 
 ### Requirement: Find shortcut routes to the active surface
 
-`⌘F` (`Ctrl+F` on non-Apple platforms) SHALL open find on the active surface and
-SHALL prevent the host's native find from acting. `⌘G` and `⇧⌘G` SHALL advance to
-the next and previous match on the same surface. When the active surface has no
-find implementation, the shortcut SHALL fall through to the preview. Before the
-bar is mounted, the shortcut SHALL bring the target surface forward when that
-surface is not currently visible — in touch mode, where only the active tab's
-surface renders, invoking preview find from the Files tab SHALL activate the
-Preview tab first. The bar MUST NOT be mounted into a hidden surface while the
-host's native find stays suppressed, because that leaves the user with neither.
+`⌘F` (`Ctrl+F` on non-Apple platforms) SHALL open find on the active surface, falling back to Preview if it has no find implementation. `⌘G` and `⇧⌘G` SHALL advance to the next and previous match on the same surface. The target SHALL become visible before mounting its find bar; suppressing native find MUST NOT leave the user with a hidden find surface.
+
+#### Scenario: Invoke surface find and match navigation
+- **WHEN** the user presses `⌘F` (`Ctrl+F` on non-Apple platforms)
+- **THEN** find opens on the active surface, falling back to Preview if that surface has no implementation, and prevents host-native find
+- **AND** `⌘G` and `⇧⌘G` advance to the next and previous match on that same surface
+
+#### Scenario: Reveal a hidden target before mounting find
+- **WHEN** a find target is not visible, including Preview while the touch Files tab is active
+- **THEN** the target is brought forward first, activating the Preview tab in that touch case
+- **AND** the bar MUST NOT mount in a hidden surface while native find remains suppressed
 
 #### Scenario: Find with the preview active
 

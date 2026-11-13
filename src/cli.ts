@@ -34,6 +34,7 @@ import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, openBrowser, spaShel
 import { findNonGitWatchEntries, resolveWatchRoots, type WatchEntry } from "./server/roots";
 import { createWatchSession } from "./server/watch-session";
 import { buildFetchFallback, buildRoutes, SERVE_IDLE_TIMEOUT_SECONDS } from "./server/routes";
+import { startMediaHttpBoundary, type MediaHttpBoundary } from "./server/media-http-boundary";
 import { DEFAULT_PORT_SCAN_LIMIT, findFreePort } from "./server/port-probe";
 import { terminalBackendAvailable } from "./terminal/backend";
 import { createTerminalServer } from "./terminal/server";
@@ -53,6 +54,8 @@ import {
 } from "./debug/metrics";
 import { setGitMetricsSink } from "./document/git-base-ref";
 import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
+import { consumeChildPolicyDescriptor } from "./hub/child-policy-bootstrap";
+import type { readChildPolicyBootstrap } from "./hub/child-policy";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -60,6 +63,11 @@ async function main() {
   // (chokidar, server, terminal stack) should run. parseWatchdogArgs throws
   // on malformed input, which we surface to stderr.
   const argv = Bun.argv.slice(2);
+  let childPolicy: ReturnType<typeof readChildPolicyBootstrap> | null = null;
+  if (argv[0] === "serve" && argv.includes("--hub-policy-bootstrap")) {
+    argv.splice(argv.indexOf("--hub-policy-bootstrap"), 1);
+    childPolicy = await consumeChildPolicyDescriptor();
+  }
   if (argv[0] === "--ssh-agent-supervisor") {
     if (argv.length !== 1) {
       process.exitCode = 2;
@@ -125,7 +133,7 @@ async function main() {
       await runHashPassword();
       return;
     }
-    await runWatch(parsed.options);
+    await runWatch(parsed.options, childPolicy);
   } catch (error) {
     console.error(`uatu: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
@@ -134,7 +142,11 @@ async function main() {
 
 // The session child. parseCommand only routes here for the hub's spawn
 // (--exit-on-stdin-close) or a source run; users get serveRemovedText().
-async function runWatch(options: WatchOptions) {
+async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof readChildPolicyBootstrap> | null = null) {
+  if (childPolicy && childPolicy.basePath !== options.basePath) {
+    childPolicy.dispose();
+    childPolicy = null;
+  }
   // Diagnostic plumbing comes before any heavy startup work — the cache dir
   // and the metrics registry are needed by createWatchSession and by the
   // watchdog spawn. Failures in this layer must never fail the watch session.
@@ -241,6 +253,7 @@ async function runWatch(options: WatchOptions) {
     const navigationFetch = createNavigationFetchHandler({
       getUnscopedRoots: () => watchSession!.getUnscopedRoots(),
       ensureDocument: id => watchSession!.ensureDocument(id),
+      pinDocument: id => watchSession!.pinDocument(id),
       isIndexComplete: () => watchSession!.getDiscoveryState().status === "ready",
       getEntries: () => rootEntries,
       getRespectGitignore: () => options.respectGitignore,
@@ -255,9 +268,12 @@ async function runWatch(options: WatchOptions) {
       basePath: options.basePath,
     });
 
-    server = Bun.serve({
+    let boundary: MediaHttpBoundary<ReturnType<typeof Bun.serve>> | undefined;
+    let workspaceRoutes!: ReturnType<typeof buildRoutes>;
+    const mediaPath = `${options.basePath}api/media`;
+    const inner = Bun.serve({
       hostname: "127.0.0.1",
-      port: chosenPort,
+      port: 0,
       idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
       routes: {
         // The HTMLBundle MUST appear as a literal at this call site so
@@ -278,7 +294,7 @@ async function runWatch(options: WatchOptions) {
         ...((options.basePath === "/"
           ? { "/": { GET: () => spaShellResponse(server!) } }
           : {}) as { "/": { GET: () => Promise<Response> } }),
-        ...buildRoutes({
+        ...(workspaceRoutes = buildRoutes({
           mode: "prod",
           assets: {
             mermaid: mermaidAsset,
@@ -297,13 +313,14 @@ async function runWatch(options: WatchOptions) {
           chatService: chatService!,
           getWorkspaceCredential: () => watchSession!.getTerminalToken(),
           basePath: options.basePath,
+          childPolicy: childPolicy?.basePath === options.basePath ? childPolicy : undefined,
           manifestScope: options.manifestScope,
           metrics,
           debug: options.debug,
           getMetricsSnapshot: () => metrics.snapshot(),
-        }),
+        })),
       },
-      fetch: (request, srv) => fetchFallback(request, srv),
+      fetch: (request, srv) => fetchFallback(boundary?.normalizeRequest(request) ?? request, boundary?.server ?? srv),
       // The serve options type is an XOR (websocket required, or absent) and
       // cannot express "present iff the terminal is enabled" — and this call
       // must stay a single object literal so Bun's bundler can analyze the
@@ -324,6 +341,12 @@ async function runWatch(options: WatchOptions) {
           }
         : undefined) as WebSocketHandler<Parameters<NonNullable<typeof terminalServer>["open"]>[0]["data"]>,
     });
+    boundary = startMediaHttpBoundary({ server: inner, hostname: "127.0.0.1", port: chosenPort,
+      isMediaRequest: request => new URL(request.url).pathname === mediaPath,
+      fetch: request => (workspaceRoutes[mediaPath] as { GET(request: Request): Response | Promise<Response>; HEAD(request: Request): Response | Promise<Response> })[request.method as "GET" | "HEAD"](request),
+    });
+    server = boundary.server;
+    await boundary.ready;
   } catch (error) {
     clearIndexingStatus();
     stopStartupHeartbeat();
@@ -386,6 +409,7 @@ async function runWatch(options: WatchOptions) {
       return;
     }
     shuttingDown = true;
+    childPolicy?.dispose();
     console.error("uatu: shutting down");
 
     // The OpenCode child is detached as its own process group, so dispose it

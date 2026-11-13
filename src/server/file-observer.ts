@@ -9,14 +9,24 @@ import chokidar from "chokidar";
 import type { WatchEntry } from "./roots";
 import type { createWatchPolicy } from "./watch-policy";
 
-export type FileObserver = EventEmitter & { close(): Promise<void> };
+// `reveal` starts reading a directory that was unlisted until now; `track`
+// starts observing one file inside such a directory.
+export type FileObserver = EventEmitter & { close(): Promise<void>; reveal?(directory: string): void; track?(file: string): void };
 type Options = {
   ignored: ReturnType<typeof createWatchPolicy>["ignored"];
+  // An ignored folder level nobody has listed: known, never read or walked.
+  unlisted?: (directory: string) => boolean;
+  // A directory that appeared after discovery: true if it is ignored as a
+  // whole (it then becomes unlisted) — decided before it is read.
+  classifyNew?: (directory: string) => Promise<boolean>;
+  // Paths inside Git-ignored folders: inspected after every other queued
+  // path, so an install's burst never delays an ordinary edit.
+  background?: (file: string) => boolean;
   usePolling?: boolean;
   renew?: boolean;
   // Controlled native notifications with real filesystem reads in tests.
   watch?: typeof watch;
-  onWork?: (kind: "watch" | "stat" | "directory") => void;
+  onWork?: (kind: "watch" | "stat" | "directory", file?: string) => void;
 };
 type NativeSubscription = { watcher: FSWatcher; listeners: Set<(event: string, file: string | null) => void> };
 const subscriptions = new Map<string, NativeSubscription>();
@@ -78,16 +88,297 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
       if (!["ERR_FEATURE_UNAVAILABLE_ON_PLATFORM", "ERR_INVALID_ARG_VALUE", "ENOSYS", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
     }
   }
-  return chokidar.watch(entry.absolutePath, {
-    ignored: options.ignored, usePolling: polling, interval: 100,
+  // Chokidar cannot defer a decision, so a folder Git starts ignoring after
+  // discovery is still walked in this mode. A known unlisted folder is
+  // watched itself (so a new one gets its row) but nothing inside it is.
+  // Files a client opened inside an unlisted folder are tracked individually.
+  const tracked = new Set<string>();
+  const ignored: Options["ignored"] = (file, stats) => options.ignored(file, stats)
+    || !tracked.has(file) && options.unlisted?.(path.dirname(file)) === true;
+  const watcher = chokidar.watch(entry.absolutePath, {
+    ignored, usePolling: polling, interval: 100,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
   });
+  const track = (file: string) => { tracked.add(file); watcher.add(file); };
+  if (!polling) return Object.assign(watcher, { reveal: (directory: string) => { watcher.add(directory); }, track });
+  const observer = new PolledBaselineCheck(watcher, ignored, {
+    root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
+  });
+  observer.track = track;
+  return observer;
+}
+
+// Chokidar polls each file and directory with fs.watchFile, which (in Bun, as
+// in Node's libuv) takes its baseline stat asynchronously after the watch is
+// registered. A change that lands before that stat becomes the baseline and is
+// never reported: an edit to a file, or a file created in a directory that
+// was just found. The index has no periodic rescan to repair either. So each
+// state reported for a file, and each directory reported, is checked once
+// more after this delay; a missed edit is reported then, and a missed child
+// is handed to Chokidar to watch.
+export const POLL_BASELINE_SETTLE_MS = 1000;
+
+const missing = (error: NodeJS.ErrnoException): boolean => error.code === "ENOENT" || error.code === "ENOTDIR";
+
+const sameState = (a: Stats | undefined, b: Stats): boolean => a !== undefined && a.mtimeMs === b.mtimeMs
+  && a.ctimeMs === b.ctimeMs && a.size === b.size && a.ino === b.ino;
+
+type PolledWatcher = EventEmitter & { add(path: string): unknown; unwatch(path: string): unknown; close(): Promise<void> };
+
+export class PolledBaselineCheck extends EventEmitter implements FileObserver {
+  // The stats each file was last reported with.
+  private reported = new Map<string, Stats>();
+  // The children reported for each reported directory.
+  private children = new Map<string, Set<string>>();
+  // Paths awaiting their check, in due order.
+  private due = new Map<string, number>();
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  // One batch at a time: paths that come due while a batch runs wait for the
+  // next one, so the 16-path bound holds however slow the metadata reads are.
+  private checking = false;
+  private closed = false;
+
+  private root: string;
+  private watched: string;
+  private settleMs: number;
+  private fs: { lstat: typeof lstat; readdir: typeof readdir };
+
+  constructor(
+    private watcher: PolledWatcher,
+    private ignored: Options["ignored"],
+    options: { root: string; watched?: string; settleMs?: number; fs?: { lstat: typeof lstat; readdir: typeof readdir } },
+  ) {
+    super();
+    this.root = options.root;
+    this.watched = options.watched ?? options.root;
+    this.settleMs = options.settleMs ?? POLL_BASELINE_SETTLE_MS;
+    this.fs = options.fs ?? { lstat, readdir };
+    watcher.on("all", (event: string, file: string, stats?: Stats) => {
+      // Chokidar's own reports pass through unchanged, even one that repeats
+      // a state: the session reads a policy file's change as an edit it may
+      // not have loaded yet.
+      if (event === "add" || event === "change") {
+        this.children.get(path.dirname(file))?.add(file);
+        if (stats) { this.reported.set(file, stats); this.schedule(file); }
+      } else if (event === "addDir") {
+        this.children.get(path.dirname(file))?.add(file);
+        if (!this.children.has(file)) this.children.set(file, new Set());
+        this.schedule(file);
+      } else if (event === "unlinkDir") {
+        // Invalidate pending descendant checks too: their directory sets
+        // belong to the removed generation, even before individual unlinks.
+        this.forget(file);
+      } else if (event === "unlink") {
+        this.children.get(path.dirname(file))?.delete(file);
+        this.children.delete(file);
+        this.reported.delete(file);
+        this.due.delete(file);
+      }
+      this.emit("all", event, file, stats);
+    });
+    watcher.on("raw", (...args: unknown[]) => this.emit("raw", ...args));
+    watcher.on("ready", () => this.emit("ready"));
+    watcher.on("error", (error: unknown) => this.emit("error", error));
+  }
+
+  reveal(directory: string): void {
+    if (!this.closed) this.watcher.add(directory);
+  }
+
+  track(file: string): void {
+    if (!this.closed) this.watcher.add(file);
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.due.clear();
+    this.reported.clear();
+    this.children.clear();
+    await this.watcher.close();
+    this.removeAllListeners();
+  }
+
+  private schedule(file: string): void {
+    this.due.delete(file);
+    this.due.set(file, performance.now() + this.settleMs);
+    this.arm();
+  }
+
+  private arm(): void {
+    if (this.closed || this.timer || this.checking) return;
+    const next = this.due.values().next();
+    if (next.done) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.checking = true;
+      void this.check().finally(() => { this.checking = false; this.arm(); });
+    }, Math.max(0, next.value - performance.now()));
+    this.timer.unref?.();
+  }
+
+  private async check(): Promise<void> {
+    const now = performance.now();
+    const paths: string[] = [];
+    for (const [file, at] of this.due) {
+      if (at > now) break;
+      paths.push(file);
+      this.due.delete(file);
+    }
+    // Bounded like the native observer's metadata work.
+    let next = 0;
+    const worker = async () => {
+      while (next < paths.length && !this.closed) {
+        const file = paths[next++]!;
+        await (this.children.has(file) ? this.checkDirectory(file) : this.checkFile(file));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(16, paths.length) }, worker));
+  }
+
+  // Chokidar still polls a path whose type changed unseen, as what it was:
+  // its file poller would follow a link and report the target as this path,
+  // and its directory poller would list a link target's children. Unwatching
+  // closes that path's poller, not necessarily all descendant pollers. Adding
+  // the path back lets Chokidar lstat it afresh
+  // under the watch policy, so a link stays unwatched, a new file or directory
+  // is watched and reported, and a later replacement is noticed through the
+  // parent directory as usual.
+  private handBack(target: string): void {
+    // The watched path itself has no parent subscription to notice a later
+    // replacement, so its registration stays with Chokidar, as without this
+    // check.
+    // A removal listener may synchronously close this observer.
+    if (this.closed || target === this.watched) return;
+    this.watcher.unwatch(target);
+    this.watcher.add(target);
+  }
+
+  // True when every directory between the root and the path is still a real
+  // directory, not a link or something else.
+  private async underRealDirectories(target: string): Promise<boolean> {
+    // The root's own ancestors are outside the watch and are not checked.
+    if (target === this.root) return true;
+    for (let directory = path.dirname(target); directory !== this.root; directory = path.dirname(directory)) {
+      if (!contained(this.root, directory)) return false;
+      const stats = await this.fs.lstat(directory).catch(() => null);
+      if (!stats?.isDirectory()) return false;
+    }
+    return true;
+  }
+
+  // Drops a path and everything under it from the check's own state.
+  private forget(target: string): void {
+    const prefix = target + path.sep;
+    const under = (p: string) => p === target || p.startsWith(prefix);
+    this.children.get(path.dirname(target))?.delete(target);
+    for (const p of [...this.reported.keys()]) if (under(p)) this.reported.delete(p);
+    for (const p of [...this.children.keys()]) if (under(p)) this.children.delete(p);
+    for (const p of [...this.due.keys()]) if (under(p)) this.due.delete(p);
+  }
+
+  private async checkFile(file: string): Promise<void> {
+    const expected = this.reported.get(file);
+    if (!expected) return;
+    // lstat: following a link would report its target as this file.
+    const stats = await this.fs.lstat(file).catch((error: NodeJS.ErrnoException) => missing(error) ? "missing" as const : null);
+    // A newer report while this stat ran means the file's polling is live,
+    // and this stat may be older than that report. A failure other than the
+    // path being gone is left to Chokidar.
+    if (this.closed || !stats || this.reported.get(file) !== expected) return;
+    // Removed, replaced by a link, or turned into a directory before the
+    // baseline: Chokidar has no earlier state to report the removal from.
+    if (stats === "missing" || !stats.isFile()) {
+      this.reported.delete(file);
+      this.children.get(path.dirname(file))?.delete(file);
+      this.emit("all", "unlink", file);
+      if (stats !== "missing") this.handBack(file);
+      return;
+    }
+    if (sameState(expected, stats)) return;
+    // lstat guards only the last component: a directory above the file that
+    // became a link would make this the link target's file.
+    if (!await this.underRealDirectories(file)) {
+      if (this.closed || this.reported.get(file) !== expected) return;
+      this.reported.delete(file);
+      this.children.get(path.dirname(file))?.delete(file);
+      this.emit("all", "unlink", file);
+      return;
+    }
+    // The file itself may have been replaced while its ancestors were
+    // checked; report only the regular file that is there now, with nothing
+    // awaited between this lstat and the report.
+    const confirmed = await this.fs.lstat(file).catch(() => null);
+    if (this.closed || this.reported.get(file) !== expected) return;
+    if (!confirmed?.isFile() || confirmed.ino !== stats.ino || confirmed.dev !== stats.dev) {
+      this.schedule(file);
+      return;
+    }
+    this.reported.set(file, confirmed);
+    this.emit("all", "change", file, confirmed);
+  }
+
+  private async checkDirectory(directory: string): Promise<void> {
+    // lstat first: readdir would follow a link and list its target's
+    // children as this directory's. A failure other than the path being
+    // gone is left to Chokidar.
+    // The children set is replaced when Chokidar reports the directory
+    // removed and added again; a result for the old one is stale.
+    const known = this.children.get(directory);
+    const current = () => !this.closed && known !== undefined && this.children.get(directory) === known;
+    const before = await this.fs.lstat(directory).catch((error: NodeJS.ErrnoException) => missing(error) ? "missing" as const : null);
+    if (!before || !current()) return;
+    if (before === "missing" || !before.isDirectory()) {
+      // Removed, replaced by a link, or turned into a file before the
+      // baseline: the directory and everything under it are gone from the
+      // index's point of view.
+      this.forget(directory);
+      this.emit("all", "unlinkDir", directory);
+      if (before !== "missing") this.handBack(directory);
+      return;
+    }
+    const entries = await this.fs.readdir(directory, { withFileTypes: true }).catch(() => null);
+    if (!entries || !current()) return;
+    const missed = entries
+      .map(entry => ({ entry, child: path.join(directory, entry.name) }))
+      .filter(({ entry, child }) => !known!.has(child) && !entry.isSymbolicLink() && (entry.isFile() || entry.isDirectory()) && !this.ignored(child, entry));
+    // lstat and readdir resolve through a directory above this one that
+    // became a link; then the listing is that link target's, not this
+    // directory's, and the directory is gone from under the root.
+    if (missed.length > 0 && !await this.underRealDirectories(directory)) {
+      if (!current()) return;
+      this.forget(directory);
+      this.emit("all", "unlinkDir", directory);
+      return;
+    }
+    // Check identity after *all* awaited validation: the directory itself
+    // could have become a link while its ancestors were checked. Nothing is
+    // awaited between this lstat and handing its children to Chokidar.
+    const after = await this.fs.lstat(directory).catch(() => null);
+    if (!current()) return;
+    if (!after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) {
+      // Replaced while it was read or validated, possibly before Chokidar's
+      // baseline: check it again, which reports whatever it is now.
+      this.schedule(directory);
+      return;
+    }
+    // Chokidar stats, watches and reports each child itself; one it has
+    // meanwhile found on its own is not reported twice.
+    for (const { child } of missed) this.watcher.add(child);
+  }
 }
 
 class DirectoryObserver extends EventEmitter implements FileObserver {
   private known = new Map<string, Stats>();
   private children = new Map<string, Set<string>>();
   private pending = new Map<string, boolean>();
+  private backgroundPending = new Map<string, boolean>();
+  private classifyWaiting: [string, Stats][] = [];
+  // Directories awaiting Git: not read until it answers.
+  private classifying = new Set<string>();
+  private classifyActive = 0;
   private activePaths = new Set<string>();
   private deleted = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
@@ -126,11 +417,33 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
     queueMicrotask(() => this.enqueue(entry.absolutePath, true));
   }
 
+  reveal(directory: string): void {
+    this.enqueue(directory, true);
+  }
+
+  // Registers one file inside an unlisted folder, with the folders above it
+  // (known, not read), so a removal of any of them is noticed.
+  track(file: string): void {
+    this.registerAncestors(file);
+    if (!this.known.has(file)) this.enqueue(file, false);
+  }
+
+  private registerAncestors(file: string): void {
+    if (this.entry.kind !== "dir") return;
+    const root = this.entry.absolutePath;
+    for (let directory = path.dirname(file); directory !== root && contained(root, directory); directory = path.dirname(directory)) {
+      if (!this.known.has(directory)) this.enqueue(directory, false);
+    }
+  }
+
   async close(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
     this.release();
     this.pending.clear();
+    this.backgroundPending.clear();
+    this.classifyWaiting = [];
+    this.classifying.clear();
     for (const timer of this.deleted.values()) clearTimeout(timer);
     this.deleted.clear();
     this.known.clear();
@@ -140,7 +453,8 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
 
   private enqueue(file: string, discover: boolean): void {
     if (this.stopped) return;
-    this.pending.set(file, (this.pending.get(file) ?? false) || discover);
+    const queue = this.options.background?.(file) ? this.backgroundPending : this.pending;
+    queue.set(file, (queue.get(file) ?? false) || discover);
     if (this.scheduled) return;
     this.scheduled = true;
     queueMicrotask(() => { this.scheduled = false; this.pump(); });
@@ -148,23 +462,28 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
 
   private pump(): void {
     if (this.stopped) return;
-    for (const [file, discover] of this.pending) {
-      if (this.activePaths.size >= 16) break;
-      if (this.activePaths.has(file)) continue;
-      this.pending.delete(file);
-      this.activePaths.add(file);
-      void this.inspect(file, discover).catch(error => {
-        if (!this.stopped) { this.failed = true; this.emit("error", error); }
-      }).finally(() => {
-        this.activePaths.delete(file);
-        this.pump();
-      });
+    for (const queue of [this.pending, this.backgroundPending]) {
+      for (const [file, discover] of queue) {
+        if (this.activePaths.size >= 16) break;
+        if (this.activePaths.has(file)) continue;
+        queue.delete(file);
+        this.activePaths.add(file);
+        void this.inspect(file, discover).catch(error => {
+          if (!this.stopped) { this.failed = true; this.emit("error", error); }
+        }).finally(() => {
+          this.activePaths.delete(file);
+          this.pump();
+        });
+      }
+      // Background paths wait while any ordinary path is queued.
+      if (queue === this.pending && queue.size) break;
     }
-    if (!this.ready && !this.failed && !this.pending.size && !this.activePaths.size) {
+    const queued = this.pending.size + this.backgroundPending.size;
+    if (!this.ready && !this.failed && !queued && !this.activePaths.size) {
       this.ready = true;
       this.emit("ready");
     }
-    if (!this.pending.size && !this.activePaths.size) this.emit("idle");
+    if (!queued && !this.activePaths.size) this.emit("idle");
   }
 
   private async inspect(file: string, discover: boolean): Promise<void> {
@@ -191,11 +510,34 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       let children = this.children.get(parent);
       if (!children) this.children.set(parent, children = new Set());
       children.add(file);
+      // A file reported inside a folder never read (an unlisted ignored
+      // folder): register the folders above it, so removing one is noticed.
+      if (!previous && !this.known.has(parent)) this.registerAncestors(file);
     }
     if (directory) {
+      if (this.classifying.has(file)) return;
+      const unlisted = file !== this.entry.absolutePath && this.options.unlisted?.(file) === true;
+      if (!unlisted && !previous && this.ready && file !== this.entry.absolutePath && this.options.classifyNew) {
+        // Git answers outside the shared inspection slots, so a build's new
+        // folders never hold up an ordinary edit; the folder is reported
+        // and read (or not) once it does.
+        this.classifying.add(file);
+        this.classifyWaiting.push([file, stats]);
+        this.drainClassification();
+        return;
+      }
       if (!previous) this.emit("all", "addDir", file, stats);
+      if (unlisted) {
+        // An ambiguous rename inside it can name only a temporary source,
+        // and a replaced folder (new inode) can carry new copies of what is
+        // tracked below it: recheck the tracked chain, subfolders included,
+        // without reading the rest.
+        const replaced = previous?.isDirectory() === true && previous.ino !== stats.ino;
+        if (discover || replaced) for (const child of this.children.get(file) ?? []) this.enqueue(child, this.known.get(child)?.isDirectory() === true);
+        return;
+      }
       if (!discover && previous?.isDirectory() && previous.mtimeMs === stats.mtimeMs && previous.ino === stats.ino) return;
-      this.options.onWork?.("directory");
+      this.options.onWork?.("directory", file);
       const entries = await readdir(file, { withFileTypes: true }).catch(error => {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
         throw error;
@@ -220,6 +562,22 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       const changed = !previous || previous.mtimeMs !== stats.mtimeMs || previous.ctimeMs !== stats.ctimeMs
         || previous.size !== stats.size || previous.ino !== stats.ino;
       if (changed) this.emit("all", previous?.isFile() ? "change" : "add", file, stats);
+    }
+  }
+
+  private drainClassification(): void {
+    while (!this.stopped && this.classifyActive < 4 && this.classifyWaiting.length) {
+      const [file, stats] = this.classifyWaiting.shift()!;
+      this.classifyActive++;
+      void this.options.classifyNew!(file).catch(() => false).then(ignored => {
+        this.classifyActive--;
+        this.classifying.delete(file);
+        if (!this.stopped && this.known.has(file)) {
+          this.emit("all", "addDir", file, stats);
+          if (!ignored) this.enqueue(file, true);
+        }
+        this.drainClassification();
+      });
     }
   }
 

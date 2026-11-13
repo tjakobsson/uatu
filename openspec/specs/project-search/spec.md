@@ -111,15 +111,15 @@ sweep is still running. The pane SHALL report the running match and file counts.
 
 ### Requirement: Search is bounded in work and in results
 
-Queries SHALL be debounced and SHALL NOT run below a minimum query length.
-Results SHALL be capped, and when the cap is reached the pane SHALL say results
-were truncated rather than presenting a partial list as complete.
+Queries SHALL be debounced and SHALL NOT run below a minimum length. Results SHALL be capped, with truncation disclosed. A sweep exceeding its deadline SHALL stop and report collected results as incomplete. Deadline checks occur between match attempts, so the bound is the deadline plus one attempt's duration: regular-expression evaluation is not interruptible, and a per-document budget alone cannot bound it because that budget is also checked between attempts.
 
-A sweep exceeding its deadline SHALL stop and report the results collected so
-far as incomplete. The deadline is checked between match attempts, so the bound
-it provides is the deadline plus the duration of one attempt: a single regular
-expression evaluation is not interruptible, and a per-document budget alone
-cannot bound it because that budget is also only checked between attempts.
+#### Scenario: Debounce eligible queries before sweeping
+- **WHEN** the query changes repeatedly
+- **THEN** dispatch is debounced and no query below the minimum length runs
+
+#### Scenario: Disclose either result or deadline truncation
+- **WHEN** a sweep reaches its result cap or exceeds its deadline
+- **THEN** the pane labels capped results truncated, or stops the overdue sweep and reports its collected results as incomplete, rather than claiming completeness
 
 #### Scenario: Truncation is disclosed
 

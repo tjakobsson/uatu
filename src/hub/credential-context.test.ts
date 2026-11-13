@@ -266,6 +266,9 @@ describe("local workspace credential projection", () => {
       uatuArgv: ["/opt/Uatu Code/uatu"],
       sourceEnv: {
         HOME: home,
+        // Select the fixture config explicitly: a managed Git launcher may
+        // deliberately replace HOME. Never depend on the host's Git config.
+        GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"),
         PATH: process.env.PATH,
         SSH_AUTH_SOCK: "/ambient-agent.sock",
         GH_TOKEN: "ambient-token",
@@ -816,6 +819,7 @@ describe("local workspace credential projection", () => {
       uatuArgv: ["uatu"],
       sourceEnv: {
         HOME: home,
+        GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"),
         PATH: process.env.PATH,
         SSH_AUTH_SOCK: "/ambient-agent.sock",
         GNUPGHOME: "/ambient/gnupg",
@@ -842,6 +846,8 @@ describe("local workspace credential projection", () => {
       if (key === "GIT_SSH_COMMAND" || key.startsWith("GIT_CONFIG_")) delete bypass[key];
     }
     bypass.HOME = home;
+    // Re-enable the fixture's ambient config, not the host launcher's HOME.
+    bypass.GIT_CONFIG_GLOBAL = path.join(home, ".gitconfig");
     bypass.PATH = process.env.PATH ?? "";
     expect(await gitCredentialFill(workspace.path, bypass)).toBe(0);
     expect(await Bun.file(marker).exists()).toBe(true);
@@ -932,6 +938,7 @@ describe("local workspace credential projection", () => {
 
       const sourceEnv = {
         HOME: home,
+        GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"),
         PATH: process.env.PATH,
         GIT_CONFIG_SYSTEM: systemConfig,
       };
@@ -1096,7 +1103,7 @@ describe("local workspace credential projection", () => {
         signing: null,
       },
       uatuArgv: ["uatu"],
-      sourceEnv: { HOME: home, PATH: process.env.PATH },
+      sourceEnv: { HOME: home, GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"), PATH: process.env.PATH },
     });
 
     expect(gitConfig(workspace.path, projected.env, "core.excludesfile")).toBe(excludesFile);

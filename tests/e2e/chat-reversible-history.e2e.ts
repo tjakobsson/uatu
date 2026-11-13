@@ -1,10 +1,14 @@
 import type { APIRequestContext, Browser, Page } from "@playwright/test";
 
 import type { ChatCapability, ConversationItem, ConversationSnapshot } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import { openChatPanel, openChatPending } from "./chat-helpers";
 import { expect, test } from "./fixtures";
+import { expectWorkControlVisible } from "./work-panel-assertions";
+import { withEngineBrowsers } from "./page-diagnostics";
+import type { OpenCodeV2FakeSessionState } from "./opencode-v2-fake";
 
 const CAPABILITIES: ChatCapability[] = ["commands", "attachments", "reversible-history"];
+const nativeTest = withEngineBrowsers(test);
 const PNG = Array.from(Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
   "base64",
@@ -28,8 +32,7 @@ async function openClient(page: Page, credential: string, conversationId: string
   await expect(page.locator("#chat-conversation-select")).toHaveValue(conversationId);
 }
 
-// `running`: a turn is in flight, so the send control reads "Cancel response"
-// and the command goes through the form's own submit path instead.
+// Send submits history commands even while a turn is running; Stop is separate.
 async function historyCommand(page: Page, operation: "undo" | "redo", { running = false }: { running?: boolean } = {}) {
   const response = page.waitForResponse(
     candidate => new URL(candidate.url()).pathname.endsWith(`/${operation}`),
@@ -37,14 +40,11 @@ async function historyCommand(page: Page, operation: "undo" | "redo", { running 
   );
   const sendButton = page.locator("#chat-send");
   await page.locator("#chat-input").fill(`/${operation}`);
-  await expect(sendButton).toHaveAttribute("aria-label", running ? "Cancel response" : "Send message");
-  if (running) {
-    await page.locator("#chat-composer").evaluate((form: HTMLFormElement) => form.requestSubmit());
-  } else {
-    await expect(sendButton).toBeEnabled();
-    if (await page.locator("html").getAttribute("data-ui-mode") === "touch") await sendButton.tap();
-    else await sendButton.click();
-  }
+  await expect(page.locator("#chat-stop")).toBeEnabled({ enabled: running });
+  await expect(sendButton).toHaveAttribute("aria-label", "Send message");
+  await expect(sendButton).toBeEnabled();
+  if (await page.locator("html").getAttribute("data-ui-mode") === "touch") await sendButton.tap();
+  else await sendButton.click();
   return response;
 }
 
@@ -105,6 +105,103 @@ function historyItems(availableAttachment?: { id: string; mimeType: string }): C
     },
     { id: "part:third", type: "assistant_message", createdAt: 6, markdown: "third answer" },
   ];
+}
+
+for (const engine of ["chromium", "webkit"] as const) for (const touch of [false, true]) {
+  nativeTest(`external native revert and restore across an event gap: ${engine} ${touch ? "touch" : "desktop"}`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL, viewport: { width: touch ? 390 : 1280, height: 844 }, hasTouch: touch, isMobile: touch });
+    const native = <T = unknown>(body: Record<string, unknown>) => control<T>(request, { action: "opencode", ...body });
+    const nativeState = () => native<{ eventSubscribers: number; sessions: Record<string, OpenCodeV2FakeSessionState> }>({ op: "state" });
+    try {
+      expect((await request.post("/__e2e/reset")).status()).toBe(200);
+      await control(request, { action: "agents", stack: "opencode-v2", backgroundPreview: true });
+      const credential = await token(request);
+      await page.goto(`/?t=${encodeURIComponent(credential)}`);
+      await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+      if (touch) await page.locator("#touch-tab-chat").click(); else await openChatPanel(page);
+      await page.getByRole("button", { name: "New conversation", exact: true }).click();
+      await expect(page.locator("#chat-state")).toContainText("Started new conversation");
+      const conversationId = await page.locator("#chat-conversation-select").inputValue();
+      const submit = async (text: string) => {
+        await page.locator("#chat-input").fill(text);
+        const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+        await page.locator("#chat-send").click();
+        expect((await accepted).status()).toBe(202);
+        await expect(page.locator("#chat-stop")).toBeEnabled();
+      };
+      await submit("Retained base turn");
+      await native({ op: "finish", conversationId, text: "Retained base answer" });
+      await expect(page.locator("#chat-stop")).toBeDisabled();
+      await submit("Externally reverted turn");
+      const worker = await native<{ childId: string; taskId: string }>({ op: "launchWorker", conversationId });
+      await native({ op: "settleWorker", childId: worker.childId, text: "Terminal worker report" });
+      await native({ op: "step", conversationId });
+      const task = (client: Page) => client.locator(`[data-chat-item-id="task:${worker.taskId}"]`);
+      await expect(task(page)).toContainText("finished");
+      await page.locator("#chat-input").fill("Pending stays paused");
+      // Steer while running creates native pending input; Alt+Enter would
+      // create an adapter-held queue entry, which has no native inbox id.
+      const pendingAccepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+      await page.locator("#chat-send").click();
+      expect((await pendingAccepted).status()).toBe(202);
+      await expect(page.locator("#chat-queue .chat-queued-message")).toHaveCount(1);
+      await page.locator("#chat-stop").click();
+      await expect(page.locator("#chat-queue [data-paused]")).toHaveCount(1);
+      await expect(page.locator("#chat-stop")).toBeDisabled();
+      const before = await nativeState();
+      const providerId = conversationId.replace(/^opencode:/, "");
+      const boundary = before.sessions[providerId]!.messages.find(message => message.text === "Externally reverted turn")!.id;
+      expect(before.sessions[providerId]!.pending).toHaveLength(1);
+      const pendingId = before.sessions[providerId]!.pending[0]!.id;
+      await page.locator("#chat-input").fill("Private retained draft");
+      await page.locator("#chat-input").focus();
+      let automaticPrompts = 0;
+      page.on("request", request => { if (request.method() === "POST" && request.url().endsWith("/prompts")) automaticPrompts++; });
+      const gap = async (revertMessageId: string | null) => {
+        await native({ op: "pauseEvents" });
+        expect((await nativeState()).eventSubscribers).toBe(0);
+        await native({ op: "externalRevert", conversationId, revertMessageId });
+        await native({ op: "reconnectEvents" });
+        await expect.poll(async () => (await nativeState()).eventSubscribers).toBe(1);
+      };
+      const preserved = async () => {
+        await expect(page.locator("#chat-conversation-select")).toHaveValue(conversationId);
+        await expect(page.locator("#chat-input")).toHaveValue("Private retained draft");
+        await expect(page.locator("#chat-input")).toBeFocused();
+        await expect(page.locator("#chat-queue [data-paused]")).toHaveCount(1);
+        const state = (await nativeState()).sessions[providerId]!;
+        expect(state.running).toBe(false);
+        expect(state.pending.map((entry: { id: string }) => entry.id)).toEqual([pendingId]);
+        expect(automaticPrompts).toBe(0);
+      };
+      await gap(boundary);
+      await expect(page.locator("#chat-items")).toContainText("Retained base answer");
+      await expect(page.locator("#chat-items")).not.toContainText("Externally reverted turn");
+      await expect(task(page)).toHaveCount(0);
+      await expect(page.locator(`[data-background-task="${worker.taskId}"]`)).toHaveCount(0);
+      await preserved();
+      const other = await browser.newPage({ baseURL, viewport: { width: touch ? 390 : 1280, height: 844 }, hasTouch: touch, isMobile: touch });
+      await openClient(other, credential, conversationId);
+      await expect(other.locator("#chat-items")).toContainText("Retained base answer");
+      await expect(other.locator("#chat-reverted-items .chat-reverted-message")).toHaveCount(1);
+      await expect(other.locator("#chat-items")).not.toContainText("Externally reverted turn");
+      await expect(task(other)).toHaveCount(0);
+      await other.reload();
+      await expect(other.locator("#connection-state .connection-label")).toHaveText("Connected");
+      if (touch) await other.locator("#touch-tab-chat").click(); else await openChatPanel(other);
+      await expect(other.locator("#chat-conversation-select")).toHaveValue(conversationId);
+      await expect(other.locator("#chat-items")).toContainText("Retained base answer");
+      await expect(other.locator("#chat-reverted-items .chat-reverted-message")).toHaveCount(1);
+      await expect(other.locator("#chat-items")).not.toContainText("Externally reverted turn");
+      await expect(task(other)).toHaveCount(0);
+      await gap(null);
+      await expect(page.locator("#chat-items")).toContainText("Externally reverted turn");
+      await expect(task(page)).toContainText("finished");
+      await expect(task(other)).toContainText("finished");
+      await preserved();
+    } finally { await page.close(); await browser.close(); }
+  });
 }
 
 test.describe("reversible Chat history", () => {
@@ -232,14 +329,19 @@ test.describe("reversible Chat history", () => {
     await expect(page.locator("#chat-queue .is-held")).toHaveCount(2);
     await expect(page.locator("#chat-items")).not.toContainText("older queued turn");
 
+    await openChatPending(page);
+    await expect(page.locator("[data-pending-toggle]")).toHaveAttribute("aria-expanded", "true");
     const removal = page.waitForResponse(response => response.request().method() === "DELETE" && response.url().includes("/queue/"));
-    await page.locator("#chat-queue .is-held", { hasText: "remove this queued turn" }).locator("[data-queue-remove]").click();
+    const remove = page.locator("#chat-queue .is-held", { hasText: "remove this queued turn" }).locator("[data-queue-remove]");
+    await remove.scrollIntoViewIfNeeded();
+    await expectWorkControlVisible(remove);
+    await remove.click();
     expect((await removal).status()).toBe(200);
     await expect(page.locator("#chat-queue .is-held")).toHaveCount(1);
 
     const replacement = await send(page, "replacement turn");
     expect(replacement.status()).toBe(202);
-    expect(await replacement.json()).toMatchObject({ held: false });
+    expect(await replacement.json()).toMatchObject({ pending: false });
     await expect(page.locator("#chat-items")).toContainText("replacement turn");
     await expect(page.locator("#chat-items")).not.toContainText("discarded active turn");
     await expect(page.locator("#chat-queue .is-held")).toContainText("older queued turn");

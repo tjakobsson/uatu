@@ -156,7 +156,8 @@ export type LiveChannelOptions = {
 export type LiveChannelConnectOptions = {
   // Whether this attempt replaces a stream the client believes it lost, as
   // opposed to the first connect. Only the former is transport recovery, and
-  // only it is marked as one for the hub's diagnostics.
+  // only it is marked as one for the hub's diagnostics and opening-topic
+  // recovery. Fresh post-history control adds do not inherit that intent.
   resumed?: boolean;
 };
 
@@ -204,6 +205,9 @@ type Entry = {
   consumer: LiveTopicConsumer;
   // Set when the handle closes; a closed handle is told nothing more.
   closed: boolean;
+  // One retained conversation deferred from this recovery generation's URL.
+  // Object identity prevents a stale accepted POST from clearing newer intent.
+  deferredRecovery?: { generation: number };
 };
 
 function keyOf(subscription: LiveSubscriptionKey): LiveSubscriptionKey {
@@ -342,6 +346,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
   // stream. The consumer is told on a microtask, so a caller of `subscribe`
   // already holds its handle when the callback runs.
   const refuse = (id: string, entry: Entry) => {
+    entry.deferredRecovery = undefined;
     if (entries.get(id) === entry) entries.delete(id);
     queueMicrotask(() => {
       if (!disposed && !entry.closed) entry.consumer.unavailable?.(generation);
@@ -367,6 +372,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     if (disposed || streamId === null || control !== null || controlRetryTimer !== null || dirty.size === 0) return;
     const add: LiveSubscription[] = [];
     const remove: LiveSubscriptionKey[] = [];
+    const recoveryAdds = new Map<string, { entry: Entry; intent: NonNullable<Entry["deferredRecovery"]> }>();
     for (const id of dirty) {
       let entry = entries.get(id);
       if (entry && !admissible(subscriptionOf(entry))) {
@@ -376,7 +382,14 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
         entry = undefined;
       }
       const held = presented.get(id);
-      if (entry) add.push(subscriptionOf(entry));
+      if (entry) {
+        const subscription = subscriptionOf(entry);
+        const intent = entry.deferredRecovery;
+        if (intent?.generation === generation && entry.key.topic === "conversation" && entry.cursor) {
+          add.push({ ...subscription, reconnect: true });
+          recoveryAdds.set(id, { entry, intent });
+        } else add.push(subscription);
+      }
       else if (held) remove.push(held);
     }
     dirty.clear();
@@ -427,6 +440,9 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
       if (!settleControl(request)) return;
       if (response.ok) {
         controlFailures = 0;
+        for (const [id, { entry, intent }] of recoveryAdds) {
+          if (entries.get(id) === entry && entry.deferredRecovery === intent) entry.deferredRecovery = undefined;
+        }
         for (const subscription of add) presented.set(liveSubscriptionId(subscription), keyOf(subscription));
         for (const key of remove) presented.delete(liveSubscriptionId(key));
         // Whatever changed while this request was in flight.
@@ -524,9 +540,13 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     const subs: LiveSubscription[] = [];
     const deferred: string[] = [];
     for (const [id, entry] of entries) {
+      entry.deferredRecovery = undefined;
       const subscription = subscriptionOf(entry);
       if (urlFor([...subs, subscription]).length <= LIVE_CONNECT_URL_MAX_BYTES) subs.push(subscription);
-      else deferred.push(id);
+      else {
+        deferred.push(id);
+        if (connectOptions.resumed === true && entry.key.topic === "conversation" && entry.cursor) entry.deferredRecovery = { generation };
+      }
     }
     presented = new Map(subs.map(subscription => [liveSubscriptionId(subscription), keyOf(subscription)]));
     for (const id of deferred) dirty.add(id);
@@ -571,12 +591,15 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
           close() { entry.closed = true; },
         };
       }
+      const replaced = entries.get(id);
+      if (replaced) replaced.deferredRecovery = undefined;
       entries.set(id, entry);
       dirty.add(id);
       scheduleControlFlush();
       return {
         resubscribe(cursor) {
           if (disposed || entries.get(id) !== entry) return;
+          entry.deferredRecovery = undefined;
           entry.cursor = cursor || undefined;
           // Refused, the key is released at the hub like a close.
           if (!admissible(subscriptionOf(entry))) refuse(id, entry);
@@ -584,6 +607,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
           scheduleControlFlush();
         },
         close() {
+          entry.deferredRecovery = undefined;
           entry.closed = true;
           // A handle closes only its own subscription: a replacement for the
           // same key installed after this handle is left alone.
@@ -644,6 +668,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
       // Anything the closed source still delivers is from a superseded
       // attempt, and the next connect is a replacement, not a first connect.
       generation += 1;
+      for (const entry of entries.values()) entry.deferredRecovery = undefined;
       recovering = false;
       latestActivity.clear();
     },

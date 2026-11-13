@@ -41,12 +41,15 @@ cognitive debt.
 - **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved compare base via [`@pierre/diffs`](https://diffs.com/)
 - **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
-- Whole-repo browsing with `.uatu.json ignore.exclude` and `.gitignore` filtering on top of built-in defaults
+- Whole-repo browsing that follows VS Code: Gitignored files and folders show muted, big ignored folders such as `node_modules/` and `build/` are read when expanded, and `.uatu.json ignore.exclude` hides anything else
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
+- [All / Recent / Changed Files views](./docs/FILES.md), with disk-write ordering, filename/path filtering, and a saved per-workspace view
+- [Audio/video previews and quick auditioning](./docs/FILES.md#audio-and-video), with one persistent player, captured Previous/Next order, current-clip Loop, and explicit Reload for new renders
 - Git-aware workspaces: adding a folder outside a repository offers `git init`
 - [Git worktree workspaces](./docs/WORKTREES.md): create and switch branch checkouts from the workspace picker, with independent terminals and conversations, parent credential policy and guarded cleanup
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
-- Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
+- Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and inline images/SVG, tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
+- Subagent rows show the latest execution-reported reasoning effort and cumulative child-session USD cost when available; a labeled dash means not reported, never an estimated price or inherited parent selection.
 - Installable as a PWA so TUI editor shortcuts (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach the embedded terminal
 
 Claude Code and OpenCode are first-class agents in uatu: the aim is to use what each SDK offers, not the subset they share. The [Agent SDK coverage dashboard](https://github.com/tjakobsson/uatu/issues/480) lists everything each SDK declares and what uatu does with it; the gap count is the work still to do.
@@ -247,11 +250,26 @@ Change Overview rather than aborting the watch session.
 ```json
 {
   "ignore": {
-    "exclude": ["bun.lock", "*.log", "!debug.log"],
+    "exclude": ["bun.lock", "*.log", "!debug.log", ".env*"],
     "respectGitignore": true
   }
 }
 ```
+
+Uatu hides what VS Code's `files.exclude` hides by default: `.git`, `.svn`,
+`.hg`, `.jj`, `.DS_Store` and `Thumbs.db`. Everything else, including
+`node_modules/`, `build/`, `dist/`, `.venv/` and secret-like files such as
+`.env`, is listed unless `ignore.exclude` names it. `ignore.exclude` plays the
+role of VS Code's `files.exclude`: excluded paths are not indexed, followed or
+served.
+
+Files Git ignores show muted, and **Files options → Show ignored files** hides
+them for this browser. A folder Git ignores as a whole is read only when you
+expand it, one level at a time, and files written inside it while the session
+runs appear in Recent straight away. Follow never jumps to an ignored file.
+Explicit `respectGitignore` is a legacy initial visibility default, and a saved
+personal choice wins. `ignore.include` no longer has an effect. See
+[Files](./docs/FILES.md) for details.
 
 Every monospace surface in the app — rendered Markdown code blocks,
 AsciiDoc code blocks, the source view, the diff view, the terminal —
@@ -265,8 +283,9 @@ The compare base is resolved automatically in order: `origin/HEAD` →
 staged + unstaged worktree changes against `HEAD`.
 
 Files at or above 1 MB render without syntax highlighting to keep the
-browser responsive. Binary files appear with VS Code-style icons and route
-to a "preview unavailable" view. Git status (added / modified / deleted /
+browser responsive. Binary files appear with VS Code-style icons; images use
+image previews, recognized audio/video opens paused with browser-native decoding,
+and other binaries show "preview unavailable". Git status (added / modified / deleted /
 renamed / untracked) is surfaced as ambient row annotations on the tree.
 
 ## Security posture of the terminal

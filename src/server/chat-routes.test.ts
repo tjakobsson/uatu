@@ -1,18 +1,30 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
+import os from "node:os";
+import { promises as fs } from "node:fs";
 
 import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
-import { isLiveConversationStatus, type ChatAccountChange, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
+import { isLiveConversationStatus, type ChatAccountChange, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationItem, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
-import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError } from "../chat/adapter";
-import { ReversibleHistoryTargetError, InvalidQuestionAnswerError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../chat/provider";
+import { CommandSteeringError, ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError } from "../chat/adapter";
+import { OperationOutcomeUnknownError, ReversibleHistoryTargetError, InvalidQuestionAnswerError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../chat/provider";
 import { MetricsRegistry } from "../debug/metrics";
 import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
 import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
+import { createChildPolicyAuthority, readChildPolicyBootstrap, CHILD_POLICY_HEADER } from "../hub/child-policy";
+import { LiveBroker } from "../hub/live-broker";
+import { LiveEndpoint } from "../hub/live-endpoint";
+import { SseFrameParser } from "../hub/live-sse";
+import { CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, parseLiveEnvelope, parseLiveHello, type LiveEnvelope } from "../shared/live-protocol";
+import type { ChatActionContext } from "../chat/types";
+import { createWatchedVisualReader, VisualReadError, VisualStore, VISUAL_CSP, type StoredVisual } from "../chat/visual-store";
+import { ChatApiClient } from "../chat/client";
+import { applyChatEvent, projectionFromSnapshot } from "../chat/projection";
+import { createLiveChannel, type LiveChannelSource } from "../shell/live-channel";
 
 const TOKEN = "chat-test-token";
 // The conversation route opens with an `open` event naming the cursor its
@@ -20,21 +32,36 @@ const TOKEN = "chat-test-token";
 const CONVERSATION_OPEN_FRAME = /^event: open\ndata: \{"cursor":"[^"]+"\}\n\n$/;
 
 class FakeChatService implements WorkspaceChatService {
+  items: ConversationItem[] = [];
+  readonly visuals = new Map<string, StoredVisual>();
   readonly conversation: ConversationSummary = { id: "local", title: "Local", createdAt: 1, updatedAt: 1, status: "idle" };
   readonly replay = new ConversationReplay("generation", "local", 10_000);
   readonly inventory = new ConversationInventoryBroadcaster();
   prompts = 0;
   retries = 0;
   renames = 0;
-  private promptResult: { messageId: string; held: boolean } | undefined;
+  private promptResult: { messageId: string; pending: boolean; delivery: MessageDelivery } | undefined;
   selectedModel: ModelSelection | undefined;
   selectedAgent: string | undefined;
   questionResponses: QuestionOutcome[] = [];
   rejectAnswers: Error | null = null;
   stoppedTasks: string[] = [];
+  backgrounded: string[] = [];
+  generated: string[] = [];
+  async generate(id: string, _requestId: string, question: string) { this.require(id); this.generated.push(question); return { text: "Side answer" }; }
+  async backgroundBlockingWork(id: string, _requestId: string): Promise<{ accepted: true }> {
+    this.require(id); this.backgrounded.push(id); return { accepted: true };
+  }
   released: string[] = [];
   cancelledWakeups: string[] = [];
   removals: string[] = [];
+  discards: Array<{ id: string; messageId: string; requestId: string; uncertaintyId: string }> = [];
+  async discardUnconfirmedSteer(id: string, messageId: string, requestId: string, uncertaintyId: string) {
+    this.require(id);
+    if (messageId !== "unknown" || uncertaintyId !== "opaque-1") throw new QueuedMessageNotHeldError();
+    this.discards.push({ id, messageId, requestId, uncertaintyId });
+    return { discarded: true, outcomeUnconfirmed: true } as const;
+  }
   reversibleMutations = { undo: 0, redo: 0, revert: 0, restore: 0 };
   private readonly reversibleReceipts = new Map<string, ReversibleHistoryResult>();
 
@@ -61,14 +88,20 @@ class FakeChatService implements WorkspaceChatService {
     const handoff = this.replay.handoff(() => this.snapshot(), options.cursor, options.signal);
     return { snapshot: handoff.snapshot, events: handoff.subscription };
   }
-  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection, agent?: string, _variant?: string, attachments?: MessageAttachment[]) {
+  selectedDelivery: MessageDelivery | undefined;
+  actionContexts: Array<ChatActionContext | undefined> = [];
+  operationReceipts: Array<string | undefined> = [];
+  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection, agent?: string, _variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery, context?: ChatActionContext, operationReceipt?: string) {
+    this.actionContexts.push(context);
+    this.operationReceipts.push(operationReceipt);
     this.require(id);
     this.selectedModel = model;
     this.selectedAgent = agent;
     this.promptAttachments = attachments;
+    this.selectedDelivery = delivery;
     if (!this.promptResult) {
       this.prompts += 1;
-      this.promptResult = { messageId: requestId, held: false };
+      this.promptResult = { messageId: requestId, pending: false, delivery: "queue" };
     }
     return { ...this.promptResult, configuration: { ...(model ? { model } : {}), ...(agent ? { mode: agent } : {}) } };
   }
@@ -88,8 +121,29 @@ class FakeChatService implements WorkspaceChatService {
   async removeQueued(id: string, messageId: string, _requestId: string) {
     this.require(id);
     if (messageId === "delivered") throw new QueuedMessageNotHeldError();
+    if (messageId === "unconfirmed") throw new SteerWithdrawalUnconfirmedError();
+    if (messageId === "steered") throw new SteerAlreadyDeliveredError();
     this.removals.push(messageId);
     return { removed: true } as const;
+  }
+  switches: Array<{ messageId: string; delivery: MessageDelivery }> = [];
+  sent: string[] = [];
+  async changeDelivery(id: string, messageId: string, _requestId: string, delivery: MessageDelivery, context?: ChatActionContext) {
+    this.actionContexts.push(context);
+    this.require(id);
+    if (messageId === "steered") throw new SteerAlreadyDeliveredError();
+    if (messageId === "unconfirmed") throw new SteerWithdrawalUnconfirmedError();
+    if (messageId === "command") throw new CommandSteeringError();
+    if (messageId === "unsupported") throw new SteeringUnsupportedError();
+    this.switches.push({ messageId, delivery });
+    return { messageId, delivery };
+  }
+  async sendNow(id: string, messageId: string, _requestId: string) {
+    this.require(id);
+    if (messageId === "running") throw new SendNowUnavailableError();
+    if (messageId === "unsupported") throw new SendNowUnsupportedError();
+    this.sent.push(messageId);
+    return { messageId, delivery: "queue" as const };
   }
   async renameConversation(id: string, _requestId: string, title: string) {
     this.require(id);
@@ -158,13 +212,15 @@ class FakeChatService implements WorkspaceChatService {
 
   // Workspace activity, derived as the adapter derives it: a live status is
   // working, a pending permission awaits the user. The extra fields stand in
-  // for a careless service — nothing but the two facts may reach the wire.
+  // for a careless service — nothing but the three facts may reach the wire.
   readonly activityChanges = new ConversationInventoryBroadcaster();
   readonly pendingPermissions = new Set<string>();
+  unresolved = false;
   async activity(): Promise<ChatActivity> {
     return {
       working: isLiveConversationStatus(this.conversation.status),
       awaiting: this.pendingPermissions.size > 0,
+      unresolved: this.unresolved,
       conversationId: this.conversation.id,
       title: this.conversation.title,
     } as ChatActivity;
@@ -175,7 +231,7 @@ class FakeChatService implements WorkspaceChatService {
   settlePermission(requestId: string) { this.pendingPermissions.delete(requestId); this.activityChanges.invalidate(); }
 
   private snapshot(): ConversationSnapshot {
-    return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: [] };
+    return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: this.items };
   }
   async stopTask(id: string, taskId: string) {
     this.require(id);
@@ -204,13 +260,14 @@ class FakeChatService implements WorkspaceChatService {
   private require(id: string) { if (id !== "local") throw new ConversationNotFoundError(); }
 }
 
-function routes(chatService = new FakeChatService(), basePath = "/", chatKeepaliveMs?: number, metrics?: MetricsRegistry) {
+function routes(chatService = new FakeChatService(), basePath = "/", chatKeepaliveMs?: number, metrics?: MetricsRegistry, childPolicy?: ReturnType<typeof readChildPolicyBootstrap>, visualStore?: VisualStore) {
   const repo = path.resolve(import.meta.dir, "..", "..");
   // The real router over the single-agent fake: route tests exercise the
   // qualifying seam exactly as production does. The fake keeps owning the
   // attachment behavior through the store adapter.
   const routed = new MultiAgentChatService({
     workspacePath: repo,
+    ...(visualStore ? { visualStore } : {}),
     agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: chatService }],
     attachmentStore: {
       directory: '/dev/null',
@@ -221,9 +278,11 @@ function routes(chatService = new FakeChatService(), basePath = "/", chatKeepali
       resolve: id => chatService.resolveAttachment(id),
     },
   });
+  routed.resolveVisual = async id => chatService.visuals.get(id) ?? null;
   return buildRoutes({
     mode: "prod",
     basePath,
+    childPolicy,
     ...(chatKeepaliveMs === undefined ? {} : { chatKeepaliveMs }),
     ...(metrics === undefined ? {} : { metrics }),
     assets: {
@@ -255,6 +314,118 @@ function request(pathname: string, init: RequestInit = {}, params?: Record<strin
 }
 
 describe("workspace chat routes", () => {
+  test("local discard validates closed scoped identities behind the ordinary mutation gate", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/queue/:messageId/discard-unconfirmed"] as { POST(request: Request): Promise<Response> };
+    const path = "/s/project/api/chat/conversations/opencode:local/queue/unknown/discard-unconfirmed";
+    const send = (body: unknown, params = { conversationId: "opencode:local", messageId: "unknown" }, origin = "http://127.0.0.1:4711") => handler.POST(request(path, { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }, params));
+    const valid = { requestId: "discard-1", uncertaintyId: "opaque-1" };
+    expect(await (await send(valid)).json()).toEqual({ discarded: true, outcomeUnconfirmed: true });
+    expect(service.discards).toEqual([{ id: "local", messageId: "unknown", ...valid }]);
+    for (const body of [{}, { requestId: "r" }, { uncertaintyId: "opaque-1" }, { ...valid, remove: true }, ...[null, 1, "", "x".repeat(513), "bad\nidentity"].flatMap(value => [{ ...valid, requestId: value }, { ...valid, uncertaintyId: value }])]) {
+      expect((await send(body)).status).toBe(400);
+    }
+    for (const params of [{ conversationId: "", messageId: "unknown" }, { conversationId: "opencode:local", messageId: "x".repeat(513) }, { conversationId: "opencode:local", messageId: "%00" }]) expect((await send(valid, params)).status).toBe(400);
+    expect((await send(valid, undefined, "https://foreign.example")).status).toBe(403);
+    expect((await handler.POST(new Request(`http://127.0.0.1:4711${path}`, { method: "POST" }))).status).toBe(401);
+    expect((await send(valid, { conversationId: "opencode:foreign", messageId: "unknown" })).status).toBe(404);
+    expect((await send({ ...valid, uncertaintyId: "stale" })).status).toBe(409);
+    expect((await send(valid, { conversationId: "opencode:local", messageId: "confirmed" })).status).toBe(409);
+    expect(service.discards).toHaveLength(1);
+    expect(service.removals).toEqual([]);
+    expect(service.sent).toEqual([]);
+    expect(service.backgrounded).toEqual([]);
+  });
+  test("an opaque operation receipt is only a dedup identifier and never unsigned principal or automatic-policy authority", async () => {
+    const service = new FakeChatService();
+    const table = routes(service, "/s/project/");
+    const path = "/s/project/api/chat/conversations/opencode:local/prompts";
+    const handler = table["/s/project/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request): Promise<Response> };
+    const token = `opr_${"a".repeat(43)}`;
+    const send = (headers: Record<string, string>) => handler.POST(request(path, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json", "x-uatu-hub-operation-receipt": token, ...headers }, body: '{"requestId":"correlation","text":"Fixture","delivery":"steer"}' }, { conversationId: "opencode:local" }));
+    const accepted = await send({});
+    expect(accepted.status).toBe(202);
+    expect(await accepted.json()).not.toHaveProperty("automaticBackground");
+    expect(service.actionContexts).toEqual([undefined]);
+    expect(service.operationReceipts).toEqual([token]);
+    expect((await send({ [CHILD_POLICY_HEADER]: "workspace-credential-forged-policy" })).status).toBe(403);
+    expect((await send({ origin: "https://foreign.example" })).status).toBe(403);
+    expect(service.operationReceipts).toHaveLength(1);
+  });
+  test("verified child-bound policy crosses qualified prompt dispatch without becoming shared response metadata", async () => {
+    const authority = createChildPolicyAuthority("project", "/s/project/");
+    const service = new FakeChatService();
+    const table = routes(service, "/s/project/", undefined, undefined, readChildPolicyBootstrap(authority.bootstrap()));
+    const path = "/s/project/api/chat/conversations/opencode:local/prompts";
+    const body = JSON.stringify({ requestId: "request", text: "steer", delivery: "steer" });
+    const policy = authority.sign({ method: "POST", pathname: path, body }, { principal: "alice", revision: 1, autoBackgroundOnSteer: true });
+    const handler = table["/s/project/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request): Promise<Response> };
+    const send = (envelope: string, text = body) => handler.POST(request(path, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json", [CHILD_POLICY_HEADER]: envelope }, body: text }, { conversationId: "opencode:local" }));
+    const response = await send(policy);
+    expect(response.status).toBe(202);
+    expect(service.actionContexts).toEqual([{ receiptScope: "alice", automaticBackground: "on" }]);
+    expect(JSON.stringify(await response.json())).not.toContain("alice");
+    expect((await send(policy, body.replace("steer\"}", "queue\"}"))).status).toBe(403);
+    expect((await send("workspace-token-forgery")).status).toBe(403);
+    expect(service.actionContexts).toHaveLength(1);
+    const untrusted = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/prompts"] as typeof handler;
+    expect((await untrusted.POST(request(path, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json", [CHILD_POLICY_HEADER]: policy }, body }, { conversationId: "opencode:local" }))).status).toBe(403);
+  });
+  test("visual previews and SVG source are authenticated, inert, private and base-path aware", async () => {
+    const service = new FakeChatService();
+    const id = "a".repeat(64);
+    const original = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1"/></svg>';
+    service.visuals.set(id, { bytes: new TextEncoder().encode(original), sourceBytes: new TextEncoder().encode(original), mimeType: "image/svg+xml" });
+    const table = routes(service, "/s/project/");
+    for (const source of [false, true]) {
+      const key = `/s/project/api/chat/visuals/:visualId${source ? "/source" : ""}`;
+      const handler = table[key] as { GET(request: Request): Promise<Response> };
+      expect((await handler.GET(new Request("http://127.0.0.1:4711/no-auth"))).status).toBe(401);
+      const response = await handler.GET(request(key, {}, { visualId: id }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe(source ? "text/plain; charset=utf-8" : "image/svg+xml");
+      expect(response.headers.get("content-security-policy")).toBe(VISUAL_CSP);
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+      expect(await response.text()).toBe(original);
+      expect((await handler.GET(request(key, {}, { visualId: "missing" }))).status).toBe(404);
+    }
+    service.visuals.set(id, { bytes: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" });
+    const source = table["/s/project/api/chat/visuals/:visualId/source"] as { GET(request: Request): Promise<Response> };
+    expect((await source.GET(request("/source", {}, { visualId: id }))).status).toBe(404);
+  });
+  test("refused local SVG original remains authenticated inert source after deletion; preview returns 404", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-routes-"));
+    try {
+      const root = path.join(directory, "workspace");
+      await fs.mkdir(root);
+      const original = '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><foreignObject/></svg>';
+      const pathname = path.join(root, "unsafe.svg");
+      await fs.writeFile(pathname, original);
+      const store = new VisualStore(root, path.join(directory, "state"));
+      store.setReader(createWatchedVisualReader([{ kind: "dir", absolutePath: root } as never]));
+      const snapshot = await store.capture("opencode:local", "unsafe", { index: 0, kind: "file", source: "unsafe.svg", alt: "unsafe", complete: true }, false);
+      expect(snapshot.status).toBe("unavailable");
+      await fs.writeFile(pathname, "changed");
+      await fs.unlink(pathname);
+      const restarted = new VisualStore(root, path.join(directory, "state"));
+      const service = new FakeChatService();
+      service.visuals.set(snapshot.id!, (await restarted.resolve(snapshot.id!))!);
+      const table = routes(service);
+      const preview = table["/api/chat/visuals/:visualId"] as { GET(request: Request): Promise<Response> };
+      const source = table["/api/chat/visuals/:visualId/source"] as { GET(request: Request): Promise<Response> };
+      expect((await preview.GET(request("/preview", {}, { visualId: snapshot.id! }))).status).toBe(404);
+      expect((await source.GET(new Request("http://127.0.0.1:4711/source"))).status).toBe(401);
+      const response = await source.GET(request("/source", {}, { visualId: snapshot.id! }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(response.headers.get("content-security-policy")).toBe(VISUAL_CSP);
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(await response.text()).toBe(original);
+    } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  });
   test("requires the child credential for every read without starting chat", async () => {
     let calls = 0;
     const service = new FakeChatService();
@@ -691,9 +862,88 @@ describe("workspace chat routes", () => {
     const conflict = await send("delivered");
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toEqual({ error: "message is no longer held" });
+    // A steer the agent delivered before the withdrawal (opencode-v2-steering
+    // D7): the same status with its own code.
+    const late = await send("steered");
+    expect(late.status).toBe(409);
+    expect(await late.json()).toEqual({ error: "the message was already delivered", code: "steer-already-delivered" });
+    const unconfirmed = await send("unconfirmed");
+    expect(unconfirmed.status).toBe(409);
+    expect(await unconfirmed.json()).toMatchObject({ code: "steer-withdrawal-unconfirmed" });
 
     const foreign = handler.DELETE(request("/api/chat/conversations/other/queue/held-1", {
       method: "DELETE", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "remove-2" }),
+    }, { conversationId: "other", messageId: "held-1" }) as never);
+    expect((await foreign).status).toBe(404);
+  });
+
+  test("the prompt route accepts and validates a delivery (opencode-v2-steering)", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (body: unknown) => handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
+      method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify(body),
+    }, { conversationId: "opencode:local" }) as never);
+    expect((await send({ requestId: crypto.randomUUID(), text: "hello", delivery: "later" })).status).toBe(400);
+    expect((await send({ requestId: crypto.randomUUID(), text: "hello", delivery: 1 })).status).toBe(400);
+    const steered = await send({ requestId: crypto.randomUUID(), text: "hello", delivery: "steer" });
+    expect(steered.status).toBe(202);
+    expect(service.selectedDelivery).toBe("steer");
+    expect(await steered.json()).toMatchObject({ pending: false, delivery: "queue" });
+    expect((await send({ requestId: crypto.randomUUID(), text: "hello" })).status).toBe(202);
+    expect(service.selectedDelivery).toBeUndefined();
+  });
+
+  test("switches a pending message's delivery: origin-guarded, validated, idempotent, with distinct refusals", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/queue/:messageId"] as { PATCH(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (messageId: string, body: unknown = { requestId: "switch-1", delivery: "steer" }, origin = "http://127.0.0.1:4711") => handler.PATCH(request(`/api/chat/conversations/opencode:local/queue/${messageId}`, {
+      method: "PATCH", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body),
+    }, { conversationId: "opencode:local", messageId }) as never);
+    expect((await send("held-1", undefined, "https://attacker.example")).status).toBe(403);
+    expect((await send("held-1", { delivery: "steer" })).status).toBe(400);
+    expect((await send("held-1", { requestId: "switch-1" })).status).toBe(400);
+    expect((await send("held-1", { requestId: "switch-1", delivery: "later" })).status).toBe(400);
+    const switched = await send("held-1");
+    expect(switched.status).toBe(200);
+    expect(await switched.json()).toEqual({ messageId: "held-1", delivery: "steer" });
+    expect(await (await send("msg_1", { requestId: "switch-2", delivery: "queue" })).json()).toEqual({ messageId: "msg_1", delivery: "queue" });
+    expect(service.switches).toEqual([{ messageId: "held-1", delivery: "steer" }, { messageId: "msg_1", delivery: "queue" }]);
+    // Already delivered by the agent: a conflict with its own code, so the
+    // client can say "too late" rather than "not held".
+    const late = await send("steered", { requestId: "switch-3", delivery: "queue" });
+    expect(late.status).toBe(409);
+    expect(await late.json()).toEqual({ error: "the message was already delivered", code: "steer-already-delivered" });
+    const command = await send("command");
+    const unconfirmed = await send("unconfirmed", { requestId: "withdrawal-unknown", delivery: "queue" });
+    expect(unconfirmed.status).toBe(409);
+    expect(await unconfirmed.json()).toMatchObject({ code: "steer-withdrawal-unconfirmed" });
+    expect(command.status).toBe(409);
+    expect(await command.json()).toEqual({ error: "a command cannot be steered; it stays queued" });
+    expect((await send("unsupported")).status).toBe(409);
+    const foreign = handler.PATCH(request("/api/chat/conversations/other/queue/held-1", {
+      method: "PATCH", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "switch-4", delivery: "steer" }),
+    }, { conversationId: "other", messageId: "held-1" }) as never);
+    expect((await foreign).status).toBe(404);
+  });
+
+  test("sends a pending message now: origin-guarded, idempotent, refused while a turn runs or without the capability", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/queue/:messageId/send-now"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (messageId: string, body: unknown = { requestId: "send-1" }, origin = "http://127.0.0.1:4711") => handler.POST(request(`/api/chat/conversations/opencode:local/queue/${messageId}/send-now`, {
+      method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body),
+    }, { conversationId: "opencode:local", messageId }) as never);
+    expect((await send("held-1", undefined, "https://attacker.example")).status).toBe(403);
+    expect((await send("held-1", { messageId: "held-1" })).status).toBe(400);
+    const sent = await send("held-1");
+    expect(sent.status).toBe(200);
+    expect(await sent.json()).toEqual({ messageId: "held-1", delivery: "queue" });
+    expect(service.sent).toEqual(["held-1"]);
+    const running = await send("running");
+    expect(running.status).toBe(409);
+    expect(await running.json()).toEqual({ error: "a turn is running; the message is delivered when it ends" });
+    expect((await send("unsupported")).status).toBe(409);
+    const foreign = handler.POST(request("/api/chat/conversations/other/queue/held-1/send-now", {
+      method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "send-2" }),
     }, { conversationId: "other", messageId: "held-1" }) as never);
     expect((await foreign).status).toBe(404);
   });
@@ -805,6 +1055,60 @@ describe("workspace chat routes", () => {
     expect((await send({ requestId: crypto.randomUUID(), extra: 1 })).status).toBe(400);
     expect(service.stoppedTasks).toEqual(["b2f6"]);
   });
+  test("background-all is qualified, validated, and exposes unknown outcomes as 409, never acceptance", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/background"] as { POST(request: Request): Promise<Response> };
+    const send = (body: Record<string, unknown>, id = "opencode:local") => handler.POST(request(`/api/chat/conversations/${id}/background`, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify(body) }, { conversationId: id }));
+    expect(await (await send({ requestId: "bg-request" })).json()).toEqual({ accepted: true });
+    expect(service.backgrounded).toEqual(["local"]);
+    expect((await send({})).status).toBe(400);
+    expect((await send({ requestId: "bg-request", childId: "other" })).status).toBe(400);
+    expect((await send({ requestId: "bg-request" }, "opencode:foreign")).status).toBe(404);
+    service.backgroundBlockingWork = async () => { throw new OperationOutcomeUnknownError(); };
+    const unknown = await send({ requestId: "ambiguous" });
+    expect(unknown.status).toBe(409);
+    expect(await unknown.json()).toMatchObject({ code: "operation_outcome_unknown" });
+  });
+
+  test("side answers authenticate and validate a closed bounded request without prompt dispatch", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/aside"] as { POST(request: Request): Promise<Response> };
+    const send = (body: Record<string, unknown>, id = "opencode:local") => handler.POST(request(`/api/chat/conversations/${id}/aside`, { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify(body) }, { conversationId: id }));
+    const result = await send({ requestId: "q", question: "Why?" });
+    expect(result.status).toBe(200); expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual({ text: "Side answer" });
+    for (const body of [{ question: "Why?" }, { requestId: "q", question: "" }, { requestId: "q", question: "x".repeat(16385) }, { requestId: "q", question: "Why?", tools: true }]) expect((await send(body)).status).toBe(400);
+    expect((await send({ requestId: "q", question: "Why?" }, "opencode:foreign")).status).toBe(404);
+    expect(service.generated).toEqual(["Why?"]); expect(service.prompts).toBe(0); expect(service.backgrounded).toEqual([]);
+  });
+  test("relocated side answers refuse unauthenticated and foreign-origin access before inference", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/aside"] as { POST(request: Request): Promise<Response> };
+    const pathname = "/s/project/api/chat/conversations/opencode:local/aside";
+    const params = { conversationId: "opencode:local" };
+    const init = { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "side", question: "Why?" }) };
+    const unauthenticated = new Request(`http://127.0.0.1:4711${pathname}`, init) as Request & { params: typeof params };
+    unauthenticated.params = params;
+    expect((await handler.POST(unauthenticated)).status).toBe(401);
+    expect((await handler.POST(request(pathname, { ...init, headers: { ...init.headers, origin: "https://foreign.invalid" } }, params))).status).toBe(403);
+    expect(service.generated).toEqual([]);
+    expect((await handler.POST(request(pathname, init, params))).status).toBe(200);
+    expect(service.generated).toEqual(["Why?"]);
+  });
+  test("relocated background mutation refuses missing credentials and foreign origins before dispatch", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service, "/s/project/")["/s/project/api/chat/conversations/:conversationId/background"] as { POST(request: Request): Promise<Response> };
+    const pathname = "/s/project/api/chat/conversations/opencode:local/background";
+    const params = { conversationId: "opencode:local" };
+    const init = { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "receipt" }) };
+    const unauthenticated = new Request(`http://127.0.0.1:4711${pathname}`, init) as Request & { params: typeof params };
+    unauthenticated.params = params;
+    expect((await handler.POST(unauthenticated)).status).toBe(401);
+    expect((await handler.POST(request(pathname, { ...init, headers: { ...init.headers, origin: "https://foreign.invalid" } }, params))).status).toBe(403);
+    expect(service.backgrounded).toEqual([]);
+    expect((await handler.POST(request(pathname, init, params))).status).toBe(200);
+    expect(service.backgrounded).toEqual(["local"]);
+  });
 
   test("releases a scheduled conversation through the chat service; a refused release is a conflict", async () => {
     const service = new FakeChatService();
@@ -901,6 +1205,37 @@ describe("workspace chat routes", () => {
     expect(await refused.json()).toEqual({ error: "count: enter a whole number" });
   });
 
+  test("oversized recovery emits open then one terminal qualified resync; its cursor resumes a racing native update", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const open = async (cursor?: string) => handler.GET(request(`/api/chat/conversations/opencode:local/events${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, {}, { conversationId: "opencode:local" }) as never);
+    const reader = (await open()).body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
+    service.replay.prepareBatch(Array.from({ length: 318 }, (_, index) => ({
+      type: "item.upsert" as const,
+      item: { type: "assistant_message" as const, id: `result:${index}`, createdAt: index, markdown: "x".repeat(4096), completedAt: index + 1 },
+    })))();
+    const frame = new TextDecoder().decode((await reader.read()).value);
+    expect(frame).toContain("event: resync\n");
+    expect(frame).not.toContain("event: chat\n");
+    const event = JSON.parse(frame.match(/data: (.+)\n/)![1]!);
+    expect(event).toMatchObject({ type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local" });
+    expect((await reader.read()).done).toBe(true);
+    const cursor = frame.match(/id: (.+)\n/)![1]!;
+    expect(service.replay.latestCursor()).toBe(cursor);
+    // The snapshot cursor is captured before this live update and reattachment.
+    service.replay.publish({ type: "conversation.status", status: "idle" });
+    const resumed = (await open(cursor)).body!.getReader();
+    expect(new TextDecoder().decode((await resumed.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
+    const followup = new TextDecoder().decode((await resumed.read()).value);
+    expect(followup).toContain("event: chat\n");
+    expect(JSON.parse(followup.match(/data: (.+)\n/)![1]!)).toMatchObject({ type: "conversation.status", sequence: event.sequence + 1, status: "idle" });
+    expect(service.prompts).toBe(0);
+    expect(service.reversibleMutations).toEqual({ undo: 0, redo: 0, revert: 0, restore: 0 });
+    await resumed.cancel();
+    expect(service.replay.subscriberCount()).toBe(0);
+  });
+
   test("streams retained events immediately with replay IDs and no-buffering headers", async () => {
     const service = new FakeChatService();
     const cursor = encodeReplayCursor({ generation: "generation", sequence: 0 });
@@ -921,6 +1256,578 @@ describe("workspace chat routes", () => {
     expect(frame).toContain("id: ");
     expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual(expect.objectContaining({ type: "conversation.status", sequence: 1 }));
     await reader.cancel();
+  });
+  test("authenticated child replay carries terminal status and visual reconciliation through the Hub before fresh ready", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-hub-replay-"));
+    const service = new FakeChatService();
+    const store = new VisualStore("/workspace", directory);
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false, reads = 0, opens = 0;
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return png; });
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const timers = new Set<() => void>();
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        opens++;
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(opens === 1 ? null : service.replay.latestCursor());
+        return response;
+      },
+    }, { catchUpTrailerClock: {
+      setTimer(run, ms) { expect(ms).toBe(10_000); timers.add(run); return run; },
+      clearTimer(timer) { timers.delete(timer as () => void); },
+    } });
+    try {
+      const cached = await getHistory();
+      expect(cached.items[0].visuals[0].status).toBe("pending");
+      available = true;
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after image generation" });
+      const terminalCursor = service.replay.latestCursor();
+      const originReady = Promise.withResolvers<void>();
+      live.subscribe({ write(envelope) { if (envelope.event.kind === "ready") originReady.resolve(); } }, "ws", { topic: "conversation", key: "opencode:local" });
+      await originReady.promise;
+      const received: LiveEnvelope[] = [];
+      const reconciled = Promise.withResolvers<void>();
+      const sink = { write(envelope: LiveEnvelope) { received.push(envelope); if (envelope.event.kind === "resync") reconciled.resolve(); } };
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: cached.cursor });
+      await reconciled.promise;
+      expect(received.map(envelope => envelope.event.kind)).toEqual(["data", "resync"]);
+      expect(received[0]).toMatchObject({ cursor: terminalCursor, event: { kind: "data", data: { ...terminal, conversationId: "opencode:local" } } });
+      expect(received[1]).toMatchObject({ cursor: terminalCursor, event: { kind: "resync", data: {
+        type: "resync", reason: "conversation-rewritten", generation: terminal.generation, sequence: terminal.sequence, conversationId: "opencode:local",
+      } } });
+      expect(service.replay.subscriberCount()).toBe(1); // Only the shared child stream remains.
+      expect(timers.size).toBe(0);
+      const fresh = await getHistory();
+      expect(fresh.cursor).toBe(terminalCursor);
+      expect(fresh.items[0].visuals[0].status).toBe("ready");
+      expect((await store.resolve(fresh.items[0].visuals[0].id))?.bytes).toEqual(png);
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: fresh.cursor });
+      expect(received.map(envelope => envelope.event.kind)).toEqual(["data", "resync", "ready"]);
+      expect(opens).toBe(2);
+      expect(reads).toBe(2);
+      expect(service.replay.latestCursor()).toBe(terminalCursor);
+    } finally {
+      live.dispose();
+      expect(timers.size).toBe(0);
+      expect(service.replay.subscriberCount()).toBe(0);
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("Hub transport recovery after losing a terminal status trailer repairs cached visuals at the same native cursor", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-hub-equal-cursor-"));
+    const service = new FakeChatService();
+    const store = new VisualStore("/workspace", directory);
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false, reads = 0, droppedStatusTrailer = false, trailerTimers = 0;
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return png; });
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const paths: string[] = [];
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        const attempt = paths.push(path);
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        const recovery = new URL(path, "http://child").searchParams.get("reconnect") === "1";
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(recovery ? service.replay.latestCursor() : null);
+        if (attempt !== 1) return response;
+        const reader = response.body!.getReader();
+        let ended = false;
+        // The route produces one frame per pull. Model a transport that
+        // delivers status, then closes without delivering its visual resync.
+        return new Response(new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            const next = await reader.read();
+            if (ended) return;
+            if (next.done) { ended = true; controller.close(); return; }
+            controller.enqueue(next.value);
+            if (new TextDecoder().decode(next.value).includes('"type":"conversation.status"')) {
+              droppedStatusTrailer = true;
+              ended = true;
+              await reader.cancel();
+              try { controller.close(); } catch { /* Broker already cancelled. */ }
+            }
+          },
+          cancel() { ended = true; return reader.cancel(); },
+        }), { headers: response.headers });
+      },
+    }, { retryMinMs: 10, retryMaxMs: 10, catchUpTrailerClock: {
+      setTimer(run) { trailerTimers++; return run; }, clearTimer() {},
+    } });
+    const received: LiveEnvelope[] = [];
+    const initialReady = Promise.withResolvers<void>();
+    const repaired = Promise.withResolvers<void>();
+    let onReady = () => initialReady.resolve();
+    const sink = { write(envelope: LiveEnvelope) {
+      received.push(envelope);
+      if (envelope.event.kind === "ready") onReady();
+      if (envelope.event.kind === "resync") repaired.resolve();
+    } };
+    try {
+      const cached = await getHistory();
+      expect(cached.items[0].visuals[0].status).toBe("pending");
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: cached.cursor });
+      await initialReady.promise;
+      expect(new URL(paths[0]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      available = true;
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after image generation" });
+      const cursor = service.replay.latestCursor();
+      await repaired.promise; // No later native event is published to wake it.
+      expect(droppedStatusTrailer).toBe(true);
+      expect(paths).toHaveLength(2);
+      const recovery = new URL(paths[1]!, "http://child");
+      expect(recovery.searchParams.get("cursor")).toBe(cursor);
+      expect(recovery.searchParams.get("reconnect")).toBe("1");
+      expect(received.filter(envelope => envelope.event.kind === "data")).toEqual([
+        expect.objectContaining({ cursor, event: { kind: "data", data: { ...terminal, conversationId: "opencode:local" } } }),
+      ]);
+      const resyncs = received.filter(envelope => envelope.event.kind === "resync");
+      expect(resyncs).toHaveLength(1);
+      expect(resyncs[0]).toMatchObject({ cursor, event: { kind: "resync", data: {
+        type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local", generation: terminal.generation, sequence: terminal.sequence,
+      } } });
+      expect(received.findIndex(envelope => envelope.event.kind === "data")).toBeLessThan(received.findIndex(envelope => envelope.event.kind === "resync"));
+      expect(service.replay.subscriberCount()).toBe(0);
+      const fresh = await getHistory();
+      expect(fresh.cursor).toBe(cursor);
+      expect(fresh.items[0].visuals[0].status).toBe("ready");
+      expect((await store.resolve(fresh.items[0].visuals[0].id))?.bytes).toEqual(png);
+      const freshReady = Promise.withResolvers<void>();
+      onReady = () => freshReady.resolve();
+      live.subscribe(sink, "ws", { topic: "conversation", key: "opencode:local", cursor: fresh.cursor });
+      await freshReady.promise;
+      expect(paths).toHaveLength(3);
+      expect(new URL(paths[2]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      expect(received.at(-1)!.event.kind).toBe("ready");
+      expect(received.filter(envelope => envelope.event.kind === "resync")).toHaveLength(1);
+      expect(service.replay.latestCursor()).toBe(cursor);
+      expect(reads).toBe(2);
+      expect(trailerTimers).toBe(0);
+      expect(service.replay.subscriberCount()).toBe(1);
+    } finally {
+      live.dispose();
+      expect(service.replay.subscriberCount()).toBe(0);
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("repeated nonvisual browser resumes at head keep the actual client projection without refetching history, even after linger", async () => {
+    const service = new FakeChatService();
+    service.conversation.status = "completed";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "No images here." }];
+    let historyReads = 0;
+    const nativeHistory = service.history.bind(service);
+    service.history = async id => { historyReads++; return nativeHistory(id); };
+    const table = routes(service);
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const paths: string[] = [], releases: Array<Promise<void>> = [];
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        paths.push(path);
+        const released = Promise.withResolvers<void>(); releases.push(released.promise);
+        signal.addEventListener("abort", () => released.resolve(), { once: true });
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+        return response;
+      },
+    }, { lingerMs: 0 });
+    const endpoint = new LiveEndpoint({ broker: live, resolveWorkspace: id => id === "ws" ? id : null });
+    const principal = { user: "browser", sessionId: "browser-session" };
+    const pumps: Array<Promise<void>> = [], errors: unknown[] = [];
+    const channel = createLiveChannel({ ws: "ws", activity: false,
+      fetcher: async (url, init) => {
+        const streamId = new URL(url, "http://hub.test").pathname.split("/").at(-2)!;
+        return endpoint.changeSubscriptions(new Request(new URL(url, "http://hub.test"), init), streamId, principal);
+      },
+      openSource: url => {
+        const response = endpoint.openStream(new Request(new URL(url, "http://hub.test")), principal);
+        expect(response.status).toBe(200);
+        const reader = response.body!.getReader(), parser = new SseFrameParser();
+        const listeners = new Map<string, Array<(event: Event) => void>>();
+        let closed = false;
+        const pump = (async () => {
+          while (!closed) {
+            const chunk = await reader.read();
+            if (chunk.done) return;
+            for (const frame of parser.push(chunk.value)) if (!("comment" in frame)) {
+              for (const listener of listeners.get(frame.event) ?? []) listener(new MessageEvent(frame.event, { data: frame.data }));
+            }
+          }
+        })().catch(error => { if (!closed) errors.push(error); });
+        pumps.push(pump);
+        return { addEventListener(type, listener) { const entries = listeners.get(type) ?? []; entries.push(listener); listeners.set(type, entries); },
+          close() { closed = true; void reader.cancel().catch(() => undefined); } } satisfies LiveChannelSource;
+      },
+    });
+    const api = new ChatApiClient(async (url, init) => history.GET(request(String(url), init, { conversationId: "opencode:local" })), () => channel);
+    let stream: ReturnType<ChatApiClient["stream"]> | undefined;
+    let recovery: Promise<void> | undefined;
+    let keeper: { detach(): void } | undefined;
+    let ready = Promise.withResolvers<void>();
+    const applied = Promise.withResolvers<void>();
+    try {
+      const initial = await api.snapshot("opencode:local");
+      let projection = projectionFromSnapshot(initial);
+      const originalProjection = projection;
+      const handlers: Parameters<ChatApiClient["stream"]>[2] = {
+        event: event => { const result = applyChatEvent(projection, event); projection = result.projection; applied.resolve(); },
+        recovered: () => ready.resolve(),
+        error: error => { errors.push(error); ready.reject(error); },
+        // This is the owner's normal recovery path, not an assertion that a
+        // broker response alone avoided a history read/reprojection.
+        resync: () => { recovery = api.snapshot("opencode:local").then(current => {
+          projection = projectionFromSnapshot(current); stream = api.stream("opencode:local", current.cursor, handlers);
+        }); void recovery.catch(error => ready.reject(error)); },
+      };
+      keeper = live.subscribe({ write() {} }, "ws", { topic: "conversation", key: "opencode:local", cursor: initial.cursor });
+      stream = api.stream("opencode:local", initial.cursor, handlers);
+      channel.connect(); await ready.promise;
+      for (let round = 0; round < 3; round++) {
+        ready = Promise.withResolvers<void>();
+        channel.suspend(); channel.connect({ resumed: true }); await ready.promise;
+        expect(projection).toBe(originalProjection);
+        expect(historyReads).toBe(1);
+        expect(paths).toHaveLength(1);
+      }
+      // Foregrounding after the hidden page released its last interest opens
+      // a new child with reconnect=1. With no visual metadata it is still ready.
+      keeper.detach(); channel.suspend(); await releases[0]!;
+      expect(live.upstreamCount()).toBe(0);
+      ready = Promise.withResolvers<void>(); channel.connect({ resumed: true }); await ready.promise;
+      expect(paths).toHaveLength(2);
+      expect(new URL(paths[1]!, "http://child").searchParams.get("reconnect")).toBe("1");
+      expect(historyReads).toBe(1);
+      expect(projection).toBe(originalProjection);
+      service.replay.publish({ type: "item.text_delta", itemId: "answer", delta: " Still live." });
+      await applied.promise;
+      expect(projection.items[0]).toMatchObject({ id: "answer", markdown: "No images here. Still live." });
+      expect(historyReads).toBe(1);
+      expect(errors).toEqual([]);
+    } finally {
+      stream?.close(); keeper?.detach(); channel.dispose(); endpoint.endAll(); live.dispose();
+      await recovery?.catch(() => undefined); await Promise.all(pumps);
+      await service.dispose();
+    }
+  });
+
+  test("browser endpoint recovery repairs a lost visual resync after the Hub consumed it, including healthy shared-origin joins", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-browser-hub-recovery-"));
+    const service = new FakeChatService();
+    const store = new VisualStore("/workspace", directory);
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false, reads = 0;
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    store.setReader(async () => { reads++; if (!available) throw new VisualReadError(true); return png; });
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const paths: string[] = [];
+    const oldChildReleased = Promise.withResolvers<void>();
+    const live = new LiveBroker({
+      isRunning: () => true, workspaceIds: () => ["ws"],
+      open: async ({ path, signal }) => {
+        const attempt = paths.push(path);
+        if (attempt === 1) signal.addEventListener("abort", () => oldChildReleased.resolve(), { once: true });
+        const response = await events.GET(request(path, { signal }, { conversationId: "opencode:local" }));
+        expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(
+          new URL(path, "http://child").searchParams.get("reconnect") === "1" ? service.replay.latestCursor() : null,
+        );
+        return response;
+      },
+    });
+    const endpoint = new LiveEndpoint({ broker: live, resolveWorkspace: id => id === "ws" ? id : null });
+    const clients: Array<ReadableStreamDefaultReader<Uint8Array>> = [];
+    const openBrowser = (cursor: string, reconnect: boolean, sessionId = "browser-A", deferred = false) => {
+      const params = new URLSearchParams({ ws: "ws", subs: JSON.stringify(deferred ? [] : [{ topic: "conversation", key: "opencode:local", cursor }]) });
+      if (reconnect) params.set("reconnect", "1");
+      const principal = { user: sessionId, sessionId };
+      const response = endpoint.openStream(new Request(`http://hub.test/api/hub/live?${params}`), principal);
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      clients.push(reader);
+      const parser = new SseFrameParser();
+      const pending: LiveEnvelope[] = [];
+      const received: LiveEnvelope[] = [];
+      let streamId: string | undefined;
+      const readChunk = async () => {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("browser stream ended before expected envelope");
+        for (const frame of parser.push(chunk.value)) {
+          if ("comment" in frame) continue;
+          if (frame.event === "hello") streamId = parseLiveHello(frame.data)?.streamId;
+          if (frame.event === "live") {
+            const envelope = parseLiveEnvelope(frame.data);
+            if (envelope) pending.push(envelope);
+          }
+        }
+      };
+      const next = async (): Promise<LiveEnvelope> => {
+        while (!pending.length) await readChunk();
+        const envelope = pending.shift()!;
+        received.push(envelope);
+        return envelope;
+      };
+      return { reader, received, next,
+        async hello() { while (!streamId) await readChunk(); },
+        async until(kind: LiveEnvelope["event"]["kind"]) { let envelope: LiveEnvelope; do { envelope = await next(); } while (envelope.event.kind !== kind); return envelope; },
+        async attach(cursor: string, reconnect = false) {
+          expect(streamId).toBeDefined();
+          const changed = await endpoint.changeSubscriptions(new Request("http://hub.test/control", { method: "POST",
+            body: JSON.stringify({ add: [{ topic: "conversation", key: "opencode:local", cursor, ...(reconnect ? { reconnect: true } : {}) }] }),
+          }), streamId!, principal);
+          expect(changed.status).toBe(200);
+        },
+      };
+    };
+    try {
+      const cached = await getHistory();
+      expect(cached.items[0].visuals[0].status).toBe("pending");
+      const first = openBrowser(cached.cursor, false);
+      await first.until("ready");
+      available = true;
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after generating the image" });
+      const cursor = service.replay.latestCursor();
+      expect(await first.until("data")).toMatchObject({ cursor, event: { kind: "data", data: { ...terminal, conversationId: "opencode:local" } } });
+      // Keep the browser subscribed until the Hub consumes the trailer and
+      // drops its child, but never pull that resync from the browser body.
+      await oldChildReleased.promise;
+      expect(live.upstreamCount()).toBe(0);
+      expect(first.received.some(envelope => envelope.event.kind === "resync")).toBe(false);
+      await first.reader.cancel();
+      const resumed = openBrowser(cursor, true);
+      expect(await resumed.until("resync")).toMatchObject({ cursor, event: { kind: "resync", data: {
+        type: "resync", reason: "conversation-rewritten", generation: terminal.generation, sequence: terminal.sequence, conversationId: "opencode:local",
+      } } });
+      expect(paths).toHaveLength(2);
+      expect(new URL(paths[0]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      expect(new URL(paths[1]!, "http://child").searchParams.get("reconnect")).toBe("1");
+      expect(resumed.received.filter(envelope => envelope.event.kind === "data")).toEqual([]);
+      const fresh = await getHistory();
+      expect(fresh.cursor).toBe(cursor);
+      expect(fresh.items[0].visuals[0].status).toBe("ready");
+      expect((await store.resolve(fresh.items[0].visuals[0].id))?.bytes).toEqual(png);
+      await resumed.attach(fresh.cursor);
+      await resumed.until("ready");
+      expect(paths).toHaveLength(3);
+      expect(new URL(paths[2]!, "http://child").searchParams.has("reconnect")).toBe(false);
+      // A second browser now recovers at the healthy shared origin. Repair
+      // is scoped to it, with no new child request or future native message.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const deferred = attempt === 1;
+        const joining = openBrowser(cursor, true, "browser-B", deferred);
+        if (deferred) {
+          await joining.hello();
+          await joining.attach(cursor, true); // Retained recovery deferred past the opening URL.
+        }
+        expect((await joining.until("resync")).event).toEqual({ kind: "resync" });
+        expect(paths).toHaveLength(3);
+        const latest = await getHistory();
+        expect(latest.items[0].visuals[0].status).toBe("ready");
+        await joining.attach(latest.cursor);
+        expect((await joining.until("ready")).event.kind).toBe("ready");
+        expect(joining.received.map(envelope => envelope.event.kind)).toEqual(["resync", "ready"]);
+        await joining.reader.cancel();
+      }
+      expect(paths).toHaveLength(3);
+      expect(resumed.received.filter(envelope => envelope.event.kind === "resync")).toHaveLength(1);
+      expect(service.replay.latestCursor()).toBe(cursor);
+      expect(reads).toBe(2);
+      expect(service.replay.subscriberCount()).toBe(1);
+    } finally {
+      endpoint.endAll(); live.dispose();
+      await Promise.all(clients.map(reader => reader.cancel().catch(() => undefined)));
+      expect(service.replay.subscriberCount()).toBe(0);
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("HTTP cursor-only reconnect finishes terminal visual replay with a boundary resync and no resubscribe loop", async () => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-replay-route-"));
+    try {
+      const service = new FakeChatService();
+      const cursor = service.replay.latestCursor();
+      const markdown = "```svg\n<svg><rect width=\"1\"/></svg>\n```";
+      const rawDelta = service.replay.publish({ type: "item.text_delta", itemId: "m", delta: markdown });
+      const terminal = service.replay.publish({ type: "conversation.status", status: "completed" });
+      service.conversation.status = "completed";
+      service.items = [{ id: "m", type: "assistant_message", createdAt: 1, markdown }];
+      const table = routes(service, "/", undefined, undefined, undefined, new VisualStore("/workspace", directory));
+      const handler = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+      const denied = await handler.GET(Object.assign(new Request("http://127.0.0.1:4711/api/chat/conversations/opencode:local/events"), { params: { conversationId: "opencode:local" } }));
+      expect(denied.status).toBe(401);
+      expect(denied.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+      const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
+      expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(service.replay.latestCursor());
+      const reader = response.body!.getReader();
+      const opening = new TextDecoder().decode((await reader.read()).value);
+      expect(opening).toMatch(CONVERSATION_OPEN_FRAME);
+      expect(opening).not.toContain("visuals");
+      const boundaryCursor = service.replay.latestCursor();
+      expect(opening).toContain(boundaryCursor);
+      const replayed = new TextDecoder().decode((await reader.read()).value);
+      expect(JSON.parse(replayed.match(/data: (.+)\n/)![1]!)).toEqual({ ...rawDelta, conversationId: "opencode:local" });
+      const status = new TextDecoder().decode((await reader.read()).value);
+      expect(status).toContain(`id: ${boundaryCursor}\nevent: chat\n`);
+      expect(JSON.parse(status.match(/data: (.+)\n/)![1]!)).toEqual({ ...terminal, conversationId: "opencode:local" });
+      const ending = new TextDecoder().decode((await reader.read()).value);
+      expect(ending).toContain(`id: ${boundaryCursor}\nevent: resync\n`);
+      expect(JSON.parse(ending.match(/data: (.+)\n/)![1]!)).toEqual({ type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local", generation: terminal.generation, sequence: terminal.sequence });
+      expect((await reader.read()).done).toBe(true);
+      const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+      const snapshot = await (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+      expect(snapshot.cursor).toBe(boundaryCursor);
+      expect(snapshot.generation).toBe(terminal.generation);
+      expect(snapshot.items[0].markdown).toBe(markdown);
+      expect(snapshot.items[0].visuals[0].status).toBe("ready");
+      const resumed = await handler.GET(request("/api/chat/conversations/opencode:local/events", { headers: { "last-event-id": boundaryCursor } }, { conversationId: "opencode:local" }));
+      expect(resumed.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+      const resumedReader = resumed.body!.getReader();
+      await resumedReader.read();
+      const liveStatus = service.replay.publish({ type: "conversation.status", status: "completed" });
+      const live = new TextDecoder().decode((await resumedReader.read()).value);
+      expect(live).toContain(`id: ${service.replay.latestCursor()}\nevent: chat\n`);
+      expect(JSON.parse(live.match(/data: (.+)\n/)![1]!)).toEqual({ ...liveStatus, conversationId: "opencode:local" });
+      await resumedReader.cancel();
+      expect(service.replay.subscriberCount()).toBe(0);
+    } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  });
+
+  test.each(["ready", "unavailable"] as const)("HTTP exact-terminal-cursor recovery repairs a lost visual resync (%s), including repeated cached reconnects", async state => {
+    const scratch = path.join(os.homedir(), ".cache/opencode/scratch");
+    await fs.mkdir(scratch, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(scratch, "uatu-544-equal-cursor-route-"));
+    const service = new FakeChatService();
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let available = false;
+    let bytes = png;
+    let reads = 0;
+    const store = new VisualStore("/workspace", directory);
+    service.conversation.status = "running";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "![Generated](result.png)" }];
+    const table = routes(service, "/", undefined, undefined, undefined, store);
+    // buildRoutes installs its session-policy reader. Replace it afterwards
+    // so this test controls file arrival rather than calling unused getSession.
+    store.setReader(async source => { expect(source).toBe("result.png"); reads++; if (!available) throw new VisualReadError(true); return bytes; });
+    const events = table["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    const history = table["/api/chat/conversations/:conversationId"] as { GET(request: Request): Promise<Response> };
+    const getHistory = async () => (await history.GET(request("/api/chat/conversations/opencode:local", {}, { conversationId: "opencode:local" }))).json();
+    const open = async (cursor: string, reconnect: boolean) => {
+      const response = await events.GET(request(`/api/chat/conversations/opencode:local/events?reconnect=${reconnect ? "1" : "0"}`, { headers: { "last-event-id": cursor } }, { conversationId: "opencode:local" }));
+      expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBe(reconnect ? cursor : null);
+      const reader = response.body!.getReader();
+      readers.push(reader);
+      const opening = new TextDecoder().decode((await reader.read()).value);
+      expect(opening).toMatch(CONVERSATION_OPEN_FRAME);
+      expect(opening).not.toContain("visuals");
+      return reader;
+    };
+    try {
+      const pending = await getHistory();
+      expect(pending.items[0].visuals[0].status).toBe("pending");
+      expect(reads).toBe(1);
+      const first = await open(pending.cursor, false);
+      available = state === "ready";
+      service.conversation.status = "failed";
+      const terminal = service.replay.publish({ type: "conversation.status", status: "failed", message: "Provider failed after image generation" });
+      const statusFrame = new TextDecoder().decode((await first.read()).value);
+      const terminalCursor = statusFrame.match(/id: (.+)\n/)![1]!;
+      expect(terminalCursor).toBe(service.replay.latestCursor());
+      expect(statusFrame).toContain("event: chat\n");
+      expect(statusFrame).not.toContain("event: resync\n");
+      expect(JSON.parse(statusFrame.match(/data: (.+)\n/)![1]!)).toEqual({ ...terminal, conversationId: "opencode:local" });
+      await first.cancel(); // Acknowledge status, deliberately never read its visual resync.
+      expect(service.replay.subscriberCount()).toBe(0);
+      expect(reads).toBe(2);
+      available = true;
+      bytes = Uint8Array.from([...png.slice(0, -1), 2]); // Later source bytes cannot replace a sealed capture.
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const resumed = await open(terminalCursor, true);
+        const frame = new TextDecoder().decode((await resumed.read()).value);
+        expect(frame).toContain(`id: ${terminalCursor}\nevent: resync\n`);
+        expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual({ type: "resync", reason: "conversation-rewritten", conversationId: "opencode:local", generation: terminal.generation, sequence: terminal.sequence });
+        expect((await resumed.read()).done).toBe(true);
+        const snapshot = await getHistory();
+        expect(snapshot.cursor).toBe(terminalCursor);
+        expect(snapshot.generation).toBe(terminal.generation);
+        expect(snapshot.items[0].visuals[0].status).toBe(state);
+        if (state === "ready") expect((await store.resolve(snapshot.items[0].visuals[0].id))?.bytes).toEqual(png);
+        expect(service.replay.latestCursor()).toBe(terminalCursor); // No synthetic native sequence.
+        expect(reads).toBe(2); // Even a second reconnect after a cached history read must repair.
+      }
+
+      // The resync owner's fresh post-history attachment must not repeat the
+      // invalidation. A real native frame proves progress without timing out.
+      const fresh = await open(terminalCursor, false);
+      const barrier = service.replay.publish({ type: "conversation.configuration", configuration: {} });
+      const next = new TextDecoder().decode((await fresh.read()).value);
+      expect(next).toContain("event: chat\n");
+      expect(next).not.toContain("event: resync\n");
+      expect(JSON.parse(next.match(/data: (.+)\n/)![1]!)).toEqual({ ...barrier, conversationId: "opencode:local" });
+      expect(reads).toBe(2);
+      await fresh.cancel();
+      expect(service.replay.subscriberCount()).toBe(0);
+    } finally {
+      await Promise.all(readers.map(reader => reader.cancel().catch(() => undefined)));
+      await service.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("HTTP equal-cursor transport recovery of plain terminal text needs no visual resync or file reads", async () => {
+    const service = new FakeChatService();
+    service.conversation.status = "completed";
+    service.items = [{ id: "answer", type: "assistant_message", createdAt: 1, markdown: "Plain terminal answer" }];
+    const terminal = service.replay.publish({ type: "conversation.status", status: "completed" });
+    const store = new VisualStore("/workspace");
+    let reads = 0;
+    const handler = routes(service, "/", undefined, undefined, undefined, store)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request): Promise<Response> };
+    store.setReader(async () => { reads++; throw new Error("plain text must not read files"); });
+    const response = await handler.GET(request("/api/chat/conversations/opencode:local/events?reconnect=1", { headers: { "last-event-id": service.replay.latestCursor() } }, { conversationId: "opencode:local" }));
+    expect(response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER)).toBeNull();
+    const reader = response.body!.getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
+      const barrier = service.replay.publish({ type: "conversation.configuration", configuration: {} });
+      const frame = new TextDecoder().decode((await reader.read()).value);
+      expect(frame).toContain("event: chat\n");
+      expect(frame).not.toContain("event: resync\n");
+      expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual({ ...barrier, conversationId: "opencode:local" });
+      expect(barrier.sequence).toBe(terminal.sequence + 1);
+      expect(reads).toBe(0);
+    } finally { await reader.cancel(); await service.dispose(); }
+    expect(service.replay.subscriberCount()).toBe(0);
   });
 });
 
@@ -1097,8 +2004,8 @@ class FrameReader {
   }
 }
 
-function activityFrame(data: { working: boolean; awaiting: boolean }): string {
-  return `event: activity\ndata: ${JSON.stringify(data)}\n\n`;
+function activityFrame(data: { working: boolean; awaiting: boolean; unresolved?: boolean }): string {
+  return `event: activity\ndata: ${JSON.stringify({ ...data, unresolved: data.unresolved ?? false })}\n\n`;
 }
 
 async function openActivity(
@@ -1118,6 +2025,22 @@ async function untilSubscribers(service: FakeChatService, count: number): Promis
 }
 
 describe("workspace activity route", () => {
+  test("uncertainty-only changes serialize the third boolean without leaking service fields", async () => {
+    const service = new FakeChatService();
+    const { frames } = await openActivity(service);
+    try {
+      expect(await frames.next()).toBe(": open\n\n");
+      expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+      service.unresolved = true;
+      service.activityChanges.invalidate();
+      const frame = await frames.next();
+      expect(frame).toBe(activityFrame({ working: false, awaiting: false, unresolved: true }));
+      expect(Object.keys(JSON.parse(frame.split("\ndata: ")[1]!))).toEqual(["working", "awaiting", "unresolved"]);
+      service.unresolved = false;
+      service.activityChanges.invalidate();
+      expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+    } finally { await frames.reader.cancel(); }
+  });
   test("requires the workspace credential and subscribes to nothing without it", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/activity"] as { GET(request: Request): Promise<Response> };
@@ -1140,7 +2063,7 @@ describe("workspace activity route", () => {
     await frames.reader.cancel();
   });
 
-  test("a status change and a pending permission each produce exactly one event carrying only the two facts", async () => {
+  test("a status change and a pending permission each produce exactly one event carrying only the three facts", async () => {
     const service = new FakeChatService();
     const { frames } = await openActivity(service);
     expect(await frames.next()).toBe(": open\n\n");
@@ -1164,9 +2087,10 @@ describe("workspace activity route", () => {
       expect(frame).not.toContain("id:");
       const data = JSON.parse(frame.split("\ndata: ")[1]!) as Record<string, unknown>;
       // The fake also returns its conversation id and title; neither leaks.
-      expect(Object.keys(data)).toEqual(["working", "awaiting"]);
+      expect(Object.keys(data)).toEqual(["working", "awaiting", "unresolved"]);
       expect(typeof data.working).toBe("boolean");
       expect(typeof data.awaiting).toBe("boolean");
+      expect(typeof data.unresolved).toBe("boolean");
     }
 
     service.settlePermission("permission-1");

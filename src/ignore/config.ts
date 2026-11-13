@@ -11,6 +11,7 @@ import path from "node:path";
 export type IgnoreConfig = {
   exclude: string[];
   respectGitignore: boolean;
+  explicitRespectGitignore?: boolean;
 };
 
 export type IgnoreConfigResult = {
@@ -72,11 +73,17 @@ export async function loadIgnoreConfig(rootPath: string): Promise<IgnoreConfigRe
   if (block.respectGitignore !== undefined) {
     if (typeof block.respectGitignore === "boolean") {
       config.respectGitignore = block.respectGitignore;
+      config.explicitRespectGitignore = block.respectGitignore;
     } else {
       warnings.push("Ignored .uatu.json ignore.respectGitignore because it must be a boolean.");
     }
   }
 
+  // `ignore.include` opened build/dist subtrees before they were visible by
+  // default. It has no effect now; say so once rather than silently ignore it.
+  if (block.include !== undefined) {
+    warnings.push("Ignored .uatu.json ignore.include because it no longer has an effect: build and dist output is listed without configuration.");
+  }
   return { config, warnings };
 }
 

@@ -38,8 +38,7 @@ export const test = base.extend<{}, WorkerFixtures>({
       // worker must not inherit a predecessor's leftover files.
       const port = workerServerPort(workerInfo.parallelIndex);
       const workspace = path.resolve(
-        process.cwd(),
-        ".e2e",
+        process.env.UATU_E2E_WORKSPACE_ROOT ?? path.join(process.cwd(), ".e2e"),
         `watch-docs-w${workerInfo.workerIndex}`,
       );
 
@@ -153,7 +152,7 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
   // root automatically when given a CSS selector.
   await expect(treeRow(page, "README.md")).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await expect(page.locator("#document-count")).toHaveText("18 files");
+  await expect(page.locator("#document-count")).toHaveAttribute("aria-label", "18 files");
   await waitForPreviewToSettle(page);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await normalizeFollowOff(page);

@@ -8,6 +8,22 @@ export type SlashCommandQuery = {
 
 export type LocalHistoryOperation = "undo" | "redo";
 
+export function sideQuestionOperation(value: string): { question: string } | null {
+  const match = /^\/btw(?:\s+([\s\S]*))?$/.exec(value.trim());
+  return match ? { question: match[1]?.trim() ?? "" } : null;
+}
+
+/** Whole-prompt command grammar shared by dispatch and browser affordances.
+ * A path such as /build/notes.md is prose, not a /build invocation. */
+export function parsePromptSlashCommand(text: string, commands: ChatCommand[]): { name: string; arguments: string; command: ChatCommand } | undefined {
+  if (!text.startsWith("/") || text.startsWith("//")) return undefined;
+  const match = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(text);
+  if (!match || match[1] === "undo" || match[1] === "redo") return undefined;
+  const command = commands.find(candidate => candidate.name === match[1] && candidate.kind !== "local-operation");
+  if (!command) return undefined;
+  return { name: match[1]!, arguments: match[2]?.trim() ?? "", command };
+}
+
 export function localHistoryOperation(value: string, commands: ChatCommand[], reversibleHistory = false): LocalHistoryOperation | null {
   const name = value === "/undo" ? "undo" : value === "/redo" ? "redo" : null;
   if (!name) return null;

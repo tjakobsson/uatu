@@ -32,6 +32,7 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 3_000): Promise<voi
 function sessionFor(port: number): RunningSession {
   return {
     workspaceId: "project",
+    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
     basePath: "/s/project/",
     endpoint: { hostname: "127.0.0.1", port },
     token: "child-secret",

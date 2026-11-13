@@ -265,7 +265,7 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   await expect(rows.nth(1).locator("td").last()).toHaveText("$0.13");
   await expect(page.locator("#chat-plan-session-total td").last()).toHaveText("$1.50");
   await views.getByRole("radio", { name: "Agents" }).click();
-  await expect(page.locator("#chat-subagents-items")).toContainText("$0.25");
+  await expect(page.locator('[data-chat-item-id="tool:agent"] .chat-activity-subject')).toContainText("$0.25");
   await captureScreenshot(page, testInfo, `${PREFIX}-readout-desktop`);
   // A label-only correction to the subagent repaints the open table.
   const agentSeed = costItems.find(item => item.id === "tool:agent")!;

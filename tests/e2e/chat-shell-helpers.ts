@@ -43,8 +43,8 @@ export async function bootShell(page: Page, request: APIRequestContext, options:
   else await openChatPanel(page);
   await page.locator("#chat-conversation-select").selectOption(parent.conversation.id);
   if (child) {
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Shell child" }).click();
+    await page.locator("#chat-compact-workers summary").click();
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Shell child$/ }) }).click();
   }
   const timeline = page.locator(child ? "#chat-drilldown-timeline" : "#chat-timeline");
   await openShellRow(timeline, "shell:a");

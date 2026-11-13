@@ -206,3 +206,335 @@ test("newest eligible document stays correct after replacement, reclassification
     expect(heap.id).toBe(expected);
   }
 });
+
+// Ignored folders (task: lists on demand, live-write window, batched lane).
+function ignoredFixture(options: Partial<FileIndexOptions> = {}) {
+  return fixture({ ignored: { folders: ["node_modules", "build"], files: [] }, classify: async () => "binary", ...options });
+}
+const insideIgnored = (batches: FileIndexBatch[]) => batches.filter(batch => batch.lane);
+function documentIds(index: FileIndex, prefix: string) {
+  return [...index.documents.keys()].filter(id => id.startsWith(prefix));
+}
+
+test("unlisted writes are captured within a bounded, newest-first window", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  for (let i = 0; i < 80_000; i++) index.observe("add", `/docs/node_modules/pkg${i % 400}/f${i}.js`, stat(i));
+  await index.idle();
+  const kept = documentIds(index, "/docs/node_modules/");
+  expect(kept).toHaveLength(2000);
+  expect(kept.every(id => Number(id.match(/f(\d+)\.js$/)![1]) >= 78_000)).toBe(true);
+  expect([...index.documents.values()].every(doc => doc.gitIgnoreStatus === "ignored")).toBe(true);
+}, 30_000);
+
+test("the window evicts the oldest unpinned write, refreshes rewritten files, and listing brings evicted files back", async () => {
+  const { index } = ignoredFixture({ windowLimit: 3 });
+  index.markReady();
+  const file = (name: string) => `/docs/build/renders/${name}.wav`;
+  for (const name of ["a", "b", "c"]) index.observe("add", file(name), stat());
+  await index.idle();
+  index.pin(file("a"));
+  index.observe("change", file("b"), stat(2)); // b is now the newest write
+  index.observe("add", file("d"), stat());
+  await index.idle();
+  // a is pinned, so c (the oldest unpinned) leaves; b was rewritten.
+  expect(documentIds(index, "/docs/build/").sort()).toEqual([file("a"), file("b"), file("d")]);
+  index.observe("add", file("e"), stat());
+  await index.idle();
+  expect(documentIds(index, "/docs/build/").sort()).toEqual([file("a"), file("d"), file("e")]);
+  // Listing the level: its files are admitted and leave the window.
+  index.markListed("/docs/build");
+  index.markListed("/docs/build/renders");
+  for (const name of ["b", "c"]) index.observe("add", file(name), stat(3));
+  await index.idle();
+  for (const name of ["f", "g", "h", "i"]) index.observe("add", file(name), stat(4));
+  await index.idle();
+  expect(documentIds(index, "/docs/build/").sort()).toEqual(["a", "b", "c", "d", "e", "f", "g", "h", "i"].map(file));
+});
+
+test("a burst inside an ignored folder arrives as a few classified patches with no Follow candidates", async () => {
+  const { index, batches } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  await index.idle();
+  batches.length = 0;
+  for (let i = 0; i < 5000; i++) index.observe("add", `/docs/build/obj${i}.o`, stat());
+  await index.idle();
+  const lane = insideIgnored(batches);
+  // idle() also forces the (empty) ordinary flush; only batches with files count.
+  expect(batches.filter(batch => batch.upserts.length || batch.removals.length)).toEqual(lane);
+  expect(lane.length).toBeLessThanOrEqual(5);
+  expect(lane.reduce((n, batch) => n + batch.upserts.length, 0)).toBe(5000);
+  expect(lane.every(batch => batch.upserts.length <= 1024 && batch.upserts.every(doc => doc.gitIgnoreStatus === "ignored"))).toBe(true);
+  expect(lane.every(batch => batch.changedId === null && (batch.followCandidates ?? []).length === 0)).toBe(true);
+});
+
+test("repeated writes collapse and short-lived output is never published", async () => {
+  const { index, batches } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  await index.idle();
+  batches.length = 0;
+  for (const mtime of [1, 2, 3]) index.observe("change", "/docs/build/main.o", stat(mtime));
+  index.observe("add", "/docs/build/tmp.o", stat());
+  index.observe("unlink", "/docs/build/tmp.o");
+  await index.idle();
+  const upserts = insideIgnored(batches).flatMap(batch => batch.upserts);
+  expect(upserts.map(doc => [doc.relativePath, doc.mtimeMs])).toEqual([["build/main.o", 3]]);
+  expect(insideIgnored(batches).flatMap(batch => batch.removals)).toEqual([]);
+});
+
+test("the lane waits at least 1 s and at most 5 s while ordinary edits keep their 2 s bound", async () => {
+  let now = 0, nextId = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const advance = async (target: number) => {
+    for (;;) {
+      const due = [...timers.entries()].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      timers.delete(due[0]); now = due[1].at; due[1].run();
+      await Promise.resolve();
+    }
+    now = target;
+  };
+  const published: { at: number; lane: boolean; ids: string[] }[] = [];
+  const { index } = ignoredFixture({
+    clock: { now: () => now,
+      setTimer: (run, delay) => { const id = ++nextId; timers.set(id, { at: now + delay, run }); return id as unknown as ReturnType<typeof setTimeout>; },
+      clearTimer: timer => { timers.delete(timer as unknown as number); },
+    },
+    publish: batch => published.push({ at: now, lane: batch.lane === true, ids: batch.upserts.map(doc => doc.relativePath) }),
+  });
+  index.markReady();
+  index.markListed("/docs/build");
+  index.flushLane();
+  published.length = 0;
+  // A build writes every 100 ms for 8 s; a document is saved at 1 s.
+  for (let time = 0; time < 8000; time += 100) {
+    await advance(time);
+    index.observe("change", `/docs/build/obj${time}.o`, stat(time));
+    if (time === 1000) index.observe("change", "/docs/notes.md", stat(time));
+    await Bun.sleep(0);
+  }
+  await advance(20_000);
+  const lane = published.filter(batch => batch.lane);
+  const ordinary = published.filter(batch => !batch.lane && batch.ids.length);
+  expect(ordinary.map(batch => batch.ids)).toEqual([["notes.md"]]);
+  expect(ordinary[0]!.at - 1000).toBeLessThanOrEqual(2000);
+  expect(lane[0]!.at).toBeGreaterThanOrEqual(1000);
+  expect(lane[0]!.at).toBeLessThanOrEqual(5000);
+  for (let i = 1; i < lane.length; i++) expect(lane[i]!.at - lane[i - 1]!.at).toBeLessThanOrEqual(5000);
+  expect(lane.flatMap(batch => batch.ids)).toHaveLength(80);
+});
+
+test("a requested ignored file is published before settlement even behind 1,500 pending entries", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  for (let i = 0; i < 1500; i++) index.observe("add", `/docs/build/obj${i}.o`, stat());
+  // Let the jobs finish without letting the lane publish.
+  await Bun.sleep(50);
+  await index.request("/docs/build/obj1499.o", stat());
+  expect(index.documents.has("/docs/build/obj1499.o")).toBe(true);
+});
+
+test("a folder recreated before its removal is published stays an entry", async () => {
+  const { index, batches } = ignoredFixture({ classifyDirectory: async () => true });
+  index.markReady();
+  await index.idle();
+  index.observe("unlinkDir", "/docs/build");
+  expect(await index.classifyNewDirectory("/docs/build")).toBe(true);
+  index.observe("addDir", "/docs/build");
+  index.flushLane();
+  expect(index.folders.has("/docs/build")).toBe(true);
+  expect(batches.flatMap(batch => batch.folderRemovals ?? []).filter(removal => removal.id === "/docs/build")).toEqual([]);
+});
+
+test("ignored files waiting on content classification never take every slot from an ordinary edit", async () => {
+  const blocked = Promise.withResolvers<"binary">();
+  let started = 0;
+  const { index, batches } = ignoredFixture({ classify: async id => {
+    if (id.endsWith(".sniff")) { started++; return blocked.promise; }
+    return "text";
+  } });
+  index.markReady();
+  index.markListed("/docs/build");
+  // An unfamiliar extension forces a content sniff.
+  for (let i = 0; i < 20; i++) index.observe("add", `/docs/build/obj${i}.sniff`, stat());
+  await Bun.sleep(20);
+  // Half the default eight slots at most.
+  expect(started).toBe(4);
+  index.observe("change", "/docs/notes.unknown", stat(5));
+  const deadline = Date.now() + 2000;
+  while (!batches.some(batch => batch.upserts.some(doc => doc.relativePath === "notes.unknown")) && Date.now() < deadline) await Bun.sleep(20);
+  expect(batches.some(batch => batch.upserts.some(doc => doc.relativePath === "notes.unknown"))).toBe(true);
+  blocked.resolve("binary");
+  await index.idle();
+  expect(documentIds(index, "/docs/build/")).toHaveLength(20);
+});
+
+test("deleting a large ignored folder publishes its removal only after every file's removal", async () => {
+  const { index, batches } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  for (let i = 0; i < 1500; i++) index.observe("add", `/docs/build/obj${i}.o`, stat());
+  await index.idle();
+  batches.length = 0;
+  index.observe("unlinkDir", "/docs/build");
+  await index.idle();
+  const lane = batches.filter(batch => batch.lane);
+  const folderBatch = lane.findIndex(batch => (batch.folderRemovals ?? []).some(removal => removal.id === "/docs/build"));
+  const lastFileBatch = lane.findLastIndex(batch => batch.removals.length > 0);
+  expect(lane.flatMap(batch => batch.removals)).toHaveLength(1500);
+  expect(folderBatch).toBeGreaterThanOrEqual(lastFileBatch);
+  expect(lane.every(batch => batch.upserts.length + batch.removals.length + (batch.folderRemovals ?? []).length <= 1024)).toBe(true);
+});
+
+test("deleting a file whose folder became ignored before its first flush clears both lanes", async () => {
+  const { index } = ignoredFixture({ classifyDirectory: async () => true });
+  index.markReady();
+  await index.idle();
+  index.observe("add", "/docs/gen/a.md", stat());
+  await Bun.sleep(5);
+  expect(await index.classifyNewDirectory("/docs/gen")).toBe(true);
+  index.observe("unlink", "/docs/gen/a.md");
+  await index.idle();
+  expect(index.documents.has("/docs/gen/a.md")).toBe(false);
+});
+
+test("the live-write window evicts by write order, not by when classification finished", async () => {
+  const blocked = Promise.withResolvers<"binary">();
+  const { index } = ignoredFixture({ windowLimit: 2, classify: async id => id.endsWith(".unknown") ? blocked.promise : "text" });
+  index.markReady();
+  await index.idle();
+  index.observe("add", "/docs/build/renders/old.unknown", stat(1));
+  await Bun.sleep(5);
+  index.observe("add", "/docs/build/renders/newer.md", stat(2));
+  index.observe("add", "/docs/build/renders/newest.md", stat(3));
+  await Bun.sleep(5);
+  blocked.resolve("binary");
+  await index.idle();
+  expect(documentIds(index, "/docs/build/").sort()).toEqual(["/docs/build/renders/newer.md", "/docs/build/renders/newest.md"]);
+});
+
+test("a file replacing an ignored folder of the same path arrives after the folder's removal", async () => {
+  const { index, batches } = ignoredFixture({ ignored: { folders: ["output"], files: [] } });
+  index.markReady();
+  await index.idle();
+  batches.length = 0;
+  index.observe("unlinkDir", "/docs/output");
+  index.observe("add", "/docs/output", stat());
+  await index.idle();
+  const removal = batches.findIndex(batch => (batch.folderRemovals ?? []).some(entry => entry.id === "/docs/output"));
+  const upsert = batches.findIndex(batch => batch.upserts.some(doc => doc.id === "/docs/output"));
+  expect(removal).toBeGreaterThanOrEqual(0);
+  expect(upsert).toBeGreaterThan(removal);
+});
+
+test("a directory removed while Git classifies it does not come back as an ignored folder", async () => {
+  const gate = Promise.withResolvers<boolean>();
+  const { index } = ignoredFixture({ classifyDirectory: () => gate.promise });
+  index.markReady();
+  await index.idle();
+  const classified = index.classifyNewDirectory("/docs/out");
+  index.observe("unlinkDir", "/docs/out");
+  gate.resolve(true);
+  expect(await classified).toBe(false);
+  await index.idle();
+  expect(index.folders.has("/docs/out")).toBe(false);
+});
+
+test("removing the watched root itself clears its indexed files", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  index.observe("add", "/docs/a.md", stat());
+  index.observe("add", "/docs/build/b.o", stat());
+  await index.idle();
+  expect(index.documents.size).toBe(2);
+  index.observe("unlinkDir", "/docs");
+  await index.idle();
+  expect(index.documents.size).toBe(0);
+  expect(index.folders.size).toBe(0);
+});
+
+test("a requested file replacing an ignored folder is published before the request resolves", async () => {
+  const { index } = ignoredFixture({ ignored: { folders: ["output"], files: [] } });
+  index.markReady();
+  await index.idle();
+  index.observe("unlinkDir", "/docs/output");
+  await index.request("/docs/output", stat());
+  expect(index.documents.has("/docs/output")).toBe(true);
+});
+
+test("a job that changes lanes replaces the older queued job instead of losing the write", async () => {
+  const blocker = Promise.withResolvers<"text">();
+  const { index } = ignoredFixture({ concurrency: 1, classifyDirectory: async () => true,
+    classify: async id => id.endsWith(".sniff") ? blocker.promise : "text" });
+  index.markReady();
+  await index.idle();
+  index.observe("add", "/docs/x.sniff", stat()); // holds the only slot
+  await Bun.sleep(5);
+  index.observe("add", "/docs/gen/a.md", stat(1)); // queued as an ordinary job
+  expect(await index.classifyNewDirectory("/docs/gen")).toBe(true);
+  index.observe("change", "/docs/gen/a.md", stat(2)); // now an ignored-folder job
+  blocker.resolve("text");
+  await index.idle();
+  expect(index.documents.get("/docs/gen/a.md")?.mtimeMs).toBe(2);
+});
+
+test("adopting a single-character folder lists its known levels and returns", () => {
+  const { index } = ignoredFixture({ ignored: { folders: [], files: [] } });
+  index.markReady();
+  index.observe("add", "/docs/a/doc.md", stat());
+  index.observe("add", "/docs/a/b/deep.md", stat());
+  return index.idle().then(() => {
+    index.adoptIgnoredFolder("a");
+    expect(index.ignoredFolders.isListed("a")).toBe(true);
+    expect(index.ignoredFolders.isListed("a/b")).toBe(true);
+    expect(index.ignoredFolders.isListed(".")).toBe(false);
+  });
+});
+
+test("a requested ignored file already queued takes a free slot at once", async () => {
+  const first = Promise.withResolvers<"binary">();
+  const started: string[] = [];
+  const { index } = ignoredFixture({ concurrency: 2, classify: async id => { started.push(id); return id.endsWith("one.sniff") ? first.promise : "text"; } });
+  index.markReady();
+  index.markListed("/docs/build");
+  await index.idle();
+  index.observe("add", "/docs/build/one.sniff", stat());
+  index.observe("add", "/docs/build/two.sniff", stat());
+  await Bun.sleep(5);
+  // One background slot of two: the second ignored job waits.
+  expect(started).toEqual(["/docs/build/one.sniff"]);
+  await index.request("/docs/build/two.sniff", stat());
+  expect(index.documents.has("/docs/build/two.sniff")).toBe(true);
+  first.resolve("binary");
+  await index.idle();
+});
+
+test("inside a listed ignored folder, a file replacing a folder of the same path follows its removal", async () => {
+  const { index, batches } = ignoredFixture({ classifyDirectory: async () => true });
+  index.markReady();
+  index.markListed("/docs/build");
+  index.admitFolder("/docs/build/out.md");
+  await index.idle();
+  batches.length = 0;
+  index.observe("unlinkDir", "/docs/build/out.md");
+  index.observe("add", "/docs/build/out.md", stat());
+  await index.idle();
+  const removal = batches.findIndex(batch => (batch.folderRemovals ?? []).some(entry => entry.id === "/docs/build/out.md"));
+  const upsert = batches.findIndex(batch => batch.upserts.some(doc => doc.id === "/docs/build/out.md"));
+  expect(removal).toBeGreaterThanOrEqual(0);
+  expect(upsert).toBeGreaterThan(removal);
+});
+
+test("a requested file replacing a folder inside a listed ignored folder is published before the request resolves", async () => {
+  const { index } = ignoredFixture();
+  index.markReady();
+  index.markListed("/docs/build");
+  index.admitFolder("/docs/build/out.md");
+  await index.idle();
+  index.observe("unlinkDir", "/docs/build/out.md");
+  await index.request("/docs/build/out.md", stat());
+  expect(index.documents.has("/docs/build/out.md")).toBe(true);
+});

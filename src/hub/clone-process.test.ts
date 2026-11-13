@@ -276,8 +276,8 @@ describe("CloneProcessAdapter", () => {
     await writeFile(fakeGit, [
       "#!/bin/sh",
       "sleep 300 &",
+      "trap 'wait; exit 0' TERM",
       `printf '%s' \"$!\" > '${childPidFile}'`,
-      "trap 'exit 0' TERM",
       "wait",
     ].join("\n"), { mode: 0o755 });
 

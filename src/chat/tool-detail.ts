@@ -160,9 +160,13 @@ function parseToolDetail(item: DetailInput): ToolDetail {
       };
     }
     // Loading a skill is one fact — which one. The raw JSON view buried the
-    // name inside an input blob.
+    // name inside an input blob. The input's key moved with CLI generations —
+    // `skill` on the fork-era Claude Code, `name` on some providers, and the
+    // current Claude Code Skill tool takes the id alone (tool schema: "the
+    // skill ID must match an available skill") — but in every shape that
+    // value is the display name (GitHub #524).
     case "skill": {
-      const skillName = optionalText(input.name ?? input.skill);
+      const skillName = optionalText(input.name ?? input.skill ?? input.id);
       if (skillName === undefined) break;
       return { kind: "skill", label: "Skill", name: skillName, ...(item.childConversationId === undefined ? {} : { conversationId: item.childConversationId }) };
     }

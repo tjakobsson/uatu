@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { ChatProvider } from "./provider";
 import type { ChatCommand } from "./types";
 import { ChatAdapter, parseSlashCommand } from "./adapter";
-import { insertCommand, localHistoryOperation, matchingCommands, slashCommandQuery } from "./slash-commands";
+import { insertCommand, localHistoryOperation, matchingCommands, parsePromptSlashCommand, sideQuestionOperation, slashCommandQuery } from "./slash-commands";
 
 const commands: ChatCommand[] = [
   { name: "review", description: "Review work", argumentHint: "[focus]", kind: "command" },
@@ -12,6 +12,30 @@ const commands: ChatCommand[] = [
 ];
 
 describe("slash command completion", () => {
+  test("side questions use a whole built-in token, independently of the provider catalog", () => {
+    for (const [text, question] of [["/btw", ""], [" /btw  hi  ", "hi"], ["/btw\nfirst\nsecond", "first\nsecond"]]) {
+      expect(sideQuestionOperation(text!)).toEqual({ question });
+    }
+    for (const text of ["/btw/notes.md", "/btwhatever hi", "/BTW hi", "//btw hi", "prose /btw hi", "/build hi"]) {
+      expect(sideQuestionOperation(text)).toBeNull();
+    }
+  });
+  test("prompt classification agrees with dispatch, including paths and whole tokens", () => {
+    const catalog: ChatCommand[] = ["build", "provider:build", "reload", "undo"].map(name => ({ name, description: name, argumentHint: "", kind: "command" }));
+    for (const [text, name, args] of [
+      ["/build", "build", ""], ["/build hi", "build", "hi"], ["/build notes", "build", "notes"],
+      ["/build\nnotes\nmore  ", "build", "notes\nmore"], ["/build  ", "build", ""],
+      ["/provider:build notes", "provider:build", "notes"], ["/reload", "reload", ""],
+      ["/build/notes.md"], ["/btw /build/notes"], ["/unknown"], ["/Build"],
+      ["/builder"], [" /build"], ["//build"], ["/undo"], ["/redo"],
+    ]) {
+      const parsed = parsePromptSlashCommand(text!, catalog);
+      expect(parsed, text).toEqual(parseSlashCommand(text!, catalog));
+      expect(parsed?.name, text).toBe(name);
+      expect(parsed?.arguments, text).toBe(args);
+    }
+    expect(parsePromptSlashCommand("/build", [{ ...catalog[0]!, kind: "local-operation" }])).toBeUndefined();
+  });
   test("finds the slash token at the caret, including after prose", () => {
     expect(slashCommandQuery("check this /open", 16)).toEqual({ start: 11, end: 16, query: "open" });
     expect(slashCommandQuery("/review later", 13)).toBeNull();

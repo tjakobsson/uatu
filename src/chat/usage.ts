@@ -34,14 +34,15 @@ export function formatUsd(value: number): string {
 }
 
 /**
- * Token counts at a glance: `840`, `12.4k`, `1.2M`. The exact figure is always
+ * Token counts at a glance: `840`, `12.4k`, `1.2M`, `1.0B`. The exact figure is always
  * one hover or one expansion away (the title attribute and the breakdown), so
  * the compact form never has to be the only statement.
  */
 export function formatTokens(value: number): string {
   if (value < 1_000) return String(value);
   if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
-  return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value < 1_000_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  return `${(value / 1_000_000_000).toFixed(1)}B`;
 }
 
 /** Tokens occupying the model's context window right now. */

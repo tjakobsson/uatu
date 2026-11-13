@@ -1,13 +1,14 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 11.24.0-experimental
+  version: 15.37.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 11 and workspace revision 24
+  summary: Hub revision 15 and workspace revision 37
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
-    Under `/s/{workspaceId}/` the Hub serves one family itself, personal
-    state, and it is part of this contract. Everything else under that
+    Under `/s/{workspaceId}/` the Hub serves personal state, worker
+    dismissals and activity-viewed acknowledgements itself, and those are
+    part of this contract. Other routes under that
     prefix is the internal protocol between the Hub, the workspace child,
     and the web client shipped in the same build, and `exclusions.yaml`
     lists it. Workspace payloads reach public clients
@@ -20,8 +21,8 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 11
-    workspaceApiRevision: 24
+    hubApiRevision: 15
+    workspaceApiRevision: 37
 servers:
   - url: https://{hubHost}
     variables:
@@ -148,9 +149,9 @@ paths:
                   summary: An ordinary workspace
                   value:
                     version: 0.5.1 (abcdef0)
-                    hubApiRevision: 10
-                    workspaceApiRevision: 20
-                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 20, shells: [{ attached: false, label: zsh }] }]
+                    hubApiRevision: 15
+                    workspaceApiRevision: 37
+                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 37, shells: [{ attached: false, label: zsh }] }]
                     workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
                 worktrees:
                   summary: A main workspace and one linked worktree
@@ -414,6 +415,56 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
               example: { error: workspace display name could not be persisted }
+  /api/hub/settings/chat-preferences:
+    get:
+      operationId: hubGetPersonalChatPreferences
+      tags: [Hub]
+      summary: Read the authenticated account's personal chat preferences
+      description: No identity selectors. Absent records default ON at revision zero; unreadable persisted state is unavailable, not reset. Responses are no-store.
+      responses:
+        '200':
+          description: Only the authenticated account's effective personal preference.
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalChatPreferences' }
+              example: { version: 1, revision: 0, autoBackgroundOnSteer: true }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+    put:
+      operationId: hubUpdatePersonalChatPreferences
+      tags: [Hub]
+      summary: Save the authenticated account's personal chat preferences
+      description: Serialized compare-revision update across devices and workspaces. Identity comes only from the cookie or bearer session. Cookie mutations require same origin. This never changes machine-wide agent logins, workspace defaults or another account's preference. No-store responses.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdatePersonalChatPreferencesRequest' }
+            example: { version: 1, expectedRevision: 0, autoBackgroundOnSteer: false }
+      responses:
+        '200':
+          description: Confirmed persisted own-account state.
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalChatPreferences' }
+              example: { version: 1, revision: 1, autoBackgroundOnSteer: false }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '409':
+          description: A newer own-account revision is already saved. Review current before a fresh explicit update.
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalChatPreferencesConflict' }
+              example: { error: personal chat preferences changed on another device, current: { version: 1, revision: 1, autoBackgroundOnSteer: false } }
+        '503': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/settings/workspace-defaults:
     get:
       operationId: hubGetWorkspaceDefaults
@@ -965,11 +1016,11 @@ paths:
         - name: subs
           in: query
           schema: { type: string, contentMediaType: application/json, contentSchema: { $ref: '#/components/schemas/LiveSubscriptionList' } }
-          description: "Initial subscriptions as a JSON array of LiveSubscription, each with the cursor to resume from. A reconnect presents every retained cursor here. Malformed JSON or an invalid entry answers 400. The set rides the query string, and proxies commonly refuse a request line past about 8 KB. A client whose set would exceed that presents part of it here and adds the rest with hubUpdateLiveSubscriptions after `hello`, from the same cursors."
+          description: "Initial subscriptions as a JSON array of LiveSubscription, each with the cursor to resume from. A reconnect presents every retained cursor here. A conversation subscription's boolean `reconnect` overrides the stream-level reconnect default. Malformed JSON or an invalid entry answers 400. The set rides the query string, and proxies commonly refuse a request line past about 8 KB. A client whose set would exceed that presents part of it here and adds the rest with hubUpdateLiveSubscriptions after `hello`, from the same cursors and with `reconnect: true` on each deferred recovering conversation."
         - name: reconnect
           in: query
           schema: { type: string, enum: ['0', '1'], default: '0' }
-          description: "`1` when this stream replaces one the client lost. The Hub records it in diagnostics and behaves the same either way."
+          description: "`1` when this stream replaces one the client lost. Also recorded in diagnostics. Supplies the recovery-intent default for opening conversation subscriptions in `subs`; each conversation's boolean `reconnect` overrides it. Recovery can reconcile missed same-cursor visual metadata through the existing resync protocol, but does not require a fresh snapshot on every reconnect. A healthy shared subscription at its head sends resync only when the presented cursor matches that conversation's last remembered visual-trailer cursor; otherwise it sends ready. Later POST additions do not inherit this query parameter."
       responses:
         '200':
           description: SSE stream described by streaming.yaml#channels.live
@@ -997,6 +1048,14 @@ paths:
         snapshot's cursor. Once this operation answers, the stream carries no
         further envelope for a removed subscription.
 
+        A conversation addition may set `reconnect: true` with a nonempty
+        cursor to preserve transport-recovery intent when deferred from the
+        opening URL. This can repair missed same-cursor visual metadata;
+        it does not request a full snapshot on every reconnect. Omitted or
+        false means a fresh attachment, even if the stream opened with
+        `reconnect=1`. Opening `subs` instead use the GET's reconnect default
+        unless the conversation supplies its own boolean override.
+
         A 400, 403, or 404 answer means this stream cannot take the change,
         and repeating the request fails the same way. Reconnect and present
         the whole subscription set in `subs`. Retry a 5xx, or a request that
@@ -1007,7 +1066,15 @@ paths:
       requestBody:
         required: true
         content:
-          application/json: { schema: { $ref: '#/components/schemas/LiveSubscriptionChange' } }
+          application/json:
+            schema: { $ref: '#/components/schemas/LiveSubscriptionChange' }
+            examples:
+              deferredRecovery:
+                summary: Resume a conversation deferred from the opening URL
+                value: { add: [{ topic: conversation, key: 'opencode:conversation-1', cursor: 'eyJ2IjoxfQ', reconnect: true }] }
+              freshConversation:
+                summary: Attach a new conversation without recovery intent
+                value: { add: [{ topic: conversation, key: 'opencode:conversation-2', reconnect: false }] }
       responses:
         '200':
           description: Subscriptions changed
@@ -1057,6 +1124,55 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+  /s/{workspaceId}/api/personal-worker-dismissals:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: hubGetWorkerDismissals
+      tags: [Hub]
+      summary: Read personal worker-summary dismissals
+      description: "The Hub derives the account from authentication and reconciles exact executions against an authoritative workspace conversation read. Response is no-store. No username selector, provider mutation or shared workspace state is involved. The workspace must currently answer; unavailable storage or evidence returns 503 rather than empty marks."
+      parameters:
+        - name: conversationId
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 512, pattern: '^[a-z][a-z0-9-]*:.+' }
+      responses:
+        '200':
+          description: Current authenticated account's execution-scoped dismissals
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WorkerDismissalState' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+        '507': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: hubUpdateWorkerDismissal
+      tags: [Hub]
+      summary: Dismiss an execution group or retire one stale dismissal
+      description: "Cookie mutations require the existing same-origin protection. Singleton requests retain their existing shape and 4096-byte bound. Bulk dismiss uses targets (1–8192 unique execution IDs with independent expectedRevision), with a 4 MiB body bound. The Hub reads compact complete authoritative worker evidence once per operation. All bulk targets must be present, dismissible and current at conditional validation; refusal applies no selected dismissals. Successful bulk changes and reconciled evidence use one atomic durable save. Positive activity during persistence still retires affected marks. Singleton retire requires positively verified activity. A stale revision returns 409; refetch instead of overwriting. Repeated identical operations are idempotent while the evidence revision is unchanged. No provider work, results or canonical interaction requests are changed. No generic Restore operation exists."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - { $ref: '#/components/schemas/WorkerDismissalMutation' }
+                - { $ref: '#/components/schemas/WorkerDismissalBatch' }
+      responses:
+        '200':
+          description: Durable personal state after the conditional operation
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WorkerDismissalState' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+        '507': { $ref: '#/components/responses/Error' }
   /s/{workspaceId}/api/activity-viewed:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     post:
@@ -1586,11 +1702,11 @@ components:
     PersonalState:
       type: object
       required: [version]
-      properties: { version: { const: 1 }, documentPath: { type: string }, follow: { type: boolean }, previewMode: { $ref: '#/components/schemas/ViewMode' }, compareTarget: { enum: [base, last-commit] }, filesFilter: { enum: [all, changed] }, lastPtyId: { type: string, format: uuid } }
+      properties: { version: { const: 1 }, documentPath: { type: string }, follow: { type: boolean }, previewMode: { $ref: '#/components/schemas/ViewMode' }, compareTarget: { enum: [base, last-commit] }, filesFilter: { enum: [all, recent, changed] }, showIgnored: { type: boolean }, lastPtyId: { type: string, format: uuid } }
       additionalProperties: false
     PersonalStatePatch:
       type: object
-      properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, changed, null] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
+      properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, recent, changed, null] }, showIgnored: { type: [boolean, 'null'] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
       additionalProperties: false
     CredentialId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
     CredentialToolName: { enum: [ssh, ssh-agent, ssh-add, ssh-keygen, gpg, gpgconf, git, gh, glab] }
@@ -1816,6 +1932,29 @@ components:
       type: object
       required: [workspace]
       properties: { workspace: { $ref: '#/components/schemas/OnboardedWorkspace' } }
+      additionalProperties: false
+    PersonalChatPreferences:
+      type: object
+      required: [version, revision, autoBackgroundOnSteer]
+      properties:
+        version: { const: 1 }
+        revision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        autoBackgroundOnSteer: { type: boolean, description: "Personal default ON; applies to accepted steer actions, not job starts." }
+      additionalProperties: false
+    UpdatePersonalChatPreferencesRequest:
+      type: object
+      required: [version, expectedRevision, autoBackgroundOnSteer]
+      properties:
+        version: { const: 1 }
+        expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740990 }
+        autoBackgroundOnSteer: { type: boolean }
+      additionalProperties: false
+    PersonalChatPreferencesConflict:
+      type: object
+      required: [error, current]
+      properties:
+        error: { type: string }
+        current: { $ref: '#/components/schemas/PersonalChatPreferences' }
       additionalProperties: false
     WorkspaceDefaults:
       type: object
@@ -2266,12 +2405,53 @@ components:
       minimum: 0
       description: "Provider-reported terminal timestamp in Unix epoch milliseconds. Omitted when unknown; never inferred from creation time, duration, receive time, or silence. Display only for a terminal item status, not pending or running."
     TimelineBase: { type: object, required: [id, type, createdAt], properties: { id: { type: string }, type: { type: string }, createdAt: { type: number, minimum: 0 } } }
+    ChatVisualSnapshot:
+      type: object
+      description: |
+        Immutable snapshot of a permanently admitted agent-authored visual in
+        current rendered occurrence order. At most eight logical occurrences
+        per native assistant message, including refusals, and 10 MiB per image.
+        Removing or reordering markup does not free admissions. Only currently
+        present admitted occurrences have entries; omitted occurrences are limit
+        refusals, even at low rendered indexes. Missing files are retried at turn completion. Authenticated
+        internal GET /api/chat/visuals/{id} serves preview bytes. For SVG,
+        /api/chat/visuals/{id}/source serves the exact original as text/plain;
+        the image endpoint uses a restrictive sandbox CSP. These child routes
+        are internal workspace protocol, not public Hub API operations.
+      required: [index, status]
+      properties:
+        index: { type: integer, minimum: 0, maximum: 9007199254740991, description: "Current rendered occurrence index, not an admission slot. It may exceed seven after HTML repair or late reference resolution; only the at-most-eight permanently admitted occurrences have entries." }
+        status: { type: string, enum: [ready, pending, unavailable] }
+        id: { type: string, pattern: '^[a-f0-9]{64}$' }
+        mimeType: { type: string, enum: [image/png, image/jpeg, image/svg+xml] }
+        message: { type: string }
+      if: { properties: { status: { const: ready } }, required: [status] }
+      then: { properties: { id: {}, mimeType: {} }, required: [id, mimeType] }
+      additionalProperties: false
     ConversationItem:
       oneOf:
         - { type: object, required: [id, type, createdAt, text], properties: { id: { type: string }, type: { const: user_message }, createdAt: { type: number }, text: { type: string }, requestId: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } }, origin: { const: wakeup, description: "Present when the user did not type this prompt: `wakeup` is a scheduled wakeup firing, and the item opens that wakeup's turn. Clients present it as a wakeup, never as the user's message. Absent means the user typed it." }, wakeupId: { type: string, minLength: 1, maxLength: 512, description: "With `origin: wakeup`: the `scheduled_wakeup` item that fired, when known." } }, additionalProperties: false }
-        - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, completedAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512, description: "Execution identity joining usage to its window observation, including the selected window variant." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "Message-level tokens. Normalization emits exactly one dedicated carrier per reported provider message: its id is `usage:<provider-message-id>` and its markdown is empty, so clients MUST treat it as data rather than render it as a message bubble. Present only where the agent declares the context capability and reported usage." }, model: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "The model that reported this usage carrier, when known. Context percentages MUST use this model's context limit rather than a newly selected model that has not produced usage yet." }, agent: { type: string, minLength: 1, description: "The agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind). Rides the usage carrier so a cost receipt can name the main agent's lines. Absent where the provider names none." } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, visuals: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/ChatVisualSnapshot' } }, completedAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512, description: "Execution identity joining usage to its window observation, including the selected window variant." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "Message-level tokens. Normalization emits exactly one dedicated carrier per reported provider message: its id is `usage:<provider-message-id>` and its markdown is empty, so clients MUST treat it as data rather than render it as a message bubble. Present only where the agent declares the context capability and reported usage." }, model: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "The model that reported this usage carrier, when known. Context percentages MUST use this model's context limit rather than a newly selected model that has not produced usage yet." }, agent: { type: string, minLength: 1, description: "The agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind). Rides the usage carrier so a cost receipt can name the main agent's lines. Absent where the provider names none." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, text, status], properties: { id: { type: string }, type: { const: reasoning }, createdAt: { type: number }, text: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, durationMs: { type: number }, label: { type: string, minLength: 1, description: "The row's label when it is recalled context rather than the model's own thinking (\"Recalled from memory\"). Absent for ordinary reasoning." } }, additionalProperties: false }
-        - { type: object, required: [id, type, createdAt, name, status], properties: { id: { type: string }, type: { const: tool }, createdAt: { type: number }, name: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, completedAt: { $ref: '#/components/schemas/ActivityCompletionTime' }, input: { type: string }, output: { type: string }, error: { type: string }, childConversationId: { type: string }, model: { type: string, description: "For a task tool: the model the subagent's own session ran, mirrored from that child session. A subagent may run a different model from its parent." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "For a task tool: what the subagent spent on THE TASK THIS ROW REPRESENTS — the messages it produced answering that task's prompt. A subagent given several tasks is one `childConversationId` on several rows, each stating its own task; together they are what the subagent's session spent. Subagents the subagent launched are NOT included: they are listed in `descendants`. Absent until the task has reported any." }, descendants: { type: array, items: { $ref: '#/components/schemas/SubagentLine' }, description: "For a task tool: every subagent launched beneath this row, at any depth, flat and ordered so that each line follows the row or line named by its `parentId`. The row's own `usage` plus its lines' is what the whole branch spent, each message counted once. Absent when the subagent launched none." }, elapsedMs: { type: number, minimum: 0, description: "How long the tool has been running, from the agent's own progress heartbeat, for a tool still producing no output." } }, additionalProperties: false }
+        - type: object
+          required: [id, type, createdAt, name, status]
+          properties:
+            id: { type: string }
+            type: { const: tool }
+            createdAt: { type: number }
+            name: { type: string }
+            status: { enum: [pending, running, completed, failed, cancelled] }
+            completedAt: { $ref: '#/components/schemas/ActivityCompletionTime' }
+            input: { type: string }
+            output: { type: string }
+            error: { type: string }
+            childConversationId: { type: string }
+            model: { type: string, description: "For a task tool: the model the subagent's own session ran, mirrored from that child session. A subagent may run a different model from its parent." }
+            usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "For a task tool: what the subagent spent on THE TASK THIS ROW REPRESENTS — the messages it produced answering that task's prompt. A subagent given several tasks is one `childConversationId` on several rows, each stating its own task; together they are what the subagent's session spent. Subagents the subagent launched are NOT included: they are listed in `descendants`. Absent until the task has reported any." }
+            descendants: { type: array, items: { $ref: '#/components/schemas/SubagentLine' }, description: "For a task tool: every subagent launched beneath this row, at any depth, flat and ordered so that each line follows the row or line named by its `parentId`. The row's own `usage` plus its lines' is what the whole branch spent, each message counted once. Absent when the subagent launched none." }
+            elapsedMs: { type: number, minimum: 0, description: "How long the tool has been running, from the agent's own progress heartbeat, for a tool still producing no output." }
+            workerSession: { $ref: '#/components/schemas/WorkerSessionReport' }
+          additionalProperties: false
         - { type: object, required: [id, type, createdAt, command, status], properties: { id: { type: string }, type: { const: command }, createdAt: { type: number }, command: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, completedAt: { $ref: '#/components/schemas/ActivityCompletionTime' }, output: { type: string }, exitCode: { type: integer } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, path, operation], properties: { id: { type: string }, type: { const: file_change }, createdAt: { type: number }, path: { type: string }, operation: { enum: [create, update, delete] }, additions: { type: integer, minimum: 0 }, deletions: { type: integer, minimum: 0 } }, additionalProperties: false }
         - { $ref: '#/components/schemas/PermissionItem' }
@@ -2281,14 +2461,144 @@ components:
         - { type: object, required: [id, type, createdAt, level, message], properties: { id: { type: string }, type: { const: notice }, createdAt: { type: number }, level: { enum: [info, warning, error] }, message: { type: string }, code: { type: string, minLength: 1, maxLength: 512, description: "A machine-readable kind for notices the surface reacts to: `rate-limit-warning` and `rate-limit-rejected` carry the current rate-limit standing and are data for the composer, never a timeline row — a client MUST treat them the way it treats `context_report`. The standing occupies one item id for the conversation's life, upserted as it changes and removed when requests are allowed again. `refusal-fallback` names a model swap. `login-failed` marks a turn that failed because the agent's login is missing, expired, or refused; `message` is the agent's own words, and a client offers a way to log in. `reauthenticating` is the one item an agent occupies while it signs in again mid-session, removed when that finishes. Absent otherwise." }, resetsAt: { type: number, minimum: 0, description: "When the rate-limit standing's window resets." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, total], description: "The agent's own statement of how full the context window is, at the point in the timeline where it was reported (after a turn, after a compaction). Data for the context readout, never rendered as a row: a client MUST treat it like the empty-markdown usage carrier. The readout uses whichever of a report or a usage carrier is newest in the timeline.", properties: { id: { type: string }, type: { const: context_report }, createdAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512 }, window: { $ref: '#/components/schemas/ContextWindowMetadata' }, total: { type: integer, minimum: 0, description: "Tokens occupying the window." }, max: { type: integer, minimum: 1, description: "The window the total was measured against. Absent when the agent did not state one; the reporting model's known limit then applies." }, model: { $ref: '#/components/schemas/ModelSelection' }, categories: { type: array, items: { type: object, required: [name, tokens, kind], properties: { name: { type: string, minLength: 1 }, tokens: { type: integer, minimum: 0 }, kind: { enum: [used, free, buffer, deferred], description: "`used` rows occupy the window and sum to `total`; `free` is the remaining window; `buffer` a compaction reserve; `deferred` rows are out-of-window tool schemas listed for awareness only." } }, additionalProperties: false } }, plan: { $ref: '#/components/schemas/PlanUtilization' } }, additionalProperties: false }
         - { $ref: '#/components/schemas/ContextWindowItem' }
-        - { type: object, required: [id, type, createdAt, taskId, description, status], description: "One background task the agent runs (a backgrounded command, a backgrounded subagent, a monitor), updated in place as it progresses and settles. A running task is presented in the composer's live list, a settled one as a timeline row with its outcome and summary; `toolUseId` links it to the tool row that launched it. Only for agents declaring `background-tasks`; ambient housekeeping tasks never appear.", properties: { id: { type: string }, type: { const: background_task }, createdAt: { type: number }, taskId: { type: string, minLength: 1, maxLength: 512 }, description: { type: string, minLength: 1 }, taskType: { type: string }, toolUseId: { type: string, minLength: 1, maxLength: 512 }, status: { enum: [running, completed, failed, stopped] }, progress: { type: string, description: "The agent's latest progress note, while running." }, summary: { type: string, description: "The agent's summary, once settled." } }, additionalProperties: false }
+        - type: object
+          required: [id, type, createdAt, taskId, description, status]
+          description: "Worker state independent of its launcher. Missing execution evidence is uncertainty, not completion or cancellation."
+          properties:
+            id: { type: string }
+            type: { const: background_task }
+            createdAt: { type: number }
+            taskId: { type: string, minLength: 1, maxLength: 512 }
+            description: { type: string, minLength: 1 }
+            taskType: { type: string }
+            toolUseId: { type: string, minLength: 1, maxLength: 512 }
+            status: { enum: [running, completed, failed, stopped] }
+            stateUncertain: { type: boolean, description: "Compatibility uncertainty for occurrence/control proof; never authorizes Stop. Independently verified current activity is carried in activity." }
+            activity: { $ref: '#/components/schemas/WorkerActivity' }
+            control:
+              type: object
+              required: [available]
+              description: "Presentation of retained Stop availability only. A native Stop always revalidates private occurrence proof; Working alone grants no control authority."
+              properties:
+                available: { type: boolean }
+                reason: { type: string, maxLength: 512 }
+              additionalProperties: false
+            resultId: { type: string, minLength: 1, maxLength: 512, description: "Provider notification identity, stable across enqueue, delivery and history." }
+            terminalReportedAt: { type: number, minimum: 0, description: "Provider terminal-report clock in Unix epoch milliseconds, not execution completion. OpenCode V2 live events use inbox admission; stored synthetic messages use delivery, so recovery can change this clock and finished ordering. Absent without a valid provider timestamp; zero is valid. Never synthesize from local receipt time, launcher completion or missing-time fallbacks, or infer worker state, duration, usage or cost from it." }
+            toolUseIds: { type: array, minItems: 1, items: { type: string, minLength: 1, maxLength: 512 }, description: "Launch calls known to share this worker occurrence; do not count each alias as another running worker." }
+            progress: { type: string }
+            summary: { type: string, description: "Canonical worker report, not launcher instructions." }
+            subagentType: { type: string }
+            prompt: { type: string }
+            outputFile: { type: string, description: "Provider output reference; never accepted as a client-supplied filesystem path." }
+            childConversationId: { type: string, minLength: 1, maxLength: 512 }
+            foreground: { const: true }
+            workerSession: { $ref: '#/components/schemas/WorkerSessionReport' }
+            usage:
+              type: object
+              required: [totalTokens, toolUses, durationMs]
+              properties:
+                totalTokens: { type: number, minimum: 0 }
+                toolUses: { type: number, minimum: 0 }
+                durationMs: { type: number, minimum: 0 }
+              additionalProperties: false
+          additionalProperties: false
         - { type: object, required: [id, type, createdAt, wakeupId, prompt, recurring, schedule, status], description: "One future turn the agent scheduled for itself (a self-paced wakeup, a cron, a loop), as its session reports it, updated in place through its life. `pending` rows are listed with the conversation's scheduled state and shown in the timeline; a one-shot that fired reads `fired` with `firedTurnId` naming the `user_message` (origin `wakeup`) that opened its turn; a recurring one stays `pending` across fires with `nextFireAt` moving on. `cancelled`: the agent removed it, or the user cancelled it or released the session; the workspace blocks a cancelled wakeup from firing again even if the agent's tooling later rebuilds it. `paused`: the session ended, but the agent's tooling rebuilds this wakeup (a cron) when the conversation runs again; `message` says so, and a conversation opened without a live session lists its paused wakeups. `lost`: the session ended some other way and the schedule ended with it; `message` says so. A reopened conversation whose session is gone replays no pending row. Only for agents declaring `scheduled-wakeups`.", properties: { id: { type: string }, type: { const: scheduled_wakeup }, createdAt: { type: number }, wakeupId: { type: string, minLength: 1, maxLength: 512 }, prompt: { type: string, description: "The prompt the wakeup submits when it fires, as the agent reports it (possibly clipped by the agent)." }, recurring: { type: boolean }, schedule: { type: string, minLength: 1, description: "Five-field cron expression in the workspace host's local time; a one-shot encodes a single fire time." }, nextFireAt: { type: number, minimum: 0, description: "The workspace's reading of the next fire time (epoch ms), for display only: the agent fires on its own clock. Only on a pending row, and absent when the expression could not be read." }, status: { enum: [pending, fired, cancelled, paused, lost] }, firedTurnId: { type: string, minLength: 1, maxLength: 512 }, message: { type: string, description: "What happened to a wakeup that did not fire, when that needs saying (a lost or paused schedule)." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt], description: "The agent compacted the conversation at this point. Content before the marker stays in the timeline; the figures are the agent's own pre/post token counts when it reported them.", properties: { id: { type: string }, type: { const: compaction }, createdAt: { type: number }, trigger: { enum: [manual, auto] }, preTokens: { type: integer, minimum: 0 }, postTokens: { type: integer, minimum: 0 } }, additionalProperties: false }
+    WorkerDismissalState:
+      type: object
+      required: [version, conversationId, entries]
+      properties:
+        version: { const: 1 }
+        conversationId: { type: string, minLength: 1, maxLength: 512 }
+        entries:
+          type: array
+          maxItems: 8192
+          items:
+            type: object
+            required: [executionId, revision, dismissed]
+            properties:
+              executionId: { type: string, minLength: 1, maxLength: 512 }
+              revision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+              dismissed: { type: boolean }
+            additionalProperties: false
+      additionalProperties: false
+    WorkerDismissalMutation:
+      type: object
+      required: [version, conversationId, executionId, expectedRevision, operation]
+      properties:
+        version: { const: 1 }
+        conversationId: { type: string, minLength: 1, maxLength: 512, pattern: '^[a-z][a-z0-9-]*:.+' }
+        executionId: { type: string, minLength: 1, maxLength: 512 }
+        expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        operation: { enum: [dismiss, retire] }
+      additionalProperties: false
+    WorkerDismissalBatch:
+      type: object
+      required: [version, conversationId, operation, targets]
+      description: "Atomic explicit dismissal group. The body is at most 4 MiB; execution IDs are unique and identifiers are at most 512 UTF-8 bytes without control characters. Validation failure dismisses none of the selected targets. Trusted positive activity still retires stale marks."
+      properties:
+        version: { const: 1 }
+        conversationId: { type: string, minLength: 1, maxLength: 512, pattern: '^[a-z][a-z0-9-]*:.+' }
+        operation: { const: dismiss }
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 8192
+          uniqueItems: true
+          items:
+            type: object
+            required: [executionId, expectedRevision]
+            properties:
+              executionId: { type: string, minLength: 1, maxLength: 512 }
+              expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+            additionalProperties: false
+      additionalProperties: false
+    WorkerActivity:
+      type: object
+      required: [kind]
+      description: "Current task observation independent of Stop authorization. Historical running metadata or an active reused session alone is not task activity; ended is not a successful result."
+      properties:
+        kind: { enum: [working, needs-answer, checking, session-active, unavailable, ended] }
+        launchRef: { type: string, minLength: 1, maxLength: 512, pattern: '^[!-~]+$', description: "Opaque printable-ASCII provider-proven reference linking partial and qualified updates for the same observed native launch, at most 512 bytes without spaces or control characters. Presentation recovery only; not a dismissal identity, persisted alias or Stop authorization. May be absent or change when the provider observation lifetime ends; never derive it from a row, child session, clock or UI fold." }
+        observedAt: { type: number, minimum: 0, description: "Last positive server observation of this task in Unix epoch milliseconds, not launch time or unrelated session progress." }
+        endedAt: { type: number, minimum: 0, description: "Positively correlated execution end in Unix epoch milliseconds; does not establish a result outcome." }
+        executionId: { type: string, minLength: 1, maxLength: 512, description: "Stable occurrence identity when established, never child-session identity alone." }
+        executionAliases:
+          type: array
+          minItems: 1
+          maxItems: 2048
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 512 }
+          description: "Immutable launch anchors positively proven to name the same execution, including executionId. Enables exact dismissal/revision continuity as aliases are discovered; a shared child session never establishes an alias."
+        generation: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        reason: { type: string, maxLength: 512 }
+        request:
+          type: object
+          required: [id, kind]
+          properties:
+            id: { type: string, minLength: 1, maxLength: 512 }
+            kind: { enum: [permission, question] }
+          additionalProperties: false
+      allOf:
+        - if: { properties: { kind: { const: needs-answer } } }
+          then: { properties: { request: {} }, required: [request] }
+          else: { not: { properties: { request: {} }, required: [request] } }
+      additionalProperties: false
+    WorkerSessionReport:
+      type: object
+      required: [effort, costUsd]
+      description: "Child-session metadata, repeated on its launcher/worker occurrences for display only. Never sum these reports across rows or add them to the conversation receipt. Model and effort describe the same latest agent-reported assistant execution, ordered by provider creation time then message id; not a downstream-provider behavior guarantee or inherited parent configuration. Cost uses only an authoritative cumulative session aggregate in USD (OpenCode 2.x SessionInfo.cost / session.usage.updated.cost), including compaction and reverted spend, excluding parent and descendants. No message-sum fallback. Null means unreported; reported zero stays zero. No price estimation."
+      properties:
+        model: { type: string }
+        effort: { type: [string, 'null'], minLength: 1, description: "Execution-reported reasoning variant, verbatim; null when unavailable." }
+        costUsd: { type: [number, 'null'], minimum: 0 }
+      additionalProperties: false
     PlanUtilizationWindow: { type: object, properties: { utilization: { type: number, minimum: 0, description: "Percent of the window used, 0-100." }, resetsAt: { type: number, minimum: 0, description: "When the window resets." } }, additionalProperties: false }
     PlanUtilization: { type: object, description: "Plan utilization the login reports (claude.ai plans only). Empty when the login reports no windows (an API-key session). Absent from a report that does not speak to the plan (a compaction's post-count, an agent that never reports it): the previous report's plan then still stands.", properties: { fiveHour: { $ref: '#/components/schemas/PlanUtilizationWindow' }, sevenDay: { $ref: '#/components/schemas/PlanUtilizationWindow' } }, additionalProperties: false }
     SubagentLine: { type: object, description: "A subagent launched by a subagent, as a line beneath the task row that launched its branch. Lines sharing a `conversationId` are one subagent given several tasks.", required: [id, parentId, description, conversationId], properties: { id: { type: string, minLength: 1, description: "The launching row's item id in its own conversation. Unique within the list." }, parentId: { type: string, minLength: 1, description: "The task row carrying the list, or an earlier line in it: what launched this subagent." }, description: { type: string, minLength: 1 }, subagent: { type: string, description: "The kind of subagent, where the launcher named one." }, conversationId: { type: string, minLength: 1, description: "The subagent's own session." }, model: { type: string }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "What the subagent spent on this task alone. Absent until it has reported any." } }, additionalProperties: false }
     TokenUsage: { type: object, description: "What a message spent, as the agent reports it. Every component is optional: an absent one means the agent did not report it, which is not the same statement as zero. Window occupancy is input + cacheRead + cacheWrite; output is what came back rather than what occupies the window.", properties: { input: { type: integer, minimum: 0 }, output: { type: integer, minimum: 0 }, reasoning: { type: integer, minimum: 0 }, cacheRead: { type: integer, minimum: 0 }, cacheWrite: { type: integer, minimum: 0 }, costUsd: { type: number, minimum: 0, description: "What the message cost in USD, where the agent prices its messages (OpenCode reports one per assistant message). Not a token component. Absent means the agent did not price it, which is not the same statement as zero; zero is what OpenCode reports for a model it has no price for." } }, additionalProperties: false }
-    PermissionItem: { type: object, required: [id, type, createdAt, requestId, action, resources, status], properties: { id: { type: string }, type: { const: permission }, createdAt: { type: number }, requestId: { type: string }, conversationId: { type: string, minLength: 1, maxLength: 512, description: "Conversation that owns this request. Differs from the containing conversation when a subagent's request is shown in the conversation that launched it; answers are addressed here." }, action: { type: string }, resources: { type: array, items: { type: string } }, alwaysPatterns: { type: array, items: { type: string, minLength: 1 }, description: "What the persistent approval (`approved-session`) will authorize, in the owning agent's own syntax (OpenCode `git status *`, Claude Code `Bash(git status:*)`). Distinct from `resources`: the agent derives a reusable pattern from the request, and that pattern is what it installs. Empty means the agent supplied nothing reusable; absent means it did not say. Render verbatim; never derive scope from a resource." }, status: { enum: [pending, resolved] }, outcome: { enum: [approved-once, approved-session, rejected] }, diff: { type: string, description: "Unified diff a file-edit permission would apply, when the agent attaches one. Absent for a permission with nothing to show." }, plan: { type: string, description: "The plan this approval would put into effect, as markdown (a Claude Code plan approval)." }, choices: { type: array, minItems: 1, items: { $ref: '#/components/schemas/PermissionChoice' }, description: "Agent-provided approval intents. When present they replace the generic approve pair; rejecting stays universal." }, choiceId: { type: string, description: "On resolution: the choice that approved it, when choices were offered." }, sourceToolId: { type: string, minLength: 1, maxLength: 512, description: "The `tool` item this permission belongs to (`tool:<call id>`), when the agent names the call it is asking about (OpenCode 2.x `source`). What lets a request naming no resource of its own (an MCP tool's `*`) show the arguments of the call it would allow. Absent when the agent did not say; a client then falls back to the running tool row bearing the request's `action`." }, mcp: { $ref: '#/components/schemas/PermissionMcpTool' } }, additionalProperties: false }
+    PermissionItem: { type: object, required: [id, type, createdAt, requestId, action, resources, status], properties: { id: { type: string }, type: { const: permission }, createdAt: { type: number }, requestId: { type: string }, queueOrder: { type: number, minimum: 0, description: "Queue position within this adapter generation, independent of transcript timestamps. Smaller positions are answered first per owning conversation. Reconciliation preserves the provider's pending-list order." }, conversationId: { type: string, minLength: 1, maxLength: 512, description: "Conversation that owns this request. Differs from the containing conversation when a subagent's request is shown in the conversation that launched it; answers are addressed here." }, action: { type: string }, resources: { type: array, items: { type: string } }, alwaysPatterns: { type: array, items: { type: string, minLength: 1 }, description: "What the persistent approval (`approved-session`) will authorize, in the owning agent's own syntax (OpenCode `git status *`, Claude Code `Bash(git status:*)`). Distinct from `resources`: the agent derives a reusable pattern from the request, and that pattern is what it installs. Empty means the agent supplied nothing reusable; absent means it did not say. Render verbatim; never derive scope from a resource." }, status: { enum: [pending, resolved] }, outcome: { enum: [approved-once, approved-session, rejected] }, diff: { type: string, description: "Unified diff a file-edit permission would apply, when the agent attaches one. Absent for a permission with nothing to show." }, plan: { type: string, description: "The plan this approval would put into effect, as markdown (a Claude Code plan approval)." }, choices: { type: array, minItems: 1, items: { $ref: '#/components/schemas/PermissionChoice' }, description: "Agent-provided approval intents. When present they replace the generic approve pair; rejecting stays universal." }, choiceId: { type: string, description: "On resolution: the choice that approved it, when choices were offered." }, sourceToolId: { type: string, minLength: 1, maxLength: 512, description: "The `tool` item this permission belongs to (`tool:<call id>`), when the agent names the call it is asking about (OpenCode 2.x `source`). What lets a request naming no resource of its own (an MCP tool's `*`) show the arguments of the call it would allow. Absent when the agent did not say; a client then falls back to the running tool row bearing the request's `action`." }, mcp: { $ref: '#/components/schemas/PermissionMcpTool' } }, additionalProperties: false }
     PermissionMcpTool: { type: object, description: "The MCP server and tool a permission's `action` names, when the action is an MCP tool's registry name (`<server>_<tool>`, each half sanitized by OpenCode) and the agent resolved it against the MCP servers it reports. `server` is the name the user registered; `tool` the remainder. Absent for a built-in tool or an action no reported server matches. The `action` remains what a persistent approval installs.", required: [server, tool], properties: { server: { type: string, minLength: 1 }, tool: { type: string, minLength: 1 } }, additionalProperties: false }
     TaskProgressEntry: { type: object, required: [text, status], properties: { text: { type: string, minLength: 1 }, status: { enum: [pending, in_progress, completed] }, activeText: { type: string, description: "Present-continuous label shown while in progress, when the agent provides one." } }, additionalProperties: false }
     PermissionChoice: { type: object, required: [id, label], properties: { id: { type: string, minLength: 1, maxLength: 128 }, label: { type: string, minLength: 1 }, description: { type: string } }, additionalProperties: false }
@@ -2308,7 +2618,51 @@ components:
       dependentRequired: { variant: [model] }
       additionalProperties: false
     MessageAttachment: { type: object, required: [name, mimeType], description: "An image riding a user message, referenced by workspace attachment id — never by bytes. `id` is absent on a replayed attachment whose reference could not be recovered; clients render those as labeled placeholders.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 200 }, mimeType: { type: string, enum: [image/png, image/jpeg, image/gif, image/webp] } }, additionalProperties: false }
-    QueuedMessage: { type: object, required: [id, text, queuedAt], description: "A submission the workspace holds until the running turn ends. Not a timeline item; it becomes one when delivered. `requestId` echoes the accepting mutation's client request id so the submitting client can reconcile.", properties: { id: { type: string }, text: { type: string, description: "Empty for an image-only message." }, queuedAt: { type: number }, requestId: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } } }, additionalProperties: false }
+    QueuedMessage:
+      type: object
+      required: [id, text, queuedAt, delivery]
+      description: |
+        A pending submission, not a timeline item. Queue is held by Uatu until
+        the turn ends; steer is pending with a steering-capable agent for its
+        native next-step boundary. Paused means no ordinary delivery is scheduled.
+        Unconfirmed takes precedence over delivery/paused labels: admission,
+        batch resume or withdrawal may have applied, so retain text/attachments, suppress
+        resend/edit/remove/batch actions and reconcile read-only. A client with
+        the scoped steer-withdrawal-unconfirmed error may offer an explicit
+        cancellation-only retry against the same inbox ID; the generic marker
+        alone does not grant this exception. No mutation is retried automatically.
+        A server-issued admissionUncertaintyId permits explicit local-only discard
+        after warning that the original may still arrive. This never cancels or
+        resends native input and leaves other messages queued until explicit Send
+        now or a later normal idle transition. It is absent for in-flight admission,
+        resume and withdrawal uncertainty. Discard does not clear the original
+        unknown operation receipt or infer non-application from passive absence.
+        It does not
+        assert native admission, confirm withdrawal, or promise native work is paused. The
+        original requestId links the submitting client's unconfirmed input.
+      properties:
+        id: { type: string }
+        submissionId:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[^\u0000-\u001f\u007f]+$'
+          description: "Server-owned opaque identity of this pending submission within its conversation. Preserved across queue/steer handle changes, including uncertain admission and read-side recovery while known to this adapter. Newly recovered native entries start with their native ID. Not a client request ID, account identifier, mutation receipt or durable identity across adapter recreation. Optional for older payloads; fall back to id when absent. Retain numbering for live entries and a bounded recent-transition window only; use id, not submissionId, for actions."
+        text: { type: string, description: Empty for an image-only message. }
+        queuedAt: { type: number }
+        delivery: { enum: [steer, queue] }
+        paused: { const: true }
+        unconfirmed: { const: true }
+        admissionUncertaintyId:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[^\u0000-\u001f\u007f]+$'
+          description: "Opaque fresh server token for classified settled unknown admission only. Scope discard to the same conversation, current message id and token; a changed token or confirmed record is refused. Not cancellation or delivery evidence."
+        requestId: { type: string }
+        attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } }
+      dependentRequired: { admissionUncertaintyId: [unconfirmed] }
+      additionalProperties: false
     ChatEvent:
       oneOf:
         - { type: object, required: [generation, sequence, conversationId, type, item], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.upsert }, item: { $ref: '#/components/schemas/ConversationItem' } }, additionalProperties: false }
@@ -2317,18 +2671,24 @@ components:
         - { type: object, required: [generation, sequence, conversationId, type, status], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.status }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, configuration], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.configuration }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, conversation], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.updated }, conversation: { allOf: [{ $ref: '#/components/schemas/ConversationSummary' }], description: "Updated summary for this conversation. Its id is the event conversationId." } }, additionalProperties: false }
-        - { type: object, required: [generation, sequence, conversationId, type, queued, change], description: "Restates the whole held queue after a change, so replayed or duplicated frames converge on the same state.", properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.queue }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' } }, change: { type: object, required: [kind, messageId], properties: { kind: { enum: [held, removed, delivered] }, messageId: { type: string } }, additionalProperties: false } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, queued, change], description: "Restates every pending message after a change — steers first in enqueue order, then held messages in submission order — so replayed or duplicated frames converge on the same state. `change.kind` names what happened to `change.messageId`: `held` or `steered` (accepted), `switched` (delivery changed), `paused` or `resumed` (paused state changed), `removed`, `delivered`.", properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.queue }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' } }, change: { type: object, required: [kind, messageId], properties: { kind: { enum: [held, steered, removed, switched, paused, resumed, delivered] }, messageId: { type: string } }, additionalProperties: false } }, additionalProperties: false }
         - { $ref: '#/components/schemas/ChatResyncEvent' }
     ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor, conversation-rewritten] } }, additionalProperties: false }
     DocumentMeta:
       type: object
       required: [id, name, relativePath, mtimeMs, rootId, kind, revision]
-      properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] }, revision: { type: integer, minimum: 0 } }
+      properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] }, revision: { type: integer, minimum: 0 }, gitIgnoreStatus: { enum: [ignored, not-ignored, unknown] }, ignoreVisibilityException: { type: boolean } }
+      additionalProperties: false
+    FolderEntry:
+      type: object
+      description: "A folder Git ignores as a whole, such as node_modules/ or build/, or a folder inside one. Its contents are listed one level at a time on demand rather than discovered up front. `relativePath` ends in `/`. `listed` is true once that level's files and subfolders are in the inventory; until then only files written during the session can appear beneath it."
+      required: [id, rootId, relativePath, listed, revision]
+      properties: { id: { type: string }, rootId: { type: string }, relativePath: { type: string, pattern: '/$' }, listed: { type: boolean }, revision: { type: integer, minimum: 0 } }
       additionalProperties: false
     RootGroup:
       type: object
       required: [id, label, path, docs, hiddenCount]
-      properties: { id: { type: string }, label: { type: string }, path: { type: string }, docs: { type: array, items: { $ref: '#/components/schemas/DocumentMeta' } }, hiddenCount: { type: integer, minimum: 0 } }
+      properties: { id: { type: string }, label: { type: string }, path: { type: string }, docs: { type: array, items: { $ref: '#/components/schemas/DocumentMeta' } }, folders: { type: array, description: "Git-ignored folder entries of this root. Absent when there are none.", items: { $ref: '#/components/schemas/FolderEntry' } }, hiddenCount: { type: integer, minimum: 0 } }
       additionalProperties: false
     WorkspaceState:
       type: object
@@ -2345,6 +2705,8 @@ components:
         repositories: { type: array, items: { $ref: '#/components/schemas/RepositorySnapshot' } }
         compareTarget: { enum: [base, last-commit] }
         initialFollow: { type: boolean }
+        showIgnored: { type: boolean }
+        initialShowIgnored: { type: boolean }
         defaultDocumentId: { type: [string, 'null'] }
         changedId: { type: [string, 'null'] }
         generatedAt: { type: number }
@@ -2377,6 +2739,8 @@ components:
       required: [kind, epoch, previousRevision, revision, generatedAt, scope, compareTarget, unscopedFingerprint, upserts, removals, changedId]
       properties:
         kind: { const: patch }
+        showIgnored: { type: boolean }
+        initialShowIgnored: { type: boolean }
         epoch: { type: string }
         previousRevision: { type: integer, minimum: 0 }
         revision: { type: integer, minimum: 0 }
@@ -2386,6 +2750,8 @@ components:
         unscopedFingerprint: { type: string }
         upserts: { type: array, items: { $ref: '#/components/schemas/DocumentMeta' } }
         removals: { type: array, items: { type: object, required: [rootId, id], properties: { rootId: { type: string }, id: { type: string } }, additionalProperties: false } }
+        folderUpserts: { type: array, description: "Git-ignored folder entries added or changed (for example, newly listed) at this revision.", items: { $ref: '#/components/schemas/FolderEntry' } }
+        folderRemovals: { type: array, description: "Git-ignored folder entries that no longer exist.", items: { type: object, required: [rootId, id], properties: { rootId: { type: string }, id: { type: string } }, additionalProperties: false } }
         roots: { type: array, items: { $ref: '#/components/schemas/DocumentRoot' } }
         discovery: { $ref: '#/components/schemas/DocumentDiscovery' }
         repositories: { type: array, items: { $ref: '#/components/schemas/RepositorySnapshot' } }
@@ -2464,8 +2830,13 @@ components:
           properties:
             topic: { type: string, const: worktrees }
           additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: personal }
+          additionalProperties: false
     LiveSubscription:
-      description: A subscription and the cursor to resume it from.
+      description: A subscription and the cursor to resume it from. Only conversation subscriptions accept the optional boolean reconnect recovery intent.
       oneOf:
         - type: object
           required: [topic]
@@ -2486,12 +2857,29 @@ components:
             topic: { type: string, const: conversation }
             key: { $ref: '#/components/schemas/LiveConversationKey' }
             cursor: { $ref: '#/components/schemas/LiveCursor' }
+            reconnect:
+              type: boolean
+              description: "Transport-recovery intent, not a request to refresh every reconnect. True requires a nonempty cursor bounded to 1024 UTF-8 bytes. Recovery reconciles possibly missed visual metadata only where retained visual evidence requires it. False is a fresh attachment. In opening GET subs, omission inherits the stream's reconnect query parameter; later POST additions use only their own flag, with omitted/false meaning fresh. Older Hubs may ignore this field, so deferred visual repair requires an updated Hub."
+          if:
+            required: [reconnect]
+            properties:
+              reconnect: { const: true }
+          then:
+            required: [cursor]
+            properties:
+              cursor: { minLength: 1 }
           additionalProperties: false
         - type: object
           required: [topic]
           properties:
             topic: { type: string, const: worktrees }
             cursor: { $ref: '#/components/schemas/LiveCursor', description: "Ignored. The worktrees topic has no replay cursor; every attach receives a fresh invalidation." }
+          additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: personal }
+            cursor: { $ref: '#/components/schemas/LiveCursor', description: "Ignored. Personal state is fetched authoritatively after each account-private invalidation." }
           additionalProperties: false
     LiveSubscriptionList:
       type: array

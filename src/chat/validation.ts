@@ -1,4 +1,6 @@
 import { TOKEN_USAGE_COMPONENTS } from "./usage";
+import { CHAT_VISUAL_ID_PATTERN, VISUAL_MAX_COUNT } from "./visual-types";
+import type { AutomaticBackgroundFeedback, AutomaticBackgroundOutcome } from "./types";
 import type {
   AgentChatStatus,
   BackgroundTaskOutput,
@@ -42,6 +44,12 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "scheduled",
 ]);
 const ACTIVITY_STATUSES = new Set<ActivityStatus>(["pending", "running", "completed", "failed", "cancelled"]);
+
+export function parseAutomaticBackground(value: unknown): AutomaticBackgroundFeedback {
+  if (value === undefined) return {};
+  if (typeof value !== "string" || !["not-needed", "accepted", "unavailable", "failed", "unknown"].includes(value)) throw new Error("invalid automatic background outcome");
+  return { automaticBackground: value as AutomaticBackgroundOutcome };
+}
 
 export function parseChatAvailability(value: unknown): ChatAvailability {
   const record = expectRecord(value, "chat availability");
@@ -261,12 +269,13 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "alwaysPatterns", "status", "outcome", "diff", "plan", "choices", "choiceId", "sourceToolId", "mcp"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "queueOrder", "action", "resources", "alwaysPatterns", "status", "outcome", "diff", "plan", "choices", "choiceId", "sourceToolId", "mcp"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
   expectTimelineBase(record, "permission");
   expectIdentity(record.requestId, "permission request id");
+  if (record.queueOrder !== undefined) expectTimestamp(record.queueOrder, "permission queue order");
   expectNonEmptyString(record.action, "permission action");
   // Empty is legitimate: a plan approval affects no named resource.
   expectStringArray(record.resources, "permission resources", record.plan === undefined);
@@ -361,6 +370,15 @@ function expectSubagentLines(value: unknown, rowId: unknown): void {
  * stay absent, not arrive as some other type, since the readouts do
  * arithmetic on these.
  */
+function expectWorkerSession(value: unknown): void {
+  if (value === undefined) return;
+  const report = expectRecord(value, "worker session");
+  expectKeys(report, ["model", "effort", "costUsd"], "worker session");
+  expectOptionalString(report.model, "worker session model");
+  if (report.effort !== null) expectNonEmptyString(report.effort, "worker session effort");
+  if (report.costUsd !== null && (typeof report.costUsd !== "number" || !Number.isFinite(report.costUsd) || report.costUsd < 0)) throw new Error("worker session cost must be non-negative USD or null");
+}
+
 function expectTokenUsage(value: unknown, label: string): void {
   if (value === undefined) return;
   const usage = expectRecord(value, label);
@@ -404,7 +422,22 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "user message attachment");
       break;
     case "assistant_message":
-      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model", "agent", "contextKey"], type);
+      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model", "agent", "contextKey", "visuals"], type);
+      if (record.visuals !== undefined) {
+        if (!Array.isArray(record.visuals) || record.visuals.length > VISUAL_MAX_COUNT) throw new Error("invalid assistant visuals");
+        const indices = new Set<number>();
+        for (const value of record.visuals) {
+          const visual = expectRecord(value, "assistant visual");
+          expectKeys(visual, ["index", "status", "id", "mimeType", "message"], "assistant visual");
+          if (!Number.isSafeInteger(visual.index) || (visual.index as number) < 0 || indices.has(visual.index as number)) throw new Error("invalid assistant visual index");
+          indices.add(visual.index as number);
+          expectOneOf(visual.status, ["ready", "pending", "unavailable"], "assistant visual status");
+          if (visual.id !== undefined && (typeof visual.id !== "string" || !CHAT_VISUAL_ID_PATTERN.test(visual.id))) throw new Error("invalid assistant visual id");
+          if (visual.mimeType !== undefined) expectOneOf(visual.mimeType, ["image/png", "image/jpeg", "image/svg+xml"], "assistant visual mime type");
+          if (visual.message !== undefined) expectString(visual.message, "assistant visual message");
+          if (visual.status === "ready" && (visual.id === undefined || visual.mimeType === undefined)) throw new Error("ready assistant visual requires id and MIME type");
+        }
+      }
       expectOptionalIdentity(record.contextKey, "assistant contextKey");
       expectString(record.markdown, "assistant markdown");
       expectOptionalTimestamp(record.completedAt, "completedAt");
@@ -421,7 +454,8 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.label !== undefined) expectNonEmptyString(record.label, "reasoning label");
       break;
     case "tool":
-      expectKeys(record, ["id", "type", "createdAt", "name", "status", "completedAt", "input", "output", "error", "childConversationId", "model", "usage", "descendants", "elapsedMs"], type);
+      expectKeys(record, ["id", "type", "createdAt", "name", "status", "completedAt", "input", "output", "error", "childConversationId", "model", "usage", "descendants", "elapsedMs", "workerSession"], type);
+      expectWorkerSession(record.workerSession);
       expectOptionalTimestamp(record.completedAt, "completedAt");
       expectNonEmptyString(record.name, "tool name");
       parseActivityStatus(record.status);
@@ -522,7 +556,47 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectContextWindow(record.window);
       break;
     case "background_task":
-      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground"], type);
+      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground", "stateUncertain", "resultId", "toolUseIds", "workerSession", "terminalReportedAt", "activity", "control"], type);
+      if (record.activity !== undefined) {
+        const activity = expectRecord(record.activity, "worker activity");
+        expectKeys(activity, ["kind", "launchRef", "observedAt", "endedAt", "executionId", "executionAliases", "generation", "reason", "request"], "worker activity");
+        expectOneOf(activity.kind, ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"], "worker activity kind");
+        expectOptionalTimestamp(activity.observedAt, "worker observation time");
+        expectOptionalTimestamp(activity.endedAt, "worker end time");
+        expectOptionalCount(activity.generation, "worker observation generation");
+        expectOptionalIdentity(activity.launchRef, "worker launch reference");
+        if (typeof activity.launchRef === "string" && /[^!-~]/.test(activity.launchRef)) throw new Error("worker launch reference must be printable ASCII without spaces");
+        expectOptionalIdentity(activity.executionId, "worker execution id");
+        if (activity.executionAliases !== undefined) {
+          expectStringArray(activity.executionAliases, "worker execution aliases", true);
+          const aliases = activity.executionAliases as string[];
+          if (aliases.length > 2048 || aliases.length !== new Set(aliases).size || !aliases.includes(activity.executionId as string)) throw new Error("invalid worker execution aliases");
+          for (const alias of aliases) expectIdentity(alias, "worker execution alias");
+        }
+        expectOptionalString(activity.reason, "worker activity reason");
+        if (typeof activity.reason === "string" && activity.reason.length > 512) throw new Error("worker activity reason is too long");
+        if (activity.kind === "needs-answer") {
+          const request = expectRecord(activity.request, "worker request");
+          expectKeys(request, ["id", "kind"], "worker request");
+          expectIdentity(request.id, "worker request id");
+          expectOneOf(request.kind, ["permission", "question"], "worker request kind");
+        } else if (activity.request !== undefined) throw new Error("only needs-answer activity can link a request");
+      }
+      if (record.control !== undefined) {
+        const control = expectRecord(record.control, "worker control");
+        expectKeys(control, ["available", "reason"], "worker control");
+        if (typeof control.available !== "boolean") throw new Error("worker control availability must be a boolean");
+        expectOptionalString(control.reason, "worker control reason");
+        if (typeof control.reason === "string" && control.reason.length > 512) throw new Error("worker control reason is too long");
+      }
+      expectOptionalTimestamp(record.terminalReportedAt, "terminalReportedAt");
+      expectWorkerSession(record.workerSession);
+      if (record.stateUncertain !== undefined && typeof record.stateUncertain !== "boolean") throw new Error("background task uncertainty must be a boolean");
+      expectOptionalIdentity(record.resultId, "background result id");
+      if (record.toolUseIds !== undefined) {
+        expectStringArray(record.toolUseIds, "background launch ids", true);
+        for (const id of record.toolUseIds as string[]) expectIdentity(id, "background launch id");
+      }
       expectIdentity(record.taskId, "background task id");
       expectNonEmptyString(record.description, "background task description");
       expectOptionalString(record.taskType, "background task type");
@@ -566,7 +640,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
 
 export function parseConversationSnapshot(value: unknown): ConversationSnapshot {
   const record = expectRecord(value, "conversation snapshot");
-  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "queued", "reversibleHistory", "olderCursor"], "conversation snapshot");
+  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "queued", "reversibleHistory", "olderCursor", "historyStart"], "conversation snapshot");
   parseConversationSummary(record.conversation);
   parseConversationConfiguration(record.configuration);
   expectIdentity(record.generation, "generation");
@@ -576,6 +650,12 @@ export function parseConversationSnapshot(value: unknown): ConversationSnapshot 
   if (record.queued !== undefined) parseQueuedMessages(record.queued);
   if (record.reversibleHistory !== undefined) parseReversibleHistoryState(record.reversibleHistory);
   if (record.olderCursor !== undefined) expectNonEmptyString(record.olderCursor, "older cursor");
+  if (record.historyStart !== undefined) {
+    const start = expectRecord(record.historyStart, "history start");
+    expectKeys(start, ["id", "createdAt"], "history start");
+    expectIdentity(start.id, "history start id");
+    expectTimestamp(start.createdAt, "history start createdAt");
+  }
   return value as ConversationSnapshot;
 }
 
@@ -615,10 +695,18 @@ export function parseQueuedMessages(value: unknown): QueuedMessage[] {
   if (!Array.isArray(value)) throw new Error("queued messages must be an array");
   for (const entry of value) {
     const record = expectRecord(entry, "queued message");
-    expectKeys(record, ["id", "text", "queuedAt", "requestId", "attachments"], "queued message");
+    expectKeys(record, ["id", "submissionId", "text", "queuedAt", "delivery", "paused", "unconfirmed", "admissionUncertaintyId", "requestId", "attachments"], "queued message");
     expectIdentity(record.id, "queued message id");
+    if (record.submissionId !== undefined) expectIdentity(record.submissionId, "queued message submissionId");
     expectString(record.text, "queued message text");
     expectTimestamp(record.queuedAt, "queued message queuedAt");
+    expectOneOf(record.delivery, ["steer", "queue"], "queued message delivery");
+    if (record.paused !== undefined && record.paused !== true) throw new Error("queued message paused must be true when present");
+    if (record.unconfirmed !== undefined && record.unconfirmed !== true) throw new Error("queued message unconfirmed must be true when present");
+    if (record.admissionUncertaintyId !== undefined) {
+      expectIdentity(record.admissionUncertaintyId, "queued message admissionUncertaintyId");
+      if (record.unconfirmed !== true) throw new Error("admission uncertainty requires an unconfirmed entry");
+    }
     if (record.requestId !== undefined) expectIdentity(record.requestId, "queued message requestId");
     if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "queued message attachment");
   }
@@ -681,7 +769,7 @@ export function parseChatEvent(value: unknown): ChatEvent {
       parseQueuedMessages(record.queued);
       const change = expectRecord(record.change, "queue change");
       expectKeys(change, ["kind", "messageId"], "queue change");
-      expectOneOf(change.kind, ["held", "removed", "delivered"], "queue change kind");
+      expectOneOf(change.kind, ["held", "steered", "removed", "switched", "paused", "resumed", "delivered"], "queue change kind");
       expectIdentity(change.messageId, "queue change message id");
       break;
     }

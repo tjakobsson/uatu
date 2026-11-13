@@ -305,6 +305,16 @@ describe("OpenCode-native tool payloads", () => {
     expect(detail).toEqual({ kind: "skill", label: "Skill", name: "openspec-propose" });
     expect(toolSubject(detail)).toBe("openspec-propose");
   });
+
+  // GitHub #524: the current Claude Code Skill tool names the skill by id
+  // alone (tool schema: "the skill ID must match an available skill"). With
+  // only `name`/`skill` recognized, the row fell back to a generic blob whose
+  // subject was nothing — a timeline of skill loads read as bare "Skill" rows.
+  test("a skill input naming the skill only by id still names it", () => {
+    const detail = describeToolDetail({ name: "skill", input: JSON.stringify({ id: "frontend-design" }) });
+    expect(detail).toEqual({ kind: "skill", label: "Skill", name: "frontend-design" });
+    expect(toolSubject(detail)).toBe("frontend-design");
+  });
 });
 
 describe("todo activity", () => {

@@ -104,7 +104,7 @@ describe("findNonGitWatchEntries", () => {
 });
 
 describe("scanRoots", () => {
-  test("discovers all non-binary files recursively, tags binary files as binary, and honors the hardcoded directory denylist", async () => {
+  test("discovers all non-binary files recursively, tags binary files as binary, and honors only the VCS/OS built-in exclusions", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-"));
     tempDirectories.push(tempDirectory);
 
@@ -119,8 +119,10 @@ describe("scanRoots", () => {
     await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
     // .git contents must stay hidden.
     await writeFile(path.join(tempDirectory, ".git", "config.md"), "# Should not appear\n");
-    // node_modules contents must stay hidden.
-    await writeFile(path.join(tempDirectory, "node_modules", "pkg", "README.md"), "# Should not appear\n");
+    // node_modules is not special outside Git: a non-Git root is discovered
+    // completely, as VS Code's Explorer would show it.
+    await writeFile(path.join(tempDirectory, "node_modules", "pkg", "README.md"), "# Package\n");
+    await writeFile(path.join(tempDirectory, ".DS_Store"), "litter");
     // Other dotdirs (not on the denylist) SHOULD be surfaced — they often hold
     // real markdown (e.g., .github/CONTRIBUTING.md, .claude/*.md).
     await writeFile(path.join(tempDirectory, ".github", "CONTRIBUTING.md"), "# Contributing\n");
@@ -134,6 +136,7 @@ describe("scanRoots", () => {
       "guides/drafts/note.txt",
       "guides/setup.markdown",
       "logo.png",
+      "node_modules/pkg/README.md",
       "README.md",
     ]);
 
@@ -163,7 +166,7 @@ describe("scanRoots", () => {
     expect(roots[0]?.hiddenCount).toBe(1);
   });
 
-  test("respects .gitignore by default and skips it when respectGitignore is false", async () => {
+  test("discovers the Gitignored superset regardless of the legacy visibility default", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-gitignore-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, ".gitignore"), "*.log\n");
@@ -171,7 +174,7 @@ describe("scanRoots", () => {
     await writeFile(path.join(tempDirectory, "debug.log"), "log line\n");
 
     const respected = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    expect(respected[0]?.docs.map(doc => doc.relativePath)).not.toContain("debug.log");
+    expect(respected[0]?.docs.map(doc => doc.relativePath)).toContain("debug.log");
 
     const ignored = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }], {
       respectGitignore: false,
@@ -179,7 +182,7 @@ describe("scanRoots", () => {
     expect(ignored[0]?.docs.map(doc => doc.relativePath)).toContain("debug.log");
   });
 
-  test("excludes secret-like files from directory roots", async () => {
+  test("lists secret-like files like VS Code does unless explicitly excluded", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-secrets-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
@@ -188,12 +191,12 @@ describe("scanRoots", () => {
     await writeFile(path.join(tempDirectory, "credentials.json"), "{}\n");
     await writeFile(path.join(tempDirectory, "id_ed25519"), "private key\n");
 
-    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }], {
-      respectGitignore: false,
-    });
-    const paths = roots[0]?.docs.map(doc => doc.relativePath) ?? [];
+    const listed = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }], { respectGitignore: false });
+    expect((listed[0]?.docs.map(doc => doc.relativePath) ?? []).sort()).toEqual([".env", ".npmrc", "credentials.json", "id_ed25519", "README.md"].sort());
 
-    expect(paths).toEqual(["README.md"]);
+    await writeFile(path.join(tempDirectory, ".uatu.json"), JSON.stringify({ ignore: { exclude: [".env*", ".npmrc", "credentials.json", "id_*"] } }));
+    const excluded = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }], { respectGitignore: false });
+    expect(excluded[0]?.docs.map(doc => doc.relativePath).filter(p => p !== ".uatu.json")).toEqual(["README.md"]);
   });
 
   test("returns a single-document root for a file entry tagged with its kind", async () => {

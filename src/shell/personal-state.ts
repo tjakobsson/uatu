@@ -9,6 +9,7 @@ export type PersonalWorkspaceState = {
   previewMode?: ViewMode;
   compareTarget?: CompareTarget;
   filesFilter?: FilesPaneFilter;
+  showIgnored?: boolean;
   lastPtyId?: string;
 };
 
@@ -18,6 +19,7 @@ export type PersonalWorkspaceStatePatch = Partial<{
   previewMode: ViewMode | null;
   compareTarget: CompareTarget | null;
   filesFilter: FilesPaneFilter | null;
+  showIgnored: boolean | null;
   lastPtyId: string | null;
 }>;
 
@@ -45,13 +47,14 @@ export function parsePersonalWorkspaceState(value: unknown): PersonalWorkspaceSt
     result.documentPath = record.documentPath;
   }
   if (typeof record.follow === "boolean") result.follow = record.follow;
+  if (typeof record.showIgnored === "boolean") result.showIgnored = record.showIgnored;
   if (record.previewMode === "rendered" || record.previewMode === "source" || record.previewMode === "diff") {
     result.previewMode = record.previewMode;
   }
   if (record.compareTarget === "base" || record.compareTarget === "last-commit") {
     result.compareTarget = record.compareTarget;
   }
-  if (record.filesFilter === "all" || record.filesFilter === "changed") {
+  if (record.filesFilter === "all" || record.filesFilter === "recent" || record.filesFilter === "changed") {
     result.filesFilter = record.filesFilter;
   }
   if (typeof record.lastPtyId === "string") result.lastPtyId = record.lastPtyId;

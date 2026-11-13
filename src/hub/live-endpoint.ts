@@ -21,6 +21,7 @@ import {
   LIVE_KEEPALIVE_MS,
   LIVE_MAX_SUBSCRIPTIONS,
   LIVE_OPEN_FRAME,
+  PERSONAL_INVALIDATION,
   liveSubscriptionId,
   parseLiveStreamQuery,
   parseLiveSubscriptionChange,
@@ -116,8 +117,8 @@ class ClientStream {
     if (envelope.event.kind === "resync" && subscriptionId !== null) this.subscriptions.delete(subscriptionId);
     // Only a complete baseline can replace an undelivered document frame.
     // Patches name their predecessor, so dropping one creates a replay gap.
-    const coalescible = envelope.topic === "document" && envelope.event.kind === "data"
-      && !(envelope.event.data && typeof envelope.event.data === "object" && "kind" in envelope.event.data && envelope.event.data.kind === "patch");
+    const coalescible = (envelope.topic === "personal" && envelope.event.kind === "data") || (envelope.topic === "document" && envelope.event.kind === "data"
+      && !(envelope.event.data && typeof envelope.event.data === "object" && "kind" in envelope.event.data && envelope.event.data.kind === "patch"));
     this.enqueue(subscriptionId, formatLiveEnvelope(envelope), coalescible);
   }
 
@@ -299,7 +300,9 @@ export class LiveEndpoint {
     // queue), so `ended` is re-read before each one.
     for (const subscription of query.subs) {
       if (stream.ended) break;
-      this.attach(stream, subscription);
+      // Opening subscriptions use their validated override or the stream's
+      // recovery default. Control adds below use only their own explicit flag.
+      this.attach(stream, subscription, subscription.reconnect ?? query.reconnect);
     }
     if (query.activity && !stream.ended) this.attachActivity(stream);
     return new Response(body, { status: 200, headers: STREAM_HEADERS });
@@ -330,7 +333,7 @@ export class LiveEndpoint {
       // An add replays onto the queue; on a nearly full one that ends the
       // stream, and the later adds must not attach to the corpse.
       if (stream.ended) break;
-      this.attach(stream, subscription);
+      this.attach(stream, subscription, subscription.reconnect === true);
     }
     return json(200, { ok: true });
   }
@@ -346,6 +349,28 @@ export class LiveEndpoint {
     for (const stream of [...this.streams.values()]) stream.end("completed");
   }
 
+  // Committed changes or private storage-health changes call this; the
+  // authoritative read distinguishes them. Private scopes never enter the
+  // broker's shared upstream/cache keys or activity payloads.
+  invalidatePersonal(user: string, workspaceId: string, notice: "changed" | "unavailable" | "ready" = "changed"): void {
+    for (const stream of this.streams.values()) {
+      if (stream.principal.user === user && stream.workspaceId === workspaceId
+        && stream.subscriptions.has(liveSubscriptionId({ topic: "personal" }))) {
+        if (notice !== "changed") {
+          // Health is a latest-state signal, not replay. Drop undelivered
+          // personal frames so recovery remains ready→data, never data→ready.
+          stream.purge(liveSubscriptionId({ topic: "personal" }));
+          stream.write({ ws: stream.workspaceId, topic: "personal", cursor: "", event: { kind: notice } });
+        }
+        if (notice !== "unavailable") this.writePersonal(stream);
+      }
+    }
+  }
+
+  private writePersonal(stream: ClientStream): void {
+    stream.write({ ws: stream.workspaceId, topic: "personal", cursor: "", event: { kind: "data", data: PERSONAL_INVALIDATION } });
+  }
+
   // The broker's subscribe writes synchronously (the latest document
   // snapshot and its `ready`, a replay, the activity snapshot) and returns
   // its handle afterwards. If a write ended the stream, `end()` has already
@@ -353,13 +378,23 @@ export class LiveEndpoint {
   // stream and never detached: its upstream would never linger out and
   // would pin a child fetch for the hub's lifetime. Detach such a handle at
   // once instead.
-  private attach(stream: ClientStream, subscription: LiveSubscription): void {
+  private attach(stream: ClientStream, subscription: LiveSubscription, reconnect = false): void {
     const id = liveSubscriptionId(subscription);
     // `add` of a subscribed key replaces it: re-attach from the new cursor,
     // and nothing queued for the old attachment survives.
     this.detach(stream, id);
-    const attachment = this.deps.broker.subscribe(stream, stream.workspaceId, subscription);
-    if (stream.ended) {
+    if (subscription.topic === "personal") {
+      stream.subscriptions.set(id, { detach() {} });
+      this.writePersonal(stream);
+      return;
+    }
+    // A recovering attachment can synchronously resync and delete its record.
+    // Reserve the slot first so that terminal signal cannot leave a dead
+    // handle in the set (or attach it again as transport recovery after read).
+    const pending: LiveAttachment = { detach() {} };
+    stream.subscriptions.set(id, pending);
+    const attachment = this.deps.broker.subscribe(stream, stream.workspaceId, subscription, { reconnect });
+    if (stream.ended || stream.subscriptions.get(id) !== pending) {
       attachment.detach();
       return;
     }

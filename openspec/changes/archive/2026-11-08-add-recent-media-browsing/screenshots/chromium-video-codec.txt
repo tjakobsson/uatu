@@ -1,0 +1,1 @@
+H264 Baseline canPlayType=probably; actual videoWidth=32, native play and seek verified. Expanded decoded frame before fullscreen: {"pixel":[47,125,175,255],"width":1260,"height":259.1875}.

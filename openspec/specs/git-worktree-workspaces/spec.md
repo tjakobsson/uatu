@@ -7,7 +7,15 @@ Define provider-neutral Git worktrees as independent Hub workspaces, with explic
 ## Requirements
 
 ### Requirement: Approved worktree UX obligations hold on the real surfaces
-The worktree experience SHALL be delivered through the existing in-workspace workspace picker as the primary create, discover and switch entry point, with Hub dashboard entry points secondary. It was first presented as a resettable mock-backed prototype inside the actual Uatu workspace frontend, and real Git/backend integration began only after the user's explicit UX approval of that prototype, recorded on 2026-09-17. That prototype and its harnesses are retired; the obligations it established SHALL hold for the real surfaces. Each registered checkout SHALL open its own `/s/<workspace-id>/` context with its own files, preview, terminal and chat. Desktop, narrow touch, keyboard/focus/error announcements, light/dark themes and desktop WebView titlebar inset SHALL be supported in the actual workspace frontend rather than only in Hub cards. Worktree surfaces MUST NOT depend on mock hosts, scenario controls, demo pages or gallery fixtures; every automated check SHALL exercise product code through its real entry points, against real Hub state and temporary Git repositories.
+The existing workspace picker SHALL be the primary worktree create/discover/switch entry point, with dashboard secondary. Approved UX SHALL hold on real surfaces as below.
+
+Historical context, not an acceptance precondition: the resettable mock-backed prototype in the actual workspace frontend received explicit UX approval recorded on 2026-09-17 before real Git/backend integration. That prototype and its harnesses are retired.
+
+#### Scenario: Approved prototype obligations are verified on actual product surfaces
+- **WHEN** the worktree experience is delivered or tested
+- **THEN** its established obligations SHALL hold on real surfaces; each registered checkout SHALL open its own `/s/<workspace-id>/` with its own files, preview, terminal, and chat
+- **AND** desktop, narrow touch, keyboard/focus/error announcements, light/dark, and desktop WebView titlebar inset SHALL work in the actual frontend, not only Hub cards
+- **AND** surfaces MUST NOT depend on mock hosts, scenario controls, demo pages, or gallery fixtures; every automated check SHALL use product code's real entry points with real Hub state and temporary Git repositories
 
 #### Scenario: User exercises the actual workspace picker
 - **WHEN** a user creates a worktree from a populated workspace's existing picker and explicitly starts and opens the stopped result
@@ -19,11 +27,60 @@ The worktree experience SHALL be delivered through the existing in-workspace wor
 - **THEN** the approved behavior remains the acceptance standard and no mock host, demo page, gallery or scenario control is required to demonstrate it
 
 ### Requirement: Creation supports explicit branch modes without force
-The Hub SHALL create an ordinary linked worktree from a selected repository using either a new local branch from an explicitly selected starting branch, an existing local branch, or a new local tracking branch from an explicitly selected remote ref. It SHALL validate paths, refs, names, availability and occupancy without replacing content or resetting branches. It MUST NOT force a checked-out target branch into another checkout; a checked-out starting branch SHALL remain a valid base for a different new branch. Both branch comboboxes SHALL show cached refs with no automatic network call and adjacent Fetch remote branches. Loading/errors SHALL be inline. Fetch SHALL preserve name/query/valid selection, invalidate disappeared refs, and MUST NOT reapply initial defaults or silently substitute refs.
+The Hub SHALL create ordinary linked worktrees from explicit new-local, existing-local, or remote-tracking branch choices, validating paths, refs, names, availability, and occupancy without replacement, reset, or forced duplicate checkout. Loading/errors SHALL be inline. Compact client dialogs SHALL preserve exact branch intent and predetermined safe destinations.
 
-Each parent fork SHALL open a three-option menu: New branch / worktree, Existing branch and Register worktree…, the last listing only the checkouts Git lists for that repository that Uatu has not registered. New creation SHALL show target title, Name, Create from and Create/Cancel. Create from and Existing's Branch SHALL share the accessible editable fuzzy local/remote combobox semantics, badges, qualified refs, keyboard/touch and empty results. Initial Create from SHALL prefer local main, otherwise select the sole remote named main; ambiguous or absent mains SHALL require explicit choice, never fallback to current HEAD. Both lists SHALL open expanded before anything is typed: Create from with the full local and remote listing, and Existing's Branch with only the branches no checkout holds — excluding every local branch a listed checkout has checked out and every remote ref whose derived local tracking name already exists locally — re-filtered the same way after an explicit fetch, showing `Every branch is already checked out. Create a new branch instead.` with Create disabled when none remain. Click, tap and Enter SHALL commit the exact ref and confirm selection; Enter MUST NOT submit. A touch tap SHALL commit an option and activate a footer action exactly as a pointer click does. Editing SHALL clear selection and disable Create; invalid/empty Name or pending operation SHALL also disable new Create. Reopening SHALL offer all refs. Escape SHALL close list before popup; blur/click-away SHALL close list without losing first-click footer actions. Cancel/reopen SHALL discard old drafts and apply initial defaults only. No destination/settings/details/ownership or extra metadata SHALL appear. Expanded lists SHALL remain within compact viewport-safe dialogs with safe reachable buttons. Both dialogs SHALL be rendered by the client from the published worktree JSON, preserving these roles, labels, copy and keyboard behavior.
+#### Scenario: Parent forks offer explicit creation and unregistered-checkout choices
+- **WHEN** a parent fork is opened
+- **THEN** it SHALL offer New branch / worktree, Existing branch, and Register worktree…, the latter listing only Git-listed checkouts of that repository not registered by Uatu
+- **AND** new creation SHALL show target title, Name, Create from, and Create/Cancel; Create from and Existing's Branch SHALL share accessible editable fuzzy local/remote semantics, badges, qualified refs, keyboard/touch, and empty results
+- **AND** both dialogs SHALL be client-rendered from published worktree JSON with these roles, labels, copy, and keyboard behavior, no destination/settings/details/ownership/extra metadata, and compact viewport-safe expanded lists with safely reachable buttons
 
-New checkout destinations SHALL be predetermined siblings `<main-folder>.worktrees/<safe-branch-folder>`. The child workspace name SHALL equal the exact current local branch, including slashes, not its sanitized folder name. No destination/name form or child branch rename SHALL be offered. Sanitized folder collisions SHALL be handled deterministically without overwrite, including refusal when a disambiguated destination remains occupied. Branch occupancy SHALL be scoped to repository identity, not globally to the displayed branch string.
+#### Scenario: Branch lists default conservatively and exclude occupied targets
+- **WHEN** Create from initially opens
+- **THEN** it SHALL prefer local main, otherwise sole remote named main; ambiguous/absent mains SHALL require explicit choice, never current HEAD fallback
+
+#### Scenario: Every branch-list opening exposes its full eligible listing
+- **WHEN** either branch list opens, before anything is typed
+- **THEN** it SHALL open expanded: Create from with full local/remote listing, Existing's Branch only unheld branches, excluding locals checked out by any listed checkout and remotes whose derived local tracking names exist locally
+- **AND** when Existing's Branch has no eligible refs, it SHALL show `Every branch is already checked out. Create a new branch instead.` with Create disabled
+- **WHEN** an explicit fetch completes
+- **THEN** the same filtering SHALL apply, including the no-remaining-branches message and disabled Create
+
+#### Scenario: Checked-out bases remain valid without forcing occupied targets
+- **WHEN** creation validates a target or starting branch
+- **THEN** checked-out targets MUST NOT be forced into another checkout, but a checked-out starting branch SHALL remain valid for a different new branch
+
+#### Scenario: Fetch and combobox interaction preserve exact creation intent
+- **WHEN** either branch combobox is displayed
+- **THEN** it SHALL show cached refs without automatic network calls and an adjacent Fetch remote branches control, with inline loading/errors
+- **WHEN** Fetch remote branches is activated
+- **THEN** fetch SHALL retain name/query/valid choice, invalidate disappeared refs, and MUST NOT reapply defaults or substitute refs silently
+- **WHEN** the user clicks, taps, presses Enter, edits, reopens, or dismisses a list
+- **THEN** click/tap/Enter SHALL commit the exact ref and confirm choice, Enter MUST NOT submit, and touch SHALL commit options and activate footer actions like pointer clicks
+- **AND** edits SHALL clear choice and disable Create; invalid/empty Name or pending operation SHALL disable new Create; reopening SHALL offer all refs
+- **AND** Escape SHALL close list before popup, blur/click-away SHALL close list without losing first-click footer actions, and Cancel/reopen SHALL discard drafts and apply initial defaults only
+
+#### Scenario: New Create is disabled for invalid names and pending operations
+- **WHEN** Name is invalid or empty, or an operation is pending, regardless of list interaction
+- **THEN** new Create SHALL be disabled
+
+#### Scenario: Checkout destinations and branch names remain separate
+- **WHEN** a new checkout is created from the selected repository and explicit branch mode
+- **THEN** it SHALL use a new local branch from the selected starting branch, an existing local branch, or a new local tracking branch from the selected remote ref
+- **AND** destination SHALL be predetermined sibling `<main-folder>.worktrees/<safe-branch-folder>`
+- **AND** sanitized collisions SHALL be deterministic without overwrite, refusing if the disambiguated destination remains occupied
+
+#### Scenario: Existing child workspace names reflect the current local branch
+- **WHEN** a child workspace exists, including after an external branch switch
+- **THEN** the child workspace name SHALL equal the exact current local branch, including slashes, not its sanitized folder name
+
+#### Scenario: Branch occupancy checks are scoped to repository identity before creation
+- **WHEN** branch occupancy is checked, including before a checkout is created
+- **THEN** branch occupancy SHALL be scoped to repository identity, not globally to the displayed branch string
+
+#### Scenario: Worktree controls do not offer destination forms or child branch rename
+- **WHEN** worktree controls are displayed, including for an existing child outside creation
+- **THEN** no destination/name form or child branch rename SHALL be offered
 
 #### Scenario: Two branches sanitize to the same folder
 - **WHEN** `feature/login` and `feature-login` target the same parent
@@ -63,14 +120,17 @@ New checkout destinations SHALL be predetermined siblings `<main-folder>.worktre
 - **THEN** the error and stale state remain visible, no checkout is created, and the user can correct credentials and retry or explicitly use a displayed cached ref
 
 ### Requirement: Branch creation origin is a historical snapshot
-Nested worktree rows SHALL expose recorded branch creation source separately from
-current tracking/upstream and live parent policy. A new branch SHALL snapshot the
-explicitly selected starting ref at creation; a newly created tracking branch
-SHALL snapshot its selected remote-qualified source. Existing-local and external
-branches SHALL remain origin unknown unless explicit trustworthy creation history
-exists. Git upstream, merge-base, parent identity and checkout starting revision
-MUST NOT be used to guess historical branch origin. Recorded creation history SHALL come only from Uatu's durable
-provenance record, never from Git inference.
+Nested worktree rows SHALL distinguish recorded branch creation source from tracking/upstream and live parent policy. Historical origin SHALL come only from Uatu's durable provenance, never Git inference; absent trustworthy history SHALL remain unknown.
+
+#### Scenario: Creation snapshots exact source refs without inferring existing history
+- **WHEN** a new branch or new tracking branch is created
+- **THEN** it SHALL snapshot the explicitly selected starting ref or selected remote-qualified source respectively
+- **WHEN** an existing-local or external branch lacks explicit trustworthy creation history
+- **THEN** origin SHALL remain unknown
+
+#### Scenario: Historical origin is never guessed from live Git relationships
+- **WHEN** historical branch origin is determined for any branch
+- **THEN** Git upstream, merge-base, parent identity, and checkout starting revision MUST NOT be used to guess it
 
 #### Scenario: Parent ref or configuration changes after creation
 - **WHEN** a branch is created with `release` explicitly selected as its base, then that parent changes checkout ref or configuration
@@ -83,7 +143,35 @@ provenance record, never from Git inference.
 - **THEN** its origin is unknown, even when it has an upstream or known checkout starting revision
 
 ### Requirement: Workspace boundaries and credentials remain explicit
-Each registered worktree SHALL have independent workspace identity, child/watch root, terminal cwd and provider directory context. Explicit switching through the existing workspace picker SHALL navigate to the selected checkout's separate `/s/<workspace-id>/` context for files, preview, terminal and chat, not replace the current workspace's checkout in place. Returning through the picker or browser history SHALL restore that workspace's own selected document/preview, terminal context and selected conversation. Conversations MUST remain attached to their original checkout and MUST NOT migrate or be copied by creation, discovery or switching. Delayed responses and live events from another workspace MUST NOT overwrite the active workspace's context. These observable boundaries SHALL be verified against real Hub state, real workspace children and real terminals. Registration SHALL atomically retain the explicit parent/repository relationship and exact local branch identity, defaulting to stopped. Credentials and shared workspace configuration SHALL be managed only on the parent and inherited live; parent updates SHALL propagate without child overrides or child credential/settings forms. Parent policy SHALL be disclosed, not implemented by copying secrets or adopting ambient credentials. Every surface that reports a child's credential policy SHALL report its parent's effective assignments and name the parent they are inherited from, rather than presenting the child's own empty assignment record as an absence of credentials. Assignments SHALL be recorded only against the workspace that owns the policy: a request to assign or unassign a credential that names a linked worktree SHALL be refused with a conflict naming that parent, before any workspace is stopped on the request's behalf, so no assignment is recorded against a child and a refused request costs a running child nothing. Checkout runtime and personal/per-device UI state MUST remain separate. Creation MUST NOT copy uncommitted or ignored source files, install dependencies, implicitly execute setup scripts, or claim security isolation; it SHALL explain that Git hooks/filters and later project configuration may execute.
+Registered worktrees SHALL have independent workspace/runtime/UI contexts, with atomic stopped registration retaining parent/repository and exact branch identity. Conversations MUST stay on their original checkout without migration or copying by creation, discovery, or switching. Credentials and shared policy SHALL inherit live only from the parent, without child assignments, copied secrets, or ambient-credential adoption.
+
+#### Scenario: Switching and delayed events preserve checkout-local context
+- **WHEN** a registered worktree is opened or revisited through picker/history
+- **THEN** its independent workspace identity, child/watch root, terminal cwd, and provider directory context SHALL apply; picker switching SHALL navigate to separate `/s/<workspace-id>/` files/preview/terminal/chat, not replace a checkout in place
+- **AND** return SHALL restore its own selected document/preview, terminal context, and conversation
+- **AND** boundaries SHALL be verified with real Hub state, real workspace children, and real terminals; checkout runtime and personal/per-device UI state MUST remain separate
+
+#### Scenario: Other-workspace completions cannot overwrite active context
+- **WHEN** a delayed response or live event arrives from another workspace
+- **THEN** it MUST NOT overwrite the active workspace's context
+
+#### Scenario: Child credential policy is inherited and assignment writes target its owner
+- **WHEN** a worktree is registered
+- **THEN** registration SHALL atomically retain explicit parent/repository relationship and exact local branch, defaulting to stopped
+- **WHEN** credentials or shared workspace configuration are managed
+- **THEN** they SHALL be managed only on the parent and inherited live; parent updates SHALL propagate without child overrides or child credential/settings forms
+- **AND** policy SHALL be disclosed without secret copying or ambient credentials
+
+#### Scenario: Every child policy report shows its effective parent assignments
+- **WHEN** any surface reports a child's credential policy
+- **THEN** it SHALL report the parent's effective assignments and name that parent, rather than present the child's own empty assignment record as an absence of credentials
+- **WHEN** assignment/unassignment names a linked worktree
+- **THEN** it SHALL be refused with a conflict naming the parent before stopping any workspace, leaving no child assignment and no cost to a running child
+
+#### Scenario: Creation discloses execution limits without copying source state
+- **WHEN** a checkout is created
+- **THEN** it MUST NOT copy uncommitted/ignored source files, install dependencies, implicitly execute setup scripts, or claim security isolation
+- **AND** it SHALL explain Git hooks/filters and later project configuration may execute
 
 #### Scenario: Source workspace remains unchanged
 - **WHEN** a new worktree workspace is created and explicitly started
@@ -126,7 +214,15 @@ Each registered worktree SHALL have independent workspace identity, child/watch 
 - **AND** a refused removal that asked to stop the workspace leaves the child running, with no session stopped
 
 ### Requirement: Creation provenance and partial outcomes are recoverable
-The Hub SHALL durably distinguish verified Uatu-created checkouts from external or uncertain checkouts independently of registration. Creation SHALL coordinate repository and destination mutations, report bounded operation progress and sanitized errors, and support idempotent recovery after interruption. Registration failure after successful Git creation MUST retain the checkout and branch and offer registration retry without recreating them. A reused path or uncertain identity MUST NOT acquire ownership from an older record.
+The Hub SHALL durably distinguish verified Uatu-created checkouts from external or uncertain checkouts independently of registration. Creation SHALL coordinate repository and destination mutations, report bounded operation progress and sanitized errors, and support idempotent recovery after interruption.
+
+#### Scenario: Partial registration retains checkout without transferring stale ownership
+- **WHEN** Git creation succeeds but registration fails
+- **THEN** checkout and branch MUST remain with registration retry that does not recreate them
+
+#### Scenario: Reused paths and uncertain identities cannot inherit stale ownership
+- **WHEN** a path is reused or a checkout identity is uncertain, regardless of registration outcome
+- **THEN** it MUST NOT acquire ownership from an older record
 
 #### Scenario: Registration fails after checkout creation
 - **WHEN** Git creation succeeds but registration or assignment persistence fails
@@ -142,9 +238,33 @@ The Hub SHALL durably distinguish verified Uatu-created checkouts from external 
 - **THEN** coordination and Git checks allow no overwrite or forced duplicate checkout, and the losing request receives an actionable conflict
 
 ### Requirement: External discovery does not imply ownership or navigation
-The Hub SHALL reconcile authoritative Git worktree inventory on navigator/workspace open, after relevant observed activity, periodically with bounded refresh, and on manual refresh. The existing in-workspace picker SHALL expose creation, discovery and explicit switching as the primary entry point, labelling its selector with the current checkout's repository followed by that checkout's branch, with no separate repository title line above it — one reading for a child and its main checkout alike — and grouping its rows under repository headers whose fork control sits at the header's trailing edge, with consecutive groups separated and no row indented beneath another. Discovery SHALL be presented as one compact list of the checkouts Git lists that Uatu has not registered, reached from the fork menu's Register worktree… item; registered checkouts SHALL be presented and acted on as the picker's and the dashboard's own rows rather than duplicated in a second inventory surface. Uatu-created results SHALL notify interested clients immediately after commit. Inventory updates, including external discovery and reconnect refresh, MUST NOT change the active workspace, selected document/preview, terminal context or selected conversation. Discovered external trees SHALL remain external when registered, SHALL NOT be automatically cleaned up, and SHALL require explicit user open/registration. Missing or replaced paths SHALL surface unavailable/identity-conflict state without silent recreation, forgetting, fallback or workspace/conversation switching.
+The Hub SHALL reconcile authoritative Git inventory through the existing picker without automatic navigation or ownership inference. External registration SHALL preserve path/provenance and require explicit action; missing or replaced checkouts SHALL remain unavailable rather than silently recreated or forgotten.
 
-External checkout registration SHALL preserve its existing path and provenance, disclose live parent policy, and use its exact local branch as the child name. Neither grouping nor a conventional path SHALL imply creation ownership. Every surface SHALL label ownership rather than guess an origin: a registered external checkout reads `External worktree`, an unverifiable one `Ownership uncertain`, and `origin unknown` is reserved for a Uatu-owned branch with no recorded creation history.
+#### Scenario: Inventory refresh is authoritative and non-navigating
+- **WHEN** navigator/workspace opens, relevant activity is observed, a bounded periodic refresh occurs, or manual refresh is requested
+- **THEN** the Hub SHALL reconcile authoritative Git worktree inventory
+- **AND** inventory updates including external discovery/reconnect MUST NOT change active workspace, selected document/preview, terminal context, or selected conversation
+- **AND** missing/replaced paths SHALL expose unavailable/identity-conflict state without silent recreation, forgetting, fallback, or workspace/conversation switching
+
+#### Scenario: Committed Uatu-created results immediately notify interested clients
+- **WHEN** Uatu-created results commit
+- **THEN** interested clients SHALL be notified immediately
+
+#### Scenario: Picker discovery lists only unregistered Git checkouts
+- **WHEN** users access creation, discovery, or switching
+- **THEN** the existing picker SHALL be primary, with selector repository-then-branch reading alike for main/child and no separate repository title above it
+- **AND** repository headers SHALL have trailing forks, consecutive groups separated, and no row indentation
+- **AND** Register worktree… SHALL open one compact list of only Git-listed unregistered checkouts; registered checkouts SHALL remain picker/dashboard rows without a duplicate inventory surface
+
+#### Scenario: External registration preserves ownership and explicit policy disclosure
+- **WHEN** an external checkout is discovered or registered
+- **THEN** it SHALL remain external, require explicit open/registration, and SHALL NOT be automatically cleaned up
+- **AND** registration SHALL preserve existing path/provenance, disclose live parent policy, and name the child by exact local branch
+
+#### Scenario: Every surface labels ownership without guessing branch origin
+- **WHEN** any surface presents checkout ownership or origin
+- **THEN** grouping and conventional paths SHALL NOT imply creation ownership
+- **AND** it SHALL use `External worktree` for registered external checkouts, `Ownership uncertain` for unverifiable ones, and reserve `origin unknown` for Uatu-owned branches without recorded creation history
 
 #### Scenario: Native agent creates a checkout
 - **WHEN** a refresh observes a new tree created by an agent or external Git tool
@@ -160,7 +280,45 @@ External checkout registration SHALL preserve its existing path and provenance, 
 - **THEN** the registration remains visible with a missing/identity-conflict explanation and start is refused until resolved
 
 ### Requirement: Manual deletion is guarded and distinct from forgetting
-Deletion SHALL be limited to verified Uatu-created linked trees and require explicit confirmation identifying parent display name / branch, with Delete for stopped trees or Stop and delete for running trees. For a checkout without local data, the destructive button SHALL authorize the stated Uatu stop/removal operation without another checkbox; internal path/identity checks MUST remain authoritative and MUST NOT require a metadata-heavy dialog. The Hub SHALL fence starts, await in-flight starts, stop Uatu sessions/agents/terminals, respect locks, revalidate identity and inspect tracked/untracked/ignored data before removal. Locked, nested-dependent (a nested linked worktree, an initialized submodule or a nested Git repository inside the checkout, including a bare repository, anywhere except deeper inside an ignored directory), Git-operation-in-progress, externally active/owned or uncertain states SHALL block with short actionable explanations replacing normal dialog consequences. Tracked changes (staged or unstaged), untracked files and ignored files are acknowledgeable local data. Local data SHALL NOT be removed without the user's explicit acknowledgement. When local data is present and nothing else blocks, the confirmation SHALL keep the normal consequences and add a warning that the listed files will be permanently deleted with the worktree and cannot be recovered. For each category present, the warning SHALL state how many entries it has and list a short sorted sample of their checkout-relative paths, never absolute paths, and SHALL say how many more exist when the sample is truncated. An entry that is a whole folder SHALL be marked as a folder, and the warning SHALL make clear that a listed folder is deleted with everything inside it. It SHALL add a required checkbox confirming permanent deletion of those files with the worktree. The destructive button SHALL keep its Delete or Stop and delete label, and it SHALL NOT delete anything while that checkbox is unchecked; submitting unchecked SHALL say that confirmation is required and that nothing changed. Cancel SHALL leave the worktree unchanged. The acknowledgement SHALL cover exactly the set of local-data status entries the confirmation reported. At every safety recheck before removal, local data that was not acknowledged, or that differs from the acknowledged set, SHALL block with a short actionable local-data explanation, and checkout and registration SHALL be retained. When no local data remains, deletion SHALL proceed whether or not an acknowledgement was given. Removal SHALL be non-force unless the acknowledged, still-matching local data includes tracked changes or untracked files; only then SHALL the Hub pass Git a single force, and never the double force that overrides a Git lock. The acknowledgement SHALL NOT override any other blocker. The UI MUST NOT imply it can stop unknown external applications. Branches SHALL always remain, so committed work and the repository's stashes are unaffected; branch-deletion UI and operations are out of scope. Failed stop/removal SHALL retain registration and files. Verified removal SHALL precede unregister/metadata cleanup with recoverable cleanup failure. Success SHALL close the popup and remove the row with safe navigation for an active removed context. Forget SHALL only unregister a stopped workspace and remove Hub personal state; checkout, branch and provenance SHALL remain.
+Deletion SHALL be limited to verified Uatu-created linked trees and require explicit confirmation and authoritative safety rechecks. Local data SHALL require exact disclosed acknowledgement without bypassing other blockers. Branches SHALL remain; Forget SHALL only unregister stopped workspaces and remove Hub personal state.
+
+#### Scenario: Delete confirmation authorizes only known Uatu activity and verified checkout removal
+- **WHEN** deletion of a linked tree is requested
+- **THEN** deletion SHALL be limited to verified Uatu-created trees, with explicit confirmation identifying parent display name / branch and label Delete if stopped or Stop and delete if running
+- **AND** clean-checkout destructive action SHALL authorize stated Uatu stop/removal without another checkbox, while internal path/identity checks MUST remain authoritative without metadata-heavy dialogs
+- **AND** the Hub SHALL fence starts, await in-flight starts, stop Uatu sessions/agents/terminals, respect locks, revalidate identity, and inspect tracked/untracked/ignored data before removal
+- **AND** the UI MUST NOT imply it can stop unknown external applications
+
+#### Scenario: Non-data safety blockers cannot be acknowledged away
+- **WHEN** deletion finds locks, nested dependencies, Git operations in progress, external activity/ownership, or uncertain state
+- **THEN** short actionable reasons SHALL replace normal consequences and block removal, and data acknowledgement SHALL NOT override them
+- **AND** nested dependencies SHALL include nested linked worktrees, initialized submodules, and nested Git repositories including bare repositories anywhere inside the checkout except deeper inside an ignored directory
+
+#### Scenario: Local-data disclosure requires exact permanent-deletion acknowledgement
+- **WHEN** staged/unstaged tracked changes, untracked files, or ignored files are present without other blockers
+- **THEN** confirmation SHALL retain normal consequences and warn listed files will be permanently deleted with the worktree and cannot be recovered
+- **AND** each present category SHALL show entry count and a short sorted checkout-relative, never absolute, path sample plus remaining count when truncated; whole folders SHALL be marked and explained as deleted with all contents
+- **AND** a required checkbox SHALL confirm permanent deletion of those files; Delete/Stop and delete labels SHALL remain
+- **AND** unchecked submission SHALL delete nothing and say confirmation is required and nothing changed
+
+#### Scenario: Cancelling any deletion leaves the worktree unchanged
+- **WHEN** deletion is cancelled, with or without local data
+- **THEN** the worktree SHALL remain unchanged
+
+#### Scenario: Rechecks bind removal force to the reviewed data set
+- **WHEN** deletion rechecks local data before removal
+- **THEN** acknowledgement SHALL cover exactly the reported local-data status entries, and unacknowledged/different data SHALL block with a short actionable local-data explanation retaining checkout and registration
+- **AND** local data SHALL NOT be removed without explicit acknowledgement; when no local data remains deletion SHALL proceed with or without acknowledgement
+- **AND** removal SHALL be non-force unless the acknowledged, still-matching local data includes tracked changes or untracked files; only then SHALL the Hub pass Git a single force, and never the double force that overrides a Git lock
+
+#### Scenario: Removal completion and Forget retain branches and recoverable state
+- **WHEN** stop/removal fails
+- **THEN** registration and files SHALL remain
+- **WHEN** removal succeeds
+- **THEN** verified removal SHALL precede unregister/metadata cleanup with recoverable cleanup failure, close the popup, remove the row, and safely navigate an active removed context
+- **AND** branches SHALL always remain, leaving committed work and repository stashes unaffected; branch-deletion UI/operations are out of scope
+- **WHEN** Forget is used
+- **THEN** it SHALL only unregister a stopped workspace and remove Hub personal state, retaining checkout, branch, and provenance
 
 #### Scenario: Known running Uatu workspace can be stopped and deleted
 - **WHEN** the user explicitly selects Stop and delete for a known running Uatu workspace
@@ -222,7 +380,30 @@ Deletion SHALL be limited to verified Uatu-created linked trees and require expl
 - **THEN** no branch-deletion choice exists and the branch and its recorded creation history remain
 
 ### Requirement: Worktree operations are published as one authenticated JSON family
-The Hub SHALL serve every worktree operation from one session-authenticated JSON family under `/api/hub/worktrees`, published through the existing public-contract machinery with no contract exclusion: `GET /api/hub/worktrees?source=<workspaceId>` for inventory and `POST /api/hub/worktrees/{fetch,create,open,preflight-delete,delete,register,forget}` for bounded operations. Requests SHALL require current authentication and authorization for the named source workspace, cookie-authenticated requests SHALL pass the Hub's same-origin check, and results SHALL be scoped to the initiating user with secrets redacted. A refused operation SHALL answer 200 with `{ok: false, error}` carrying the short actionable reason the UI displays, so a safety blocker is never an unexplained transport failure. Creation SHALL NOT accept a destination. Deletion SHALL require an explicit confirmation flag and SHALL always keep the branch. When a checkout has local data (tracked changes, untracked files or ignored entries) and nothing else blocks, a successful deletion preflight SHALL describe it: for each category present, its count and a short sorted sample of checkout-relative paths, plus one opaque fingerprint of the complete set of local-data status entries. A deletion request SHALL accept that fingerprint as an optional acknowledgement. The acknowledgement authorizes discarding only the local data it identifies. It SHALL NOT override a lock, a nested dependency, an initialized submodule or nested repository, external activity, uncertain identity or ownership. While local data exists, a deletion request without a matching acknowledgement SHALL be refused. No operation SHALL accept a force option or any other client-supplied override. The acknowledgement of exactly the disclosed data SHALL be the only way to discard local data. The Hub MAY pass Git a single force only to remove acknowledged tracked changes or untracked files. Each operation SHALL answer with its own bounded outcome rather than requiring a separate progress poll. The published Hub state SHALL expose the capability itself — a worktree API field present only when the Hub serves worktrees, and a boolean marker on each main checkout that can fork — rather than URLs of server-rendered pages. Safety SHALL live in the service behind this family so no client can bypass it.
+All worktree operations SHALL use one session-authenticated published JSON family under `/api/hub/worktrees`, with bounded own-response outcomes and service-enforced safety. Creation SHALL reject client destinations; deletion SHALL require confirmation, retain branches, and bind optional data acknowledgement to exact disclosed local data without force overrides.
+
+#### Scenario: Published worktree operations enforce authentication and bounded JSON outcomes
+- **WHEN** a client accesses worktree inventory or operations
+- **THEN** existing public-contract machinery SHALL publish without exclusions `GET /api/hub/worktrees?source=<workspaceId>` and `POST /api/hub/worktrees/{fetch,create,open,preflight-delete,delete,register,forget}`
+- **AND** current authentication/source-workspace authorization SHALL be required, cookie requests SHALL pass Hub same-origin checks, and results SHALL be initiating-user-scoped with secrets redacted
+- **AND** refusal SHALL answer 200 with `{ok: false, error}` carrying a short actionable UI reason, not unexplained transport failure
+- **AND** each operation SHALL return its own bounded outcome without a separate progress poll; service-level safety SHALL prevent client bypass
+
+#### Scenario: Deletion preflight exposes only bounded acknowledged local-data authority
+- **WHEN** tracked changes, untracked files, or ignored entries exist without other blockers
+- **THEN** successful preflight SHALL report each category's count and short sorted checkout-relative path sample plus one opaque fingerprint of the complete local-data status-entry set
+- **AND** deletion SHALL accept the fingerprint optionally, authorizing only the exact identified data; while data exists a missing/mismatching acknowledgement SHALL be refused
+- **AND** acknowledgement SHALL NOT override locks, nested dependencies, initialized submodules/nested repositories, external activity, uncertain identity, or ownership
+
+#### Scenario: Every operation rejects client safety overrides
+- **WHEN** any worktree operation is requested, with or without local data
+- **THEN** no operation SHALL accept force or other client-supplied overrides
+- **AND** exact disclosed acknowledgement SHALL be the only way to discard local data; the Hub MAY pass Git a single force only for acknowledged tracked changes or untracked files
+- **AND** deletion SHALL require explicit confirmation and always retain the branch; creation SHALL NOT accept a destination
+
+#### Scenario: Capability discovery uses published state rather than presentation URLs
+- **WHEN** Hub state advertises worktrees
+- **THEN** it SHALL expose a worktree API field only when served and boolean marker per fork-capable main checkout, not server-rendered page URLs
 
 #### Scenario: Blocked operation is an ordinary answer
 - **WHEN** a preflight or safety check refuses a create, delete or register request

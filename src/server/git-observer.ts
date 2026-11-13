@@ -6,6 +6,7 @@
 import { readFileSync, watch as nodeWatch, type FSWatcher } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import ignore, { type Ignore } from "ignore";
 import { safeGit } from "../document/git-base-ref";
 import type { WatchEntry } from "./roots";
@@ -31,6 +32,8 @@ export type GitObserver = {
 };
 
 type Options = {
+  onIgnoreChange?: () => void;
+  onIgnoreBaseline?: (fingerprint: string) => void;
   entries: WatchEntry[];
   // A Git-only change may have happened. `name` is the changed entry's name
   // within its watched directory, when the platform reports one.
@@ -67,7 +70,7 @@ function isLockOrTemp(name: string): boolean {
   return name.endsWith(".lock") || name.endsWith(".new") || name.includes(".watchman-cookie-");
 }
 
-type Candidates = { directories: string[]; nonGitRoot: string | null };
+type Candidates = { directories: string[]; nonGitRoot: string | null; ignoreFiles?: string[]; policyFiles?: string[] };
 
 // The directories whose entries carry the published repository state for one
 // watch entry. Every compare-base candidate (origin/HEAD's target,
@@ -94,11 +97,28 @@ async function candidateDirectories(entry: WatchEntry): Promise<Candidates> {
   // info/exclude changes what Git reports as untracked and ignored.
   const exclude = await gitPath(cwd, ["rev-parse", "--git-path", "info/exclude"]);
   if (exclude && await isDirectory(path.dirname(exclude))) directories.add(path.dirname(exclude));
+  const globalExclude = await gitPath(cwd, ["config", "--path", "--get", "core.excludesFile"]);
+  const global = globalExclude ?? path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "git", "ignore");
+  const ignoreFiles = [global, path.join(os.homedir(), ".gitconfig"),
+    path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "git", "config")];
+  const policyFiles = [...ignoreFiles, ...(exclude ? [exclude] : [])];
+  for (const name of ["index", "config"]) {
+    const file = await gitPath(cwd, ["rev-parse", "--git-path", name]);
+    if (file) policyFiles.push(file);
+  }
+  const top = await gitPath(cwd, ["rev-parse", "--show-toplevel"]);
+  const realTop = top ? await realpath(top).catch(() => top) : null;
+  let parent = await realpath(cwd).catch(() => cwd);
+  for (;;) {
+    policyFiles.push(path.join(parent, ".gitignore"));
+    if (parent === realTop || path.dirname(parent) === parent) break;
+    parent = path.dirname(parent);
+  }
   for (const symref of ["HEAD", "refs/remotes/origin/HEAD"]) {
     const target = await symbolicTarget(cwd, symref);
     if (target) await add(["rev-parse", "--git-path", target], true);
   }
-  return { directories: [...directories], nonGitRoot: null };
+  return { directories: [...directories], nonGitRoot: null, ignoreFiles, policyFiles };
 }
 
 function contains(parent: string, child: string): boolean {
@@ -146,6 +166,8 @@ async function loadTrackedIgnored(topLevel: string): Promise<Set<string>> {
 export function createGitObserver(options: Options): GitObserver {
   const watchDirectory = options.watch ?? nodeWatch;
   const handles = new Map<string, FSWatcher>();
+  let externalIgnoreFiles = new Map<string, Set<string>>();
+  let internalDirectories = new Set<string>();
   const repositories = new Map<string, RepositoryState>();
   // Watched roots as spelled by the session, with their real paths, so a
   // content-watcher path can be placed in its repository.
@@ -170,9 +192,17 @@ export function createGitObserver(options: Options): GitObserver {
   function receive(directory: string, name: string | null) {
     if (closed || failed) return;
     const base = name === null ? null : path.basename(name);
+    const external = externalIgnoreFiles.get(directory);
+    if (external && (name === null || [...external].some(file => contains(path.join(directory, name), file)))) {
+      options.onIgnoreChange?.();
+      options.onChange(base);
+      void resync();
+      return;
+    }
+    if (external && !internalDirectories.has(directory)) return;
     if (nonGitRoots.has(directory)) {
       // `git init` (or a clone into place) makes this root a repository.
-      if (base === null || base === ".git") { void resync(); options.onChange(base); }
+      if (base === null || base === ".git") { void resync(); options.onIgnoreChange?.(); options.onChange(base); }
       return;
     }
     // A directory that did not exist yet may exist now. FETCH_HEAD counts:
@@ -182,6 +212,7 @@ export function createGitObserver(options: Options): GitObserver {
     const lockOrTemp = base !== null && isLockOrTemp(base);
     if (missing && !lockOrTemp) void resync();
     if (base !== null && isGitNoise(base)) return;
+    if (base === null || ["index", "exclude", "config"].includes(base)) options.onIgnoreChange?.();
     // A moved HEAD symref (branch switch, a new origin/HEAD) or a config
     // change (a remote added) can change which ref directories matter.
     if (!missing && (base === null || base === "HEAD" || base === "config")) void resync();
@@ -238,7 +269,7 @@ export function createGitObserver(options: Options): GitObserver {
     const base = segments[segments.length - 1] ?? relative;
     // Any .gitignore, nested ones included, can change what is tracked but
     // ignored, and which directories negate.
-    if (base === ".gitignore") { negations.clear(); void refreshTracked(topLevel, state); }
+    if (base === ".gitignore") { negations.clear(); void refreshTracked(topLevel, state); options.onIgnoreChange?.(); }
     else if (state.ignored.ignores(relative) && !state.trackedIgnored.has(relative) && !mayBeReincluded(topLevel, relative)) return;
     options.onChange(base);
   }
@@ -330,17 +361,36 @@ export function createGitObserver(options: Options): GitObserver {
   async function resolveAll(): Promise<number> {
     resolutionCount++;
     const directories = new Set<string>();
+    const external = new Map<string, Set<string>>();
+    const internal = new Set<string>();
+    const policyFiles = new Set<string>();
     const wanted = new Map<string, { roots: string[]; narrow: boolean }>();
     const spelled: typeof aliases = [];
     const nonGit = new Set<string>();
     const pendingGit = new Set<string>();
     for (const entry of options.entries) {
       const candidates = await candidateDirectories(entry);
-      for (const directory of candidates.directories) directories.add(directory);
+      for (const file of candidates.policyFiles ?? []) policyFiles.add(file);
+      for (const directory of candidates.directories) {
+        directories.add(directory);
+        const real = await realpath(directory).catch(() => null);
+        if (real) internal.add(real);
+      }
+      for (const file of candidates.ignoreFiles ?? []) {
+        let parent = path.dirname(file);
+        while (!await stat(parent).then(info => info.isDirectory(), () => false) && path.dirname(parent) !== parent) parent = path.dirname(parent);
+        const realParent = await realpath(parent).catch(() => null);
+        if (!realParent) continue;
+        const files = external.get(realParent) ?? new Set<string>();
+        files.add(path.join(realParent, path.relative(parent, file)));
+        external.set(realParent, files);
+        directories.add(realParent);
+      }
       if (candidates.nonGitRoot) {
         const real = await realpath(candidates.nonGitRoot).catch(() => null);
         if (real) {
           directories.add(real);
+          internal.add(real);
           nonGit.add(real);
           // `git init` creates .git before it writes HEAD, so the first
           // resolution can still find no repository. Watching the half-made
@@ -361,6 +411,15 @@ export function createGitObserver(options: Options): GitObserver {
     const watchedBefore = new Set(handles.keys());
     const opened = await open([...directories]);
     if (closed || failed) return 0;
+    externalIgnoreFiles = external;
+    internalDirectories = internal;
+    if (options.onIgnoreBaseline) {
+      const signature = await Promise.all([...policyFiles].sort().map(async file => {
+        const info = await stat(file, { bigint: true }).catch(() => null);
+        return `${file}\0${info ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` : "missing"}`;
+      }));
+      if (!closed && !failed) options.onIgnoreBaseline(signature.join("\0"));
+    }
     // git init may have finished between finding no repository and the
     // half-made .git's watch going live, leaving no event to come. Resolve
     // once more now that later writes are observed.

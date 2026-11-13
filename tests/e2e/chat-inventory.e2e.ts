@@ -414,7 +414,7 @@ test.describe("live conversation inventory", () => {
       await chooseChatModel(page, "GPT-5");
       await page.locator("#chat-configuration-done").click();
       await control(request, { action: "status", conversationId: primary.conversation.id, status: "running" });
-      await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+      await expect(page.locator("#chat-stop")).toBeEnabled();
 
       const timeline = page.locator("#chat-timeline");
       await expect.poll(() => timeline.evaluate(element => element.scrollHeight - element.clientHeight)).toBeGreaterThan(100);
@@ -438,7 +438,7 @@ test.describe("live conversation inventory", () => {
       await expect(input).toHaveValue("Draft and focus stay with the primary conversation");
       await expect(input).toBeFocused();
       expect(await timeline.evaluate(element => element.scrollTop)).toBeCloseTo(scrollTop, 0);
-      await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+      await expect(page.locator("#chat-stop")).toBeEnabled();
       await expect(page.locator("#chat-attachments .chat-attachment")).toContainText("inventory.png");
       await expect(page.locator("#chat-configuration-trigger")).toContainText("GPT-5");
       await expect(page.locator("#chat-conversation-unseen-count")).toHaveAttribute("aria-label", "Acknowledge 1 new conversation");

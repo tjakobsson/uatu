@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ChatProvider } from "./provider";
+import { OperationOutcomeUnknownError, type ChatProvider } from "./provider";
 import type { ChatAgent, ReversibleHistoryResult } from "./types";
 
 // What `provider()` below declares — the ready state carries it once the
 // adapter exists, so every ready assertion names it.
 const FAKE_AGENT: ChatAgent = { id: "opencode", name: "OpenCode", capabilities: ["models", "commands", "permissions"] };
-import { ChatAdapter, ReversibleHistoryUnsupportedError } from "./adapter";
+import { ChatAdapter, InteractionConflictError, ReversibleHistoryUnsupportedError, SteeringUnsupportedError } from "./adapter";
 import { OpenCodeService, type SpawnedOpenCode } from "./opencode/opencode-service";
-import { LazyChatService, resolveProviderFactories } from "./service";
+import { ChatUnavailableError, LazyChatService, resolveProviderFactories, type AgentRuntime } from "./service";
 import { createOpenCodeV1Provider } from "./opencode/v1/provider";
 import { createOpenCodeV2Provider } from "./opencode/v2/provider";
 
@@ -60,6 +60,105 @@ function fixtureRuntime(): OpenCodeService {
 }
 
 describe("LazyChatService", () => {
+  test("local discard on a cold or disposed service rejects without starting or constructing anything", async () => {
+    const calls: string[] = [];
+    const runtime: AgentRuntime = {
+      status: async () => { calls.push("status"); return { state: "idle" }; },
+      ensure: async () => { calls.push("ensure"); return { state: "ready", version: "synthetic" }; },
+      restart: async () => { calls.push("restart"); return { state: "ready", version: "synthetic" }; },
+      createProvider: () => { calls.push("createProvider"); return provider(); },
+      dispose: async () => {},
+    };
+    const service = new LazyChatService({ workspacePath: "/workspace", agentRuntime: runtime,
+      createAdapter: options => { calls.push("createAdapter"); return new ChatAdapter(options); } });
+    try {
+      await expect(service.discardUnconfirmedSteer("session", "unknown", "discard", "invented-token")).rejects.toBeInstanceOf(ChatUnavailableError);
+      expect(calls).toEqual([]);
+    } finally { await service.dispose(); }
+    await expect(service.discardUnconfirmedSteer("session", "unknown", "discard-after-dispose", "invented-token")).rejects.toBeInstanceOf(ChatUnavailableError);
+    expect(calls).toEqual([]);
+  });
+
+  test("local discard preserves the existing adapter's unsupported refusal despite unhealthy runtime", async () => {
+    let unavailable = false, ensures = 0, providerLookups = 0;
+    const runtime: AgentRuntime = {
+      status: async () => ({ state: "idle" }),
+      ensure: async () => { ensures++; return unavailable ? { state: "unavailable", reason: "startup-failed", message: "Synthetic runtime stopped" } : { state: "ready", version: "synthetic" }; },
+      restart: async () => { throw new Error("Must not restart"); },
+      createProvider: () => { providerLookups++; return provider(); },
+      dispose: async () => {},
+    };
+    const service = new LazyChatService({ workspacePath: "/workspace", agentRuntime: runtime });
+    try {
+      await service.models();
+      unavailable = true;
+      const before = { ensures, providerLookups };
+      await expect(service.discardUnconfirmedSteer("session", "unknown", "discard", "invented-token")).rejects.toBeInstanceOf(SteeringUnsupportedError);
+      expect({ ensures, providerLookups }).toEqual(before);
+    } finally { await service.dispose(); }
+  });
+
+  test("local discard uses the existing adapter when its runtime is unavailable without ensuring or looking up the provider", async () => {
+    let unavailable = false, ensures = 0, providerLookups = 0, restarts = 0, networkCalls = 0;
+    const synthetic: ChatProvider = {
+      ...provider(),
+      describe: () => ({ ...FAKE_AGENT, capabilities: [...FAKE_AGENT.capabilities, "steering"] }),
+      listModels: async () => { networkCalls++; return []; },
+      getSession: async id => { networkCalls++; return { id, title: "Synthetic", directory: "/workspace", createdAt: 1, updatedAt: 1 }; },
+      getConversationConfiguration: async () => { networkCalls++; return {}; },
+      listMessages: async () => { networkCalls++; return { items: [], accounting: [] }; },
+      listPendingInbox: async () => { networkCalls++; return []; },
+      prompt: async (_id, input) => {
+        networkCalls++;
+        if (input.text === "Unknown admission") throw new OperationOutcomeUnknownError();
+        return { messageId: input.id };
+      },
+    };
+    const availability = () => unavailable
+      ? { state: "unavailable" as const, reason: "startup-failed" as const, message: "Synthetic runtime stopped" }
+      : { state: "ready" as const, version: "synthetic" };
+    const runtime: AgentRuntime = {
+      status: async () => availability(),
+      ensure: async () => { ensures++; return availability(); },
+      restart: async () => { restarts++; return availability(); },
+      createProvider: () => { providerLookups++; return synthetic; },
+      dispose: async () => {},
+    };
+    const service = new LazyChatService({ workspacePath: "/workspace", agentRuntime: runtime });
+    try {
+      await service.prompt("session", "start", "Start synthetic work");
+      await expect(service.prompt("session", "unknown", "Unknown admission", undefined, undefined, undefined, undefined, "steer")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      const { snapshot, events } = await service.subscribe("session");
+      const entry = snapshot.queued!.find(item => item.admissionUncertaintyId)!;
+      expect(entry.admissionUncertaintyId).toEqual(expect.any(String));
+      unavailable = true;
+      expect(await service.status()).toMatchObject({ state: "unavailable" });
+      const before = { ensures, providerLookups, restarts, networkCalls };
+      await expect(service.discardUnconfirmedSteer("session", entry.id, "wrong-token", "stale-token")).rejects.toBeInstanceOf(InteractionConflictError);
+      expect(await service.discardUnconfirmedSteer("session", entry.id, "discard", entry.admissionUncertaintyId!)).toEqual({ discarded: true, outcomeUnconfirmed: true });
+      expect(await service.discardUnconfirmedSteer("session", entry.id, "discard", entry.admissionUncertaintyId!)).toEqual({ discarded: true, outcomeUnconfirmed: true });
+      expect({ ensures, providerLookups, restarts, networkCalls }).toEqual(before);
+      const removed = await events[Symbol.asyncIterator]().next();
+      expect(removed.value).toMatchObject({ type: "conversation.queue", queued: [], change: { kind: "removed", messageId: entry.id } });
+      events.cancel();
+    } finally { await service.dispose(); }
+  });
+  test("explicit parent backgrounding delegates through the initialized adapter and retains its receipt", async () => {
+    const calls: string[] = [];
+    const service = new LazyChatService({
+      workspacePath: "/workspace", runtime: fixtureRuntime(),
+      createProvider: () => ({
+        ...provider(),
+        describe: () => ({ ...FAKE_AGENT, capabilities: [...FAKE_AGENT.capabilities, "background-blocking-work"] }),
+        getSession: async id => ({ id, directory: "/workspace", title: "Fixture", createdAt: 1, updatedAt: 1 }),
+        backgroundBlockingWork: async id => { calls.push(id); },
+      }),
+    });
+    expect(await service.backgroundBlockingWork("parent", "receipt")).toEqual({ accepted: true });
+    expect(await service.backgroundBlockingWork("parent", "receipt")).toEqual({ accepted: true });
+    expect(calls).toEqual(["parent"]);
+    await service.dispose();
+  });
   test("a ready agent reports its login state, and every accounts change bumps the revision and reaches the provider", async () => {
     const changes: unknown[] = [];
     let login: "ok" | "missing" = "missing";
@@ -546,7 +645,7 @@ describe("workspace activity", () => {
     });
     const changes = await service.subscribeActivity();
     expect((await changes.next()).done).toBe(false);
-    expect(await service.activity()).toEqual({ working: false, awaiting: false });
+    expect(await service.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     // Watching the summary starts nothing: the hub watches every running
     // workspace, and watching must not spawn an agent.
     expect(providerCalls).toBe(0);
@@ -556,12 +655,12 @@ describe("workspace activity", () => {
     expect((await changes.next()).done).toBe(false);
     built.at(-1)!.projectionForTests("conversation").apply({ kind: "status", status: "running" });
     expect((await changes.next()).done).toBe(false);
-    expect(await service.activity()).toEqual({ working: true, awaiting: false });
+    expect(await service.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
 
     // A retry retires the adapter, and its turn with it.
     await service.retry();
     expect((await changes.next()).done).toBe(false);
-    expect(await service.activity()).toEqual({ working: false, awaiting: false });
+    expect(await service.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
 
     await service.dispose();
     expect((await changes.next()).done).toBe(true);

@@ -8,6 +8,100 @@ For the user-facing pitch (features, install, usage), see [README.md](./README.m
 
 `uatu` is a Bun-served Progressive Web App that watches a directory of docs and source, previews Markdown and AsciiDoc with Mermaid diagrams, surfaces the repository's change context (changed files, diffs, git log), and (where supported) hosts an embedded terminal in the same browser tab. It runs as a hub (`uatu hub`) on a machine you own: a login-gated daemon that runs one loopback-only session child per workspace and is the only server a browser talks to. There is no cloud component. It ships as a single Bun-compiled binary or runs from source.
 
+### Personal chat preference state
+
+`src/hub/personal-chat-preferences.ts` stores version-1 per-account policy in
+`personal-chat-preferences.json` under the leased private Hub state root.
+Missing records default ON/revision 0; unsafe, corrupt, unreadable or unsupported
+files make the store unavailable. Serialized compare-revision writes prepare a
+0600 temporary file, sync it, then atomically rename before publishing memory
+state. A failed commit retains all prior account records, including OFF.
+This is separate from Hub-wide preferences, per-workspace personal state and
+device/browser storage.
+
+Authenticated GET/PUT `/api/hub/settings/chat-preferences` select identity only
+from the verified session, use no-store responses and a closed versioned body,
+and reject stale updates with current own-account state. Cookie PUTs retain
+same-origin checks. Settings refreshes on focus/visibility/reconnect and confirms
+saves only after persistence. The workspace Hub menu links to the personal
+section. Eligible workspace mutations resolve the initiating account's current
+policy server-side; browser storage/display is not policy authority.
+
+The local backend now generates an independent 256-bit policy secret and fresh
+instance identity per spawn. A dedicated private descriptor (separate from
+lifetime stdin/stdout) first requires the child's non-secret readiness marker;
+old/non-consuming children receive no secret. Early CLI initialization consumes
+and closes it before runtime/tool startup. The listening child answers a bounded,
+domain-separated challenge at its base-path internal proof endpoint. Only a
+verified proof installs signing authority in a backend-private WeakMap. Missing,
+invalid or timed-out bootstrap/proof leaves explicit unavailable trust, including
+with a null terminal token; workspace credentials never seed this authority.
+Stop/exit/replacement withdraws trust and clears key buffers. Source and compiled
+children use the same protocol. The authenticated proxy strips reserved caller
+headers and signs only prompt/delivery/send-now actions, binding account scope,
+preference revision, instance, workspace, canonical action path and body digest.
+Child verification adds request-local `ChatActionContext` to qualified service
+dispatch; existing primary authentication/origin/ownership gates are unchanged.
+Untrusted children receive no unsigned principal: the Hub adds neutral
+automation-unavailable feedback to accepted steer results instead.
+
+In degraded mode, `proxy.ts` supplies a separate opaque operation-receipt token,
+derived using a Hub-private per-running-child random key and the authenticated
+account/action/request ID. The body keeps its original correlation ID. This
+token is an untrusted idempotency namespace, not principal or policy authority:
+the child passes it separately from verified `ChatActionContext`, after all
+existing access gates, and it can never enable automation. Caller-reserved
+headers are stripped; tokens are absent from shared replay. A bounded Hub
+receipt cache retains the first degraded feedback decision (1,000 entries,
+512 KiB, up to 15 minutes from the proxy decision). Losing either that snapshot
+or the adapter receipt ends composite replay protection; neither is durable.
+
+The adapter retains the first policy and primary/follow-up result in an
+account-scoped composite receipt, holding the existing parent admission lane.
+After acknowledged admission/resume and pending-state commit, fresh scoped
+blocker evidence can authorize one internal background-all call without
+recursive lane entry. Primary uncertainty skips follow-up; bounded waits and
+late read-side reconciliation never add delayed mutations. Follow-up refusal
+or uncertainty preserves the accepted message. Receipts are memory-only,
+bounded by count/bytes and settled TTL; expiry, eviction or adapter/process
+restart ends protection, with no automatic reload/reconnect replay.
+Native steer/resume unknown retention is independent of policy context. Queue
+conversion/Send now browser transport failures and 5xx retain page-local
+uncertainty and recover read-only without disturbing the composing draft.
+
+`CompactDisclosure` in `compact-work.ts` owns Workers and Pending disclosure
+policy in a page-local, 200-conversation cache with separate desktop/touch choices.
+Touch starts collapsed. Selected desktop UI mode opens each new active-worker or
+nonempty pending batch; deliberate collapse holds until that batch ends, and
+settlement never forces collapse. Finished-only history is not a new batch.
+Native DOM state is observed before repaint so a human toggle cannot be
+overwritten while its deferred event is pending; matching programmatic toggle
+echoes and mode changes do not create user choices. Null selection during refresh
+does not end work. The same module folds
+retained canonical projection occurrences, not child IDs or launcher counts,
+and separately names uncertainty. Existing
+inspection/stop owners render expanded rows; warnings/batch actions remain
+outside collapse. `hold-to-queue.ts` owns the Send gesture and `queue-discovery.ts`
+owns its device-local learning hint. Keyboard submission uses fixed Steer with
+Alt/Option+Enter for Queue. Attachment and configuration controls stay inline;
+the existing picker and header options retain their own actions. Geometry
+continues through the measured work dock/viewport and coordinated scroll owner.
+
+### Personal worker dismissal batches
+
+The Workers action sends one conditional group to the Hub's personal dismissal
+resource. The store admits every exact target before its workspace lifecycle
+lane, validates the group against one compact complete child evidence read, and
+atomically saves the selected changes together. Trusted activity during a save
+still retires affected marks; client observation fences keep active work visible.
+Singleton dismiss/retire ordering and the version-1 private store remain unchanged.
+The child reuses the adapter's owned current-history read and provider complete
+coverage, not a cached browser projection. Transcript text and tool output never
+enter the compact evidence response. Legacy incomplete sources retain a bounded
+fallback and fail closed on exhaustion. See
+[the dismissal protocol guide](api/guides/worker-dismissals.md) for bounds,
+failure behavior and remaining provider-read costs.
+
 ## The 30-second map
 
 ```mermaid
@@ -195,7 +289,8 @@ src/
 │                         registry + router (agents.ts — qualified
 │                         conversation ids, per-agent status, merged
 │                         inventory), client transport + validation, the
-│                         timeline renderer, and the whole browser UI.
+│                         timeline renderer, the browser Composer workflow
+│                         (composer.ts), and its DOM presentation (ui.ts).
 │                         Agent-specific code lives below the seam:
 │                         chat/opencode/ (loopback server runtime that
 │                         decides the spawned server's generation; v1/ and
@@ -455,10 +550,21 @@ sequenceDiagram
 
 - **The stream.** The response writes `: open` at once, then a `hello` event carrying an unguessable stream id, then `live` envelopes `{ ws, topic, key?, cursor, event }`. While idle it sends a `: keepalive` comment every 15 s. The query names the workspace (`ws`), opts into activity (`activity=1`), and lists the initial subscriptions with the cursor each one resumes from (`subs`).
 - **Subscription changes.** Selecting a conversation or opening a subagent never opens a connection. The page posts `add` and `remove` operations to `POST /api/hub/live/<streamId>/subscriptions`, which the hub accepts only from the hub session that owns the stream, so one tab can't steer another's. An `add` for a key that is already subscribed replaces it; that is how a topic re-attaches after a resync.
-- **Topics.** `document` is keyed by the watch context and carries a baseline snapshot followed by file patches and independent repository updates. The Hub applies patches to a keyed accumulator and materializes a current snapshot for joining or behind clients. The child epoch and predecessor revision protect application ordering independently of Hub transport cursors. Only full snapshots can replace queued document frames; patches retain their order. `inventory` invalidates the chat conversation list, `conversation` carries one conversation's events, and `activity` carries the validated workspace summary.
-- **Cursors and signals.** Each topic has its own opaque cursor, and only `data` events advance it. A reconnect presents every retained cursor, so each topic resumes independently and a stale conversation cursor never forces a document resync. Besides `data`, a topic can receive `ready` (attached, any owed replay written), `resync` (the cursor can't be replayed: take a fresh snapshot, then add the subscription again), or `unavailable` (the upstream failed or the child exited, and the hub is retrying). All three are scoped to their topic and never end the stream.
+- **Recovery intent.** Conversation additions may carry optional `reconnect: true` with a bounded nonempty cursor when they resume retained browser state, including additions deferred by the stream URL budget. Omitted or false means a fresh attachment; post-history resubscription clears recovery intent even at the same cursor. Other topics cannot carry this flag. The updated endpoint forwards validated intent per attachment, not to every later add on a recovering stream; older Hubs do not guarantee this repair.
+- **Caught-up recovery.** Recovery intent does not imply a full snapshot refetch. The broker remembers the last forwarded visual-resync trailer cursor per conversation beyond an upstream replacement. A healthy-head reconnect requests resync only at that remembered cursor; without a matching trailer it receives `ready` without refetch or reprojection. After a Hub restart there is no retained upstream, so child-side recovery applies its visual-metadata gate. The subscription recovery flag is published in Hub API revision 15.
+- **Topics.** `document` is keyed by the watch context and carries a baseline snapshot followed by file patches and independent repository updates. The Hub applies patches to a keyed accumulator and materializes a current snapshot for joining or behind clients. The child epoch and predecessor revision protect application ordering independently of Hub transport cursors. Only full snapshots can replace queued document frames; patches retain their order. `inventory` invalidates the chat conversation list, `conversation` carries one conversation's events, and `activity` carries the validated workspace summary. `worktrees` invalidates accessible worktree inventory. `personal` invalidates the authenticated account's worker-dismissal state for the stream's workspace; it carries no marks, account identity or conversation content.
+- **Cursors.** `document`, `inventory` and `conversation` have independent opaque replay cursors, advanced only by `data`. A reconnect presents their retained cursors, so a stale conversation cursor never forces a document resync. `activity`, `worktrees` and `personal` have no replay cursor: attachment/reconnect supplies fresh activity summaries, or invalidations prompting authoritative worktree/personal-state reads.
+- **Signals.** For upstream-backed subscriptions, `ready` means attached with owed replay written, `resync` requires a fresh snapshot and reattachment, and `unavailable` means upstream failure or child exit with retry while subscribed. For `personal`, `unavailable` instead reports failed or unconfirmed private dismissal persistence—not workspace liveness. There is no personal upstream retry loop; confirmed persistence recovery emits `ready` followed by a fresh data invalidation. Initial personal attachment emits data without requiring `ready`. Topic-scoped signals do not end the stream; private persistence trouble does not block chat or suppress canonical requests.
 
-**Fan-out at the hub.** `hub/live-broker.ts` holds one upstream subscription per (workspace, topic, key). The first interested client stream opens it and every later one shares it. The upstreams are the child's own SSE routes: `/api/events` for document state, `/api/chat/conversations/events` for the inventory, `/api/chat/conversations/<id>/events` for one conversation, and `/api/activity` for the workspace's working/awaiting summary (`hub/live-sse.ts` parses them). When the last subscriber leaves, the upstream lingers for 3 s (`LIVE_LINGER_MS`), so a reload or a quick A→B→A switch doesn't churn the child. After that the broker aborts it explicitly, which cancels the request at the child. Each upstream keeps a 256 KB replay buffer (`LIVE_REPLAY_BUFFER_BYTES`). A client cursor inside the buffer replays from the hub; one behind it falls back to the child's own replay, or its resync. An upstream failure sends `unavailable` to each subscriber, leaves every client stream open, and retries with capped backoff while anyone is still subscribed. The `activity` topic is computed per user: the hub merges its own session state (`running`) with each running child's `/api/activity` summary, which the broker subscribes to on its own account rather than on a client's (below). That summary stays two booleans, and `working` is the broader of them — a conversation counts while a turn is in flight *or* while the agent still holds live background work, so a workspace whose agent has backgrounded a command does not read as idle in someone else's switcher.
+**Fan-out at the hub.** `hub/live-broker.ts` holds one upstream subscription per (workspace, topic, key). The first interested client stream opens it and every later one shares it. The upstreams are the child's own SSE routes: `/api/events` for document state, `/api/chat/conversations/events` for the inventory, `/api/chat/conversations/<id>/events` for one conversation, and `/api/activity` for the workspace's content-free activity facts (`hub/live-sse.ts` parses them). When the last subscriber leaves, the upstream lingers for 3 s (`LIVE_LINGER_MS`), so a reload or a quick A→B→A switch doesn't churn the child. After that the broker aborts it explicitly, which cancels the request at the child. Each upstream keeps a 256 KB replay buffer (`LIVE_REPLAY_BUFFER_BYTES`). A client cursor inside the buffer replays from the hub; one behind it falls back to the child's own replay, or its resync. An upstream failure sends `unavailable` to each subscriber, leaves every client stream open, and retries with capped backoff while anyone is still subscribed. The `activity` topic is computed per user: the hub merges its own session state (`running`) with each running child's `/api/activity` summary, which the broker subscribes to on its own account rather than on a client's (below). Working includes a live parent turn or independently verified background activity. Providers without the new activity observation retain their existing authoritative background-status behavior.
+
+**Bulk conversation recovery is a bounded commit.** The adapter's validated history and background-worker recovery use `ConversationProjection.recover()`: stage merged rows and provenance hooks against the old view, recheck source/mutation ownership, then synchronously commit the complete projection and replay boundary. `ConversationReplay.prepareBatch()` retains candidate events within 1 MiB minus a 64 KiB reserve, including a 256-byte allowance per event for framing. A fitting batch is delivered in order; an oversized batch emits one existing `conversation-rewritten` resync, with no incremental prefix. A subscriber whose existing backlog cannot accommodate a fitting batch receives resync instead. This is read-only snapshot recovery, not a provider history mutation. The client fetches the complete state and reattaches from its cursor on the same page channel. Equivalent effective rows still refresh private proof/hooks but emit no event or cursor change, so unchanged rereads do not repeat resync. Ordinary updates retain the exact 1 MiB stalled-subscriber limit; replay retention and Hub 64 KiB pacing are unchanged. The regression reproduces child overflow from clustered worker recovery; the exact producer of the observed live interruption remains unproven.
+
+History exclusions and request retirements join the same validated commit. Complete native history replacement uses `replace(items, removals?, admit?)`, staging a fresh map and text reconciler before the final admission check; its required removals and terminal marker share one bounded publication. Native buffered updates are discarded only after successful replacement. Required visibility invalidation is included in the publication decision, not appended afterward. Deliberate remove/reinsert operations retain an ordered reset pair even when the final row looks unchanged: a sparse upsert alone could preserve revoked authority fields in a client's merge. Ordinary equivalent rereads without such a reset remain silent.
+
+**Private invalidation is not shared fan-out.** `hub/live-endpoint.ts` delivers `personal` frames directly to matching authenticated account/workspace subscriptions, outside the shared child-topic broker and replay cache. A committed dismissal change invalidates only that account's clients; each then reads the private authenticated resource. No extra EventSource or per-mark poller is introduced.
+
+**Unresolved is an internal activity fact.** The child reports `working`, `awaiting` and `unresolved`; the public workspace-summary fields do not change. Losing background verification stops counting as verified Working, but unresolved work delays a new finish rather than fabricating one. An epoch armed by observed Working can finish after uncertainty resolves into genuine quiet, without renewed Working. Existing Awaiting policy remains unchanged: attention cancels prior finish eligibility; a later positive Working observation can rearm it. First-seen unresolved/quiet state never arms an epoch. The transient eligibility belongs to the existing workspace activity-watch lifetime; restart, stop, removal and transport-loss handling preserve conservative completion semantics, without another subscription or persistence format.
 
 **`finished` is the hub's own fact.** The child cannot supply it: it is per user, and it is about not having looked. Beside the feeds the broker keeps three marks — the last value each workspace's shared activity upstream delivered, a stamp for the moment that value went from working to quiet, and a per-user stamp for the last acknowledged view of the workspace. A user's `finished` is the composition of those: running, not working, nothing awaiting, and the finish outranking that user's last view. The marks sit at the broker rather than in a feed because a feed is discarded when the user's last page closes, and "switched away, came back later" is exactly the case the fact exists for. The *observation* is the broker's for the same reason: it holds one `activity` attachment per running workspace (`activityWatches`), opened when the session starts and released when it stops, and a feed only reads what that has recorded. An upstream attached per feed, as one was, sees nothing while every page is closed — which is precisely the work the fact is about. The production hub arms watching when it constructs the broker (`watchActivityFromStart`, set by `hub/main.ts`), so every running workspace is watched from the moment the hub starts and every session started later from its start, whether or not any page ever connects: a client that starts a session and drives its chat through the proxy without opening a page still has its finishes recorded. The marks are restored first, so no watch can compose a value before them. Brokers built for tests keep a lazy default, armed by the first activity subscription of their lifetime and never disarmed, so the e2e harness and unit fixtures for other topics open no child stream nobody asked for. A transition is read only between two values the watch delivered, so a page opening onto an already-quiet workspace invents nothing, and `working → awaiting` is not a finish. A stop the hub observes, a return to working, or a workspace leaving the registry forgets the marks. A child that goes unreachable does not: its upstream reports `unavailable` on the first failure of any episode, including a single dropped stream the retry recovers from, so it is recorded as not running instead — nothing resurrects it as live, the marks survive, and the recovered stream's first value has no working predecessor to misread as a finish.
 
@@ -471,6 +577,90 @@ The clearing signal comes from the page that is looking: `POST /s/<id>/api/activ
 **One channel in the page.** `shell/live-channel.ts` owns the stream: capped-exponential reconnect, a generation per attempt so events from a superseded stream are dropped, per-topic cursors, and subscription changes. `shell/live.ts` holds that one channel for the page and runs the one lifecycle recovery. A `pageshow`, `visibilitychange`, or `online` wake-up reconnects the stream and runs the reconciliation each consumer registered, in one coalesced pass. A hide (`visibilitychange` to hidden, or `pagehide` whatever `persisted` says) only *suspends* the channel — socket closed, subscriptions and cursors kept, listeners still armed — because iOS fires an unpersisted `pagehide` for a home-screen page it then keeps alive; nothing disposes the channel from a lifecycle event. Each recovery task is bounded (the state fetch has a timeout, and the coalescer releases its in-flight slot after a ceiling) so one hung request cannot swallow every later wake-up. `requestManualRecovery()` is the user's escape hatch behind Chat's interruption-line Reconnect and the shell's connection indicator: the same recovery in place, then a reload if the channel does not confirm live within a bounded window. The consumers keep their own callbacks. `shell/events.ts` handles `document` and confirms the shell's connection indicator once the current generation has applied state. The chat client handles `inventory` and `conversation` and reports topic-scoped trouble as chat-surface status, never as shell status. `shell/hub-nav.ts` shows `activity` in the workspace switcher.
 
 ## Request lifecycle
+
+### Media response-writing boundary
+
+`server/media-http-boundary.ts` places a narrow Node HTTP/HTTPS response writer
+at the child and Hub listener boundaries for GET/HEAD media only. It dispatches
+the same product route/authentication code, preserves the advertised byte/range
+headers, awaits write/drain backpressure, and cancels/destroys interrupted bodies.
+This avoids Bun 1.4.4's generic-stream length/error framing behavior without
+buffering clips or introducing another browser-facing origin/port.
+
+Other HTTP requests, early-flushed live streams, and WebSocket upgrades retain
+the private loopback Bun listener and its literal HTMLBundle assembly. Public
+URL/TLS and peer context are restored using private connection correlation;
+untrusted forwarding headers grant no authority. The listener facade retains
+readiness, request-IP, upgrade, and graceful/forced shutdown semantics. Production,
+E2E, and compiled servers use this same boundary. Media remains an internal
+child-proxied protocol classified in `api/exclusions.yaml`, not a public Hub API.
+
+### Files presentation and ignored visibility
+
+`media/controller.ts` owns the page's one native audio/video source, source and
+Play generations, captured audition order, loop choice, and explicit revision
+notice. `media/preview.ts` presents paused destinations without replacing a
+different audition; `media/dock.ts` renders persistent controls using that same
+element. Preview cleanup parks the element before document, commit, or empty
+content replaces its host. Close releases the source and cannot be undone by
+subscriber rendering. The pagehide owner also ends auditions before a cached
+page can return, so foreground/pageshow recovery cannot restore playback.
+New epochs or file revisions release obsolete delivery
+and require explicit Reload at zero, paused. Media remains excluded from startup
+defaults and automatic Follow nomination while being valid manual/direct/saved/
+history preview destinations.
+
+`sidebar/media-browsing.ts` owns runtime-only All types/Audio/Video filtering and
+explicit audition actions. Recent provides separate Play buttons; Pierre's public
+context menu provides Play/Open preview without interactive decorations. A row
+Play captures eligible media identities in view order, disables Follow, and calls
+native Play within the gesture without changing preview history or touch tabs.
+Later filtering and writes do not reorder that session; missing/nonpermitted
+entries are skipped and end-of-clip never advances automatically.
+
+`media/layout.ts` publishes measured dock geometry to existing viewport owners.
+Touch content reserves the player above the tabs, with keyboard and safe-area
+space accounted separately; desktop, Chat, and Terminal retain their own sizing
+and PTY lifetimes. Video expansion reparents one element, preserving position.
+Actual PCM WAV/H.264 playback is automated in Chromium/WebKit; physical Safari
+and installed-PWA acceptance is recorded separately rather than inferred.
+
+`sidebar/recent-model.ts` builds one disk-write-ordered projection from the
+indexed snapshot, then removes/reinserts affected patch entries with stable
+path/root ties. `recent-view.ts` mounts only a viewport-sized window. It defers
+structural changes during pointer/touch activation and restores a surviving
+scroll anchor and file-keyed focus. A visible-row ticker updates ages without
+fetching file or Git data. All/Changed continue to use the one Pierre tree;
+Recent hides that presentation without replacing its instance or expansion.
+The metadata query is shared across views and uses Pierre's public search API
+in the hierarchy. The header counts eligible files, independently of expansion
+or mounted rows.
+
+Exposure policy and browsing visibility are separate. The shared inventory
+retains permitted Gitignored files; `gitIgnoreStatus` is independent metadata,
+and unknown classification stays visible without a clean/ignored assertion.
+Each client holds `showIgnored` in `appState`, owned by
+`shell/ignored-visibility.ts`, and persists it as personal workspace state.
+Boot resolves saved visibility before the server's legacy initial default.
+Changing visibility replaces only the document topic's context and protects
+selection from old Follow nominations in its baseline. Direct authenticated
+delivery still enforces exposure policy regardless of row visibility.
+
+Built-in exposure exclusions are only VS Code's `files.exclude` defaults
+(`ignore/exposure.ts`); everything else is excluded only by an explicit
+`.uatu.json` `ignore.exclude`. Discovery, observation, index membership, and
+delivery share that policy; a client visibility toggle does not rebuild
+watchers. Folders Git ignores as a whole come from one `git ls-files
+--others --ignored --directory` call per root (`server/git-ignore.ts`) and
+become `FolderEntry` rows that discovery does not read (`server/ignored-folders.ts`).
+`POST /api/index/folder` lists one level into the shared index, which every
+client receives as an ordinary patch. The native watcher still reports writes
+inside unlisted levels; `FileIndex` keeps the newest 2,000 per root (pinned
+when a client requests them) and publishes everything inside ignored folders
+on its own 1 s / 5 s lane in patches of up to 1,024 entries, classified and
+never followed. The watcher queues those paths behind ordinary ones. A
+`.gitignore` edit rebuilds a root only when the set of whole-ignored folders
+changes.
 
 A representative path: the SPA needs the rendered HTML for `guides/setup.md`.
 
@@ -518,7 +708,27 @@ that file. The observer bounds metadata work to 16 concurrent paths, excludes
 denied directories before descent, and does not follow symlink entries.
 Unsupported recursive watching and explicit polling use Chokidar's normalized
 initial events instead. Both backends supply stats to the index and normalize
-atomic replacement with a short removal delay.
+atomic replacement with a short removal delay. Polling takes each file's and
+directory's baseline stat asynchronously, after the watch is registered, so
+an edit or a new child that lands first would never be reported. The polling
+observer therefore checks every reported file state and every reported
+directory once more, a second later: a missed edit is reported then, and a
+missed child is handed to Chokidar (`add`), which watches and reports it. A
+path found removed is reported removed. A path found to be a symlink, or of the
+other type, is reported removed and handed back (`unwatch`, then `add`) to
+re-register that path under the watch policy. The watched path itself keeps
+its registration because it has no parent subscription to discover a later
+replacement. Unwatching a directory does not guarantee that Chokidar closes
+every existing descendant poller; the check drops its own descendant state,
+not Chokidar's entire subtree. Missed-child handoff validates ancestors below
+the configured root, then rechecks the directory's type and identity after
+the awaited validation. Stale directory generations and closed observers
+discard pending handoffs. The configured root and its ancestors remain trusted;
+these metadata checks are not atomic containment for concurrent filesystem
+replacement or later content reads (the broader read-time containment work is
+separate). Checks use one-shot timers per reported state, with at most 16 paths
+checked concurrently across batches, not periodic whole-tree rescans. A path
+replaced during validation is scheduled for another check.
 
 A native rename notification may name only the temporary source. The observer
 coalesces those notifications into a shallow metadata check of the containing
@@ -572,7 +782,10 @@ cancelled operation.
 Ignore-policy changes, observation failures, and authenticated explicit
 `POST /api/index/recover` requests rebuild affected roots. Replacements collect
 a coherent inventory before taking ownership, and current exposure rules apply
-to reads while recovery is pending. Automatic observation recovery has bounded
+to reads while recovery is pending. Policy-file revisions are checked across
+matcher loading and watcher readiness: an edit already present in the watcher's
+initial baseline still triggers reconciliation rather than waiting for another
+edit. Automatic observation recovery has bounded
 retries; the UI offers Retry indexing after failure. Browser transport recovery
 alone consumes current server state rather than starting another filesystem
 walk. There is no periodic document-tree rescan.
@@ -669,6 +882,42 @@ The chat surface speaks one timeline model for every agent (`src/chat/types.ts`)
 | `compaction` | Where the agent compacted its context, with before/after figures | Timeline marker |
 | `turn_status`, `notice` | A turn's outcome; warnings and errors. A `notice.code` (`rate-limit-*`, `refusal-fallback`) drives the composer's badge. `login-failed` marks a turn that failed on the agent's login and renders with the way to log in; `reauthenticating` is the one item an agent occupies while it signs in again. | Timeline, composer |
 
+**Composer ownership**
+
+The [Composer](./GLOSSARY.md) workflow lives in `src/chat/composer.ts`.
+Its browser-facing interface covers editing, attachment intake, submission,
+pending-message actions, side questions and reversible history. Private workflows
+own capture/restoration, upload draining, attachment reservations and preview
+lifetimes, request identity, action locks, operation-scoped uncertainty, and
+history results awaiting a successful refresh. Pending actions capture the
+initiating agent's steering eligibility before dispatch, so selecting another
+agent cannot change how a late transport failure is classified.
+
+`ui.ts` retains rendering, dialogs, focus, scrolling, keyboard/hold gestures and
+conversation selection. Its adapters supply conversation facts, draft storage,
+the existing transport and presentation updates. A confirmation carries a
+one-shot continuation that rechecks the selected conversation and current target
+before dispatch; showing or cancelling the dialog remains presentation work.
+
+There is one authoritative browser conversation projection. The UI installs
+snapshots and applies stream events through the existing projection functions,
+feeding committed evidence synchronously to Composer. Composer uses that same
+projection for response echoes and uncertainty reconciliation; it keeps operation
+evidence, not another queue or transcript. Server admission, native delivery,
+receipt scope and authentication remain behind the existing transport/provider
+seams, with no new route or wire contract.
+
+Draft outcomes remain operation-specific: a refused ordinary send restores its
+captured text ahead of newer edits; uncertain admission does not restore a
+resendable draft; pending Edit transfers input only after confirmed removal;
+successful history restoration replaces that conversation's draft and attachments.
+Uploaded server bytes are not deleted when browser previews are released.
+`pagehide` flushes draft storage but does not dispose Composer or replay work.
+
+`composer.test.ts` exercises the interface without a DOM using deferred transport
+results, committed-event evidence and tracked preview resources. Existing UI and
+browser tests retain coverage of presentation, focus, gestures and scroll behavior.
+
 Claude context-window discovery is independent of occupancy. A query asks for
 `getContextUsage({ detail: "summary" })` before its first prompt. Prompt delivery
 waits at most two seconds; an eligible late answer can correct the window while
@@ -725,6 +974,128 @@ labels. Neither a summary discovery nor a catalog refresh replaces occupancy.
 
 Conversation status is `idle`, `sending`, `running`, `completed`, `interrupted`, `failed`, plus four named states: `retrying` and `compacting` are live-turn states (the composer offers Cancel, a new prompt is held), `background` means no turn is running but the agent still holds live background work (prompting is possible), and `scheduled` means nothing runs but the agent's session holds future turns it scheduled for itself (prompting is possible; the composer lists the wakeups with a release). `isLiveConversationStatus()` in `types.ts` is the one rule for which statuses are live.
 
+Send stays a labelled submit button while busy for every agent; only the
+separate Stop button cancels. There is no Send dropdown, delivery selector or
+immediate Queue draft menu action. Tapping Send and desktop Enter steer ordinary
+busy text. Touch Enter inserts a newline, Ctrl/Command+Enter steers, and
+Option/Alt+Enter queues when the steering choice is available. Legacy saved
+delivery defaults are ignored without deleting browser settings.
+Submission controls have at least 44px targets and 8px gaps. The compact composer
+keeps its inline controls and distinct Send/Stop actions across turn changes.
+Raw-touch hit checking suppresses gap taps that a mobile browser might snap
+onto a nearby action. Stop remains disabled in place while idle.
+
+Send's accessible name identifies busy delivery and describes hold-to-queue.
+Its dedicated fill token keeps white text above 4.5:1 contrast in both themes.
+Touch composer and dock actions preserve focus through `mousedown`, not cancelled touch
+`pointerdown` for native clicks (which suppresses activation in WebKit). The
+explicit hold controller instead owns pointer activation: quick release steers,
+release before 500ms steers once, release during the following two-second countdown
+cancels, and a 2500ms continuous hold queues once. It
+validates draft/configuration/selection/attachment identity and active locks on
+every frame and timer, including fixed target geometry, cancels on visibility/blur/capture/drag/Escape, and consumes
+the later click. After silent arming, the pointer-transparent envelope appears
+104px above Send (bounded by viewport space) and stays fixed while its green fill
+rises. It does not move the hit target. Enter/assistive clicks need no hold;
+holding Space on focused Send uses the same controller, and message-field
+Alt+Enter retains the immediate alternate delivery shortcut. `QueueDiscovery`
+shows the device-local learning hint for an eligible ordinary-text draft while
+working, then hides it after an accepted hold queues a pending message. Storage
+failure falls back to page-local learning; neither helper changes the public
+delivery API or owns provider admission.
+Touch keeps Attach and the original configuration picker trigger inline, with
+real mode/model/effort and `contextReadout` occupancy; context breakdown and
+less-used actions remain in header options.
+
+The V2-only `side-generation` capability routes `/btw` through the authenticated,
+closed-body `/aside` action to native `session.generate`, outside the admission
+lane and shared mutation receipts. The pinned 2.0.29 flow previews context and
+makes one model-generation call without executing its advertised tool executor;
+installed plugin hooks still run. No prompt, history write, parent interrupt or
+background call is substituted. Answers and failed questions remain bounded
+page-local state, opened deliberately without completion-time focus theft.
+The transcript-edge side notice is separate from composer feedback. Its bounded
+visual-viewport reader uses `renderChatMarkdown` and the normal sanitizer, with
+local horizontal table/code scrolling and native modal focus/Escape behavior.
+Side answers also use normal chat's `decorateFileLinks` and shared item-interaction
+wiring, with a current-reader/conversation guard. The file action resolves against
+current watched roots, closes the reader before normal preview navigation and
+does not return focus over that preview. No separate URL resolver or root-relative
+navigation is introduced; external-link sanitization and behavior remain shared.
+Concurrent side requests are guarded per conversation; failures preserve newer
+drafts exactly, and reconnect never replays inference. V1/Claude and pending
+attachments are refused rather than falling through to ordinary admission.
+
+While a revert is
+staged, the dock keeps the count-only steer replacement warning visibly above
+its entries, rather than announcing it only to assistive technology. Entering
+that warning state reveals the dock's top once, including when it was already
+scrolled; subsequent updates preserve the reader's own scrolling.
+A steer that wakes an idle/interrupted conversation marks admission as
+sending/running before releasing the admission lane; clearing the revert
+must not drain the held queue before the provider's running event arrives.
+
+**Pending messages are one dock with two owners** (`opencode-v2-steering`). Busy
+prompts are either workspace-held (`heldQueues` in `src/chat/adapter.ts`) or,
+on OpenCode 2.x, sent as steers to the native inbox with `resume: true`.
+Held messages deliver in submission order, one per completed turn, under their
+frozen model/mode/variant; skills, commands and `/reload` always take that path.
+Steers use session configuration at delivery, avoiding mid-turn retargeting.
+The adapter tracks pending user steers from inbox pending/settled/delivery
+updates and replaces them from `inbox.list` on attach/reconnect. Only native
+delivery puts a steer in the transcript. One bound covers both owners:
+20 messages / 256 KiB, with steers listed before the held queue.
+
+Paused held messages reflect dormancy/revert. Pending steers stay paused after
+an idle/interrupted/completed transition until a later wake supersedes it.
+Settlement identity, not wall time, fences delayed wake acknowledgements.
+Cancel never resumes; confirmed or ambiguous Stop application retains dormancy.
+One dock-header `Send N paused steers now` action calls `interrupt({resume:true})`
+to wake every paused steer. Sending a held message now on a steering agent also
+wakes paused steers, explicitly named and confirmed in-app; the rest of a
+dormant held queue stays dormant. Claude's `send-now` dispatches the selected
+held entry under its frozen configuration while nothing runs. Withdrawing a
+steer waits for cancellation settlement because native missing/delivered cancel
+also answers 204; delivered produces `steer-already-delivered`/409 and a neutral
+notice. A bounded silent timeout resolves through inbox/history evidence.
+
+The dock has sticky delivery counts, leading delivery/Paused badges, plain
+timing labels, and an overflow-only bottom fade within a roughly 40%-height
+scroll budget. Touch pending-message actions use the approved 32px minimum
+height with 8px gaps; batch Send and worker Stop retain 44px minimum heights.
+Fine-pointer desktop uses 32px pending and batch actions and 28px worker Stop.
+Active/unknown worker Inspect has a 44px minimum height (28px in the wide
+fine-pointer desktop layout); settled rows retain compact inspection density
+with the existing narrow-width fallback. Accessible
+action names quote the message, with silent success and visible focus rings.
+Duplicate text and image-only entries gain client-local `pending message N`
+discriminators retained while pending across reorder, switches and sibling
+removal. Errors and unknown results remain readable; successful send/dock and
+automatic-background receipts do not create confirmation notices.
+Desktop Enter steers and Alt+Enter queues; no delivery-default setting remains. Undo replacements
+steer, with a count-only warning explaining older paused steers deliver together.
+
+Touch work tracks share `#chat-work-dock`, bounded by `--chat-visual-height`
+(35%, 25% on tablets; 24% while editing without a software keyboard), with
+independent Workers/Pending content scrollers separate from the transcript.
+Desktop queue height uses 40% of the measured panel height, not a fixed rem
+estimate of the viewport.
+Short visual bands compact the header/composer; keyboard/short-landscape mode
+keeps both cards available with compact chrome. The outer surface normally
+cannot scroll; only physically insufficient bands allow native scrolling to
+keep minimum action targets reachable. Viewport corrections preserve that
+exception's reader/focus reveal and reset the offset when it ends.
+Hardware-keyboard editing retains the bottom safe inset without doubling it
+under a software keyboard. Touch Stop parent with worker records confirms its
+scope; detached workers remain running. Expanded work tracks hide the prompt rail so
+it cannot cover Stop targets. Transcript anchoring remains with its coordinated
+scroll owner; sending a prompt deliberately requests latest, remote dock growth
+preserves the reading anchor.
+Dock growth reserves its final bounded height and reveals the added area over
+160ms; reduced motion applies it immediately. Reserving layout avoids racing
+animated scroll clamps with prompt echo removal; the coordinated scroll owner
+preserves transcript position across the single geometry change.
+
 A Claude Code conversation's session lifetime (`src/chat/claude/provider.ts`) follows the work, not the first result: the SDK session is retired on a turn's result only when no accepted prompt is pending, no unprompted follow-up is in flight, and the background set (`background_tasks_changed`, ambient tasks excluded) is empty. While the set is non-empty the conversation reports `background`. When a backgrounded task settles the CLI starts a follow-up turn by itself (see the D9 spike in the change's design notes); the provider reports that turn as running and completed like any other. A set that empties with no follow-up returns the conversation to idle after a short grace window. Scheduled wakeups from `ScheduleWakeup`, `CronCreate`, and `/loop` hold the session the same way. The SDK sends no stream message for them, so the provider registers a `Stop` hook and level-sets the session's wakeups from its `session_crons`. The hook fires before the turn's `result`, so the set is current when retirement is decided. A result with wakeups pending and no background work reports `scheduled`. With both, `background` wins. A fired wakeup's turn reaches the host only as a `UserPromptSubmit` hook, with no `user` message on the stream, so the provider mints that turn's opening `user_message` itself, with `origin: "wakeup"`. It attributes the turn by the hook's `source`, or by the prompt matching a pending wakeup while no accepted prompt is outstanding. A cron missing from the next `Stop` fired if a turn was attributed to it. Otherwise the agent cancelled it. Resuming a session makes the CLI rebuild its `CronCreate` crons from the transcript, while a `ScheduleWakeup` never outlives its process. So when the stream ends or the workspace shuts down, a pending `ScheduleWakeup` is marked lost and a `CronCreate` cron paused. The provider tells them apart by the `CronCreate` result's `id` and the `ScheduleWakeup` call's prompt. The provider enforces a cancel itself, because the SDK has no call that deletes a cron. Cancelled ids live per conversation in its durable state, never hold a session, and have their fires answered with `decision: "block"` at the `UserPromptSubmit` hook. The `init`, `informational`, and `result` frames a blocked fire produces are swallowed. The per-wakeup cancel is `POST /api/chat/conversations/:id/wakeups/:wakeupId/cancel`. Release, `POST /api/chat/conversations/:id/release`, cancels every wakeup and retires the session. A conversation opened without a live session lists its paused crons, derived from the transcript by `transcriptCrons()` in `src/chat/claude/transcript.ts`: `CronCreate` results minus `CronDelete`d ids, fired or lapsed one-shots, and crons past the 7-day expiry. Nothing starts a session to keep a schedule running. Conversation titles follow the transcript's own entries: a user rename (`custom-title`) outranks Claude Code's generated title (`ai-title`), which outranks the first prompt.
 
 A subagent run is a conversation in its own right (`sub:<parentSessionId>:<agentId>`), reached as a child of its launcher through the shared drill-down, and it is live while it runs. The query asks Claude Code to forward subagent text and thinking (`forwardSubagentText`), and the provider routes every frame tagged `parent_tool_use_id` to that run's child rather than to the parent: normalized untagged, with the child's *own* event memory, which is what keeps the item ids (`message:<uuid>`, `tool:<toolUseId>`) identical to the ones the stored `agent-<id>.jsonl` replays — so a projection filled from the file and then fed live frames upserts the same rows instead of doubling them. The run is known from its start edge, before the CLI has written a line of its transcript, because an agent task's `task_id` *is* its agent id. The parent keeps only the launching row and its attribution.
@@ -742,6 +1113,195 @@ A run that streams nothing is followed from its transcript on disk. Claude Code 
 What each agent's SDK declares that the timeline does not handle is recorded, not guessed: `bun run coverage:agents` (`scripts/agent-coverage.ts`) reads the installed SDKs' declaration files and runs every message type, block or part type, and tool name through the normalizers above and `describeToolDetail` (`src/chat/tool-detail.ts`), rendering the body of the [Agent SDK coverage dashboard](https://github.com/tjakobsson/uatu/issues/480), which `.github/workflows/agent-coverage.yml` publishes after every push to `main`. A hidden marker in that body records the published vocabulary, so the next run can comment on what a bump added or removed; nothing is committed. The normalizers report what they skip so the probe can observe it: an unrecognized event (`chat.event.unrecognized.<type>`, a Claude system subtype as `system.<subtype>`) and an unread content block or part inside a recognized event (`skippedBlocks`, counted as `chat.block.unrecognized.<type>`). The hand-kept inputs are the annotations modules `src/chat/claude/sdk-coverage.ts` and `src/chat/opencode/sdk-coverage.ts` (ignore reasons, behavior-missing flags, Claude tool wire names). `scripts/agent-coverage.test.ts` builds both reports from the installed SDKs, so a dependency bump fails CI only when an axis can no longer be read or an annotation goes stale, never because a version moved.
 
 ### OpenCode generations
+
+**V2 native background work.** The provider declares `background-tasks` and
+`background-blocking-work`. The manual background API remains, but chat has no
+Continue button or disclosure. Only the existing authenticated Hub policy can
+automatically follow an accepted steer with backgrounding; standalone gets no
+replacement UI. Native `question` awaits `Form.ask`, not `Job.block`, and is not
+detachable by `Job.backgroundAll`. Unanswered foreground questions keep their
+execution waiting while detached children can continue; child questions retain
+their existing parent mirroring. No automatic form cancellation is introduced.
+Shell removal and queued batch-wake confirmation use an in-app dialog, with
+Cancel focused and layered Escape. Shell targets are revalidated on acceptance.
+If settlement removes the invoker while confirmation is open, focus returns to
+the surviving inspection action before falling back to the composer. Pointer
+invokers are captured explicitly because WebKit need not focus clicked buttons.
+Touch preserves composing focus through worker actions. Its disclosure remains
+in the bottom in-flow dock across keyboard/viewport changes, never implicitly
+promoted to a top overlay. Active rows use two lines for title and reported
+agent/model/cumulative usage; Stop stays 44px with 8px separation. Settled rows
+remain dense. Desktop and touch share one canonical worker card, not duplicate
+tracks. Touch remains deliberately collapsed by default; desktop auto-opens a
+new visible working/unknown batch unless the user collapsed its current batch.
+Pending follows the same desktop policy for any entries, including paused ones.
+Per-conversation choices survive reselection independently for each UI mode;
+settlement leaves current expansion alone and permits the next desktop batch
+to open. Disclosure policy follows UI mode, not pointer-density media queries.
+V2 reserves the parent Stop footprint
+before workers appear; worker controls have horizontal and vertical 0.5rem gaps.
+`opencode/v2/background.ts` folds successful tool launches and authenticated
+synthetic results into independent worker occurrences. Launcher tool rows keep
+their costs and success; `toolUseIds` aliases join one worker, and `resultId`
+deduplicates pending/delivered/stored reports. Reused children are correlated
+only when execution boundaries disambiguate them; otherwise the readable
+result stays separate and affected work is uncertain. A settled report renders
+after its correlated launcher even if its retained start timestamp predates it.
+V2 prepares canonical envelope, launcher and notification facts once, before
+ownership-verification awaits. Normalization, child-reference discovery,
+background folding and Stop consume that same preparation. Native launcher
+clocks, worker kind and owning-message identity remain separate from display
+fallbacks; progress or lagging history cannot erase a known supersession.
+Consumed replay requires retained identity, stamp, semantic fingerprint and an
+occurrence link, not merely an old-looking timestamp.
+
+Complete history reconstructs verified child execution intervals before applying
+later idle boundaries to unresolved work. Launcher timing bounds an admission
+window, not an exact job start: `time.ran` precedes permission approval, while
+accepted-running tool success (`time.completed`, or its native success-event
+clock) bounds admission from above. Input-content order can differ from call
+order. Aliases require complete child history placing both windows wholly within
+one interval, with distinct native start coordinates. A boundary strictly between
+the incoming window and every prior alias's window preserves that separate
+occurrence for later aliases, rather than superseding it by content position.
+Missing, tied, reversed or boundary-straddling windows cannot supply this proof.
+This history-only exception preserves parent transcript order; live supersession
+and retained control revocations are unchanged.
+
+An idle boundary alone never completes a worker. Explicit reports remain readable
+when their occurrence is ambiguous; in particular, a report before or tied to a
+known accepted-running success cannot settle that launch, and an ambiguous
+admission window cannot justify report assignment. A unique explicit report may
+still settle a legacy launch without a recorded acceptance clock, but missing
+clocks never prove aliasing. An old result cannot settle a newer run.
+
+Live projection correlation and control evidence share a bound of 8,192 entries /
+4 MiB of conservative serialized UTF-16 payload, not a heap guarantee.
+The provider-lifetime control cohort uses up to 2,048 entries / 1 MiB within that
+aggregate, including sixteen-guard / 128 KiB admission headroom.
+The byte ledger serializes only inserted or changed entries, subtracts their
+cached sizes on replacement/removal, and includes JSON escaping and collection
+overhead; unrelated events do not rescan retained history. Projection saturation
+discards disposable correlation records and latches read-only recovery, without
+clearing retained control proof or known revocations. Healthy retained targets
+can remain controllable without reconnect. Missing, revoked or overflowed proof
+uses the existing uncertain state and withholds Stop consistently in live,
+history and reconciliation results. Target-specific unavailable stubs prevent
+silent readmission; reconnect does not erase them, and unretained targets may
+remain unavailable for the provider lifetime. Disposal ends that in-memory
+ownership lifetime. Complete-history folds are transient and precede pagination.
+
+The first live inventory closes only after its relevant worker evidence reads
+are complete. A failed active-state, shell-ownership, or child-history lookup may
+still publish uncertain rows while admitting healthy siblings. Successful but
+inconclusive inventory also stays incomplete in connected and standalone callers:
+foreign shell ownership or an active listing that omits a running child cannot
+authorize a transcript read already in flight. Unverified background-agent
+references preserve this fence even when ownership filtering omits their rows.
+Absence alone never settles a worker; explicit terminal results retain their
+existing handling. A partial-inventory
+marker in the existing bounded scope ledger survives read callers. While it is
+pending, transcript-only reads cannot admit unretained targets or close initial
+inventory; healthy retained siblings keep their controls. Control reads default
+to transcript-only; inventory-capable callers explicitly opt in. Fresh inventory
+recovery can positively verify unchanged targets and discharge the marker without
+a repeated launcher event. Rejected read guards record this negative coverage
+immediately, even without an active-read slot; they never grant positive proof.
+Scope markers share the existing byte/entry budget. An overlong scope identity
+closes new admission; marker-budget exhaustion falls back to a scope gap or global
+admission closure. These fail-closed paths preserve healthy retained proof.
+Per-read guards still track failures and concurrency.
+Neither mechanism reopens completed inventory or clears observation-gap, capacity,
+ownership, or unavailable-target guards.
+
+Observation gaps retire existing authorizations without globally closing future
+control admission. New post-gap targets require positive native birth and matching
+invocation proof under the live-only, non-replaying subscription contract;
+post-reconnect content snapshots alone cannot supply that proof. Existing
+revocations and actual capacity closure survive reconnect. Background-shell
+birth association also corroborates native command fingerprints, without
+requiring equal tool/shell clocks. Command-rewriting native hooks may leave that
+association unprovable, so controls remain unavailable rather than guessing.
+Typed user-command shell notes remain separate from background control/report retention, and
+unpublished prelaunch presentation payload is bounded to 128 entries / 256 KiB.
+Disposable user-shell classification is bounded to 128 identities / 64 KiB;
+unclassified delayed notes remain conservative. These subordinate stores remain
+within the aggregate accounting and do not forget genuine worker contradictions
+when presentation payload is evicted.
+
+Native V2 history reads subscribe before recovery and merge projected changes
+through a bounded change fence. Their snapshot cursor is taken after that merge
+and recovery publication, together with the current configuration and concurrent
+conversation renames. Large worker
+rows already included in the snapshot therefore need not survive the replay
+ring merely to attach its stream. Providers without this fence retain the
+pre-read cursor so concurrent events are replayed rather than skipped.
+
+`reconcileBackgroundTasks(parent)` reads complete history, all pending inbox
+entries, verified child/active evidence and owned shell records. Unlike
+Claude's authoritative live list, absence never means cancellation. The adapter
+waits for the connected marker, fences recovery generations and live updates,
+coalesces reads per parent and limits concurrent parents to four. Failed reads
+retain backoff; unchanged successful-inconclusive recovery allows three reads
+per external cycle, then parks bounded scheduling metadata outside the runnable
+drain. Unrelated source activity can restart an exhausted cycle no sooner than
+30 seconds after exhaustion, without polling in quiet sessions. Genuine new
+worker evidence, explicit refresh or reconnect can restart it immediately.
+The scheduling cohort has at most 2,048 active/queued/parked records. Eviction
+carries exhausted deadlines into a scalar fallback instead of granting a fresh
+budget. Retained native high-water fingerprints supplement projected-row progress
+across removals and alias changes; source and read results use the same continuity.
+Their separate per-record limit is 64 entries / 16 KiB serialized-entry payload,
+at most 131,072 entries / 32 MiB across the cohort, not a JavaScript heap bound.
+Overflow keeps a conservative knowledge-gap marker. These recovery-scheduling
+records are separate from native worker-control authorization evidence.
+Verified discovery progress may extend recovery, but omission/alias flapping
+does not. Dirty updates use a 100 ms throttle and safe per-item fences instead
+of discarding every in-flight result. Recovery updates workspace activity even for unselected
+parents without making `ChatService.activity()` start a runtime. Recovery is
+read-only; child results/hydration do not emit top-level success notifications.
+Complete history uses the bounded provider cache only within a connected stream
+generation; session events invalidate it and disconnected reads remain fresh.
+Verified child parentage is reused in a connected-generation cache bounded to
+8,192 entries / 4 MiB; dynamic execution, accounting and revert evidence remains
+fresh. At most four underlying child-ownership SDK requests remain outstanding
+per provider across stream, history and Stop validation. Capacity releases only
+when the SDK promise settles, not when a deadline wrapper returns. Event child
+verification shares a one-second deadline and stream cancellation; a failed
+child check does not discard unrelated event content.
+Concurrent ownership readers share the lookup, not its initiating caller's
+deadline or expected parent. Each reader checks parentage independently; the
+underlying lookup is cancelled only after its last reader leaves (or its
+provider/stream lifetime ends).
+Child execution boundaries also constrain unresolved worker occurrences: an
+active child may belong to a newer foreground run, so it does not reauthorize
+an old task. Stop revalidates fresh parent and child histories. Inventory
+recovery reconciles pending child permissions/questions through the same
+generation/dirty fences, preserving needs-answer without selecting the parent.
+
+The explicit receipt-keyed `background` route calls `session.background` for
+all eligible parent blockers, including shells, through the parent admission
+lane. Worker Stop resolves a verified occurrence to child `session.interrupt`
+with `resume:false`; shell Stop uses owned `shell.remove`. Shell exit/removal
+is not terminal capture evidence: missing capture can produce error, while
+confirmed completion and locally retained output are not rewritten as stopped.
+Unknown dispatched outcomes resolve inside the receipt store and become
+`operation_outcome_unknown`/409 outside it. Accepted/unknown deduplication ends
+at settled TTL (default 15 minutes), capacity eviction or adapter destruction;
+there is no persistent receipt or automatic replay. Native interrupt has no
+atomic generation precondition. Isolated real-provider acceptance passed on
+OpenCode 2.0.29/client 2.0.28, including mixed native worker/shell conversion,
+stop scopes, notification wakeup and disconnected-result recovery. That prior
+acceptance does not validate the new automatic Hub-steer sequence or current
+prepared-event/control-cohort implementation against a real model/service.
+Their current acceptance uses scripted fixtures and the pinned client 2.1.2
+SDK with mock HTTP/SSE; it does not establish current native emission or
+cross-session ordering guarantees.
+Settled inspection strips show only the outcome and a link to the canonical
+parent result, not another copy of its report. Task-list repaint restores the
+focused surviving worker/action rather than leaving keyboard focus on the body.
+See [Chat's limitations](docs/CHAT.md#background-workers-opencode-v2)
+and the pinned source evidence in `opencode-v2-background-work/design.md`.
 
 OpenCode 1.x and 2.x have different server APIs, and a workspace has whichever one its `opencode` on `PATH` is. `src/chat/opencode/opencode-service.ts` spawns `opencode serve` the same way for both (loopback, random port, one password under both `OPENCODE_PASSWORD` and `OPENCODE_SERVER_PASSWORD`) and decides the generation from the readiness answer, never from `--version` text or the binary's path: each probe cycle asks `GET /api/info` (2.x: `{ version, pid, urls }`) and then `GET /global/health` (1.x: `{ healthy, version }`), and the first well-formed body decides. A 2.x server answers every path it does not know — including the 1.x health path — with its web UI's HTML page and a 200, which is why a successful status alone is never readiness. The decision is fixed for that server's lifetime and carried on `OpenCodeConnection.generation`; `openCodeAgentRuntime` in `src/chat/service.ts` picks the provider from it, and a restart decides again, so a replaced binary is served by its own generation without a workspace restart. The reported version is bare semver for both (`1.18.31`, `2.0.13`), so the generation is legible from the status object without a new field.
 

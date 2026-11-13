@@ -10,7 +10,7 @@
 // services; ports.ts has the allocation and why it follows the slot rather
 // than workerIndex.
 
-import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
+import { test as base, expect, type BrowserContext, type Page, type Request, type Response } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 
 import type { HubE2EInfo, HubE2EWorkspace } from "./hub-server";
@@ -19,6 +19,7 @@ import { HUB_PORTS_PER_WORKER, hubPortBlock, waitForPortsFree } from "./ports";
 const READY_PREFIX = "uatu-e2e-hub ";
 const RESET_PREFIX = "uatu-e2e-hub-reset ";
 const HUB_RESET_TIMEOUT_MS = 20_000;
+const loginResetSerials = new WeakMap<HubE2EInfo, number>();
 
 export type { HubE2EInfo, HubE2EWorkspace };
 
@@ -27,6 +28,9 @@ type HubProcess = {
   // Puts the worker's hub back to its booted state (hub-server.ts
   // resetForTest) and resolves once it is.
   reset: () => Promise<void>;
+  // Recreate only this disposable Hub listener and its dismissal store from disk;
+  // keep child evidence/session cookies so browser restart recovery is observable.
+  restartWorkerDismissals: () => Promise<void>;
 };
 
 type WorkerFixtures = {
@@ -55,6 +59,10 @@ type WorkerOptions = {
   hubPush: boolean;
   // Serve Agent accounts over fake agent runtimes — see hub-server.ts.
   hubAgentAccounts: boolean;
+  // Use production private child bootstrap for personal chat policy tests.
+  hubChatPolicy: boolean;
+  hubChatPolicyTrust: boolean;
+  hubWorkerDismissals: boolean;
 };
 
 export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
@@ -63,9 +71,12 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
   hubCredentials: [false, { option: true, scope: "worker" }],
   hubPush: [false, { option: true, scope: "worker" }],
   hubAgentAccounts: [false, { option: true, scope: "worker" }],
+  hubChatPolicy: [false, { option: true, scope: "worker" }],
+  hubChatPolicyTrust: [true, { option: true, scope: "worker" }],
+  hubWorkerDismissals: [false, { option: true, scope: "worker" }],
 
   hubProcess: [
-    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts }, use, workerInfo) => {
+    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts, hubChatPolicy, hubChatPolicyTrust, hubWorkerDismissals }, use, workerInfo) => {
       const { hubPort, end } = hubPortBlock(workerInfo.parallelIndex);
       if (hubWorkspaces.length >= HUB_PORTS_PER_WORKER) {
         throw new Error(`a hub worker serves at most ${HUB_PORTS_PER_WORKER - 1} workspaces`);
@@ -81,6 +92,9 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
           UATU_E2E_HUB_WORKTREES: hubWorktrees ? "1" : "0",
           UATU_E2E_HUB_CREDENTIALS: hubCredentials ? "1" : "0",
           UATU_E2E_HUB_AGENT_ACCOUNTS: hubAgentAccounts ? "1" : "0",
+          UATU_E2E_HUB_CHAT_POLICY: hubChatPolicy ? "1" : "0",
+          UATU_E2E_HUB_CHAT_POLICY_TRUST: hubChatPolicyTrust ? "1" : "0",
+          UATU_E2E_HUB_WORKER_DISMISSALS: hubWorkerDismissals ? "1" : "0",
           UATU_E2E_HUB_PUSH: hubPush ? "1" : "0",
           UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
         },
@@ -106,15 +120,25 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
       });
 
       let serial = 0;
+      loginResetSerials.set(info, serial);
       const reset = async () => {
         const id = ++serial;
         const answered = lines.waitFor(line => line.startsWith(`${RESET_PREFIX}${id} `));
         child.stdin!.write(`reset ${id}\n`);
         const line = await withTimeout(answered, HUB_RESET_TIMEOUT_MS, `hub e2e server did not reset within ${HUB_RESET_TIMEOUT_MS / 1000}s`);
         if (!line.endsWith(" ok")) throw new Error(`hub e2e reset failed: ${line}`);
+        loginResetSerials.set(info, id);
       };
 
-      await use({ info, reset });
+      const restartWorkerDismissals = async () => {
+        if (!hubWorkerDismissals) throw new Error("worker dismissal fixture is not enabled");
+        const id = ++serial;
+        const answered = lines.waitFor(line => line.startsWith(`${RESET_PREFIX}${id} `));
+        child.stdin!.write(`restart-worker-dismissals ${id}\n`);
+        const line = await withTimeout(answered, HUB_RESET_TIMEOUT_MS, "disposable Hub listener/store restart timed out");
+        if (!line.endsWith(" ok")) throw new Error(`disposable Hub restart failed: ${line}`);
+      };
+      await use({ info, reset, restartWorkerDismissals });
 
       await stopChild(child);
     },
@@ -158,17 +182,101 @@ export { expect };
 // Signs the page's context in through the hub's login form — the path a
 // browser takes — and lands on the dashboard.
 export async function signIn(page: Page, hub: HubE2EInfo): Promise<void> {
-  await page.goto(`${hub.origin}/login`);
-  await page.locator('input[name="name"]').fill(hub.user.name);
-  await page.locator('input[name="password"]').fill(hub.user.password);
-  await page.locator('form button[type="submit"], form input[type="submit"]').first().click();
-  await expect(page).toHaveURL(`${hub.origin}/`);
+  const started = performance.now();
+  const steps: Record<string, number> = {};
+  const mark = (step: string) => { steps[step] = Math.round(performance.now() - started); };
+  type Category = "invalid_credentials" | "rate_limit" | "missing_fields" | "unknown";
+  type Attempt = {
+    pathname: "/login"; atMs: number; postedPairMatchesFixture: boolean | null;
+    responseSeen: boolean; status: number | null; redirectToRoot: boolean;
+    responseCategory: Category; pending: boolean; failed: boolean; responseAtMs?: number;
+  };
+  const requests = new WeakMap<Request, Attempt>();
+  const attempts: Attempt[] = [];
+  let requestCount = 0;
+  let filled: { username: boolean; password: boolean } | null = null;
+  const onRequest = (request: Request) => {
+    const url = new URL(request.url());
+    if (request.method() !== "POST" || url.origin !== hub.origin || url.pathname !== "/login") return;
+    requestCount++;
+    if (attempts.length >= 4) return;
+    let matches: boolean | null = null;
+    try {
+      const form = new URLSearchParams(request.postData() ?? "");
+      matches = form.get("name") === hub.user.name && form.get("password") === hub.user.password;
+    } catch { /* Observations never replace the login outcome. */ }
+    const attempt: Attempt = { pathname: "/login", atMs: Math.round(performance.now() - started), postedPairMatchesFixture: matches,
+      responseSeen: false, status: null, redirectToRoot: false, responseCategory: "unknown", pending: true, failed: false };
+    requests.set(request, attempt);
+    attempts.push(attempt);
+  };
+  const onResponse = (response: Response) => {
+    const attempt = requests.get(response.request());
+    if (!attempt) return;
+    attempt.responseSeen = true;
+    attempt.status = response.status();
+    attempt.responseAtMs = Math.round(performance.now() - started);
+    attempt.responseCategory = attempt.status === 401 ? "invalid_credentials" : attempt.status === 429 ? "rate_limit" : "unknown";
+    try {
+      const location = response.headers().location;
+      const redirect = location ? new URL(location, hub.origin) : null;
+      attempt.redirectToRoot = redirect?.origin === hub.origin && redirect.pathname === "/";
+    } catch { /* Retain only the redirect comparison, never the header. */ }
+  };
+  const onFinished = (request: Request) => { const attempt = requests.get(request); if (attempt) attempt.pending = false; };
+  const onFailed = (request: Request) => { const attempt = requests.get(request); if (attempt) { attempt.pending = false; attempt.failed = true; } };
+  page.on("request", onRequest);
+  page.on("response", onResponse);
+  page.on("requestfinished", onFinished);
+  page.on("requestfailed", onFailed);
+  const detachListeners = () => {
+    page.off("request", onRequest);
+    page.off("response", onResponse);
+    page.off("requestfinished", onFinished);
+    page.off("requestfailed", onFailed);
+  };
+  try {
+    mark("gotoStarted");
+    await page.goto(`${hub.origin}/login`);
+    mark("gotoFinished");
+    await page.locator('input[name="name"]').fill(hub.user.name);
+    mark("usernameFilled");
+    await page.locator('input[name="password"]').fill(hub.user.password);
+    mark("passwordFilled");
+    // Immediate DOM read only: no new readiness condition or login wait.
+    filled = await page.evaluate(({ name, password }) => ({
+      username: document.querySelector<HTMLInputElement>('input[name="name"]')?.value === name,
+      password: document.querySelector<HTMLInputElement>('input[name="password"]')?.value === password,
+    }), hub.user).catch(() => null);
+    mark("clickStarted");
+    await page.locator('form button[type="submit"], form input[type="submit"]').first().click();
+    mark("clickFinished");
+    await expect(page).toHaveURL(`${hub.origin}/`);
+  } catch (error) {
+    mark("failed");
+    detachListeners();
+    try {
+      const info = test.info();
+      // Bounded in-memory attachment only: a stalled renderer or async attach
+      // must not delay the original error or leave a late capture continuation.
+      info.attachments.push({ name: "hub-login-failure", contentType: "application/json", body: Buffer.from(JSON.stringify({
+        workerIndex: info.workerIndex, parallelIndex: info.parallelIndex, resetSerial: loginResetSerials.get(hub) ?? null,
+        steps, filledUsernameMatchesFixture: filled?.username ?? null, filledPasswordMatchesFixture: filled?.password ?? null,
+        requestCount, requests: attempts, domCategory: "unknown", currentPathname: new URL(page.url()).pathname,
+        responseSeen: attempts.some(attempt => attempt.responseSeen),
+        requestPending: attempts.some(attempt => attempt.pending), pageClosed: page.isClosed(),
+      })) });
+    } catch { /* Attachment/closed-page failures must preserve the original assertion. */ }
+    throw error;
+  } finally {
+    detachListeners();
+  }
 }
 
 // Records every EventSource a page constructs, as the URL it was opened
 // with, and forgets it on close() — so a test can assert what a page holds
 // open, not merely what it opened. Read with `openEventSources(page)`.
-async function installEventSourceLedger(context: BrowserContext): Promise<void> {
+export async function installEventSourceLedger(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     const open = new Map<EventSource, string>();
     const Native = window.EventSource;

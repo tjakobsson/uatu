@@ -1,7 +1,7 @@
 // The document topic uses snapshots for joining/recovery and path batches for
 // live changes. Payload revisions belong to the child, independently of Hub
 // transport cursors. The same reducer serves the Hub and the browser.
-import type { CompareTarget, DocumentMeta, RepositorySnapshot, RootGroup, Scope, StatePayload } from "./types";
+import type { CompareTarget, DocumentMeta, FolderEntry, RepositorySnapshot, RootGroup, Scope, StatePayload } from "./types";
 import type { WatchContext } from "./watch-context";
 
 export type DiscoveryState = {
@@ -17,8 +17,9 @@ export type RepositoryFreshness = {
 };
 
 export type RevisionedDocument = DocumentMeta & { revision: number };
-export type DocumentRoot = Omit<RootGroup, "docs">;
-export type RevisionedRoot = DocumentRoot & { docs: RevisionedDocument[] };
+export type RevisionedFolder = FolderEntry;
+export type DocumentRoot = Omit<RootGroup, "docs" | "folders">;
+export type RevisionedRoot = DocumentRoot & { docs: RevisionedDocument[]; folders?: RevisionedFolder[] };
 export type DocumentReference = { rootId: string; id: string };
 
 export type DocumentSnapshot = Omit<StatePayload, "roots"> & {
@@ -32,6 +33,8 @@ export type DocumentSnapshot = Omit<StatePayload, "roots"> & {
 };
 
 export type DocumentPatch = {
+  showIgnored?: boolean;
+  initialShowIgnored?: boolean;
   kind: "patch";
   epoch: string;
   previousRevision: number;
@@ -44,6 +47,9 @@ export type DocumentPatch = {
   unscopedFingerprint: string;
   upserts: RevisionedDocument[];
   removals: DocumentReference[];
+  // Git-ignored folder entries, keyed by folder id within a root.
+  folderUpserts?: RevisionedFolder[];
+  folderRemovals?: DocumentReference[];
   roots?: DocumentRoot[];
   discovery?: DiscoveryState;
   repositories?: RepositorySnapshot[];
@@ -58,7 +64,7 @@ export type DocumentUpdate = DocumentSnapshot | DocumentPatch;
 export type ApplyDocumentUpdateResult = "applied" | "ignored" | "resync";
 
 export function sameDocumentContext(a: WatchContext, b: WatchContext): boolean {
-  return a.compareTarget === b.compareTarget && a.scope.kind === b.scope.kind
+  return (a.showIgnored !== false) === (b.showIgnored !== false) && a.compareTarget === b.compareTarget && a.scope.kind === b.scope.kind
     && (a.scope.kind === "folder" || (b.scope.kind === "file" && a.scope.documentId === b.scope.documentId));
 }
 
@@ -68,19 +74,33 @@ function validRevision(value: number): boolean {
 
 type IndexedRoot = {
   metadata: DocumentRoot;
+  folders: Map<string, RevisionedFolder>;
   documents: Map<string, RevisionedDocument>;
   rows: RevisionedDocument[];
   positions: Map<string, number>;
 };
+
+function sameSearchDocument(a: RevisionedDocument | undefined, b: RevisionedDocument): boolean {
+  return a !== undefined && a.revision === b.revision && a.mtimeMs === b.mtimeMs
+    && a.name === b.name && a.relativePath === b.relativePath && a.kind === b.kind
+    && a.gitIgnoreStatus === b.gitIgnoreStatus && a.ignoreVisibilityException === b.ignoreVisibilityException;
+}
 
 export class DocumentStateIndex {
   private header: Omit<DocumentSnapshot, "roots"> | null = null;
   private roots = new Map<string, IndexedRoot>();
   private documents = new Map<string, Map<string, RevisionedDocument>>();
   private binaries = 0;
+  // Local ownership token, independent of transport revisions. Repository and
+  // discovery messages can advance the stream without changing searchable files.
+  private corpus = {};
+  // Changes whenever a folder entry is added, removed or listed.
+  private folderTree = {};
 
   get epoch(): string | null { return this.header?.epoch ?? null; }
   get revision(): number | null { return this.header?.revision ?? null; }
+  get corpusVersion(): object { return this.corpus; }
+  get folderVersion(): object { return this.folderTree; }
   get discovery(): DiscoveryState | undefined { return this.header?.discovery; }
   get latestChange(): DocumentSnapshot["latestChange"] { return this.header?.latestChange; }
   get binaryCount(): number { return this.binaries; }
@@ -118,6 +138,24 @@ export class DocumentStateIndex {
     for (const removal of update.removals) {
       if (!this.roots.has(removal.rootId) || seen.get(removal.rootId)?.has(removal.id)) return "resync";
     }
+    const seenFolders = new Map<string, Set<string>>();
+    for (const folder of update.folderUpserts ?? []) {
+      if (!(newRoots?.has(folder.rootId) ?? this.roots.has(folder.rootId))
+        || !validRevision(folder.revision) || folder.revision > update.revision
+        || !folder.relativePath.endsWith("/")) return "resync";
+      let ids = seenFolders.get(folder.rootId);
+      if (!ids) seenFolders.set(folder.rootId, ids = new Set());
+      if (ids.has(folder.id)) return "resync";
+      ids.add(folder.id);
+    }
+    for (const removal of update.folderRemovals ?? []) {
+      if (!this.roots.has(removal.rootId) || seenFolders.get(removal.rootId)?.has(removal.id)) return "resync";
+    }
+
+    if (update.upserts.some(doc => !sameSearchDocument(this.find(doc.id, doc.rootId), doc))
+      || update.removals.some(doc => this.find(doc.id, doc.rootId) !== undefined)
+      || newRoots && (newRoots.size !== this.roots.size
+        || [...newRoots].some(([id, root]) => this.roots.get(id)?.metadata.path !== root.path))) this.corpus = {};
 
     if (newRoots) {
       for (const [id, root] of this.roots) {
@@ -128,11 +166,16 @@ export class DocumentStateIndex {
       for (const [id, metadata] of newRoots) {
         const root = this.roots.get(id);
         if (root) root.metadata = { ...metadata };
-        else this.roots.set(id, { metadata: { ...metadata }, documents: new Map(), rows: [], positions: new Map() });
+        else this.roots.set(id, { metadata: { ...metadata }, folders: new Map(), documents: new Map(), rows: [], positions: new Map() });
       }
     }
     for (const removal of update.removals) this.remove(removal);
     for (const doc of update.upserts) this.put(doc);
+    if (update.folderUpserts?.length || update.folderRemovals?.length) {
+      this.folderTree = {};
+      for (const removal of update.folderRemovals ?? []) this.roots.get(removal.rootId)?.folders.delete(removal.id);
+      for (const folder of update.folderUpserts ?? []) this.roots.get(folder.rootId)!.folders.set(folder.id, folder);
+    }
     this.header = {
       ...header,
       revision: update.revision,
@@ -157,6 +200,7 @@ export class DocumentStateIndex {
       roots: [...this.roots.values()].map(root => ({
         ...root.metadata,
         docs: [...root.documents.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+        ...(root.folders.size ? { folders: [...root.folders.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)) } : {}),
       })),
     };
   }
@@ -164,7 +208,9 @@ export class DocumentStateIndex {
   // Browser-facing arrays are updated in place by path. Consumers must treat
   // these as read-only views and use snapshot() for an independent baseline.
   view(): DocumentSnapshot | null {
-    return this.header ? { ...this.header, roots: [...this.roots.values()].map(root => ({ ...root.metadata, docs: root.rows })) } : null;
+    return this.header ? { ...this.header, roots: [...this.roots.values()].map(root => ({
+      ...root.metadata, docs: root.rows, ...(root.folders.size ? { folders: [...root.folders.values()] } : {}),
+    })) } : null;
   }
 
   private replace(snapshot: DocumentSnapshot): ApplyDocumentUpdateResult {
@@ -173,17 +219,37 @@ export class DocumentStateIndex {
       if (snapshot.revision < this.header.revision) return "ignored";
     }
     const roots = new Map<string, IndexedRoot>();
-    for (const { docs, ...metadata } of snapshot.roots) {
+    for (const { docs, folders: folderList = [], ...metadata } of snapshot.roots) {
       if (roots.has(metadata.id)) return "resync";
+      const folders = new Map<string, RevisionedFolder>();
+      for (const folder of folderList) {
+        if (folder.rootId !== metadata.id || folders.has(folder.id) || !folder.relativePath.endsWith("/")
+          || !validRevision(folder.revision) || folder.revision > snapshot.revision) return "resync";
+        folders.set(folder.id, folder);
+      }
       const documents = new Map<string, RevisionedDocument>();
       for (const doc of docs) {
         if (doc.rootId !== metadata.id || documents.has(doc.id)
           || !validRevision(doc.revision) || doc.revision > snapshot.revision) return "resync";
         documents.set(doc.id, doc);
       }
-      roots.set(metadata.id, { metadata, documents, rows: [...docs], positions: new Map(docs.map((doc, index) => [doc.id, index])) });
+      roots.set(metadata.id, { metadata, folders, documents, rows: [...docs], positions: new Map(docs.map((doc, index) => [doc.id, index])) });
     }
     const { roots: _, ...header } = snapshot;
+    // Full comparison is confined to replacement snapshots. Patches above only
+    // inspect their changed paths and optional root headers, never the inventory.
+    if (!this.header || this.header.epoch !== snapshot.epoch
+      || roots.size !== this.roots.size || [...roots].some(([id, root]) => {
+        const previous = this.roots.get(id);
+        return !previous || previous.metadata.path !== root.metadata.path
+          || previous.documents.size !== root.documents.size
+          || [...root.documents.values()].some(doc => !sameSearchDocument(previous.documents.get(doc.id), doc));
+      })) this.corpus = {};
+    if (!this.header || this.header.epoch !== snapshot.epoch || roots.size !== this.roots.size || [...roots].some(([id, root]) => {
+      const previous = this.roots.get(id)?.folders;
+      return !previous || previous.size !== root.folders.size
+        || [...root.folders.values()].some(folder => previous.get(folder.id)?.listed !== folder.listed);
+    })) this.folderTree = {};
     this.header = header;
     this.roots = roots;
     this.binaries = snapshot.roots.reduce((count, root) => count + root.docs.filter(doc => doc.kind === "binary").length, 0);
@@ -240,7 +306,7 @@ export function projectDocumentSnapshot(
 ): DocumentSnapshot {
   const scope = context.scope;
   if (scope.kind === "folder") return { ...snapshot, ...context, repositories };
-  const roots = snapshot.roots.flatMap(root => {
+  const roots = snapshot.roots.flatMap(({ folders: _folders, ...root }) => {
     const docs = root.docs.filter(doc => doc.id === scope.documentId);
     return docs.length ? [{ ...root, docs }] : [];
   });
@@ -256,7 +322,7 @@ export function projectDocumentSnapshot(
 export function unseenSnapshotChange(index: DocumentStateIndex, snapshot: DocumentSnapshot): string | null {
   const change = snapshot.latestChange;
   if (!change) return null;
-  return index.epoch !== snapshot.epoch || change.revision > (index.latestChange?.revision ?? -1) ? change.id : null;
+  return index.epoch !== snapshot.epoch || change.revision > (index.revision ?? -1) ? change.id : null;
 }
 
 export function projectDocumentPatch(
@@ -277,6 +343,8 @@ export function projectDocumentPatch(
   if (context.compareTarget !== patch.compareTarget) delete projected.repositories;
   if (repositories !== undefined) projected.repositories = repositories;
   if (scope.kind === "file") {
+    delete projected.folderUpserts;
+    delete projected.folderRemovals;
     delete projected.roots;
     delete projected.defaultDocumentId;
     const selected = projected.upserts[0];

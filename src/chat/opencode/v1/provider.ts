@@ -6,6 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../../../shared/bounded-map";
+import { OPENCODE_COMPLETION_ALIAS } from "../normalization-types";
 import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
 import { McpServerNames, annotateMcpPermission, looksLikeMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { measureChatWork } from "../../performance";
@@ -23,7 +24,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, pendingPermissionFields, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
-import type { ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
+import type { ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 
 type Result<T> = { data?: T; error?: unknown };
 type ReversibleTurn = { id: string; providerId: string; draft: RestoredDraft; summary: string };
@@ -88,6 +89,7 @@ export function quietCancellation(fetch: FetchLike): typeof globalThis.fetch {
 
 export { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
+import { catalogContextWindow, type OpenCodeCatalogLimit } from "../context-window";
 
 export class OpenCodeV1Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
@@ -175,7 +177,8 @@ export class OpenCodeV1Provider implements ChatProvider {
           provider: provider.name,
           name: model.name,
           ...(variants.length ? { variants } : {}),
-          ...(model.limit?.context ? { contextLimit: model.limit.context, contextWindow: { source: "catalog" as const, freshness: "current" as const } } : {}),
+          // The 1.x SDK type omits `limit.input`, but 1.x servers send it.
+          ...catalogContextWindow(model.limit as OpenCodeCatalogLimit | undefined),
           ...(imageInput ? { imageInput } : {}),
         };
       }))
@@ -352,6 +355,10 @@ export class OpenCodeV1Provider implements ChatProvider {
     const end = historyPageEnd(options.cursor, version, visible.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const page = visible.slice(start, end);
+    // Neither 1.x store persists an execution id/end marker. Classic parentID
+    // names a user message, not an execution (a steer can change that parent).
+    // Do not infer capture liveness from the newest user or finish:tool-calls;
+    // these unannotated rows deliberately retain the completion fallback.
     // Each assistant message is paired with the prompt it answers. The classic
     // record names it; the v2 record does not, so the newest user message
     // before it in the transcript stands in — walked from the start, because
@@ -584,7 +591,10 @@ export class OpenCodeV1Provider implements ChatProvider {
     this.compatibilitySessions.clear();
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  // `delivery` is accepted for the seam's sake and not read: this agent does
+  // not declare `steering`, so the adapter never asks it to steer, and every
+  // prompt it receives is a dispatch onto an idle session.
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     this.historyReuse.invalidate(sessionId);
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
@@ -994,6 +1004,15 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
   const notify = () => { wake?.(); wake = null; };
   for (const stream of streams) {
     void (async () => {
+      // 1.19.5 SessionStatus.set publishes Status(idle), then Idle, and the
+      // bridge retains the event id on each stream's copy. Observe the source
+      // lifecycle BEFORE dedup: its preceding idle status may be a dropped
+      // mirror. Only a source whose latest status is idle supplies proof. A
+      // newer busy/retry status retires it, not a credit for a later turn.
+      // Unknown/mid-pair sources keep the idle-first fallback; an idle after
+      // a same-source busy has no ownership evidence and is not labelled.
+      // https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/status.ts
+      const idleStatuses = new Map<string, true>();
       // Id-less events dedupe by payload, which would also swallow a
       // legitimate repeat from the same stream (two identical " " deltas).
       // Numbering occurrences per stream keeps cross-stream duplicates
@@ -1002,7 +1021,16 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
       const occurrences = new Map<string, number>();
       try {
         for await (const value of stream) {
-          const event = value as ProviderEvent;
+          let event = value as ProviderEvent;
+          const data = asRecord(event.data ?? event.properties);
+          const sessionId = stringValue(data.sessionID ?? data.sessionId);
+          if (sessionId && event.type === "session.status") {
+            const status = stringValue(asRecord(data.status).type) ?? stringValue(data.status);
+            if (status === "idle") boundedSet(idleStatuses, sessionId, true, 2_048);
+            else idleStatuses.delete(sessionId);
+          } else if (sessionId && event.type === "session.idle" && idleStatuses.has(sessionId)) {
+            event = { ...event, [OPENCODE_COMPLETION_ALIAS]: true };
+          }
           let identity = providerEventIdentity(event);
           if (typeof event.id !== "string") {
             const occurrence = (occurrences.get(identity) ?? 0) + 1;

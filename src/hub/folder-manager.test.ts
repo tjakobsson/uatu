@@ -41,6 +41,7 @@ async function fixture(options: {
   const backend: SessionBackend = {
     start: async workspace => ({
       workspaceId: workspace.id,
+      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath: `/s/${workspace.id}/`,
       endpoint: { hostname: "127.0.0.1", port: 1 },
       token: null,

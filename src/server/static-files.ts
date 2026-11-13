@@ -10,7 +10,7 @@ import path from "node:path";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
 import { DEFAULT_RESPECT_GITIGNORE, shouldDenyPath, type WatchEntry } from "./roots";
 
-export type StaticFileResolution = { status: "found"; filePath: string } | { status: "not-found" };
+export type StaticFileResolution = { status: "found"; filePath: string; documentPath: string } | { status: "not-found" };
 
 export async function resolveStaticFileRequest(
   pathname: string,
@@ -39,6 +39,7 @@ export async function resolveStaticFileRequest(
   for (const entry of entries) {
     const rootPath = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
     const candidate = path.resolve(rootPath, relativeUrlPath);
+    if (entry.kind === "file" && candidate !== entry.absolutePath) continue;
     const relativeToRoot = path.relative(rootPath, candidate);
 
     if (
@@ -56,7 +57,7 @@ export async function resolveStaticFileRequest(
 
     let matcher = matcherCache.get(rootPath);
     if (!matcher) {
-      matcher = await loadIgnoreMatcher({ rootPath, respectGitignore });
+      matcher = await loadIgnoreMatcher({ rootPath, respectGitignore, isSingleFileRoot: entry.kind === "file" });
       matcherCache.set(rootPath, matcher);
     }
 
@@ -75,7 +76,9 @@ export async function resolveStaticFileRequest(
       continue;
     }
 
-    return { status: "found", filePath: candidateRealPath };
+    // Bytes come from the validated real path; the document id is the
+    // watched-root path the index uses (a root can be reached via symlink).
+    return { status: "found", filePath: candidateRealPath, documentPath: candidate };
   }
 
   return { status: "not-found" };
@@ -84,12 +87,13 @@ export async function resolveStaticFileRequest(
 export async function staticFileResponse(
   pathname: string,
   entries: WatchEntry[],
-  options: { respectGitignore?: boolean } = {},
+  options: { respectGitignore?: boolean; onServe?: (filePath: string) => void } = {},
 ): Promise<Response | null> {
   const resolved = await resolveStaticFileRequest(pathname, entries, options);
   if (resolved.status !== "found") {
     return null;
   }
+  options.onServe?.(resolved.documentPath);
 
   return new Response(Bun.file(resolved.filePath), { headers: { "cache-control": "no-cache" } });
 }

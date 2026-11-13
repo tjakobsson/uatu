@@ -3,12 +3,14 @@ import { parseHTML } from "linkedom";
 import type { FileTree, FileTreeDirectoryHandle } from "@pierre/trees";
 
 import type { ChangedFileSummary, RepositorySnapshot, RootGroup } from "../shared/types";
+import type { DocumentPatch } from "../shared/document-updates";
 import {
   ancestorPaths,
   buildPathInputs,
   computeFilesPaneFilterMembership,
   computeFilteredPaths,
   reconcileFilterExpansion,
+  resolveFileGitStatus,
   TreeView,
   type FilesPaneFilterMembership,
 } from "./tree-view";
@@ -170,6 +172,211 @@ describe("TreeView selection lifecycle with the real library", () => {
     expect(directory("guides/deep/").isExpanded()).toBe(true);
     expect(directory("other/").isExpanded()).toBe(false);
     expect(tree().getSelectedPaths()).toEqual([leaf]);
+  });
+
+  it("a tree of only unlisted ignored folders stays visible, and filters hide folder rows without failing", () => {
+    const folderOnly: RootGroup[] = [{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0, docs: [],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: false, revision: 0 }] }];
+    view.update(folderOnly, null);
+    expect(view.getVisibleLeafCount()).toBe(0);
+    expect(view.hasVisibleFolderRows()).toBe(true);
+    expect(directory("build/").isExpanded()).toBe(false);
+    // A listed level's file plus a media filter: folder rows leave after their
+    // files, without a non-recursive removal of a non-empty folder.
+    const listed: RootGroup[] = [{ ...folderOnly[0]!, docs: [{ id: "/r1/build/out.txt", name: "out.txt", relativePath: "build/out.txt", rootId: "r1", mtimeMs: 0, kind: "text", gitIgnoreStatus: "ignored" }],
+      folders: [{ ...folderOnly[0]!.folders![0]!, listed: true }] }];
+    view.update(listed, null);
+    view.update(listed, null, { mediaType: "audio" });
+    expect(view.hasVisibleFolderRows()).toBe(false);
+    expect(tree().getItem("build/")).toBeNull();
+    view.update(listed, null, { mediaType: "all", showIgnored: false });
+    expect(view.hasVisibleFolderRows()).toBe(false);
+    view.update(listed, null);
+    expect(view.hasVisibleFolderRows()).toBe(true);
+  });
+
+  it("removing a folder row whose live-written file sat in an implicit subfolder does not fail", () => {
+    const inventory: RootGroup[] = [{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0,
+      docs: [{ id: "/r1/build/renders/a.wav", name: "a.wav", relativePath: "build/renders/a.wav", rootId: "r1", mtimeMs: 0, kind: "binary", gitIgnoreStatus: "ignored", revision: 1 }],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: false, revision: 0 }] }];
+    view.update(inventory, null);
+    expect(tree().getItem("build/renders/a.wav")).not.toBeNull();
+    const patch: DocumentPatch = { kind: "patch", epoch: "e", previousRevision: 1, revision: 2, generatedAt: 2,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "2", upserts: [], changedId: null,
+      removals: [{ rootId: "r1", id: "/r1/build/renders/a.wav" }], folderRemovals: [{ rootId: "r1", id: "/r1/build" }] };
+    expect(view.applyPatch(patch, null)).toBe(true);
+    expect(tree().getItem("build/")).toBeNull();
+    expect(tree().getItem("build/renders/")).toBeNull();
+  });
+
+  it("a folder row removed before its last files leaves once they do", () => {
+    const docs = ["a.o", "b.o"].map((name, index) => ({ id: `/r1/build/${name}`, name, relativePath: `build/${name}`, rootId: "r1", mtimeMs: 0, kind: "binary" as const, gitIgnoreStatus: "ignored" as const, revision: index + 1 }));
+    view.update([{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0, docs,
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: true, revision: 0 }] }], null);
+    const patch = (revision: number, values: Partial<DocumentPatch>): DocumentPatch => ({ kind: "patch", epoch: "e", previousRevision: revision - 1, revision, generatedAt: revision,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: String(revision), upserts: [], removals: [], changedId: null, ...values });
+    expect(view.applyPatch(patch(3, { removals: [{ rootId: "r1", id: "/r1/build/a.o" }], folderRemovals: [{ rootId: "r1", id: "/r1/build" }] }), null)).toBe(true);
+    expect(tree().getItem("build/b.o")).not.toBeNull();
+    expect(view.applyPatch(patch(4, { removals: [{ rootId: "r1", id: "/r1/build/b.o" }] }), null)).toBe(true);
+    expect(tree().getItem("build/")).toBeNull();
+  });
+
+  it("a folder row removed and then replaced by a file of the same path applies cleanly", () => {
+    view.update([{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0, docs: [],
+      folders: [{ id: "/r1/output", rootId: "r1", relativePath: "output/", listed: false, revision: 0 }] }], null);
+    const patch = (revision: number, values: Partial<DocumentPatch>): DocumentPatch => ({ kind: "patch", epoch: "e", previousRevision: revision - 1, revision, generatedAt: revision,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: String(revision), upserts: [], removals: [], changedId: null, ...values });
+    expect(view.applyPatch(patch(1, { folderRemovals: [{ rootId: "r1", id: "/r1/output" }] }), null)).toBe(true);
+    expect(view.applyPatch(patch(2, { upserts: [{ id: "/r1/output", name: "output", relativePath: "output", rootId: "r1", mtimeMs: 0, kind: "text", revision: 2 }] }), null)).toBe(true);
+    expect(tree().getItem("output")?.isDirectory()).toBe(false);
+  });
+
+  it("switching to Audio and back keeps a listed folder that holds audio without re-adding it", () => {
+    const inventory: RootGroup[] = [{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0,
+      docs: [{ id: "/r1/build/a.wav", name: "a.wav", relativePath: "build/a.wav", rootId: "r1", mtimeMs: 0, kind: "binary", gitIgnoreStatus: "ignored", revision: 1 }],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: true, revision: 0 }] }];
+    view.update(inventory, null);
+    view.update(inventory, null, { mediaType: "audio" });
+    expect(tree().getItem("build/a.wav")).not.toBeNull();
+    view.update(inventory, null, { mediaType: "all" });
+    expect(tree().getItem("build/")).not.toBeNull();
+    expect(view.hasVisibleFolderRows()).toBe(true);
+  });
+
+  it("one patch removing a folder row and adding a file of the same path applies cleanly", () => {
+    view.update([{ id: "r1", label: "r1", path: "/r1", hiddenCount: 0, docs: [],
+      folders: [{ id: "/r1/build", rootId: "r1", relativePath: "build/", listed: true, revision: 0 },
+        { id: "/r1/build/out.md", rootId: "r1", relativePath: "build/out.md/", listed: false, revision: 0 }] }], null);
+    const patch: DocumentPatch = { kind: "patch", epoch: "e", previousRevision: 0, revision: 1, generatedAt: 1,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "1", removals: [], changedId: null,
+      folderRemovals: [{ rootId: "r1", id: "/r1/build/out.md" }],
+      upserts: [{ id: "/r1/build/out.md", name: "out.md", relativePath: "build/out.md", rootId: "r1", mtimeMs: 0, kind: "markdown", gitIgnoreStatus: "ignored", revision: 1 }] };
+    expect(view.applyPatch(patch, null)).toBe(true);
+    expect(tree().getItem("build/out.md")?.isDirectory()).toBe(false);
+  });
+
+  it("folder removals are qualified by root when overlapping roots share a folder id", () => {
+    const shared = { id: "/repo/sub/build", listed: false, revision: 0 };
+    const overlapping: RootGroup[] = [
+      { id: "/repo", label: "repo", path: "/repo", hiddenCount: 0, docs: [], folders: [{ ...shared, rootId: "/repo", relativePath: "sub/build/" }] },
+      { id: "/repo/sub", label: "sub", path: "/repo/sub", hiddenCount: 0, docs: [], folders: [{ ...shared, rootId: "/repo/sub", relativePath: "build/" }] },
+    ];
+    view.update(overlapping, null);
+    expect(tree().getItem("repo/sub/build/")).not.toBeNull();
+    expect(tree().getItem("sub/build/")).not.toBeNull();
+    const removal = (rootId: string): DocumentPatch => ({ kind: "patch", epoch: "e", previousRevision: 0, revision: 1, generatedAt: 1,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "1", upserts: [], removals: [], changedId: null,
+      folderRemovals: [{ rootId, id: shared.id }] });
+    expect(view.applyPatch(removal("/repo"), null)).toBe(true);
+    expect(tree().getItem("repo/sub/build/")).toBeNull();
+    expect(tree().getItem("sub/build/")).not.toBeNull();
+    expect(view.applyPatch({ ...removal("/repo/sub"), previousRevision: 1, revision: 2 }, null)).toBe(true);
+    expect(tree().getItem("sub/build/")).toBeNull();
+  });
+
+  it("type filtering excludes an active nonmatching file and captures natural tree order including closed folders", () => {
+    const inventory = roots(["z.wav", "renders/take10.wav", "renders/take2.wav", "movie.mp4", "README.md", "ignored.wav"]);
+    inventory[0]!.docs.find(doc => doc.name === "ignored.wav")!.gitIgnoreStatus = "ignored";
+    view.update(inventory, "README.md", { mediaType: "audio", showIgnored: false });
+    expect(tree().getItem("README.md")).toBeNull();
+    expect(tree().getItem("movie.mp4")).toBeNull();
+    expect(tree().getItem("ignored.wav")).toBeNull();
+    expect(directory("renders/").isExpanded()).toBe(false);
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["renders/take2.wav", "renders/take10.wav", "z.wav"]);
+    expect(view.getVisibleLeafCount()).toBe(3);
+    view.setQuery("renders/");
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["renders/take2.wav", "renders/take10.wav"]);
+    const original = tree();
+    view.update(inventory, "README.md", { mediaType: "video", showIgnored: false });
+    view.setQuery("");
+    expect(tree()).toBe(original);
+    expect(view.getVisibleLeafCount()).toBe(1);
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["movie.mp4"]);
+    expect(tree().getSelectedPaths()).toEqual([]);
+    expect(deselections).toBe(0);
+  });
+
+  it("Changed type membership composes with ignored visibility and does not inject a mismatching active file", () => {
+    const inventory = roots(["clip.wav", "clip.mp4", "README.md", "ignored.wav"]);
+    inventory[0]!.docs.find(doc => doc.name === "ignored.wav")!.gitIgnoreStatus = "ignored";
+    const filter = { allowedByRoot: new Map([["r1", new Set(["clip.wav", "clip.mp4", "ignored.wav"])]]) };
+    view.update(inventory, "README.md", { filter, mediaType: "audio", showIgnored: false });
+    expect(view.getEligibleDocuments().map(doc => doc.id)).toEqual(["clip.wav"]);
+    view.updateFilter(filter);
+    expect(tree().getItem("README.md")).toBeNull();
+    expect(view.getVisibleLeafCount()).toBe(1);
+    expect(tree().getSelectedPaths()).toEqual([]);
+  });
+
+  for (const mode of ["all", "changed"] as const) {
+    it(`${mode} hides an ignored active file without injecting it back or emitting navigation`, () => {
+      const inventory = roots();
+      inventory[0]!.docs.find(doc => doc.id === leaf)!.gitIgnoreStatus = "ignored";
+      inventory[0]!.docs.find(doc => doc.id === "guides/direct.md")!.gitIgnoreStatus = "unknown";
+      const exception = inventory[0]!.docs.find(doc => doc.id === "guides/deep/sibling.md")!;
+      exception.gitIgnoreStatus = "ignored";
+      exception.ignoreVisibilityException = true;
+      const filter = mode === "changed" ? { allowedByRoot: new Map([["r1", new Set(paths)]]) } : null;
+      view.update(inventory, leaf, { filter, showIgnored: true });
+      const original = tree();
+      directory("kept/").expand();
+      view.update(inventory, leaf, { filter, showIgnored: false });
+      expect(tree()).toBe(original);
+      expect(tree().getItem(leaf)).toBeNull();
+      expect(tree().getItem("guides/direct.md")).not.toBeNull();
+      expect(tree().getItem(exception.relativePath)).not.toBeNull();
+      expect(view.getVisibleLeafCount()).toBe(paths.length - 1);
+      expect(tree().getSelectedPaths()).toEqual([]);
+      expect(deselections).toBe(0);
+      if (mode === "changed") {
+        expect(view.updateFilter(filter!)).toBe(true);
+        expect(tree().getItem(leaf)).toBeNull();
+      }
+      view.setQuery("active");
+      expect(view.getVisibleLeafCount()).toBe(0);
+      view.setQuery("");
+      view.update(inventory, leaf, { filter, showIgnored: true });
+      expect(tree().getSelectedPaths()).toEqual([leaf]);
+      if (mode === "all") expect(directory("kept/").isExpanded()).toBe(true);
+    });
+  }
+
+  it("a metadata-only ignored classification removes the active row, and later patches do not resurrect it", () => {
+    const inventory = roots();
+    view.update(inventory, leaf, { showIgnored: false });
+    const doc = inventory[0]!.docs.find(doc => doc.id === leaf)!;
+    const patch: DocumentPatch = { kind: "patch", epoch: "test", previousRevision: 1, revision: 2, generatedAt: 10,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "test", changedId: null,
+      removals: [], upserts: [{ ...doc, revision: 2, gitIgnoreStatus: "ignored" }] };
+    expect(view.applyPatch(patch, leaf)).toBe(true);
+    expect(tree().getItem(leaf)).toBeNull();
+    expect(view.getVisibleLeafCount()).toBe(paths.length - 1);
+    expect(view.applyPatch({ ...patch, previousRevision: 2, revision: 3, upserts: [] }, leaf)).toBe(true);
+    expect(tree().getItem(leaf)).toBeNull();
+    view.updateFilter({ allowedByRoot: new Map([["r1", new Set([leaf])]]) });
+    expect(tree().getItem(leaf)).toBeNull();
+    expect(tree().getSelectedPaths()).toEqual([]);
+    expect(deselections).toBe(0);
+    expect(view.applyPatch({ ...patch, previousRevision: 3, revision: 4,
+      upserts: [{ ...doc, revision: 4, gitIgnoreStatus: "unknown" }] }, leaf)).toBe(true);
+    expect(tree().getItem(leaf)).not.toBeNull();
+    expect(view.getVisibleLeafCount()).toBe(paths.length);
+    expect(container.shadowRoot!.querySelector(`[data-item-path="${leaf}"]`)?.getAttribute("data-item-git-status")).toBeNull();
+  });
+
+  it("independent ignore metadata uses native muted status and preserves unrelated Git modifications", () => {
+    const inventory = roots();
+    inventory[0]!.docs.find(doc => doc.id === leaf)!.gitIgnoreStatus = "ignored";
+    inventory[0]!.docs.find(doc => doc.id === "guides/direct.md")!.gitIgnoreStatus = "unknown";
+    view.update(inventory, leaf);
+    view.setGitStatus([{ rootId: "r1", relativePath: "guides/", status: "ignored" },
+      { rootId: "r1", relativePath: "guides/deep/sibling.md", status: "modified" }]);
+    const row = (path: string) => container.shadowRoot!.querySelector<HTMLElement>(`[data-item-path="${path}"]`);
+    expect(row(leaf)?.getAttribute("data-item-git-status")).toBe("ignored");
+    expect(row("guides/direct.md")?.getAttribute("data-item-git-status")).toBeNull();
+    expect(row("guides/deep/sibling.md")?.getAttribute("data-item-git-status")).toBe("modified");
+    expect(row(leaf)?.textContent).not.toMatch(/ignored/i);
+    expect(resolveFileGitStatus({ ...inventory[0]!.docs[0]!, gitIgnoreStatus: "unknown" }, "ignored")).toBeUndefined();
   });
 
   for (const refresh of ["unchanged", "addition", "removal", "rename"] as const) {

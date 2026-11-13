@@ -218,8 +218,8 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     await page.addInitScript(() => { globalThis.__uatuChatPerformance = { counts: {}, durations: {} }; });
     await page.goto(`/?t=${encodeURIComponent(token)}`);
     await page.locator("#touch-tab-chat").click();
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Review renderer" }).click();
+    await page.locator("#chat-compact-workers summary").click();
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Review renderer$/ }) }).click();
     await expect(page.locator('[data-chat-item-id="child:49"]')).toBeVisible();
     await page.locator("#chat-drilldown-timeline").evaluate(el => { el.scrollTop = 250; });
     await page.waitForTimeout(100);

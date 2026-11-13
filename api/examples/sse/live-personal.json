@@ -1,0 +1,9 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "workspace-example",
+    "topic": "personal",
+    "cursor": "",
+    "event": { "kind": "data", "data": { "category": "worker-dismissals" } }
+  }
+}

@@ -27,6 +27,7 @@ afterEach(async () => {
 function fakeSession(workspaceId: string, onStop?: () => void): RunningSession {
   return {
     workspaceId,
+    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
     basePath: `/s/${workspaceId}/`,
     endpoint: { hostname: "127.0.0.1", port: 1 },
     token: null,
@@ -569,6 +570,7 @@ describe("SessionManager start during an in-flight stop", () => {
         const id = startCalls;
         return {
           workspaceId: "contended",
+          instanceId: crypto.randomUUID(), policyTrust: "unavailable" as const,
           basePath: "/s/contended/",
           endpoint: { hostname: "127.0.0.1", port: id },
           token: null,
@@ -623,6 +625,7 @@ describe("SessionManager serialized lifecycle", () => {
         const id = startCalls;
         return {
           workspaceId: "chained",
+          instanceId: crypto.randomUUID(), policyTrust: "unavailable" as const,
           basePath: "/s/chained/",
           endpoint: { hostname: "127.0.0.1", port: id },
           token: null,

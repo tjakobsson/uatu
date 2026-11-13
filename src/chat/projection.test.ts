@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatEvent, ConversationSnapshot } from "./types";
 import { ConversationProjection } from "./adapter";
-import { addAcceptedDraft, applyChatEvent, confirmAcceptedDraft, dropQueuedMessage, noteQueuedMessage, prependSnapshot, projectionFromSnapshot, refreshFromSnapshot } from "./projection";
+import { addAcceptedDraft, applyChatEvent, confirmAcceptedDraft, dropQueuedMessage, noteQueuedMessage, prependSnapshot, projectionFromSnapshot, refreshFromSnapshot, markDraftUnconfirmed } from "./projection";
 import { ConversationReplay } from "./replay";
 import { contextReadout } from "./context-readout";
 
@@ -15,6 +15,15 @@ const snapshot = (items: ConversationSnapshot["items"] = []): ConversationSnapsh
 });
 
 describe("chat projection", () => {
+  test("unconfirmed input stays read-only through refresh until native identity/request evidence reconciles it", () => {
+    const draft = { requestId: "request", messageId: "pending:request", text: "keep text", attachments: [{ id: "attachment", name: "image.png", mimeType: "image/png" }] };
+    const initial = addAcceptedDraft(projectionFromSnapshot(snapshot()), draft);
+    const unknown = markDraftUnconfirmed(initial, "request");
+    expect(unknown.acceptedDrafts).toEqual([{ ...draft, unconfirmed: true }]);
+    const refreshed = projectionFromSnapshot(snapshot(), unknown.acceptedDrafts);
+    expect(refreshed.acceptedDrafts).toEqual(unknown.acceptedDrafts);
+    expect(projectionFromSnapshot({ ...snapshot(), queued: [{ id: "native", requestId: "request", text: "keep text", delivery: "steer", queuedAt: 1 }] }, refreshed.acceptedDrafts).acceptedDrafts).toEqual([]);
+  });
   test("a window correction survives replay duplicates and snapshot recovery without replacing usage", () => {
     const usage = { id: "usage", type: "assistant_message" as const, markdown: "", createdAt: 2, usage: { input: 250_000 }, model: { providerId: "anthropic", modelId: "opus" }, contextKey: "q1" };
     const initial = projectionFromSnapshot(snapshot([usage]));
@@ -90,8 +99,8 @@ describe("chat projection", () => {
   });
 
   test("tracks the held queue from the snapshot and queue events", () => {
-    const initial = projectionFromSnapshot({ ...snapshot(), queued: [{ id: "held-1", text: "waiting", queuedAt: 2 }] });
-    expect(initial.queued).toEqual([{ id: "held-1", text: "waiting", queuedAt: 2 }]);
+    const initial = projectionFromSnapshot({ ...snapshot(), queued: [{ id: "held-1", text: "waiting", queuedAt: 2, delivery: "queue" }] });
+    expect(initial.queued).toEqual([{ id: "held-1", text: "waiting", queuedAt: 2, delivery: "queue" }]);
     // Every queue event restates the whole queue; a removal converges to it.
     const removed = applyChatEvent(initial, {
       generation: "g1", sequence: 5, conversationId: "c1", type: "conversation.queue",
@@ -110,7 +119,7 @@ describe("chat projection", () => {
     const revisionAtSubmit = withDrafts.queueRevision;
     const heldEvent = applyChatEvent(withDrafts, {
       generation: "g1", sequence: 5, conversationId: "c1", type: "conversation.queue",
-      queued: [{ id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" }], change: { kind: "held", messageId: "held-1" },
+      queued: [{ id: "held-1", text: "fast", queuedAt: 2, delivery: "queue", requestId: "r1" }], change: { kind: "held", messageId: "held-1" },
     });
     const deliveredItem = applyChatEvent(heldEvent.projection, {
       generation: "g1", sequence: 6, conversationId: "c1", type: "item.upsert",
@@ -121,7 +130,7 @@ describe("chat projection", () => {
       queued: [], change: { kind: "delivered", messageId: "held-1" },
     });
     expect(deliveredEvent.projection.queueRevision).toBe(revisionAtSubmit + 2);
-    const echoed = noteQueuedMessage(deliveredEvent.projection, { id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" }, revisionAtSubmit);
+    const echoed = noteQueuedMessage(deliveredEvent.projection, { id: "held-1", text: "fast", queuedAt: 2, delivery: "queue", requestId: "r1" }, revisionAtSubmit);
     expect(echoed.queued).toEqual([]);
     expect(echoed.acceptedDrafts).toEqual([]);
 
@@ -130,12 +139,12 @@ describe("chat projection", () => {
     const reloaded = projectionFromSnapshot(snapshot([
       { id: "message:m1", type: "user_message", createdAt: 3, text: "fast", requestId: "r1" },
     ]));
-    const retried = noteQueuedMessage(reloaded, { id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" });
+    const retried = noteQueuedMessage(reloaded, { id: "held-1", text: "fast", queuedAt: 2, delivery: "queue", requestId: "r1" });
     expect(retried.queued).toEqual([]);
   });
 
   test("a refused removal drops the stale local entry and is a no-op otherwise", () => {
-    const state = projectionFromSnapshot({ ...snapshot(), queued: [{ id: "held-1", text: "waiting", queuedAt: 2 }] });
+    const state = projectionFromSnapshot({ ...snapshot(), queued: [{ id: "held-1", text: "waiting", queuedAt: 2, delivery: "queue" }] });
     const dropped = dropQueuedMessage(state, "held-1");
     expect(dropped.queued).toEqual([]);
     // Unknown ids leave the projection untouched — same object, no render.
@@ -145,7 +154,7 @@ describe("chat projection", () => {
   test("a draft the server now holds is represented once, by its queued entry", () => {
     // The held acceptance mirrors locally before any stream event arrives.
     let state = addAcceptedDraft(projectionFromSnapshot(snapshot()), { requestId: "r1", messageId: "pending:r1", text: "hello" });
-    state = noteQueuedMessage(state, { id: "held-1", text: "hello", queuedAt: 2, requestId: "r1" });
+    state = noteQueuedMessage(state, { id: "held-1", text: "hello", queuedAt: 2, delivery: "queue", requestId: "r1" });
     expect(state.queued.map(held => held.id)).toEqual(["held-1"]);
     expect(state.acceptedDrafts).toEqual([]);
 
@@ -153,7 +162,7 @@ describe("chat projection", () => {
     let raced = addAcceptedDraft(projectionFromSnapshot(snapshot()), { requestId: "r2", messageId: "pending:r2", text: "again" });
     const applied = applyChatEvent(raced, {
       generation: "g1", sequence: 5, conversationId: "c1", type: "conversation.queue",
-      queued: [{ id: "held-2", text: "again", queuedAt: 3, requestId: "r2" }], change: { kind: "held", messageId: "held-2" },
+      queued: [{ id: "held-2", text: "again", queuedAt: 3, delivery: "queue", requestId: "r2" }], change: { kind: "held", messageId: "held-2" },
     });
     expect(applied.projection.queued).toHaveLength(1);
     expect(applied.projection.acceptedDrafts).toEqual([]);

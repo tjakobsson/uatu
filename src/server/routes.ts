@@ -12,16 +12,18 @@
 import type { Serve } from "bun";
 import path from "node:path";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
-import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
+import { OperationOutcomeUnknownError, BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
+import { createWatchedVisualReader, VISUAL_CSP } from "../chat/visual-store";
 import { encodeReplayCursor } from "../chat/replay";
 import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
+import { WorkerEvidenceError } from "../chat/worker-dismissal-evidence";
 import { HistoryChangedError } from "../chat/history-reuse";
 import { resolveStartupTimeoutMs } from "../chat/opencode/opencode-service";
 import { ChatUnavailableError } from "../chat/service";
 import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, TASK_OUTPUT_TAIL_DEFAULT_BYTES, TASK_OUTPUT_TAIL_MAX_BYTES, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type UsageReadMode, type ChatAccountChange } from "../chat/types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, TASK_OUTPUT_TAIL_DEFAULT_BYTES, TASK_OUTPUT_TAIL_MAX_BYTES, type MessageAttachment, type MessageDelivery, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type UsageReadMode, type ChatAccountChange } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { StreamLifecycleMetrics, type StreamOutcome } from "../debug/stream-metrics";
 import { getDocumentDiff } from "../document/diff";
@@ -38,12 +40,17 @@ import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
 import { joinBasePath, stripBasePath } from "../shared/base-path";
 import { DOCUMENT_NOT_READABLE_ERROR } from "../shared/document-errors";
-import { CHILD_CONVERSATION_OPEN_EVENT, CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
+import { CHILD_POLICY_HEADER, CHAT_ACTION_BODY_BYTES, isChildPolicyAction, type readChildPolicyBootstrap } from "../hub/child-policy";
+import { CHAT_OPERATION_RECEIPT_HEADER, validChatOperationReceipt } from "../shared/chat-operation-receipt";
+import type { ChatActionContext } from "../chat/types";
+import { SideGenerationUnsupportedError } from "../chat/adapter";
+import { CHILD_CONVERSATION_OPEN_EVENT, CHILD_CONVERSATION_REPLAY_RESYNC_HEADER, CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
 import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
-import type { WatchSession } from "./watch-session";
+import { isDocumentVisible } from "../shared/file-visibility";
+import { FolderListingError, type WatchSession } from "./watch-session";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
 // terminal WebSockets must never be reaped by an idle timer.
@@ -78,6 +85,7 @@ export type RouteAssets = {
 };
 
 type BaseDeps = {
+  childPolicy?: ReturnType<typeof readChildPolicyBootstrap>;
   assets: RouteAssets;
   // Factory rather than direct reference: the e2e harness re-creates the
   // session on every `/__e2e/reset`, so the routes must read through to the
@@ -133,6 +141,10 @@ export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
 // the result is spread at the call sites.
 export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string> {
   const { assets, getSession } = deps;
+  deps.chatService.configureVisualReader?.((source, workspacePath) => {
+    const policy = getSession().getStaticFilePolicy();
+    return createWatchedVisualReader(policy.entries, policy.respectGitignore)(source, workspacePath);
+  });
   const basePath = deps.basePath ?? "/";
   const manifestScope = deps.manifestScope ?? "base-path";
   // Static route keys are data to Bun.serve, so prefixing them is enough to
@@ -149,6 +161,12 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
   };
 
   const chat = buildChatRoutes(deps, p);
+  const media = (request: Request) => {
+    if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) {
+      return new Response(null, { status: 401, headers: { "cache-control": "no-store, no-transform", "content-length": "0" } });
+    }
+    return getSession().mediaResponse(request);
+  };
   const provenance = new Map<string, Promise<unknown>>();
 
   const modeRoutes =
@@ -157,6 +175,30 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
       : buildE2ERoutes(deps, p);
 
   return {
+    [p("/api/internal/hub-policy-proof")]: {
+      POST: async (request: Request) => {
+        if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response(null, { status: 403 });
+        if (!deps.childPolicy || !request.body) return new Response(null, { status: 503 });
+        const reader = request.body.getReader();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("proof timeout")), 500); });
+        try {
+          let text = "", bytes = 0;
+          const decoder = new TextDecoder();
+          for (;;) {
+            const chunk = await Promise.race([reader.read(), timeout]);
+            if (chunk.done) break;
+            bytes += chunk.value.byteLength;
+            if (bytes > 1024) return new Response(null, { status: 413 });
+            text += decoder.decode(chunk.value, { stream: true });
+          }
+          const data = JSON.parse(text);
+          if (!data || Object.keys(data).join() !== "challenge" || typeof data.challenge !== "string") return new Response(null, { status: 400 });
+          return Response.json({ proof: deps.childPolicy.proof(data.challenge) }, { headers: { "cache-control": "no-store" } });
+        } catch { return new Response(null, { status: 400 }); }
+        finally { clearTimeout(timer); void reader.cancel().catch(() => undefined); }
+      },
+    },
     [p("/assets/mermaid.min.js")]: new Response(Bun.file(assets.mermaid), {
       headers: {
         "content-type": "application/javascript; charset=utf-8",
@@ -245,6 +287,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         "cache-control": "public, max-age=86400",
       },
     }),
+    [p("/api/media")]: { GET: media, HEAD: media },
     [p("/api/state")]: {
       GET: async (request: Request) => {
         const context = requestContext(request);
@@ -336,6 +379,27 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         return Response.json({ ok: true });
       },
     },
+    // Lists one level of a Git-ignored folder into the shared index. Answers
+    // with the document revision that carries the listing, which every client
+    // receives as an ordinary patch.
+    [p("/api/index/folder")]: {
+      POST: async (request: Request) => {
+        if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
+        if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
+        const body = await request.json().catch(() => null) as { rootId?: unknown; path?: unknown } | null;
+        if (!body || typeof body.rootId !== "string" || typeof body.path !== "string") {
+          return Response.json({ error: "rootId and path are required" }, { status: 400 });
+        }
+        try {
+          const listed = await getSession().listFolder(body.rootId, body.path);
+          return Response.json(listed, { status: listed.status === "missing" ? 404 : 200, headers: { "cache-control": "no-store" } });
+        } catch (error) {
+          if (error instanceof FolderListingError) return Response.json({ error: error.message }, { status: error.status });
+          // Unreadable for another reason: the folder stays, unlisted.
+          return Response.json({ error: "folder could not be read" }, { status: 500 });
+        }
+      },
+    },
     [p("/api/repositories/refresh")]: {
       POST: (request: Request) => {
         if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
@@ -420,10 +484,10 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
 
         // `allRoots` is the escape hatch for a scope narrowed so far that
         // search would otherwise be useless — a single-file scope most of all.
-        const roots =
+        const roots = (
           url.searchParams.get("allRoots") === "1"
             ? getSession().getUnscopedRoots()
-            : getSession().getRoots(context);
+            : getSession().getRoots(context)).map(root => ({ ...root, docs: root.docs.filter(doc => isDocumentVisible(doc, context.showIgnored)) }));
 
         // A superseded query aborts its fetch, but that alone only stops the
         // browser-side consumer — a no-match sweep yields nothing until its
@@ -483,7 +547,7 @@ const CHAT_ID_LIMIT = 512;
 const CHAT_CURSOR_LIMIT = 2_048;
 const CHAT_PROMPT_BYTES = 64 * 1024;
 const CHAT_TITLE_BYTES = 200;
-const CHAT_BODY_BYTES = 128 * 1024;
+const CHAT_BODY_BYTES = CHAT_ACTION_BODY_BYTES;
 const CHAT_KEEPALIVE_MS = 15_000;
 const CHAT_ATTACHMENT_NAME_BYTES = 200;
 // Multipart framing around the one file field: boundaries, headers, the
@@ -500,6 +564,23 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     return hasValidWorkspaceCredentials(request, url, deps.getWorkspaceCredential())
       ? null
       : chatError(401, "authentication required");
+  };
+  const visualResponse = async (request: RouteRequest, source: boolean): Promise<Response> => {
+    const rejected = authenticated(request);
+    if (rejected) return rejected;
+    const id = routeIdentity(request, "visualId");
+    if (id instanceof Response) return id;
+    try {
+      const stored = await deps.chatService.resolveVisual?.(id);
+      const bytes = source && stored?.mimeType === "image/svg+xml" ? stored.sourceBytes : source ? undefined : stored?.bytes;
+      if (!stored || !bytes) return chatError(404, "visual not found");
+      return new Response(new Uint8Array(bytes), { headers: {
+        "content-type": source ? "text/plain; charset=utf-8" : stored.mimeType,
+        "content-security-policy": VISUAL_CSP,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, max-age=31536000, immutable",
+      } });
+    } catch (error) { return normalizedChatError(error); }
   };
   const mutationGate = (request: Request): Response | null => {
     const auth = authenticated(request);
@@ -530,7 +611,8 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     // Internal hub-to-child protocol (hub-brokered-live-stream D5): the
     // workspace's activity summary for the hub's cross-workspace badge —
     // whether any conversation is working and whether any interaction awaits
-    // the user, across every agent. Two booleans and nothing else: no id,
+    // the user, across every agent, plus unresolved background activity.
+    // Three booleans and nothing else: no id,
     // title, or count crosses here. The current summary is sent at once, then
     // again only when it changes. No stream metrics: the hub's broker holds
     // one of these per workspace and owns that picture.
@@ -576,8 +658,8 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   if (result.done) break;
                   const summary = await deps.chatService.activity();
                   // Rebuilt field by field, never spread: the wire shape is
-                  // exactly these two booleans whatever a service returns.
-                  const data = JSON.stringify({ working: summary.working === true, awaiting: summary.awaiting === true });
+                  // exactly these three booleans whatever a service returns.
+                  const data = JSON.stringify({ working: summary.working === true, awaiting: summary.awaiting === true, unresolved: summary.unresolved === true });
                   if (data === sent) continue;
                   sent = data;
                   controller.enqueue(encoder.encode(`event: ${CHILD_ACTIVITY_EVENT}\ndata: ${data}\n\n`));
@@ -816,6 +898,17 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         }
       },
     },
+    [p("/api/chat/conversations/:conversationId/worker-evidence")]: {
+      GET: async (request: RouteRequest) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const id = routeIdentity(request, "conversationId");
+        if (id instanceof Response) return id;
+        if ([...new URL(request.url).searchParams.keys()].some(key => key !== "t")) return chatError(400, "unexpected query parameter");
+        if (!deps.chatService.workerEvidence) return chatError(503, "authoritative worker evidence unavailable");
+        return run(() => deps.chatService.workerEvidence!(id));
+      },
+    },
     [p("/api/chat/conversations/:conversationId")]: {
       GET: async (request: RouteRequest) => {
         const rejected = authenticated(request);
@@ -859,7 +952,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const onAbort = () => abort.abort();
         request.signal.addEventListener("abort", onAbort, { once: true });
         try {
-          const { snapshot, events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal });
+          const { snapshot, events, replayVisualResyncCursor } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal, reconnect: url.searchParams.get("reconnect") === "1" });
           const encoder = new TextEncoder();
           const iterator = events[Symbol.asyncIterator]();
           let pending = iterator.next();
@@ -875,8 +968,10 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
             if (finished) return;
             finished = true;
             streamMetrics.closed("chat-conversation", outcome);
-            await iterator.return?.().catch(() => undefined);
+            // A prefetched next() may still await provider traffic. Cancel the
+            // source first so generator return() cannot deadlock after resync.
             events.cancel();
+            await iterator.return?.().catch(() => undefined);
             request.signal.removeEventListener("abort", onAbort);
           };
           // Pull-driven, one frame per pull: a slow or stalled client stops
@@ -929,6 +1024,9 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
               "cache-control": "no-cache, no-transform",
               "content-type": "text/event-stream; charset=utf-8",
               "x-accel-buffering": "no",
+              // Child transport metadata only: no public JSON/event change.
+              // The hint cannot name another snapshot or conversation cursor.
+              ...(replayVisualResyncCursor === snapshot.cursor ? { [CHILD_CONVERSATION_REPLAY_RESYNC_HEADER]: replayVisualResyncCursor } : {}),
             },
           });
         } catch (error) {
@@ -938,7 +1036,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       },
     },
     [p("/api/chat/conversations/:conversationId/prompts")]: {
-      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode", "variant", "attachments"], async (id, body) => {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode", "variant", "attachments", "delivery"], async (id, body, context, operationReceipt) => {
         const requestId = bodyIdentity(body, "requestId");
         if (requestId instanceof Response) return requestId;
         if (typeof body.text !== "string") return chatError(400, "text must be a string");
@@ -961,7 +1059,12 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         // Words or images: a message needs content, and an image-only prompt
         // is content (OpenCode admits empty text with files — verified live).
         if (!body.text.trim() && !attachments?.length) return chatError(400, "text must not be empty");
-        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant, attachments), 202);
+        // How the message reaches a busy agent (opencode-v2-steering D5):
+        // `steer` is honored only where the agent declares steering; the
+        // workspace decides and reports what it did.
+        const delivery = parseDelivery(body.delivery);
+        if (delivery instanceof Response) return delivery;
+        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant, attachments, delivery, context, operationReceipt), 202);
       }),
     },
     // Multipart rather than JSON: image bytes ride the request as a file
@@ -1019,6 +1122,13 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         return run(() => deps.chatService.saveAttachment(bytes), 201);
       },
+    },
+    // Visual ids name immutable workspace captures, not arbitrary file paths.
+    [p("/api/chat/visuals/:visualId")]: {
+      GET: (request: RouteRequest) => visualResponse(request, false),
+    },
+    [p("/api/chat/visuals/:visualId/source")]: {
+      GET: (request: RouteRequest) => visualResponse(request, true),
     },
     // Not conversation-scoped: the id is a workspace-issued uuid and the
     // authorization boundary is the workspace, same as every chat route.
@@ -1080,11 +1190,43 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       }),
     },
     [p("/api/chat/conversations/:conversationId/queue/:messageId")]: {
+      // Removes a held message, or withdraws a steer from the agent (D7).
       DELETE: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
         const messageId = routeIdentity(request, "messageId");
         if (messageId instanceof Response) return messageId;
         const requestId = bodyIdentity(body, "requestId");
         return requestId instanceof Response ? requestId : run(() => deps.chatService.removeQueued(id, messageId, requestId));
+      }),
+      // Switches a pending message between steer and queue (D7, D8).
+      PATCH: async (request: RouteRequest) => chatMutation(request, ["requestId", "delivery"], async (id, body, context, operationReceipt) => {
+        const messageId = routeIdentity(request, "messageId");
+        if (messageId instanceof Response) return messageId;
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        const delivery = parseDelivery(body.delivery);
+        if (delivery instanceof Response) return delivery;
+        if (delivery === undefined) return chatError(400, "delivery must be steer or queue");
+        return run(() => deps.chatService.changeDelivery(id, messageId, requestId, delivery, context, operationReceipt));
+      }),
+    },
+    // Discards only a settled unknown admission's local record; never cancels or resends.
+    [p("/api/chat/conversations/:conversationId/queue/:messageId/discard-unconfirmed")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "uncertaintyId"], async (id, body) => {
+        const messageId = routeIdentity(request, "messageId");
+        if (messageId instanceof Response) return messageId;
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        const uncertaintyId = bodyIdentity(body, "uncertaintyId");
+        return uncertaintyId instanceof Response ? uncertaintyId : run(() => deps.chatService.discardUnconfirmedSteer(id, messageId, requestId, uncertaintyId));
+      }),
+    },
+    // Sends a pending message now (D8).
+    [p("/api/chat/conversations/:conversationId/queue/:messageId/send-now")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body, context, operationReceipt) => {
+        const messageId = routeIdentity(request, "messageId");
+        if (messageId instanceof Response) return messageId;
+        const requestId = bodyIdentity(body, "requestId");
+        return requestId instanceof Response ? requestId : run(() => deps.chatService.sendNow(id, messageId, requestId, context, operationReceipt));
       }),
     },
     [p("/api/chat/conversations/:conversationId/permissions/:interactionId")]: {
@@ -1106,6 +1248,23 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         if (taskId instanceof Response) return taskId;
         if (requestId instanceof Response) return requestId;
         return run(() => deps.chatService.stopTask(id, taskId, requestId));
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/background")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        if (!deps.chatService.backgroundBlockingWork) return chatError(409, "Backgrounding is not supported");
+        return run(() => deps.chatService.backgroundBlockingWork!(id, requestId));
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/aside")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "question"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        if (typeof body.question !== "string" || !body.question.trim() || Buffer.byteLength(body.question) > 16_384) return chatError(400, "question must contain 1–16384 bytes");
+        if (!deps.chatService.generate) return chatError(409, "Side answers are not supported by this agent");
+        return run(() => deps.chatService.generate!(id, requestId, body.question as string));
       }),
     },
     [p("/api/chat/conversations/:conversationId/wakeups/:wakeupId/cancel")]: {
@@ -1164,24 +1323,54 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
   async function chatMutation(
     request: RouteRequest,
     keys: string[],
-    operation: (id: string, body: Record<string, unknown>) => Promise<Response>,
+    operation: (id: string, body: Record<string, unknown>, context?: ChatActionContext, operationReceipt?: string) => Promise<Response>,
   ): Promise<Response> {
     const rejected = mutationGate(request);
     if (rejected) return rejected;
     const id = routeIdentity(request, "conversationId");
     if (id instanceof Response) return id;
-    const body = await parseJsonObject(request, keys);
-    return body instanceof Response ? body : operation(id, body);
+    let context: ChatActionContext | undefined;
+    let body: Record<string, unknown> | Response;
+    try {
+      body = await parseJsonObject(request, keys, text => {
+        const envelope = request.headers.get(CHILD_POLICY_HEADER);
+        if (envelope === null) return;
+        if (!deps.childPolicy) throw new Error("Hub policy trust unavailable");
+        const policy = deps.childPolicy.verify({ method: request.method, pathname: new URL(request.url).pathname, body: text }, envelope);
+        context = { receiptScope: policy.principal, automaticBackground: policy.unavailable ? "unavailable" : policy.autoBackgroundOnSteer ? "on" : "off" };
+      });
+    } catch { return chatError(403, "invalid Hub chat policy"); }
+    if (body instanceof Response) return body;
+    // This is an untrusted operation identifier, not a verified principal or
+    // policy. It never creates ChatActionContext and cannot enable automation.
+    const token = !context && isChildPolicyAction(request.method, new URL(request.url).pathname, deps.basePath ?? "/")
+      ? request.headers.get(CHAT_OPERATION_RECEIPT_HEADER) : null;
+    if (token !== null && !validChatOperationReceipt(token)) return chatError(400, "invalid operation receipt identifier");
+    return operation(id, body, context, token ?? undefined);
   }
 }
 
-async function parseJsonObject(request: Request, allowedKeys: string[]): Promise<Record<string, unknown> | Response> {
+async function parseJsonObject(request: Request, allowedKeys: string[], onText?: (text: string) => void): Promise<Record<string, unknown> | Response> {
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
     return chatError(415, "content-type must be application/json");
   }
   let text: string;
-  try { text = await request.text(); } catch { return chatError(400, "invalid request body"); }
-  if (Buffer.byteLength(text) > CHAT_BODY_BYTES) return chatError(413, "request body is too large");
+  const reader = request.body?.getReader();
+  try {
+    text = "";
+    let bytes = 0;
+    const decoder = new TextDecoder();
+    if (reader) for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > CHAT_BODY_BYTES) return chatError(413, "request body is too large");
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    text += decoder.decode();
+  } catch { return chatError(400, "invalid request body"); }
+  finally { if (reader) void reader.cancel().catch(() => undefined); }
+  onText?.(text);
   let value: unknown;
   try { value = text ? JSON.parse(text) : {}; } catch { return chatError(400, "invalid JSON body"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) return chatError(400, "request body must be an object");
@@ -1308,10 +1497,19 @@ function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | 
 }
 
 function normalizedChatError(error: unknown): Response {
+  if (error instanceof WorkerEvidenceError) return chatError(error.code === "capacity" ? 507 : 503, error.message);
+  if (error instanceof SideGenerationUnsupportedError) return chatError(409, error.message);
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
   if (error instanceof HistoryChangedError) return chatError(409, error.message);
   if (error instanceof UnknownAgentError) return chatError(404, error.message);
   if (error instanceof QueuedMessageNotHeldError) return chatError(409, error.message);
+  // Its own code: the client says "too late" rather than "not held" (D7).
+  if (error instanceof SteerAlreadyDeliveredError) return chatError(409, error.message, "steer-already-delivered");
+  if (error instanceof SteerWithdrawalUnconfirmedError) return chatError(409, error.message, "steer-withdrawal-unconfirmed");
+  if (error instanceof SteeringUnsupportedError) return chatError(409, error.message);
+  if (error instanceof SendNowUnsupportedError) return chatError(409, error.message);
+  if (error instanceof SendNowUnavailableError) return chatError(409, error.message);
+  if (error instanceof CommandSteeringError) return chatError(409, error.message);
   if (error instanceof ChatQueueFullError) return chatError(429, error.message);
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
@@ -1320,6 +1518,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof ReversibleHistoryTargetError) return chatError(409, error.message);
   if (error instanceof InvalidQuestionAnswerError) return chatError(400, error.message);
   if (error instanceof BackgroundTaskUnavailableError) return chatError(409, error.message);
+  if (error instanceof OperationOutcomeUnknownError) return chatError(409, error.message, "operation_outcome_unknown");
   if (error instanceof ReleaseUnavailableError) return chatError(409, error.message);
   if (error instanceof ScheduledWakeupUnavailableError) return chatError(409, error.message);
   if (error instanceof ScheduledWakeupsUnsupportedError) return chatError(409, error.message);
@@ -1354,8 +1553,13 @@ function nextChatEvent<T>(
   });
 }
 
-function chatError(status: number, error: string): Response {
-  return Response.json({ error }, { status, headers: { "cache-control": "no-store" } });
+function chatError(status: number, error: string, code?: string): Response {
+  return Response.json({ error, ...(code ? { code } : {}) }, { status, headers: { "cache-control": "no-store" } });
+}
+
+function parseDelivery(value: unknown): MessageDelivery | undefined | Response {
+  if (value === undefined) return undefined;
+  return value === "steer" || value === "queue" ? value : chatError(400, "delivery must be steer or queue");
 }
 
 function buildProdRoutes(deps: ProdRouteDeps, p: (path: string) => string) {

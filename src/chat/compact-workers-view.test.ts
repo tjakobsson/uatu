@@ -1,0 +1,409 @@
+import { expect, spyOn, test } from "bun:test";
+import { parseHTML } from "linkedom";
+import { compactWorkers, workerSummary, type CompactWorker } from "./compact-work";
+import { CompactWorkersView } from "./compact-workers-view";
+
+test("only unavailable and ended rows offer individual presentation dismissal; requests remain canonical links", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const kinds = ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"] as const;
+    const workers = compactWorkers(kinds.map((kind, index) => ({ type: "background_task" as const, id: kind, taskId: kind, description: kind, status: "running" as const, createdAt: index + 1,
+      activity: { kind, executionId: `exec:${kind}`, ...(kind === "needs-answer" ? { request: { id: "canonical", kind: "question" as const } } : {}) } })));
+    new CompactWorkersView(host).paint("parent", workers, new Set(), true);
+    expect([...host.querySelectorAll<HTMLElement>("[data-dismiss-worker]")].map(button => button.dataset.dismissWorker)).toEqual(["unavailable", "ended"]);
+    expect(host.querySelector('[data-worker-id="needs-answer"] [data-worker-request]')?.getAttribute("data-worker-request")).toBe("canonical");
+    expect(host.querySelector('[data-worker-id="needs-answer"] [data-elapsed-since]')).toBeNull();
+    expect(host.querySelector('[data-worker-id="ended"] .chat-worker-clock')?.textContent).toContain("End time unknown");
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test.each(["agent", "shell"] as const)("uncertain %s stays inspectable without Stop or a confirmed-working indicator", taskType => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const items: import("./types").ConversationItem[] = [
+      { type: "background_task", id: "finished", taskId: "finished", taskType: "agent", description: "Finished worker", status: "completed", createdAt: 1 },
+      { type: "background_task", id: "active", taskId: "active", taskType, childConversationId: taskType === "agent" ? "child" : undefined, description: "Active worker", status: "running", createdAt: 2 },
+    ];
+    view.paint("parent", compactWorkers(items), new Set(), true);
+    const row = host.querySelector<HTMLElement>('[data-worker-id="active"]')!;
+    expect(row.querySelector("[data-stop-task]")).not.toBeNull();
+    const uncertain = compactWorkers(items.map(item => item.id === "active" ? { ...item, stateUncertain: true } : item));
+    view.paint("parent", uncertain, new Set(), true);
+    expect(workerSummary(uncertain)).toBe("1 unresolved · 1 finished");
+    expect(row.dataset.state).toBe("unknown");
+    expect(row.querySelector("[data-inspect-task]")).not.toBeNull();
+    expect(row.querySelector(".chat-worker-glyph")!.textContent).toBe("◌");
+    expect(row.querySelector(".chat-worker-inspect")!.getAttribute("aria-label")).toContain("Status unavailable · last seen unknown");
+    expect(row.querySelector("[data-elapsed-since]")).toBeNull();
+    expect(row.querySelector(".chat-worker-inspect")!.getAttribute("aria-label")).not.toContain("working");
+    expect(row.querySelectorAll("[data-stop-task]").length).toBe(0);
+    const coldHost = document.createElement("div") as unknown as HTMLElement;
+    new CompactWorkersView(coldHost).paint("parent", uncertain, new Set(), true);
+    expect(coldHost.querySelectorAll("[data-stop-task]").length).toBe(0);
+    view.paint("parent", compactWorkers(items), new Set(), true);
+    expect(row.querySelector("[data-stop-task]")).not.toBeNull();
+  } finally {
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test("reported clock has its own suffix and the full kind and provenance remain in the metadata title", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  const format = spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(() => "19:43");
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const agent = "synthetic-long-agent-kind-with-no-breaks".repeat(8);
+    view.paint("parent", compactWorkers([
+      { type: "background_task", id: "report", taskId: "report", description: "Synthetic report", subagentType: agent, status: "completed", createdAt: 10, terminalReportedAt: 40, progress: "Report received" },
+    ]), new Set(), true);
+    const meta = host.querySelector<HTMLElement>(".chat-worker-meta")!;
+    expect(meta.title).toBe(`${agent} · Reported 19:43 · finished · Report received`);
+    expect(meta.querySelector(".chat-worker-kind")!.textContent).toBe(agent);
+    expect(meta.querySelector(".chat-worker-time > .chat-worker-clock")!.textContent).toBe("Reported 19:43");
+    expect(meta.textContent).toBe(`${agent} · Reported 19:43`);
+    expect(meta.querySelector("[data-elapsed-since]")).toBeNull();
+    expect(host.querySelector(".chat-worker-inspect")!.getAttribute("aria-label")).toContain("Synthetic report");
+  } finally {
+    format.mockRestore();
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test.each(["completed", "failed", "stopped"] as const)("confirmed %s with ended activity keeps exactly one terminal report clock", status => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  const format = spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(() => "19:43");
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    for (const endedAt of [undefined, 30]) {
+      view.paint("parent", compactWorkers([
+        { type: "background_task", id: "report", taskId: "report", taskType: "shell", description: "Correlated result", status, createdAt: 10, terminalReportedAt: 40,
+          activity: { kind: "ended", endedAt } },
+      ]), new Set(), true);
+      const meta = host.querySelector(".chat-worker-meta")!;
+      expect(meta.querySelectorAll(".chat-worker-clock").length).toBe(1);
+      expect(meta.textContent).toBe("Shell · Reported 19:43");
+      expect(meta.querySelector("[data-elapsed-since]")).toBeNull();
+    }
+  } finally {
+    format.mockRestore();
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test("verified post-exit shell removal stays available without Working counts or a running clock", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const task = { type: "background_task" as const, id: "ended", taskId: "ended", taskType: "shell", description: "Unsettled shell", status: "running" as const, createdAt: 10,
+      activity: { kind: "ended" as const, endedAt: 30 }, control: { available: true } };
+    const workers = compactWorkers([task]);
+    view.paint("parent", workers, new Set(), true);
+    expect(workerSummary(workers)).toBe("1 unresolved");
+    expect(host.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(false);
+    expect(host.querySelector("[data-elapsed-since]")).toBeNull();
+    expect(host.querySelector('[data-state="working"]')).toBeNull();
+    for (const control of [undefined, { available: false }]) {
+      view.paint("parent", compactWorkers([{ ...task, control }]), new Set(), true);
+      expect(host.querySelector("[data-stop-task]")).toBeNull();
+    }
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("unresolved ended workers keep one truthful fixed end clock until a correlated result arrives", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    for (const endedAt of [undefined, 30]) {
+      view.paint("parent", compactWorkers([
+        { type: "background_task", id: "ended", taskId: "ended", taskType: "shell", description: "Missing result", status: "running", createdAt: 10,
+          activity: { kind: "ended", endedAt } },
+      ]), new Set(), true);
+      const meta = host.querySelector(".chat-worker-meta")!;
+      expect(meta.textContent).toContain("Ended · result unavailable");
+      expect(meta.querySelectorAll(".chat-worker-clock").length).toBe(1);
+      expect(meta.querySelector(".chat-worker-clock")!.textContent).toBe(endedAt === undefined ? "End time unknown" : `Ended ${new Date(endedAt).toLocaleString()}`);
+      expect(meta.querySelector("[data-elapsed-since]")).toBeNull();
+      expect(meta.textContent).not.toContain("Reported");
+    }
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("active kind and shell elapsed time survive the clock suffix structure without stale report titles", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  const now = spyOn(Date, "now").mockReturnValue(65_000);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const workers = compactWorkers([
+      { type: "background_task", id: "shell", taskId: "shell", taskType: "shell", description: "Synthetic shell", status: "running", createdAt: 5_000 },
+      { type: "background_task", id: "agent", taskId: "agent", subagentType: "explore", description: "Synthetic agent", status: "running", createdAt: 5_000 },
+    ]);
+    view.paint("parent", workers.map(worker => ({ ...worker, state: "completed", terminalReportedAt: 60_000, settledAt: 60_000 })), new Set(), true);
+    view.paint("parent", workers, new Set(), true);
+    const shell = host.querySelector<HTMLElement>('[data-worker-id="shell"] .chat-worker-meta')!;
+    const agent = host.querySelector<HTMLElement>('[data-worker-id="agent"] .chat-worker-meta')!;
+    expect(shell.textContent).toBe("Shell · 1:00");
+    expect(shell.querySelector(".chat-worker-clock")!.getAttribute("data-elapsed-since")).toBe("5000");
+    expect(shell.title).toBe("Shell · 1:00 · working");
+    expect(agent.textContent).toBe("explore");
+    expect(agent.querySelector(".chat-worker-time")).toBeNull();
+    view.paint("parent", workers.map(worker => ({ ...worker, state: "unknown" })), new Set(), true);
+    expect(shell.textContent).toBe("Shell · Status unavailable · last seen unknown");
+    expect(shell.title).toBe("Shell · Status unavailable · last seen unknown");
+    expect(shell.querySelector("[data-elapsed-since]")).toBeNull();
+    expect(shell.textContent).not.toContain("Reported");
+  } finally {
+    now.mockRestore();
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test("verified activity displays Working with disabled Stop and unresolved activity never grows a timer", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    for (const kind of ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"] as const) {
+      const workers = compactWorkers([{ id: "worker", type: "background_task", taskId: "worker", description: "Worker", taskType: "shell", status: "running", createdAt: 5,
+        stateUncertain: true, activity: { kind, ...(kind === "needs-answer" ? { request: { id: "q", kind: "question" as const } } : {}) }, control: { available: false, reason: "Stop proof unavailable" } }]);
+      view.paint("parent", workers, new Set(), true);
+      expect(host.textContent).toContain(kind === "working" ? "Working" : kind === "needs-answer" ? "Needs your answer" : kind === "checking" ? "Checking status…" : kind === "session-active" ? "Session active · task unverified" : kind === "ended" ? "Ended · result unavailable" : "Status unavailable · last seen unknown");
+      const stop = host.querySelector<HTMLButtonElement>("[data-stop-task]");
+      if (kind === "working" || kind === "needs-answer") expect(stop?.disabled).toBe(true);
+      else expect(stop).toBeNull();
+      expect(host.querySelector("[data-elapsed-since]") !== null).toBe(kind === "working");
+    }
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("native terminal clocks say Reported, including zero/equal-launch, while missing clocks say Started", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  const format = spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(() => "19:43");
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    view.paint("parent", compactWorkers([
+      { type: "background_task", id: "agent", taskId: "agent", description: "Agent", status: "completed", createdAt: 10, terminalReportedAt: 40 },
+      { type: "background_task", id: "shell", taskId: "shell", taskType: "shell", description: "Shell", status: "failed", createdAt: 10, terminalReportedAt: 10 },
+      { type: "background_task", id: "zero", taskId: "zero", description: "Epoch report", status: "stopped", createdAt: 0, terminalReportedAt: 0 },
+      { type: "background_task", id: "missing", taskId: "missing", description: "No clock", status: "completed", createdAt: 10 },
+      { type: "background_task", id: "unknown", taskId: "unknown", description: "Unknown time", status: "completed", createdAt: 0 },
+    ]), new Set(), true);
+    for (const id of ["agent", "shell", "zero"]) {
+      expect(host.querySelector(`[data-worker-id="${id}"] .chat-worker-meta`)!.textContent).toContain("Reported 19:43");
+      expect(host.querySelector(`[data-worker-id="${id}"] .chat-worker-meta`)!.textContent).not.toContain("Finished");
+    }
+    expect(host.querySelector('[data-worker-id="missing"] .chat-worker-meta')!.textContent).toBe("Agent · Started 19:43");
+    expect(host.querySelector('[data-worker-id="unknown"] .chat-worker-meta')!.textContent).toBe("Agent");
+  } finally {
+    format.mockRestore();
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test("finished worker clocks render 24-hour evening and midnight even under an AM/PM locale", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  // Force an AM/PM locale while retaining the host timezone and the view's
+  // real formatting options. Local date construction makes this timezone-neutral.
+  const format = spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(function(this: Date, _locales?: Intl.LocalesArgument, options?: Intl.DateTimeFormatOptions) {
+    return new Intl.DateTimeFormat("en-US", options).format(this);
+  });
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const evening = new Date(2026, 9, 22, 19, 43).getTime();
+    const midnight = new Date(2026, 9, 23, 0, 0).getTime();
+    view.paint("parent", compactWorkers([
+      { type: "background_task", id: "evening", taskId: "evening", description: "Finished", status: "completed", createdAt: evening - 60_000, usage: { durationMs: 60_000, totalTokens: 0, toolUses: 0 } },
+      { type: "background_task", id: "midnight", taskId: "midnight", description: "Start only", status: "completed", createdAt: midnight },
+      { type: "background_task", id: "unknown", taskId: "unknown", description: "No timestamp", status: "completed", createdAt: 0 },
+      { type: "tool", id: "same", name: "task", input: '{"description":"Instant completion"}', status: "completed", createdAt: midnight, completedAt: midnight },
+      { type: "tool", id: "zero", name: "task", input: '{"description":"Epoch completion"}', status: "completed", createdAt: 0, completedAt: 0 },
+      { type: "tool", id: "later", name: "task", input: '{"description":"Later finish"}', status: "completed", createdAt: midnight - 60_000, completedAt: midnight },
+    ]), new Set(), true);
+    expect(host.querySelector('[data-worker-id="evening"] .chat-worker-meta')!.textContent).toBe("Agent · 19:43");
+    expect(host.querySelector('[data-worker-id="midnight"] .chat-worker-meta')!.textContent).toBe("Agent · Started 00:00");
+    expect(host.querySelector('[data-worker-id="unknown"] .chat-worker-meta')!.textContent).toBe("Agent");
+    expect(host.querySelector('[data-worker-id="same"] .chat-worker-meta')!.textContent).toBe("Agent · 00:00");
+    expect(host.querySelector('[data-worker-id="later"] .chat-worker-meta')!.textContent).toBe("Agent · 00:00");
+    expect(host.querySelector('[data-worker-id="zero"] .chat-worker-meta')!.textContent).toBe(`Agent · ${new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(0))}`);
+  } finally {
+    format.mockRestore();
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test("running and finished workers share one flat list and a single compact header", () => {
+  const { document, window } = parseHTML('<html><body><details open><summary>1 working · 1 finished</summary><div id="workers"></div></details></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    view.paint("parent", compactWorkers([
+      { type: "background_task", id: "done", taskId: "done", description: "Finished task", status: "completed", createdAt: 1 },
+      { type: "background_task", id: "live", taskId: "live", description: "Running task", status: "running", createdAt: 2 },
+    ]), new Set(), true);
+    expect(host.querySelectorAll("details, summary").length).toBe(0);
+    expect(host.querySelectorAll("ul").length).toBe(1);
+    expect([...host.querySelectorAll("li")].map(row => row.dataset.workerId)).toEqual(["live", "done"]);
+    expect(host.parentElement!.querySelector("summary .chat-workers-dismiss")).not.toBeNull();
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("finished dismissal is view-only and exposes no Restore control", () => {
+  const { document, window } = parseHTML('<html><body><details><summary>Workers</summary><div id="workers"></div></details></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    let choices = 0;
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host, () => choices++);
+    const workers = compactWorkers([{ type: "background_task", id: "done", taskId: "done", description: "Finished task", status: "completed", createdAt: 1 }]);
+    view.paint("parent", workers, new Set(), true);
+    expect(host.querySelector("[data-dismiss-worker]")).toBeNull();
+    const button = host.parentElement!.querySelector<HTMLButtonElement>(".chat-workers-dismiss")!;
+    expect(button.textContent).toBe("Dismiss finished"); button.click();
+    view.paint("parent", [], new Set(), true);
+    expect(button.hidden).toBe(true);
+    expect(host.textContent).not.toContain("Restore finished");
+    expect(choices).toBe(1);
+    expect(workers[0]?.state).toBe("completed");
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("worker body measurement shrinks from narrow to wide intrinsic content despite a stale allocated scroll height", () => {
+  const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
+  const previous = new Map(["document", "Element", "getComputedStyle"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    view.paint("parent", compactWorkers([{ type: "background_task", id: "done", taskId: "done", description: "Finished", status: "completed", createdAt: 1 }]), new Set(), true);
+    const list = host.querySelector("ul")!;
+    let intrinsic = 48;
+    Object.defineProperty(list, "getBoundingClientRect", { value: () => ({ height: intrinsic }) });
+    // The old 78px card floor leaves 48px allocated to the body even after
+    // its only row returns to the approved 28px density at 390px.
+    Object.defineProperty(host, "scrollHeight", { get: () => 48 });
+    Reflect.set(globalThis, "getComputedStyle", (element: HTMLElement) => element.style);
+    expect(view.contentHeight()).toBe(48);
+    intrinsic = 28;
+    expect(view.contentHeight()).toBe(28);
+    // Read one direct content box, including its own borders/row gaps, plus
+    // outer list margins and the scrollport's padding/borders. No row walk.
+    host.style.paddingTop = "2px"; host.style.paddingBottom = "3px";
+    host.style.borderTopWidth = "1px"; host.style.borderBottomWidth = "1px";
+    list.style.marginTop = "4px"; list.style.marginBottom = "5px";
+    intrinsic = 44 + 8 + 44; // Two independently reachable actions and their gap.
+    expect(view.contentHeight()).toBe(112);
+    host.style.cssText = ""; list.style.cssText = "";
+    view.paint("parent", [], new Set(), true); intrinsic = 0;
+    expect(view.contentHeight()).toBe(0);
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test("a worker Stop becoming disabled returns owned keyboard focus to inspection", () => {
+  const { document, window } = parseHTML('<html><body><details open><summary>Workers</summary><div id="workers"></div></details></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document);
+  Reflect.set(globalThis, "Element", window.Element);
+  let focused: Element | null = null;
+  Object.defineProperty(document, "activeElement", { get: () => focused });
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const workers = compactWorkers([{ type: "background_task", id: "execution", taskId: "native", description: "Worker", taskType: "agent", createdAt: 1, status: "running" }]);
+    view.paint("parent", workers, new Set(), true);
+    const inspect = host.querySelector<HTMLButtonElement>(".chat-worker-inspect")!;
+    const stop = host.querySelector<HTMLButtonElement>("[data-stop-task]")!;
+    inspect.focus = () => { focused = inspect; };
+    focused = stop;
+    view.paint("parent", workers, new Set(["native"]), true);
+    expect(stop.disabled).toBe(true);
+    expect(focused).toBe(inspect);
+  } finally {
+    for (const [key, value] of previous) Reflect.set(globalThis, key, value);
+  }
+});
+
+test("keyed worker rows and actions survive arbitrary sibling insertion, removal and reordering", () => {
+  const { document, window } = parseHTML('<html><body><details open><summary>Workers</summary><div id="workers"></div></details></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  let focused: Element | null = null;
+  Object.defineProperty(document, "activeElement", { get: () => focused });
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const worker = (id: string): CompactWorker => ({ id, name: id, taskId: id, stoppable: true, state: "working", kind: "agent", references: [], since: 0, settledAt: 0 });
+    view.paint("parent", [worker("a"), worker("b"), worker("c")], new Set(), true);
+    const row = host.querySelector('[data-worker-id="b"]')!;
+    const inspect = row.querySelector(".chat-worker-inspect")!;
+    const stop = row.querySelector("[data-stop-task]")!;
+    focused = stop;
+    for (const ids of [["c", "b", "a"], ["b", "a", "c"], ["a", "c", "b"], ["d", "b", "a"], ["b"], ["a", "b", "c"]]) {
+      view.paint("parent", ids.map(worker), new Set(), true);
+      expect([...host.querySelectorAll("li")].map(node => node.dataset.workerId)).toEqual(ids);
+      expect(host.querySelector('[data-worker-id="b"]')).toBe(row);
+      expect(row.querySelector(".chat-worker-inspect")).toBe(inspect);
+      expect(row.querySelector("[data-stop-task]")).toBe(stop);
+      expect(stop.hasAttribute("disabled")).toBe(false);
+    }
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});
+
+test.each(["unknown", "stopping", "completed", "removed", "dismiss"] as const)("worker focus fallback uses preventScroll when %s", transition => {
+  const { document, window } = parseHTML('<html><body><details open><summary>Workers</summary><div id="workers"></div></details></body></html>');
+  const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
+  Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
+  let focused: Element | null = null;
+  Object.defineProperty(document, "activeElement", { get: () => focused });
+  try {
+    const host = document.getElementById("workers")! as unknown as HTMLElement;
+    const view = new CompactWorkersView(host);
+    const worker: CompactWorker = { id: "worker", taskId: "native", stoppable: true, name: "Worker", kind: "agent", state: transition === "dismiss" ? "completed" : "working", references: [], since: 0, settledAt: 0 };
+    view.paint("parent", [worker], new Set(), true);
+    const inspect = host.querySelector<HTMLButtonElement>(".chat-worker-inspect")!;
+    const stop = host.querySelector<HTMLButtonElement>("[data-stop-task]");
+    const header = host.parentElement!.querySelector<HTMLElement>("summary")!;
+    const dismiss = header.querySelector<HTMLButtonElement>(".chat-workers-dismiss")!;
+    const fallback = transition === "removed" || transition === "dismiss" ? header : inspect;
+    const focus = spyOn(fallback, "focus").mockImplementation(() => { focused = fallback; });
+    focused = transition === "dismiss" ? dismiss : stop;
+    view.paint("parent", transition === "removed" || transition === "dismiss" ? [] : [{ ...worker, state: transition === "stopping" ? "working" : transition }], transition === "stopping" ? new Set(["native"]) : new Set(), true);
+    expect(focused).toBe(fallback);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    if (transition === "stopping") expect(stop!.disabled).toBe(true);
+    if (transition === "unknown" || transition === "completed" || transition === "removed") expect(stop!.isConnected).toBe(false);
+    if (transition === "dismiss") expect(dismiss.hidden).toBe(true);
+    focus.mockRestore();
+  } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
+});

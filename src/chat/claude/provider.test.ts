@@ -9,11 +9,27 @@ import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
+import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, type ClaudeTextIdentity } from "./normalization-types";
+import { CHAT_VISUAL_MESSAGE } from "../visual-identity";
 import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
 import { contextReadout } from "../context-readout";
+import { CHAT_PRESENTATION_GUIDANCE } from "../presentation-guidance";
+import type { SessionStartHookInput, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
+
+async function presentationContext(query: FakeQuery, source: SessionStartHookInput["source"]): Promise<void> {
+  const options = query.input.options;
+  // Imported sessions may carry a recorded custom prompt and appends unknown
+  // to Uatu. Leave their selection and snapshot policy entirely to the CLI.
+  for (const field of ["systemPrompt", "appendSystemPrompt", "systemPromptSnapshot"]) {
+    expect(options).not.toHaveProperty(field);
+  }
+  const input: SessionStartHookInput = { hook_event_name: "SessionStart", source, session_id: "native-custom-session", transcript_path: "/native/transcript", cwd: "/workspace" };
+  const output: SyncHookJSONOutput = await options.hooks!.SessionStart![0]!.hooks[0]!(input, undefined, { signal: new AbortController().signal });
+  expect(output).toEqual({ continue: true, hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: CHAT_PRESENTATION_GUIDANCE } });
+}
 
 class FakeQuery implements ClaudeQueryHandle {
   readonly emitted: unknown[] = [];
@@ -133,6 +149,32 @@ test("verified Claude history avoids repeated processing and reconciles native f
     await expect(provider.listMessages("reuse-session", { limit: 10 })).rejects.toThrow("unknown Claude conversation");
     expect(queries).toHaveLength(0);
   } finally { globalThis.__uatuChatPerformance = previous; await provider.dispose(); }
+});
+
+test("native turn metadata survives provider history pagination and cached reads", async () => {
+  const { provider, configDir, workspace, queries } = fixture();
+  const file = path.join(claudeProjectDir(workspace, configDir), "turn-pages.jsonl");
+  const rows = [
+    { type: "assistant", message: { id: "old", content: [{ type: "text", text: "![Old](old.png)" }] } },
+    { type: "system", subtype: "turn_duration", durationMs: 1000 },
+    { type: "user", message: { content: "New turn" } },
+    { type: "assistant", message: { id: "current", content: [{ type: "text", text: "![Current](later.png)" }] } },
+    { type: "assistant", message: { id: "write", content: [{ type: "tool_use", id: "write", name: "Write", input: {} }] } },
+  ];
+  writeFileSync(file, rows.map((row, index) => JSON.stringify({ uuid: `row-${index}`, timestamp: `2026-09-01T12:00:0${index}Z`, ...row })).join("\n") + "\n");
+  try {
+    const newest = await provider.listMessages("turn-pages", { limit: 1 });
+    expect(newest.items.map(item => item.id)).toEqual(["tool:write"]);
+    const sameTurn = await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor });
+    expect(sameTurn.items.map(item => item.id)).toEqual(["message:row-3"]);
+    const current = sameTurn.items[0]!;
+    expect((current as typeof current & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    const oldPage = await provider.listMessages("turn-pages", { limit: 10, cursor: sameTurn.nextCursor });
+    const old = oldPage.items.find(item => item.id === "message:row-0")!;
+    expect((old as typeof old & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor })).items).toEqual(sameTurn.items);
+    expect(queries).toHaveLength(0);
+  } finally { await provider.dispose(); }
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {
@@ -541,10 +583,18 @@ describe("streaming and session signals (D10, D11)", () => {
     const started = normalizeClaudeMessage(stream("s1", 0, { type: "message_start", message: { id: "msg_1" } }), memory, "live");
     expect(started.outcome).toBe("ignored");
     const opened = normalizeClaudeMessage(stream("s2", 0, { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }), memory, "live");
-    expect(opened.updates).toEqual([{ kind: "upsert", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "" } }]);
+    const openedUpdate = opened.updates[0];
+    if (openedUpdate?.kind !== "upsert") throw new Error("expected opened text block");
+    const turn = (openedUpdate.item as typeof openedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    expect(turn).toEqual({ completed: false });
+    const textIdentity = { [CLAUDE_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1", [CLAUDE_TURN]: turn };
+    expect(opened.updates).toEqual([{ kind: "upsert", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     const first = normalizeClaudeMessage(stream("s3", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Autumn brings" } }), memory, "live");
     const second = normalizeClaudeMessage(stream("s4", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " a crisp chill." } }), memory, "live");
-    expect(first.updates).toEqual([{ kind: "text", itemId: "message:stream:msg_1:0", identity: "message:stream:msg_1:0", mode: "incremental", text: "Autumn brings", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "" } }]);
+    expect(first.updates).toEqual([{ kind: "text", itemId: "message:stream:msg_1:0", identity: "message:stream:msg_1:0", mode: "incremental", text: "Autumn brings", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
+    const firstUpdate = first.updates[0];
+    if (firstUpdate?.kind !== "text" || !firstUpdate.item) throw new Error("expected text delta identity");
+    expect((firstUpdate.item as typeof firstUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
     expect(second.updates[0]).toEqual(expect.objectContaining({ kind: "text", itemId: "message:stream:msg_1:0", text: " a crisp chill." }));
     // Thinking deltas and a subagent's stream stay out.
     expect(normalizeClaudeMessage(stream("s5", 1, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }), memory, "live").outcome).toBe("ignored");
@@ -553,6 +603,10 @@ describe("streaming and session signals (D10, D11)", () => {
     const completed = normalizeClaudeMessage({ type: "assistant", uuid: "a1", timestamp: at(2), message: { id: "msg_1", role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "Autumn brings a crisp chill." }], usage: { input_tokens: 5, output_tokens: 9 } } }, memory, "live");
     expect(completed.updates[0]).toEqual({ kind: "remove", itemId: "message:stream:msg_1:0" });
     expect(completed.updates[1]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "message:a1", type: "assistant_message", markdown: "Autumn brings a crisp chill." }) });
+    const completedUpdate = completed.updates[1];
+    if (completedUpdate?.kind !== "upsert") throw new Error("expected completed text block");
+    expect((completedUpdate.item as typeof completedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
+    expect(turn.completed).toBe(false); // A text-block stop is not a turn end.
     // A second text block of the same API message consumes the next streamed index.
     normalizeClaudeMessage(stream("s7", 3, { type: "content_block_start", index: 2, content_block: { type: "text", text: "" } }), memory, "live");
     const next = normalizeClaudeMessage({ type: "assistant", uuid: "a2", timestamp: at(4), message: { id: "msg_1", role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "Second." }] } }, memory, "live");
@@ -834,6 +888,22 @@ describe("catalog hydration probe", () => {
 });
 
 describe("ClaudeProvider sessions", () => {
+  test("adds presentation context through SessionStart without changing native prompts, user text, or permissions", async () => {
+    const { provider, queries } = fixture();
+    try {
+      const session = await provider.createSession("visuals");
+      const text = "  Show ![plot](plots/result.svg)\nexactly as requested.  ";
+      await provider.prompt(session.id, { id: "visual-prompt", text, delivery: "queue" });
+      const input = queries[0]!.input;
+      for (const source of ["startup", "resume", "compact", "clear", "fork"] as const) await presentationContext(queries[0]!, source);
+      expect(input.options.canUseTool).toBeFunction();
+      expect(input.options.permissionMode).toBe("auto");
+      const envelope = await input.prompt[Symbol.asyncIterator]().next();
+      expect(envelope.value?.message.content).toEqual([{ type: "text", text }]);
+      expect(input.options).not.toHaveProperty("settings");
+    } finally { await provider.dispose(); }
+  });
+
   test("creation mints a UUID session, announces it, and lists it as pending", async () => {
     const { provider } = fixture();
     const { events, stop } = collect(provider);
@@ -863,6 +933,7 @@ describe("ClaudeProvider sessions", () => {
     await provider.prompt(storedId, { id: "req-2", text: "continue", delivery: "queue" });
     expect(queries).toHaveLength(2);
     expect(queries[1]!.input.options.resume).toBe(storedId);
+    await presentationContext(queries[1]!, "resume");
     expect(queries[1]!.input.options.sessionId).toBeUndefined();
     await provider.dispose();
   });
@@ -2305,6 +2376,10 @@ describe("ClaudeProvider sessions", () => {
       },
     });
     expect(provider.describe().capabilities).toContain("conversation-rename");
+    // Send now, but no steering: the SDK has no inbox to deliver into a
+    // running turn (opencode-v2-steering D2).
+    expect(provider.describe().capabilities).toContain("send-now");
+    expect(provider.describe().capabilities).not.toContain("steering");
     const { events, stop } = collect(provider);
     const session = await provider.createSession("x");
     await provider.prompt(session.id, { id: "r1", text: "Investigate the flaky build on CI", delivery: "queue" });
@@ -4777,7 +4852,8 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     await provider.release(session.id);
     await provider.prompt(session.id, { id: "r2", text: "keep going", delivery: "queue" });
     const resumed = queries[1]!;
-    await promptHook(resumed, { prompt: "keep going", prompt_id: "typed-2" });
+    await presentationContext(resumed, "resume");
+    expect(await promptHook(resumed, { prompt: "keep going", prompt_id: "typed-2" })).toEqual({ continue: true });
     // Another wakeup keeps this session up, so the cancelled cron can fire in it.
     const other = { id: "o1", schedule: "*/10 * * * *", recurring: true, prompt: "OTHER check" };
     await stopHook(resumed, { session_crons: [recurring, other] });
@@ -4792,7 +4868,7 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     resumed.push({ type: "system", subtype: "informational", uuid: "n9", session_id: session.id, content: "UserPromptSubmit operation blocked by hook" });
     resumed.push(result(session.id, "res9"));
     // The next real turn still reads normally: the other wakeup fires.
-    await promptHook(resumed, { prompt: other.prompt, prompt_id: "fired-10" });
+    expect(await promptHook(resumed, { prompt: other.prompt, prompt_id: "fired-10" })).toEqual({ continue: true });
     resumed.push({ type: "system", subtype: "init", uuid: "i10", session_id: session.id, model: "claude-haiku-4-5-20251001" });
     await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
     const after = events.slice(before);

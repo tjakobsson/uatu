@@ -1,0 +1,37 @@
+import { test, expect, childChatControl, openSessionTab } from "./hub-fixtures";
+import { openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
+
+test.skip(process.env.UATU_CAPTURE_CHAT_SCREENSHOTS !== "1", "Opt-in documentation screenshots");
+test.use({ hubChatPolicy: true, hubCredentials: true, hubWorkspaces: ["screenshot-fixture"] });
+test("personal preferences and retained unknown receipt documentation", async ({ hub, hubContext }, info) => {
+  const settings = await hubContext.newPage();
+  await settings.setViewportSize({ width: 1440, height: 1000 });
+  await settings.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await settings.goto(`${hub.origin}/settings`);
+  await expect(settings.getByLabel("Keep workers running when I steer")).toBeEnabled();
+  await expect(settings.locator("body")).not.toContainText("Credentials could not be loaded");
+  await settings.getByText("Learn more", { exact: true }).click();
+  await settings.getByLabel("Keep workers running when I steer").scrollIntoViewIfNeeded();
+  await captureScreenshot(settings, info, "08-personal-preferences-light");
+  await settings.close();
+  const workspace = hub.workspaces[0]!;
+  await childChatControl(workspace, { action: "agents", stack: "opencode-v2", backgroundPreview: true });
+  const page = await openSessionTab(hubContext, workspace);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await openChatPanel(page);
+  await page.getByRole("button", { name: "New conversation", exact: true }).click();
+  await expect(page.locator("#chat-state")).toContainText("Started new conversation with OpenCode");
+  const conversationId = await page.locator("#chat-conversation-select").inputValue();
+  await page.locator("#chat-input").fill("Review the synthetic task list");
+  await page.locator("#chat-send").click();
+  await expect(page.locator("#chat-stop")).toBeEnabled();
+  await childChatControl(workspace, { action: "opencode", op: "launchShell", conversationId, background: false });
+  await childChatControl(workspace, { action: "opencode", op: "losePromptResponse" });
+  await page.locator("#chat-input").fill("Preserve the review checklist");
+  await page.locator("#chat-send").click();
+  await expect(page.locator("#chat-action-feedback")).toContainText("unconfirmed");
+  await captureScreenshot(page, info, "09-unknown-receipt-dark");
+  await page.close();
+});

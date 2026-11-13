@@ -10,7 +10,12 @@ also governs the desktop layout's stacking.
 ## Requirements
 
 ### Requirement: UI mode defaults by pointer type and persists per device
-The client SHALL resolve a UI mode — `touch` or `desktop` — at boot and stamp it on the document root: a per-device stored override wins when present; otherwise coarse-pointer devices (iPhone AND iPad) default to `touch` and fine-pointer devices to `desktop`. Layout SHALL be keyed on the mode, while input affordances gated on pointer coarseness (touch keybar, size steppers, scroll-gesture routing) SHALL remain available in both modes on coarse-pointer devices. Switching modes SHALL take effect live, without a page reload, and SHALL persist per device.
+The client SHALL resolve a UI mode — `touch` or `desktop` — at boot and stamp it on the document root: a per-device stored override wins when present; otherwise coarse-pointer devices (iPhone AND iPad) default to `touch` and fine-pointer devices to `desktop`.
+
+#### Scenario: Live mode switching changes layout without removing coarse-pointer input
+- **WHEN** a client renders or switches UI mode
+- **THEN** layout SHALL be keyed on the mode, while pointer-coarseness-gated affordances (touch keybar, size steppers, scroll-gesture routing) SHALL remain available in both modes on coarse-pointer devices
+- **AND** switching modes SHALL take effect live without a page reload and SHALL persist per device
 
 #### Scenario: iPad defaults to touch mode
 - **WHEN** the app boots on a coarse-pointer tablet with no stored mode override
@@ -25,7 +30,13 @@ The client SHALL resolve a UI mode — `touch` or `desktop` — at boot and stam
 - **THEN** the UI boots straight into the desktop layout
 
 ### Requirement: The Files tab hosts the sidebar stack full-screen
-The `Files` tab's surface SHALL be the existing sidebar pane stack (the visible panes — by default Change Overview and the Files tree) rendered full-screen, with the same tree DOM and state (expansion, selection, filter chip, follow-mode highlighting) as every other presentation of the tree — never a second tree instance. The per-pane visibility menu SHALL keep working inside the tab. On coarse-pointer devices each pane's header SHALL act as the gesture surface for the pane: dragging it resizes the boundary above (the thin desktop resizer strip is not a finger target), and double-tapping it toggles the pane's collapse (the reachable version of the small − / + button) — while taps on the header's controls keep working.
+The `Files` tab's surface SHALL be the existing sidebar pane stack (the visible panes — by default Change Overview and the Files tree) rendered full-screen, with the same tree DOM and state (expansion, selection, filter chip, follow-mode highlighting) as every other presentation of the tree — never a second tree instance.
+
+#### Scenario: Files pane controls remain usable with touch gestures
+- **WHEN** the sidebar stack is used inside Files
+- **THEN** the per-pane visibility menu SHALL keep working
+- **AND** on coarse-pointer devices each pane's header SHALL act as its gesture surface: dragging resizes the boundary above, rather than using the thin desktop resizer strip as a finger target
+- **AND** on coarse-pointer devices double-tapping the header SHALL toggle collapse as a reachable version of the small − / + button, while taps on header controls keep working
 
 #### Scenario: Tree state is continuous across tabs
 - **WHEN** the user expands a directory in the Files tab, switches to Preview, and returns
@@ -42,22 +53,38 @@ The `Files` tab's surface SHALL be the existing sidebar pane stack (the visible 
 - **AND** a single tap changes nothing
 
 ### Requirement: A preview-bound navigation switches to the Preview tab
-When the user navigates to content the preview renders — picking a document (a tree row or a search-pane result, both the follow-mode Rule A path), opening a review score, or opening a commit — the UI SHALL switch to the Preview tab showing that content. Directory expand/collapse taps SHALL NOT switch tabs. Programmatic tree updates (follow-mode Rules C/D, file events) MUST NOT switch tabs.
+When the user explicitly navigates to preview content by selecting a filename in the tree or Recent, selecting a search result, or opening a commit or other preview destination, the UI SHALL switch to Preview. Directory expansion, Files view/query/filter controls, and media audition actions SHALL NOT switch tabs. A media Play action SHALL stay in Files and retain the current preview destination. Programmatic tree/Recent updates and Follow events MUST NOT switch tabs.
 
 #### Scenario: Pick lands on Preview
-- **WHEN** the user taps a document row in the Files tab
-- **THEN** the Preview tab becomes active showing the picked document
+- **WHEN** the user taps a filename in All, Recent, or Changed
+- **THEN** Preview becomes active and shows that file without initiating media playback or interrupting an already active session
 
 #### Scenario: A search result lands on Preview
-- **WHEN** the user taps a search-pane result in the Files tab
-- **THEN** the Preview tab becomes active showing the matched document
+- **WHEN** the user taps a project-search result in Files
+- **THEN** Preview becomes active with the matched document
 
 #### Scenario: File events do not steal the Files tab
-- **WHEN** the Files tab is active and a watched-file event updates the tree
-- **THEN** the Files tab remains active with the tree updated
+- **WHEN** Files is active and a file event updates the tree or Recent
+- **THEN** Files remains active without automatic playback
+
+#### Scenario: Audition stays in Files
+- **WHEN** the user activates a Recent media row's Play action
+- **THEN** Files remains active and the current preview and URL remain unchanged
 
 ### Requirement: A surface-directed shortcut SHALL bring its surface forward
-A keyboard shortcut that acts on a specific surface SHALL make that surface the active tab before it acts, so its affordance is never mounted or focused inside a hidden subtree. `⌘F` targets the preview and SHALL activate the Preview tab; `⇧⌘F` targets the Search pane in the sidebar stack and SHALL activate the Files tab. This is the shortcut counterpart of the existing rule for preview-bound navigations: a shortcut the user pressed is an act of intent, so it may promote a surface, whereas programmatic activity (follow-mode Rules C/D, file events) still MUST NOT. A shortcut that consumes the key and suppresses the host's own handling MUST NOT leave the user with nothing visible to use.
+A keyboard shortcut that acts on a specific surface SHALL make that surface the active tab before it acts, so its affordance is never mounted or focused inside a hidden subtree.
+
+#### Scenario: User shortcuts promote their target but background activity does not
+- **WHEN** a surface-directed shortcut is pressed
+- **THEN** `⌘F` SHALL target the preview and activate Preview, and `⇧⌘F` SHALL target the Search pane in the sidebar stack and activate Files
+
+#### Scenario: Background activity never promotes a surface
+- **WHEN** programmatic activity occurs, including follow-mode Rules C/D or file events, whether or not a user shortcut also occurs
+- **THEN** it MUST NOT promote a surface; a shortcut the user presses is an act of intent, like explicit preview-bound navigation, so it may promote its surface
+
+#### Scenario: Consumed shortcuts leave a visible usable affordance
+- **WHEN** a shortcut consumes the key and suppresses the host's own handling
+- **THEN** it MUST NOT leave the user with nothing visible to use
 
 #### Scenario: Find brings the Preview tab forward
 - **WHEN** the Files tab is active and the user presses `⌘F` on a hardware keyboard
@@ -83,7 +110,19 @@ Selecting the `Terminal` tab SHALL show the terminal full-screen, spawning or re
 - **THEN** the same PTY is attached and the accumulated output is visible
 
 ### Requirement: The sidebar chrome offers the mode switch — never the tab bar
-On coarse-pointer devices the UI SHALL offer a single mode toggle in the sidebar header — rendered inside the Files tab in touch mode, and in the desktop chrome (with a collapsed-sidebar rail variant) in desktop mode — switching between the touch and desktop renderings: desktop mode is the UI exactly as a desktop browser renders it (sidebar, the Preview-and-Chat split work area, docked terminal, no tab bar), and the chosen mode persists per device. The toggle SHALL be available at every viewport width in both modes, so a coarse-pointer device can never be stranded in either mode (escaping in iPad landscape and rotating to portrait must keep the way back reachable). The tab bar SHALL contain only the four surface tabs — no mode control. Switching modes SHALL normalize surface state: the terminal returns to its stored dock and display mode, entering desktop with the Chat tab active opens the chat panel, entering touch lands on the Chat tab only when the user was last working in an open chat panel (otherwise Preview), and no touch-only surface promotion remains.
+On coarse-pointer devices the UI SHALL offer a single mode toggle in the sidebar header, inside Files in touch mode and in desktop chrome with a collapsed-sidebar rail variant in desktop mode. It SHALL switch touch/desktop renderings live, remain reachable at every viewport width, and persist the chosen mode per device. The tab bar SHALL contain only the four surface tabs, never a mode control.
+
+#### Scenario: Coarse-pointer desktop mode remains a complete and escapable desktop layout
+- **WHEN** a coarse-pointer device uses desktop mode, including after iPad landscape-to-portrait rotation
+- **THEN** the UI SHALL render exactly as a desktop browser: sidebar, Preview-and-Chat split work area, docked terminal, and no tab bar
+- **AND** the toggle SHALL remain available at every viewport width in both modes so the device cannot be stranded without a way back
+
+#### Scenario: Mode changes normalize the previously active surfaces
+- **WHEN** the user switches modes
+- **THEN** the terminal SHALL return to its stored dock and display mode
+- **AND** entering desktop with Chat active SHALL open the chat panel
+- **AND** entering touch SHALL land on Chat only when the user was last working in an open chat panel, otherwise Preview
+- **AND** no touch-only surface promotion SHALL remain
 
 #### Scenario: iPad flips to the desktop rendering and back
 - **WHEN** a user on a coarse-pointer viewport activates the mode toggle in the Files tab, works in the desktop layout, and then activates the toggle again
@@ -110,7 +149,12 @@ The active tab SHALL default to `Preview` on first use and SHALL persist per dev
 - **THEN** the app boots into touch mode with the Files tab active
 
 ### Requirement: Touch mode shows a bottom tab bar with four surfaces
-In touch mode the UI SHALL render a bottom tab bar — fixed to the bottom edge, padded by the device's bottom safe-area inset, with `role="tablist"` and `aria-selected` on the active tab — containing exactly four tabs: `Files`, `Preview`, `Chat`, and `Terminal`. Exactly one tab's surface SHALL fill the viewport at a time. The bar SHALL NOT render in desktop mode. The software keyboard MAY cover the bar while an input has focus (the platform convention); the bar reappears when the keyboard dismisses.
+In touch mode the UI SHALL render a bottom tab bar — fixed to the bottom edge, padded by the device's bottom safe-area inset, with `role="tablist"` and `aria-selected` on the active tab — containing exactly four tabs: `Files`, `Preview`, `Chat`, and `Terminal`. Exactly one tab's surface SHALL fill the viewport at a time. The bar SHALL NOT render in desktop mode.
+
+#### Scenario: Software keyboard temporarily covers the navigation bar
+- **WHEN** an input has focus and the software keyboard is visible
+- **THEN** the keyboard MAY cover the bar according to platform convention
+- **AND** the bar SHALL reappear when the keyboard dismisses
 
 #### Scenario: One surface at a time
 - **WHEN** the app renders in touch mode
@@ -122,7 +166,12 @@ In touch mode the UI SHALL render a bottom tab bar — fixed to the bottom edge,
 - **THEN** each tap makes that tab active (`aria-selected`) and its surface fills the viewport
 
 ### Requirement: Desktop mode respects device safe areas
-Desktop mode on a tablet SHALL retain the desktop arrangement while keeping sidebar controls, preview headings and actions, conversation controls, and the mode toggle inside the device's usable safe area. System status-bar treatments and application blur layers SHALL NOT obscure those controls. The layout SHALL account for top, side, and bottom insets after initial load, rotation, resizing, and live UI mode changes. Physical-device insets SHALL NOT be inferred solely from viewport width or primary pointer type, since attaching a keyboard or trackpad does not remove the device's safe areas.
+Desktop mode on a tablet SHALL retain the desktop arrangement while keeping sidebar controls, preview headings and actions, conversation controls, and the mode toggle inside the device's usable safe area. System status-bar treatments and application blur layers SHALL NOT obscure those controls.
+
+#### Scenario: Desktop safe-area geometry tracks device changes and attached input
+- **WHEN** desktop layout is evaluated after initial load, rotation, resizing, or live UI mode changes
+- **THEN** the layout SHALL account for top, side, and bottom insets
+- **AND** physical-device insets SHALL NOT be inferred solely from viewport width or primary pointer type, since attaching a keyboard or trackpad does not remove the device's safe areas
 
 #### Scenario: Installed iPad app enters desktop mode
 - **WHEN** an 11-inch iPad Pro opens the installed Uatu PWA in landscape and switches to desktop mode
@@ -138,7 +187,20 @@ Desktop mode on a tablet SHALL retain the desktop arrangement while keeping side
 - **THEN** the layout does not add an artificial tablet status-bar gap
 
 ### Requirement: Desktop mode follows the visible viewport during text entry
-When a tablet uses desktop mode, the workspace SHALL fit the visible viewport during software-keyboard and hardware-keyboard accessory-bar transitions, including viewport panning. Focusing the chat composer SHALL keep the sidebar, preview, and chat headers visible while keeping the composer and send control above the occluded area. A small accessory-bar occlusion SHALL be handled even when it is smaller than the software-keyboard detection threshold. Chat and preview content SHALL scroll within their appropriate panes rather than requiring the user to scroll the whole workspace to recover its headers. Geometry SHALL recover after blur, keyboard dismissal, rotation, and mode switching without clearing drafts, changing the selected conversation/document, or repeatedly forcing page scroll.
+When a tablet uses desktop mode, the workspace SHALL fit the visible viewport during software-keyboard and hardware-keyboard accessory-bar transitions, including viewport panning.
+
+#### Scenario: Composer focus keeps desktop headers and editing controls visible
+- **WHEN** the chat composer is focused on a tablet in desktop mode, whether or not a keyboard transition is occurring
+- **THEN** sidebar, preview, and chat headers SHALL remain visible while the composer and send control stay above the occluded area
+
+#### Scenario: Tablet desktop content and small occlusions retain their own boundaries
+- **WHEN** a tablet uses desktop mode, with or without composer focus
+- **THEN** small accessory-bar occlusions SHALL be handled even below the software-keyboard detection threshold
+- **AND** Chat and preview content SHALL scroll within their appropriate panes rather than requiring whole-workspace scrolling to recover headers
+
+#### Scenario: Editing geometry recovers without changing content state
+- **WHEN** blur, keyboard dismissal, rotation, or mode switching changes geometry
+- **THEN** geometry SHALL recover without clearing drafts, changing the selected conversation/document, or repeatedly forcing page scroll
 
 #### Scenario: Magic Keyboard accessory bar appears
 - **WHEN** a user with a Magic Keyboard attached to an 11-inch iPad Pro in installed-PWA desktop mode focuses the chat composer and iPadOS shows its input accessory bar
@@ -159,3 +221,23 @@ When a tablet uses desktop mode, the workspace SHALL fit the visible viewport du
 - **WHEN** the user switches between touch and desktop mode during an editing session
 - **THEN** the target layout uses the current viewport and safe areas without stale padding or double-counted insets
 - **AND** the draft and current conversation survive the switch
+
+### Requirement: A persistent player fits above the existing touch tabs
+During audition the compact player SHALL remain operable above the existing Files/Preview/Chat/Terminal tab bar. Its layout SHALL account for device safe areas, rotation, keyboard/viewport changes, and the available height of each surface. It MUST NOT obscure the last reachable file row, Chat composer, or terminal controls. Video SHALL have an expandable presentation. Switching surfaces or UI mode SHALL retain the player session and time without adding a fifth tab or a duplicate player.
+
+#### Scenario: A clip plays while Chat is used
+- **WHEN** the user switches from Files to Chat during playback on a phone
+- **THEN** the compact controls remain reachable and do not cover the composer
+- **AND** the same playback session continues
+
+#### Scenario: The last Recent row is reached
+- **WHEN** the player and bottom tabs are visible and the user scrolls to the end of Recent
+- **THEN** the last file row and its actions can be fully brought above the player
+
+#### Scenario: A device rotates or changes UI mode
+- **WHEN** the device rotates or switches between touch and desktop presentation during playback
+- **THEN** controls fit the usable viewport and the active clip retains its time without duplicate playback
+
+#### Scenario: Terminal remains operable
+- **WHEN** Terminal is shown with an active compact player
+- **THEN** terminal sizing accounts for both the player and existing tabs while retaining the PTY attachment

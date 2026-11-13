@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
+test("worker session metadata validates nullable effort/cost without replacing unknown with zero", () => {
+  const base = { id: "t", type: "tool", createdAt: 1, name: "task", status: "completed" } as const;
+  for (const workerSession of [{ effort: null, costUsd: null }, { model: "Fixture", effort: "medium", costUsd: 0 }]) {
+    expect(parseConversationItem({ ...base, workerSession })).toEqual({ ...base, workerSession });
+  }
+  for (const workerSession of [{ effort: null }, { costUsd: 0 }, { effort: "", costUsd: 0 }, { effort: null, costUsd: -1 }, { effort: null, costUsd: Number.NaN }]) {
+    expect(() => parseConversationItem({ ...base, workerSession })).toThrow();
+  }
+});
+
 import {
   parseAgentUsageReport,
   parseBackgroundTaskOutput,
@@ -16,6 +26,7 @@ import {
   parseUsageReportResponse,
   parseConversationSummary,
   parseInteractionRequest,
+  parseQueuedMessages,
   parseReversibleHistoryResult,
   parseReversibleHistoryState,
 } from "./validation";
@@ -32,6 +43,55 @@ test("tool and command completion timestamps are optional finite non-negative nu
       expect(() => parseConversationItem({ ...item, completedAt })).toThrow("completedAt must be a timestamp");
     }
     expect(() => parseConversationItem({ ...item, inventedAt: 2 })).toThrow();
+  }
+});
+
+test("background terminal report timestamps are optional finite non-negative facts, not completion", () => {
+  const item = { id: "t", type: "background_task", taskId: "t", createdAt: 0, description: "Worker", status: "completed" } as const;
+  expect(parseConversationItem(item)).toEqual(item);
+  for (const terminalReportedAt of [0, 1, 1_789_466_400_000]) {
+    expect(parseConversationItem({ ...item, terminalReportedAt })).toEqual({ ...item, terminalReportedAt });
+  }
+  for (const terminalReportedAt of [null, -1, NaN, Infinity, "2026-09-15T10:00:00Z", true]) {
+    expect(() => parseConversationItem({ ...item, terminalReportedAt })).toThrow("terminalReportedAt must be a timestamp");
+  }
+  expect(() => parseConversationItem({ ...item, completedAt: 1 })).toThrow();
+});
+
+test("background activity and control evidence round trip independently", () => {
+  const item = { id: "task", type: "background_task", taskId: "task", createdAt: 1, description: "Worker", status: "running", stateUncertain: true } as const;
+  expect(parseConversationItem(item)).toEqual(item);
+  for (const kind of ["working", "checking", "session-active", "unavailable", "ended"] as const) {
+    const value = { ...item, activity: { kind, launchRef: "launch-ref:fixture", observedAt: 3, endedAt: 4, generation: 1, executionId: "execution:fixture", executionAliases: ["execution:fixture", "execution:alias"], reason: "Fixture evidence" }, control: { available: false, reason: "Occurrence proof unavailable" } };
+    expect(parseConversationItem(value)).toEqual(value);
+    expect(parseChatEvent({ type: "item.upsert", conversationId: "opencode:parent", generation: "g", sequence: 1, item: value })).toBeDefined();
+  }
+  const request = { ...item, activity: { kind: "needs-answer", request: { kind: "question", id: "request" } } } as const;
+  expect(parseConversationItem(request)).toEqual(request);
+});
+
+test("partial worker launch references are optional bounded continuity data, not execution aliases", () => {
+  const item = { id: "task", type: "background_task", taskId: "task", createdAt: 1, description: "Worker", status: "running",
+    activity: { kind: "working", launchRef: "launch-ref:partial", generation: 1 }, control: { available: false } } as const;
+  expect(parseConversationItem(item)).toEqual(item);
+  expect(parseChatEvent({ type: "item.upsert", conversationId: "opencode:parent", generation: "g", sequence: 1, item })).toBeDefined();
+  for (const launchRef of [null, "", true, "x".repeat(513), "å".repeat(257), "ref invalid", "ref\ninvalid", "ref\u007finvalid"]) {
+    expect(() => parseConversationItem({ ...item, activity: { ...item.activity, launchRef } })).toThrow();
+  }
+});
+
+test("background activity rejects malformed or unbounded evidence", () => {
+  const item = { id: "task", type: "background_task", taskId: "task", createdAt: 1, description: "Worker", status: "running" } as const;
+  for (const activity of [null, { kind: "running" }, { kind: "working", observedAt: -1 }, { kind: "ended", endedAt: Infinity },
+    { kind: "working", generation: 0.5 }, { kind: "working", executionId: "" }, { kind: "unavailable", reason: "x".repeat(513) },
+    { kind: "working", granted: true }, { kind: "working", executionAliases: ["alias"] },
+    { kind: "working", executionId: "id", executionAliases: ["alias"] }, { kind: "working", executionId: "id", executionAliases: ["id", "id"] },
+    { kind: "working", executionId: "id", executionAliases: ["id", ""] }, { kind: "needs-answer" }, { kind: "needs-answer", request: { id: "q", kind: "approval" } },
+    { kind: "needs-answer", request: { id: "", kind: "question" } }, { kind: "working", request: { id: "q", kind: "question" } }]) {
+    expect(() => parseConversationItem({ ...item, activity })).toThrow();
+  }
+  for (const control of [null, { available: "yes" }, { available: true, token: "not-authority" }, { available: false, reason: "x".repeat(513) }]) {
+    expect(() => parseConversationItem({ ...item, control })).toThrow();
   }
 });
 
@@ -80,6 +140,29 @@ const items = [
 ] as const;
 
 describe("chat domain validation", () => {
+  test("only an unconfirmed entry can carry a bounded admission uncertainty identity", () => {
+    const entry = { id: "unknown", text: "Keep text", queuedAt: 1, delivery: "steer", unconfirmed: true, admissionUncertaintyId: "opaque-1" } as const;
+    expect(parseQueuedMessages([entry])).toEqual([entry]);
+    for (const admissionUncertaintyId of ["", null, 1, "x".repeat(513), "bad\nidentity"]) {
+      expect(() => parseQueuedMessages([{ ...entry, admissionUncertaintyId }])).toThrow();
+    }
+    expect(() => parseQueuedMessages([{ ...entry, unconfirmed: undefined }])).toThrow();
+    expect(parseQueuedMessages([{ ...entry, delivery: "queue" }])).toEqual([{ ...entry, delivery: "queue" }]);
+  });
+
+  test("unconfirmed pending admission is an explicit true-only marker", () => {
+    const entry = { id: "held", text: "Keep text", queuedAt: 1, delivery: "queue", paused: true, unconfirmed: true } as const;
+    expect(parseQueuedMessages([entry])).toEqual([entry]);
+    for (const unconfirmed of [false, "true", null]) expect(() => parseQueuedMessages([{ ...entry, unconfirmed }])).toThrow();
+  });
+  test("permission queue positions accept finite nonnegative numbers", () => {
+    const permission = items[6];
+    expect(parseConversationItem({ ...permission, queueOrder: 1.5 })).toBeDefined();
+    for (const queueOrder of [-1, NaN, Infinity, "1", null]) {
+      expect(() => parseConversationItem({ ...permission, queueOrder })).toThrow(/queue order/);
+    }
+  });
+
   test("a permission's future-approval patterns are optional strings", () => {
     const permission = items[6];
     // Present: the agent's own pattern beside the request's resource.
@@ -167,13 +250,27 @@ describe("chat domain validation", () => {
       generation: "generation-1",
       cursor: "generation-1:10",
       items,
-      queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11, requestId: "request-9" }],
+      queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11, requestId: "request-9", delivery: "queue" }],
       reversibleHistory: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:user-1", text: "hello" }] },
       olderCursor: "before:user-1",
     };
     expect(parseConversationSnapshot(snapshot)).toBeDefined();
     // Absent means empty; a producer without a queue concept stays parseable.
     expect(parseConversationSnapshot({ ...snapshot, queued: undefined })).toBeDefined();
+  });
+
+  test("snapshot page frontiers are optional, public and closed", () => {
+    const snapshot = { conversation: summary, configuration: {}, generation: "g", cursor: "cursor", items: [], olderCursor: "opaque" };
+    expect(parseConversationSnapshot(snapshot)).toEqual(snapshot);
+    const historyStart = { id: "part:first-in-source-page", createdAt: 100 };
+    // A subsequently removed page-boundary row need not survive in items.
+    expect(parseConversationSnapshot({ ...snapshot, historyStart }).historyStart).toEqual(historyStart);
+    for (const invalid of [null, {}, { id: "", createdAt: 100 }, { id: "part:x", createdAt: -1 },
+      { id: "part:x", createdAt: Infinity }, { id: "part:x", createdAt: "100" },
+      { ...historyStart, privateSource: "not-a-wire-field" }]) {
+      expect(() => parseConversationSnapshot({ ...snapshot, historyStart: invalid })).toThrow();
+    }
+    expect(() => parseConversationSnapshot({ ...snapshot, unexpected: true })).toThrow();
   });
 
   test("accepts pending and resolved interaction request fixtures", () => {
@@ -200,8 +297,14 @@ describe("chat domain validation", () => {
       { ...base, sequence: 4, type: "conversation.status", status: "completed" },
       { ...base, sequence: 5, type: "conversation.configuration", configuration: { model: { providerId: "anthropic", modelId: "claude" }, variant: "high" } },
       { ...base, sequence: 6, type: "conversation.updated", conversation: summary },
-      { ...base, sequence: 7, type: "conversation.queue", queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11 }], change: { kind: "held", messageId: "held-1" } },
+      { ...base, sequence: 7, type: "conversation.queue", queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11, delivery: "queue" }], change: { kind: "held", messageId: "held-1" } },
       { ...base, sequence: 8, type: "conversation.queue", queued: [], change: { kind: "delivered", messageId: "held-1" } },
+      // Steering (opencode-v2-steering): a steer first, then the kinds a
+      // switch, a pause, and a wake announce.
+      { ...base, sequence: 11, type: "conversation.queue", queued: [{ id: "msg_1", text: "steer this", queuedAt: 12, delivery: "steer" }, { id: "held-2", text: "then this", queuedAt: 13, delivery: "queue", paused: true }], change: { kind: "steered", messageId: "msg_1" } },
+      { ...base, sequence: 12, type: "conversation.queue", queued: [], change: { kind: "switched", messageId: "msg_1" } },
+      { ...base, sequence: 13, type: "conversation.queue", queued: [], change: { kind: "paused", messageId: "msg_1" } },
+      { ...base, sequence: 14, type: "conversation.queue", queued: [], change: { kind: "resumed", messageId: "msg_1" } },
       { ...base, sequence: 9, type: "resync", reason: "retention-gap" },
       { ...base, sequence: 10, type: "resync", reason: "conversation-rewritten" },
     ];
@@ -225,8 +328,14 @@ describe("chat domain validation", () => {
       () => parseConversationItem({ ...items[0], type: "provider_message" }),
       () => parseChatEvent({ generation: "g", sequence: -1, conversationId: "c", type: "item.remove", itemId: "i" }),
       () => parseChatEvent({ generation: "g", sequence: 1.5, conversationId: "c", type: "item.remove", itemId: "i" }),
-      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [{ id: "held-1", text: 5, queuedAt: 1 }], change: { kind: "held", messageId: "held-1" } }),
-      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [], change: { kind: "steered", messageId: "held-1" } }),
+      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [{ id: "held-1", text: 5, queuedAt: 1, delivery: "queue" }], change: { kind: "held", messageId: "held-1" } }),
+      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [], change: { kind: "enqueued", messageId: "held-1" } }),
+      // A queued message names its delivery, one of the two, and `paused` is
+      // either absent or true; unknown keys are still refused.
+      () => parseQueuedMessages([{ id: "held-1", text: "x", queuedAt: 1 }]),
+      () => parseQueuedMessages([{ id: "held-1", text: "x", queuedAt: 1, delivery: "later" }]),
+      () => parseQueuedMessages([{ id: "held-1", text: "x", queuedAt: 1, delivery: "queue", paused: false }]),
+      () => parseQueuedMessages([{ id: "held-1", text: "x", queuedAt: 1, delivery: "queue", model: "gpt" }]),
     ];
     for (const parse of invalid) expect(parse).toThrow();
   });
@@ -366,6 +475,9 @@ describe("chat domain validation", () => {
     expect(() => parseConversationItem({ ...superset, session: { ...superset.session, behaviors: {} } })).toThrow(/unknown context report session field/);
     expect(parseConversationItem({ id: "t", type: "tool", createdAt: 1, name: "Bash", status: "running", elapsedMs: 1200 })).toBeTruthy();
     expect(parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "running" })).toBeTruthy();
+    expect(parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "running", stateUncertain: true })).toHaveProperty("stateUncertain", true);
+    expect(parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "completed", resultId: "notification-1", toolUseIds: ["call-1", "call-2"] })).toHaveProperty("toolUseIds", ["call-1", "call-2"]);
+    expect(() => parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "running", stateUncertain: "true" })).toThrow();
     expect(() => parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "paused" })).toThrow(/background task status/);
   });
 

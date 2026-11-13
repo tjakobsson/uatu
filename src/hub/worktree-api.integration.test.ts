@@ -99,6 +99,7 @@ const backend: SessionBackend = {
   async start(workspace, basePath): Promise<RunningSession> {
     return {
       workspaceId: workspace.id,
+      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath,
       endpoint: { hostname: "127.0.0.1", port: 1 },
       token: null,

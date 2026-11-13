@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { languageForName } from "./languages";
 import type { DocumentKind } from "../shared/types";
+import { mediaKind } from "../shared/media";
 
 const ADDITIONAL_TEXT_EXTENSIONS = new Set([
   ".txt",
@@ -151,6 +152,7 @@ function isKnownBinary(name: string): boolean {
 }
 
 export function classifyFileName(fileName: string): DocumentKind | null {
+  if (mediaKind(fileName)) return "binary";
   if (isMarkdownPath(fileName)) {
     return "markdown";
   }

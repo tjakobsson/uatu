@@ -1,0 +1,39 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "conversation",
+    "key": "opencode:conversation-1",
+    "cursor": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0xIiwicyI6MX0",
+    "event": {
+      "kind": "data",
+      "data": {
+        "generation": "generation-1",
+        "sequence": 1,
+        "conversationId": "opencode:conversation-1",
+        "type": "conversation.queue",
+        "queued": [
+          {
+            "id": "current-native-inbox",
+            "submissionId": "original-held",
+            "text": "Check the fixture",
+            "queuedAt": 1792627200000,
+            "delivery": "steer",
+            "requestId": "client-correlation"
+          },
+          {
+            "id": "unknown-admission",
+            "submissionId": "unknown-admission",
+            "text": "Original may still arrive",
+            "queuedAt": 1792627200001,
+            "delivery": "steer",
+            "unconfirmed": true,
+            "admissionUncertaintyId": "opaque-server-token",
+            "requestId": "unknown-client-correlation"
+          }
+        ],
+        "change": { "kind": "switched", "messageId": "current-native-inbox" }
+      }
+    }
+  }
+}

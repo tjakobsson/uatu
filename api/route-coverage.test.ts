@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { readYaml } from "../scripts/validate-api";
+import { WORKER_DISMISSALS_PATH } from "../src/hub/worker-dismissals-api";
 import {
   CHILD_ACTIVITY_PATH,
   CHILD_NOTIFICATIONS_PATH,
@@ -10,7 +11,7 @@ import {
 } from "../src/shared/live-protocol";
 
 type Operation = { operationId: string; domain: "hub" | "workspace"; method: string; path: string; childPath?: string; runtime: string };
-type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string };
+type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string; methods?: string[] };
 
 const root = new URL("../", import.meta.url);
 
@@ -75,6 +76,24 @@ test("every workspace child route is an explicit internal exclusion", async () =
   }
 });
 
+test("media GET and HEAD are explicit internal exclusions, never public operations", async () => {
+  const [source, inventory, excluded, openapi] = await Promise.all([
+    Bun.file(new URL("src/server/routes.ts", root)).text(),
+    readYaml<{ operations: Operation[] }>("api/operations.yaml"),
+    readYaml<{ exclusions: Exclusion[] }>("api/exclusions.yaml"),
+    readYaml<{ paths: Record<string, unknown> }>("api/openapi.yaml"),
+  ]);
+  expect(source).toContain('p("/api/media")');
+  for (const [id, path] of [["workspace-media", "/s/{workspaceId}/api/media"], ["direct-child-media", "/api/media"]]) {
+    const entry = excluded.exclusions.find(item => item.id === id);
+    expect(entry?.path).toBe(path);
+    expect(entry?.scope).toBe("workspace");
+    expect(entry?.methods).toEqual(["GET", "HEAD"]);
+  }
+  expect(inventory.operations.filter(item => item.path.endsWith("/api/media"))).toEqual([]);
+  expect(Object.keys(openapi.paths).filter(path => path.endsWith("/api/media"))).toEqual([]);
+});
+
 test("Hub dispatch families are public or explicitly excluded", async () => {
   const [source, inventory, excluded] = await Promise.all([
     Bun.file(new URL("src/hub/server.ts", root)).text(),
@@ -98,6 +117,8 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubCreateConfiguredWorkspace", 'pathname === "/api/hub/workspaces/create"'],
     ["hubUpdateWorkspaceDisplayName", "const displayNameUpdate ="],
     ["hubGetWorkspaceDefaults", 'pathname === "/api/hub/settings/workspace-defaults"'],
+    ["hubGetPersonalChatPreferences", 'pathname === "/api/hub/settings/chat-preferences"'],
+    ["hubUpdatePersonalChatPreferences", 'pathname === "/api/hub/settings/chat-preferences"'],
     ["hubUpdateWorkspaceDefaults", 'pathname === "/api/hub/settings/workspace-defaults"'],
     ["hubListDeviceSessions", 'pathname === "/api/hub/sessions"'],
     ["hubCreateCloneJob", 'pathname === "/api/hub/clone-jobs"'],
@@ -143,6 +164,8 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubDeleteCredential", "const action ="],
     ["workspaceGetPersonalState", 'suffix === "/api/personal-state"'],
     ["workspacePatchPersonalState", 'suffix === "/api/personal-state"'],
+    ["hubGetWorkerDismissals", "suffix === WORKER_DISMISSALS_PATH"],
+    ["hubUpdateWorkerDismissal", "suffix === WORKER_DISMISSALS_PATH"],
     ["hubAcknowledgeWorkspaceActivity", 'suffix === "/api/activity-viewed"'],
     // The agent accounts family dispatches on its path prefix to one handler.
     ["hubGetAgentAccounts", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
@@ -172,6 +195,7 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
   // classified by the child-route check.
   expect(source).toContain("const SESSION_PATH = /^\\/s\\/([^/]+)(\\/|$)/;");
   const hubServedWorkspacePaths = [...source.matchAll(/suffix === "([^"]+)"/g)].map(match => `/s/{workspaceId}${match[1]!}`);
+  if (source.includes("suffix === WORKER_DISMISSALS_PATH")) hubServedWorkspacePaths.push(`/s/{workspaceId}${WORKER_DISMISSALS_PATH}`);
   expect(hubServedWorkspacePaths.length).toBeGreaterThan(0);
   expect(hubServedWorkspacePaths.filter(path => !publicPaths.has(path))).toEqual([]);
   expect(hub.filter(item => item.path.startsWith("/s/") && !hubServedWorkspacePaths.includes(item.path)).map(item => item.operationId)).toEqual([]);

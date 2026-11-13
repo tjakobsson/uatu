@@ -24,7 +24,9 @@
 //              the control route after `hello` — the same attach, from the
 //              same cursor.
 //   reconnect  "1" when this stream replaces one the client lost
-//              (diagnostics only — never changes behaviour).
+//              (also retained for lifecycle diagnostics). Opening conversation
+//              attachments reconcile possibly lost same-cursor visual resyncs.
+//              Later control adds do not inherit this stream-level intent.
 //
 // Response frames, in order:
 //   `: open`                          written immediately, so headers and
@@ -56,6 +58,13 @@
 //   cursor) — the resync path: snapshot, then `add` with the snapshot
 //   cursor. Removal is prompt: no envelope for a removed key is written
 //   after the POST answers. Within one request removals apply before adds.
+//   A conversation add may carry boolean `reconnect`: true preserves transport
+//   recovery when the opening URL budget deferred that retained subscription.
+//   It requires a nonempty bounded cursor; omitted/false control adds are fresh,
+//   even on a recovering stream. Opening subscriptions may override the GET's
+//   reconnect default with this same validated per-subscription boolean.
+//   An older Hub may ignore this optional field: deferred visual repair needs
+//   an updated Hub; new-client/old-Hub repair is not guaranteed.
 //
 // --- Topics and cursors ----------------------------------------------------
 //
@@ -119,7 +128,7 @@ export function childConversationEventsPath(conversationId: string): string {
   return `/api/chat/conversations/${encodeURIComponent(conversationId)}/events`;
 }
 // Workspace activity summary stream (task 1.1): opening comment, then
-// `event: activity` with data {working, awaiting} on every change (the first
+// `event: activity` with internal data {working, awaiting, unresolved} on every change (the first
 // one immediately), 15 s keepalives.
 export const CHILD_ACTIVITY_PATH = "/api/activity";
 export const CHILD_NOTIFICATIONS_PATH = "/api/chat/notifications/events";
@@ -130,11 +139,15 @@ export const CHILD_ACTIVITY_EVENT = "activity";
 // stream — learns where the stream begins from it.
 export const CHILD_CONVERSATION_OPEN_EVENT = "open";
 
+// Child-response metadata, never a public event/body field. The native event
+// at this cursor is followed by a separate, same-cursor visual resync.
+export const CHILD_CONVERSATION_REPLAY_RESYNC_HEADER = "x-uatu-chat-replay-resync-cursor";
+
 export function liveSubscriptionsPath(streamId: string): string {
   return `${LIVE_STREAM_PATH}/${encodeURIComponent(streamId)}/subscriptions`;
 }
 
-export const LIVE_TOPICS = ["document", "inventory", "conversation", "activity", "worktrees"] as const;
+export const LIVE_TOPICS = ["document", "inventory", "conversation", "activity", "worktrees", "personal"] as const;
 export type LiveTopic = (typeof LIVE_TOPICS)[number];
 // Topics a client subscribes to per workspace; `activity` is stream-wide and
 // opted into with `activity=1`.
@@ -149,7 +162,7 @@ export const LIVE_MAX_CURSOR_BYTES = 1024;
 export const LIVE_MAX_WORKSPACE_ID_BYTES = 256;
 
 export type LiveSubscriptionKey = { topic: LiveSubscribableTopic; key?: string };
-export type LiveSubscription = LiveSubscriptionKey & { cursor?: string };
+export type LiveSubscription = LiveSubscriptionKey & { cursor?: string; reconnect?: boolean };
 export type LiveSubscriptionChange = { add?: LiveSubscription[]; remove?: LiveSubscriptionKey[] };
 
 // Four facts per workspace. `running` is the hub's own; `working` and
@@ -168,6 +181,9 @@ export const WORKTREE_INVALIDATION: WorktreeInventoryEvent = { type: "worktree.i
 // The topic takes no replay cursor: every attach sends a fresh invalidation,
 // so there is nothing to resume from and nothing a stale cursor could skip.
 export const WORKTREE_TOPIC_CURSOR = "";
+
+// Endpoint-local, authenticated account/workspace routing; never broker data.
+export const PERSONAL_INVALIDATION = { category: "worker-dismissals" } as const;
 
 export type LiveEvent =
   | { kind: "data"; data: unknown }
@@ -203,7 +219,7 @@ export function liveSubscriptionId(subscription: LiveSubscriptionKey): string {
 // same context share one upstream.
 export function documentContextKey(params: URLSearchParams): string {
   const canonical = new URLSearchParams();
-  for (const name of ["compareTarget", "scope", "documentId"]) {
+  for (const name of ["compareTarget", "scope", "documentId", "showIgnored"]) {
     const value = params.get(name);
     if (value !== null) canonical.set(name, value);
   }
@@ -215,19 +231,20 @@ function byteLength(value: string): number {
 }
 
 function isSubscribableTopic(value: unknown): value is LiveSubscribableTopic {
-  return value === "document" || value === "inventory" || value === "conversation" || value === "worktrees";
+  return value === "document" || value === "inventory" || value === "conversation" || value === "worktrees" || value === "personal";
 }
 
 function parseSubscriptionKey(value: unknown): LiveSubscriptionKey | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "subscription must be an object";
   const record = value as Record<string, unknown>;
-  if (!isSubscribableTopic(record.topic)) return "subscription topic must be document, inventory, conversation, or worktrees";
+  if (!isSubscribableTopic(record.topic)) return "subscription topic must be document, inventory, conversation, worktrees, or personal";
   const topic = record.topic;
   if (topic === "conversation" && (typeof record.key !== "string" || record.key === "")) {
     return "conversation subscription needs a key";
   }
   if (topic === "inventory" && record.key !== undefined) return "inventory subscription takes no key";
   if (topic === "worktrees" && record.key !== undefined) return "worktrees subscription takes no key";
+  if (topic === "personal" && (record.key !== undefined || Object.keys(record).some(key => !["topic", "cursor"].includes(key)))) return "personal subscription takes no selectors";
   if (record.key !== undefined) {
     if (typeof record.key !== "string") return "subscription key must be a string";
     if (byteLength(record.key) > LIVE_MAX_KEY_BYTES) return "subscription key is too large";
@@ -238,15 +255,22 @@ function parseSubscriptionKey(value: unknown): LiveSubscriptionKey | string {
 function parseSubscription(value: unknown): LiveSubscription | string {
   const key = parseSubscriptionKey(value);
   if (typeof key === "string") return key;
+  const record = value as Record<string, unknown>;
+  const hasReconnect = "reconnect" in record;
+  const reconnect = record.reconnect;
+  if (hasReconnect && (key.topic !== "conversation" || typeof reconnect !== "boolean")) return "reconnect must be a boolean on a conversation subscription";
   // The worktrees topic has no replay cursor. A presented one is dropped
   // rather than refused, so a client that retained one from an older build
   // still attaches — and still receives the fresh invalidation.
-  if (key.topic === "worktrees") return key;
-  const cursor = (value as Record<string, unknown>).cursor;
-  if (cursor === undefined || cursor === null || cursor === "") return key;
+  if (key.topic === "worktrees" || key.topic === "personal") return key;
+  const cursor = record.cursor;
+  if (cursor === undefined || cursor === null || cursor === "") {
+    if (reconnect === true) return "reconnecting conversation subscription needs a cursor";
+    return hasReconnect ? { ...key, reconnect: false } : key;
+  }
   if (typeof cursor !== "string") return "subscription cursor must be a string";
   if (byteLength(cursor) > LIVE_MAX_CURSOR_BYTES) return "subscription cursor is too large";
-  return { ...key, cursor };
+  return { ...key, cursor, ...(hasReconnect ? { reconnect: reconnect as boolean } : {}) };
 }
 
 function parseList<T>(value: unknown, parse: (entry: unknown) => T | string): T[] | string {
@@ -361,6 +385,16 @@ export function parseLiveEnvelope(raw: string): LiveEnvelope | null {
   if (record.key !== undefined && typeof record.key !== "string") return null;
   const event = record.event as Record<string, unknown> | null;
   if (typeof event !== "object" || event === null) return null;
+  if (record.topic === "personal") {
+    if (record.key !== undefined || record.cursor !== "") return null;
+    if ((event.kind === "unavailable" || event.kind === "ready") && Object.keys(event).length === 1) {
+      return { ws: record.ws, topic: "personal", cursor: "", event: { kind: event.kind } };
+    }
+    if (event.kind !== "data"
+      || typeof event.data !== "object" || event.data === null || Array.isArray(event.data)
+      || Object.keys(event.data).length !== 1 || (event.data as Record<string, unknown>).category !== "worker-dismissals") return null;
+    return { ws: record.ws, topic: "personal", cursor: "", event: { kind: "data", data: PERSONAL_INVALIDATION } };
+  }
   let parsed: LiveEvent;
   switch (event.kind) {
     case "data":

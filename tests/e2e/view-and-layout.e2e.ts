@@ -4,6 +4,8 @@ import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import type { StatePayload } from "../../src/shared/types";
+import type { Page } from "@playwright/test";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -180,16 +182,27 @@ test("A document load the server fails transiently recovers without another clic
   await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
 });
 
-test("A document the server cannot read shows the permission notice once and loads on the next selection", async ({ page }) => {
+const permissionNoticeTitle = "A document the server cannot read shows the permission notice once and loads on the next selection";
+for (const subMillisecondMtime of [false, true]) {
+  test(`${permissionNoticeTitle}${subMillisecondMtime ? " (sub-millisecond mtime)" : ""}`, async ({ page }) => {
+    await checkUnreadableDocument(page, subMillisecondMtime);
+  });
+}
+
+async function checkUnreadableDocument(page: Page, subMillisecondMtime: boolean): Promise<void> {
   test.skip(process.getuid?.() === 0, "chmod cannot deny root a read");
   // Permission denied will not clear on its own, so the server answers a final
   // 403 and the preview must neither retry nor say "Retrying". The denying
-  // chmod runs before the first selection, so a watcher event it may cause
-  // has nothing selected to reload. The restoring chmod runs while the file
+  // chmod changes ctime, but a polling watcher need not report that alone.
+  // Advance mtime too and await that indexed update in the browser before
+  // selection, so setup cannot reload the file while we measure its reads.
+  // The restoring chmod runs while the file
   // is selected, and a watcher that reports a pure mode change (chokidar in
   // fs.watch mode can) may reload it on its own, so the recovery check below
   // does not count reads exactly.
   const filePath = workspacePath("diagram.md");
+  const originalStat = await fs.stat(filePath);
+  const setupMtime = new Date(Math.ceil(originalStat.mtimeMs) + 1_000);
   let reads = 0;
   await page.route("**/api/document?*", route => {
     const id = new URL(route.request().url()).searchParams.get("id") ?? "";
@@ -199,6 +212,28 @@ test("A document the server cannot read shows the permission notice once and loa
 
   await fs.chmod(filePath, 0o000);
   try {
+    // Exercise filesystems that round a requested millisecond down to the
+    // preceding microsecond, as observed in the Linux CI failure trace.
+    const observedMtime = subMillisecondMtime ? setupMtime.getTime() / 1_000 - 0.000001 : setupMtime;
+    await fs.utimes(filePath, originalStat.atime, observedMtime);
+    await expect.poll(async () => {
+      const state: StatePayload = await page.request.get("/api/state").then(response => response.json());
+      const indexedDocument = state.roots.flatMap(root => root.docs).find(doc => doc.id === filePath);
+      // Filesystems can round utimes' millisecond target slightly; as in the
+      // Linux CI failure trace, the stored mtime can keep the preceding
+      // microsecond (for example, 8437.999 instead of 8438), so an exact
+      // comparison would wait forever on that fractional timestamp. The
+      // requested Date is whole-millisecond (Math.ceil + 1000), so comparing
+      // with Math.round at that precision accepts such rounding — a tighter
+      // window than the upstream ±2 ms tolerance, which addressed the same
+      // mismatch — while still rejecting the prior timestamp, which is a
+      // full second older.
+      if (!indexedDocument || Math.round(indexedDocument.mtimeMs) !== setupMtime.getTime()) return false;
+      return page.evaluate(
+        generatedAt => Number(document.body.dataset.stateGeneratedAt ?? 0) >= generatedAt,
+        state.generatedAt,
+      );
+    }, { message: "permission setup's document update applied before selection" }).toBe(true);
     await treeRow(page, "diagram.md").click();
     await expect(page.locator("#preview")).toContainText(
       "Uatu doesn't have permission to read this file. Change its permissions, then select it again.",
@@ -222,7 +257,7 @@ test("A document the server cannot read shows the permission notice once and loa
   await expect(page.locator("#preview-title")).toHaveText("Diagram Fixture");
   await expect(page.locator("#preview")).not.toContainText("permission");
   expect(reads).toBeGreaterThan(readsBeforeReselect);
-});
+}
 
 test("An OK document answer that does not parse is final, not retried", async ({ page }) => {
   let reads = 0;

@@ -64,6 +64,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import { hashPassword, HubSessionStore } from "../../src/hub/auth";
 import type { RunningSession, SessionBackend } from "../../src/hub/backend";
+import { LocalProcessBackend } from "../../src/hub/backend";
 import type { HubConfig } from "../../src/hub/config";
 import {
   EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
@@ -71,6 +72,8 @@ import {
   type CredentialContextResolver,
 } from "../../src/hub/credential-context";
 import { PersonalWorkspaceStateStore } from "../../src/hub/personal-state";
+import { PersonalChatPreferencesStore } from "../../src/hub/personal-chat-preferences";
+import { WorkerDismissalsStore } from "../../src/hub/worker-dismissals";
 import { WorkspaceRegistry, type WorkspaceEntry } from "../../src/hub/registry";
 import { startHubServer } from "../../src/hub/server";
 import { SessionManager } from "../../src/hub/sessions";
@@ -93,6 +96,7 @@ import { AgentAccountService, type AgentAccountsApi } from "../../src/hub/agent-
 import { createAccountChangeNotifier } from "../../src/hub/agent-account-propagation";
 
 export const HUB_E2E_USER = { name: "e2e", password: "e2e-hub-password" };
+const POLICY_OTHER_USER = { name: "other", password: "e2e-other-password" };
 export const HUB_E2E_READY_PREFIX = "uatu-e2e-hub ";
 export const HUB_E2E_RESET_PREFIX = "uatu-e2e-hub-reset ";
 
@@ -109,6 +113,7 @@ export type HubE2EWorkspace = {
 export type HubE2EInfo = {
   origin: string;
   user: { name: string; password: string };
+  otherUser?: { name: string; password: string };
   workspaces: HubE2EWorkspace[];
   // With UATU_E2E_HUB_PUSH: the file each recorded push is appended to, and
   // the notification journal (src/hub/notification-store.ts), whose
@@ -138,6 +143,8 @@ const WORKTREES = process.env.UATU_E2E_HUB_WORKTREES === "1";
 const CREDENTIALS = process.env.UATU_E2E_HUB_CREDENTIALS === "1";
 const PUSH = process.env.UATU_E2E_HUB_PUSH === "1";
 const AGENT_ACCOUNTS = process.env.UATU_E2E_HUB_AGENT_ACCOUNTS === "1";
+const CHAT_POLICY = process.env.UATU_E2E_HUB_CHAT_POLICY === "1";
+const WORKER_DISMISSALS = process.env.UATU_E2E_HUB_WORKER_DISMISSALS === "1";
 const EXIT_ON_STDIN_CLOSE = process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1";
 const PRESENCE_GRACE_MS = Number.parseInt(process.env.UATU_E2E_HUB_PRESENCE_GRACE_MS ?? "1500", 10);
 
@@ -156,8 +163,9 @@ class HarnessBackend implements SessionBackend {
   // out of this worker's block.
   private readonly ports = new Map<string, number>();
   readonly children = new Map<string, ChildProcess>();
+  readonly trustedChildren = new Set<RunningSession>();
 
-  async start(workspace: WorkspaceEntry, basePath: string): Promise<RunningSession> {
+  async start(workspace: WorkspaceEntry, basePath: string, credentials = EMPTY_RESOLVED_CREDENTIAL_CONTEXT): Promise<RunningSession> {
     let port = this.ports.get(workspace.id);
     if (port === undefined) {
       if (this.nextPort >= CHILD_PORT_END) {
@@ -168,6 +176,23 @@ class HarnessBackend implements SessionBackend {
     } else {
       // A restart reuses the port; make sure the predecessor let go of it.
       await waitForPortsFree([port]);
+    }
+    if (CHAT_POLICY && process.env.UATU_E2E_HUB_CHAT_POLICY_TRUST !== "0") {
+      const backend = new LocalProcessBackend({
+        uatuArgv: [process.execPath, `--config=${HARNESS_BUNFIG}`, "run", HARNESS_PATH],
+        env: {
+          ...process.env, UATU_E2E_PORT: String(port), UATU_E2E_WORKSPACE: workspace.path,
+          UATU_E2E_BASE_PATH: basePath, UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
+          ...(WORKTREES ? { UATU_E2E_PRESERVE_WORKSPACE: "1" } : {}),
+        },
+      });
+      const session = await backend.start(workspace, basePath, credentials);
+      if (session.policyTrust !== "ready") { await session.stop(); throw new Error("trusted E2E child did not establish private policy trust"); }
+      this.trustedChildren.add(session);
+      const stop = session.stop;
+      session.stop = async () => { await stop(); this.trustedChildren.delete(session); };
+      void session.exited.then(() => { this.trustedChildren.delete(session); });
+      return session;
     }
     const child = spawn("bun", [`--config=${HARNESS_BUNFIG}`, "run", HARNESS_PATH], {
       cwd: path.resolve(import.meta.dir, "..", ".."),
@@ -214,6 +239,7 @@ class HarnessBackend implements SessionBackend {
     });
     return {
       workspaceId: workspace.id,
+      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath,
       endpoint: { hostname: "127.0.0.1", port },
       token,
@@ -256,13 +282,21 @@ const config: HubConfig = {
   port: HUB_PORT,
   host: "127.0.0.1",
   tls: null,
-  users: [{ name: HUB_E2E_USER.name, passwordHash: await hashPassword(HUB_E2E_USER.password) }],
+  users: [
+    { name: HUB_E2E_USER.name, passwordHash: await hashPassword(HUB_E2E_USER.password) },
+    ...(CHAT_POLICY || WORKER_DISMISSALS ? [{ name: POLICY_OTHER_USER.name, passwordHash: await hashPassword(POLICY_OTHER_USER.password) }] : []),
+  ],
   stateDir: path.join(tempRoot, "state"),
 };
 const registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
 await registry.load();
 const personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "personal-state.json"));
 await personalState.load();
+const personalChatPreferences = new PersonalChatPreferencesStore(path.join(tempRoot, "personal-chat-preferences.json"));
+await personalChatPreferences.load();
+const workerDismissalsPath = path.join(tempRoot, "worker-dismissals.json");
+let workerDismissals = WORKER_DISMISSALS ? new WorkerDismissalsStore(workerDismissalsPath) : undefined;
+await workerDismissals?.load();
 const sessionStore = new HubSessionStore(path.join(tempRoot, "sessions.json"));
 await sessionStore.load();
 const backend = new HarnessBackend();
@@ -417,13 +451,16 @@ const accountsControl = fakeAccounts ? Bun.serve({
   },
 }) : null;
 
-const server = startHubServer({ config, registry, sessions, sessionStore, personalState, notifications,
+const startServer = () => startHubServer({ config, registry, sessions, sessionStore, personalState, personalChatPreferences, notifications,
+  ...(workerDismissals ? { workerDismissals } : {}),
   ...(agentAccounts ? { agentAccounts } : {}),
   ...(PUSH ? { presenceGraceMs: PRESENCE_GRACE_MS } : {}),
   ...(WORKTREES ? { onboarding, worktrees: worktreesService,
     worktreeReconcilerOptions: { minIntervalMs: 100, periodMs: 500 } } : {}),
   ...(credentialApi ? { credentialApi } : {}),
 });
+let server = startServer();
+await server.ready;
 const origin = `http://127.0.0.1:${server.port}`;
 for (const workspace of workspaces) {
   workspace.sessionUrl = `${origin}/s/${encodeURIComponent(workspace.id)}/`;
@@ -433,6 +470,7 @@ if (PUSH) notifications.start();
 const info: HubE2EInfo = {
   origin,
   user: HUB_E2E_USER,
+  ...(CHAT_POLICY || WORKER_DISMISSALS ? { otherUser: POLICY_OTHER_USER } : {}),
   workspaces,
   ...(PUSH ? { pushLog, notificationStore: notificationStorePath } : {}),
   ...(accountsControl ? { agentAccountsControl: `http://127.0.0.1:${accountsControl.port}/` } : {}),
@@ -462,11 +500,30 @@ async function resetForTest(): Promise<void> {
     accountService = newAccountService();
     await previous?.dispose();
   }
+  const chatPreference = personalChatPreferences.get(HUB_E2E_USER.name);
+  await personalChatPreferences.update(HUB_E2E_USER.name, { version: 1, expectedRevision: chatPreference.revision, autoBackgroundOnSteer: true });
+  if (CHAT_POLICY) {
+    const otherPreference = personalChatPreferences.get(POLICY_OTHER_USER.name);
+    await personalChatPreferences.update(POLICY_OTHER_USER.name, { version: 1, expectedRevision: otherPreference.revision, autoBackgroundOnSteer: true });
+  }
   await Promise.all(workspaces.map(async workspace => {
     await sessions.stop(workspace.id);
     await sessions.start(workspace.id);
   }));
   for (const entry of registry.list()) await personalState.removeWorkspace(entry.id);
+  for (const entry of registry.list()) await workerDismissals?.forgetWorkspace(entry.id);
+}
+
+async function restartWorkerDismissals(): Promise<void> {
+  if (!WORKER_DISMISSALS) throw new Error("worker dismissal fixture is not enabled");
+  server.worktreeReconciler?.dispose();
+  server.live.endAll();
+  server.liveBroker.dispose();
+  await server.stop(true);
+  workerDismissals = new WorkerDismissalsStore(workerDismissalsPath);
+  await workerDismissals.load();
+  server = startServer();
+  await server.ready;
 }
 
 let controlBuffer = "";
@@ -478,8 +535,8 @@ process.stdin.on("data", (chunk: string) => {
     const [command, serial] = controlBuffer.slice(0, newline).trim().split(" ");
     controlBuffer = controlBuffer.slice(newline + 1);
     newline = controlBuffer.indexOf("\n");
-    if (command !== "reset") continue;
-    void resetForTest().then(
+    if (command !== "reset" && command !== "restart-worker-dismissals") continue;
+    void (command === "reset" ? resetForTest() : restartWorkerDismissals()).then(
       () => console.log(`${HUB_E2E_RESET_PREFIX}${serial} ok`),
       error => console.log(`${HUB_E2E_RESET_PREFIX}${serial} error ${JSON.stringify(String(error))}`),
     );
@@ -502,6 +559,7 @@ const shutdown = async () => {
   // Children stopped outside the manager (a test's /stop) are gone already;
   // anything still tracked is reaped here.
   await Promise.all([...backend.children.values()].map(child => terminate(child)));
+  await Promise.all([...backend.trustedChildren].map(child => child.stop()));
   server.stop(true);
   await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   process.exit(0);

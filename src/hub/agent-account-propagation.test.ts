@@ -6,6 +6,7 @@ import { createAccountChangeNotifier } from "./agent-account-propagation";
 function running(workspaceId: string, port: number): RunningSession {
   return {
     workspaceId,
+    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
     basePath: `/s/${workspaceId}/`,
     endpoint: { hostname: "127.0.0.1", port },
     token: `tok-${workspaceId}`,

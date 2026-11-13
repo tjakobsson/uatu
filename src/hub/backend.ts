@@ -15,6 +15,9 @@
 
 import type { Subprocess } from "bun";
 import { promises as fs } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { createChildPolicyAuthority, type ChildPolicyRequest, type VerifiedChatPolicy } from "./child-policy";
+import { sendChildPolicyDescriptor } from "./child-policy-bootstrap";
 
 import { buildLocalCredentialEnvironment, type ResolvedCredentialContext } from "./credential-context";
 import type { WorkspaceEntry } from "./registry";
@@ -26,6 +29,8 @@ export type SessionEndpoint = {
 
 export type RunningSession = {
   workspaceId: string;
+  instanceId: string;
+  policyTrust: "ready" | "unavailable";
   basePath: string;
   endpoint: SessionEndpoint;
   // The child's per-session terminal token (null when the child's terminal
@@ -36,6 +41,12 @@ export type RunningSession = {
   exited: Promise<number | null>;
   stop(): Promise<void>;
 };
+
+const policyAuthorities = new WeakMap<RunningSession, ReturnType<typeof createChildPolicyAuthority>>();
+export function signSessionChatPolicy(session: RunningSession, request: ChildPolicyRequest, policy: VerifiedChatPolicy): string | null {
+  try { return session.policyTrust === "ready" ? policyAuthorities.get(session)?.sign(request, policy) ?? null : null; }
+  catch { return null; }
+}
 
 export interface SessionBackend {
   start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession>;
@@ -95,6 +106,7 @@ export class LocalProcessBackend implements SessionBackend {
       workspace.path,
       "--no-open",
       "--exit-on-stdin-close",
+      "--hub-policy-bootstrap",
       "--port",
       "0",
       "--base-path",
@@ -112,14 +124,13 @@ export class LocalProcessBackend implements SessionBackend {
       uatuArgv: this.uatuArgv,
       sourceEnv: this.env,
     });
+    const authority = createChildPolicyAuthority(workspace.id, basePath);
     let child: Subprocess<"pipe", "pipe", "pipe">;
     try {
       child = this.spawn(argv, {
         // stdin stays a pipe we hold open — closing it (including by hub
         // death) is the child's signal to exit.
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
+        stdio: ["pipe", "pipe", "pipe", "socket-fd"],
         // Explicit rather than implicit: Bun's default inherit snapshots the
         // environment at process start and does not see later mutations. The hub
         // builds this argv itself, so environment is the only channel an operator
@@ -127,8 +138,17 @@ export class LocalProcessBackend implements SessionBackend {
         env: projected.env,
       });
     } catch (error) {
+      authority.dispose();
       await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       throw error;
+    }
+
+    // Extra-descriptor ownership transfers to us. Always close the parent
+    // endpoint, including bootstrap failure; stdin remains the lifetime pipe.
+    const descriptor = child.stdio?.[3];
+    let bootstrapped = false;
+    if (typeof descriptor === "number") {
+      bootstrapped = await sendChildPolicyDescriptor(descriptor, () => authority.bootstrap());
     }
 
     const stderrTail = collectTail(child.stderr);
@@ -138,6 +158,7 @@ export class LocalProcessBackend implements SessionBackend {
       const line = await readFirstUrlLine(child.stdout, this.startupInactivityMs, child);
       url = new URL(line);
     } catch (error) {
+      authority.dispose();
       await terminate(child, this.terminationGraceMs);
       await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       const tail = stderrTail.snapshot();
@@ -149,17 +170,41 @@ export class LocalProcessBackend implements SessionBackend {
 
     const session: RunningSession = {
       workspaceId: workspace.id,
+      instanceId: authority.instanceId,
+      policyTrust: "unavailable",
       basePath,
       endpoint: { hostname: url.hostname, port: Number.parseInt(url.port, 10) },
       token: url.searchParams.get("t"),
       exited: child.exited.then(code => code ?? null).catch(() => null),
       stop: async () => {
+        withdraw();
         await terminate(child, this.terminationGraceMs);
         await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       },
     };
+    const withdraw = () => {
+      session.policyTrust = "unavailable";
+      policyAuthorities.delete(session);
+      authority.dispose();
+    };
+    if (bootstrapped) {
+      const challenge = randomBytes(32).toString("base64url");
+      try {
+        const response = await fetch(new URL(`${basePath}api/internal/hub-policy-proof`, url), {
+          method: "POST", headers: { "content-type": "application/json", origin: url.origin },
+          body: JSON.stringify({ challenge }), signal: AbortSignal.timeout(2000),
+        });
+        const proof = response.ok ? await response.json() as { proof?: unknown } : null;
+        if (typeof proof?.proof === "string" && authority.verifyProof(challenge, proof.proof)) {
+          policyAuthorities.set(session, authority);
+          session.policyTrust = "ready";
+        }
+      } catch { /* Missing/old/invalid child trust never falls back to token. */ }
+    }
+    if (session.policyTrust !== "ready") authority.dispose();
     void session.exited
       .then(async () => {
+        withdraw();
         await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       })
       .catch(() => undefined);

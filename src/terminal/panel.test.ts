@@ -40,6 +40,7 @@ function memoryStorage(): Storage {
 
 const GLOBALS = ["document", "window", "Node", "Element", "HTMLElement", "HTMLButtonElement", "Event", "customElements"] as const;
 const frames: FrameRequestCallback[] = [];
+const visualViewport = Object.assign(new EventTarget(), { height: 1000, offsetTop: 0 });
 const WINDOW_STUBS = {
   requestAnimationFrame: (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; },
   cancelAnimationFrame: () => {},
@@ -49,6 +50,7 @@ const WINDOW_STUBS = {
   sessionStorage: memoryStorage(),
   innerWidth: 800,
   innerHeight: 1000,
+  visualViewport,
 };
 const savedGlobals = new Map<string, PropertyDescriptor | undefined>();
 let savedFetch: typeof fetch;
@@ -63,7 +65,7 @@ const savedSurface = appState.activeSurface;
 // The session create the panel POSTs; the test decides when it answers,
 // which is when the pane attaches.
 let pendingCreate: Deferred<Response> | null = null;
-const mounted: { host: HTMLElement; focusCalls: number }[] = [];
+const mounted: { host: HTMLElement; focusCalls: number; fitCalls: number; attachCalls: number }[] = [];
 
 async function flush(): Promise<void> {
   for (let round = 0; round < 10; round += 1) {
@@ -73,20 +75,20 @@ async function flush(): Promise<void> {
 }
 
 function fakeMount(options: { container: HTMLElement }): TerminalPanelHandle {
-  const record = { host: options.container, focusCalls: 0 };
+  const record = { host: options.container, focusCalls: 0, fitCalls: 0, attachCalls: 0 };
   mounted.push(record);
   const input = options.container.ownerDocument.createElement("textarea");
   input.className = "xterm-helper-textarea";
   options.container.append(input);
   let attached = false;
   const handle = {
-    attach() { attached = true; },
+    attach() { attached = true; record.attachCalls++; },
     detach() { attached = false; },
     terminate() { attached = false; return true; },
     release() {},
     resume() {},
     state: () => (attached ? "attached" : "idle"),
-    fit() {},
+    fit() { record.fitCalls++; },
     focus() {
       record.focusCalls += 1;
       input.focus();
@@ -110,7 +112,7 @@ beforeAll(async () => {
   for (const name of [...GLOBALS, ...Object.keys(WINDOW_STUBS)]) {
     savedGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
   }
-  for (const [name, stub] of Object.entries(WINDOW_STUBS)) Reflect.set(window, name, stub);
+  for (const [name, stub] of Object.entries(WINDOW_STUBS)) Object.defineProperty(window, name, { configurable: true, writable: true, value: stub });
   for (const name of GLOBALS) Reflect.set(globalThis, name, name === "window" ? window : Reflect.get(window, name));
 
   // linkedom tracks no focus: give it an activeElement that focus() moves.
@@ -212,5 +214,25 @@ describe("touch tab bar keyboard focus with the terminal panel", () => {
     expect(terminalTab.getAttribute("aria-selected")).toBe("true");
     expect(mounted[0]!.focusCalls).toBeGreaterThan(0);
     expect(mounted[0]!.host.contains(document.activeElement)).toBe(true);
+  });
+  test("measured player changes refit the existing pane above the keyboard without reattachment", async () => {
+    const root = document.documentElement;
+    const panel = document.getElementById("terminal-panel")!;
+    Object.defineProperty(document.getElementById("touch-tab-bar"), "offsetHeight", { configurable: true, value: 56 });
+    const attached = mounted[0]!.attachCalls;
+    const fits = mounted[0]!.fitCalls;
+    root.style.setProperty("--media-dock-height", "120px");
+    document.dispatchEvent(new Event("uatu:media-layout"));
+    await flush();
+    expect(panel.style.getPropertyValue("--terminal-visual-height")).toBe("824px");
+    visualViewport.height = 500; visualViewport.offsetTop = 40;
+    document.dispatchEvent(new Event("uatu:media-layout"));
+    await flush();
+    expect(panel.style.getPropertyValue("--terminal-visual-height")).toBe("380px");
+    expect(panel.style.getPropertyValue("--terminal-visual-top")).toBe("40px");
+    expect(mounted).toHaveLength(1);
+    expect(mounted[0]!.attachCalls).toBe(attached);
+    expect(mounted[0]!.fitCalls).toBeGreaterThan(fits);
+    root.style.removeProperty("--media-dock-height");
   });
 });

@@ -66,11 +66,15 @@ import {
   type LiveTopic,
   type WorkspaceActivity,
   CHILD_CONVERSATION_OPEN_EVENT,
+  CHILD_CONVERSATION_REPLAY_RESYNC_HEADER,
+  LIVE_MAX_CURSOR_BYTES,
 } from "../shared/live-protocol";
 import { SseFrameParser, type SseFrame } from "./live-sse";
 import { statusCategoryOf, type ProxyStatusCategory } from "./proxy";
 import { DocumentStateIndex, type DocumentUpdate } from "../shared/document-updates";
 import { PRESENCE_GRACE_MS, type Presence, type PresenceSource } from "./presence";
+
+const CATCH_UP_TRAILER_TIMEOUT_MS = 10_000;
 
 // Where upstream bytes come from. The hub implements it over the session
 // manager and the brokered child token; unit tests and the e2e harness
@@ -105,7 +109,14 @@ export type LiveAttachment = {
   detach(): void;
 };
 
+// Endpoint-validated transport intent for this attachment, separate from the
+// shared upstream's lifecycle and any other subscriber's recovery state.
+export type LiveAttachmentOptions = { reconnect?: boolean };
+
 export type LiveBrokerOptions = {
+  // Internal test seam for the trailer-only watchdog, not user configuration.
+  catchUpTrailerClock?: { setTimer(run: () => void, ms: number): unknown; clearTimer(timer: unknown): void };
+  observeConversation?(workspaceId: string, conversationId: string, data: unknown): void;
   lingerMs?: number;
   replayBufferBytes?: number;
   retryMinMs?: number;
@@ -252,16 +263,23 @@ function recordUpstreamFailure(record: LiveUpstreamDiagnostic): void {
 
 export const LIVE_LINGER_MS = 3_000;
 export const LIVE_REPLAY_BUFFER_BYTES = 256 * 1024;
+// A child read can contain a whole normalization/replay burst. Let outbound
+// response pulls and socket I/O drain between batches instead of filling a
+// reading client's bounded queue in one synchronous turn.
+const LIVE_DELIVERY_BATCH_BYTES = 64 * 1024;
 const RETRY_MIN_MS = 1_000;
 const RETRY_MAX_MS = 15_000;
 const INVENTORY_OPEN_GRACE_MS = 250;
 
 type UpstreamState = "idle" | "opening" | "live" | "failed" | "unsupported" | "closed";
 
+// Personal state never enters shared workspace/topic maps, replay or metrics.
+type BrokerTopic = Exclude<LiveTopic, "personal">;
 type Subscriber = {
+  reconnect: boolean;
   sink: LiveSink;
   workspaceId: string;
-  topic: LiveTopic;
+  topic: BrokerTopic;
   key: string | undefined;
   // The last cursor this subscriber applied: presented on attach, advanced
   // on every `data` written to it.
@@ -275,6 +293,7 @@ type Subscriber = {
   // — the subscriber already holds them from its snapshot or catch-up.
   skip: ReplayCursor | null;
   catchUp: AbortController | null;
+  catchUpTrailer?: { generation: string; recover(): void };
   notifiedUnavailable: boolean;
   detached: boolean;
 };
@@ -292,6 +311,10 @@ class Upstream {
   head = "";
   // Conversation: the cursor the current fetch was opened from.
   originCursor: string | undefined;
+  // Response-owned evidence for an initial/replayed visual trailer, including
+  // an equal-cursor reconnect with no preceding chat frame on this fetch.
+  visualResyncCursor: string | undefined;
+  conversationTrailerOwner: Map<string, string> | undefined;
   buffer: BufferedEvent[] = [];
   bufferBytes = 0;
   // Document / activity snapshots and the latest inventory tick payload.
@@ -319,19 +342,19 @@ class Upstream {
   constructor(
     readonly id: string,
     readonly workspaceId: string,
-    readonly topic: LiveTopic,
+    readonly topic: BrokerTopic,
     readonly key: string | undefined,
   ) {}
 }
 
-function upstreamId(workspaceId: string, topic: LiveTopic, key: string | undefined): string {
+function upstreamId(workspaceId: string, topic: BrokerTopic, key: string | undefined): string {
   return `${workspaceId}\n${topic}\n${key ?? ""}`;
 }
 
 // The upstream metrics describe subscriptions to a CHILD. `worktrees` has
 // none, so it is deliberately absent from the counters rather than reported
 // as an upstream that never opens.
-function childUpstreamTopic(topic: LiveTopic): UpstreamTopic | null {
+function childUpstreamTopic(topic: BrokerTopic): UpstreamTopic | null {
   return topic === "worktrees" ? null : topic;
 }
 
@@ -367,17 +390,27 @@ class ActivityFeed {
 
 export class LiveBroker implements PresenceSource {
   private readonly upstreams = new Map<string, Upstream>();
+  // One bounded cursor per full conversation key that emitted a cursor-
+  // preserving child rewrite in this workspace's current child lifetime.
+  // This is key-owned recovery state, not an event log/replay cache: replacing
+  // a trailer replaces its cursor. It survives upstream release and linger,
+  // but session stop, registry removal and broker disposal retire its owner.
+  // An LRU/TTL would falsely certify an equal-cursor resume after eviction.
+  private readonly conversationTrailers = new Map<string, Map<string, string>>();
   private readonly feeds = new Map<string, ActivityFeed>();
   // The `finished` fact's ingredients, held at the broker rather than in a
   // feed: a user's feed is discarded when their last page closes, and
   // "switched away and came back later" is exactly the case the fact is
   // for. `observed` is the last value the workspace's activity upstream
-  // delivered; `finishedAt` is stamped when that value goes from working to
+  // delivered, with completion eligibility retained through unresolved-only
+  // intervals; `finishedAt` is stamped when observed work becomes genuinely
   // quiet; `viewedAt` is stamped per user by acknowledgeViewed. Stamps come
   // from one broker counter, so a finish after the last view outranks it
   // without clocks; a restart resumes the counter above the highest stamp
   // read back, which is what keeps that comparison meaningful across one.
-  private readonly observed = new Map<string, WorkspaceActivity>();
+  // Internal child evidence and a transient completion epoch share the
+  // existing workspace observation lifetime; neither is a public wire field.
+  private readonly observed = new Map<string, WorkspaceActivity & { unresolved?: boolean; completionPending?: boolean }>();
   private readonly finishedAt = new Map<string, number>();
   private readonly viewedAt = new Map<string, Map<string, number>>();
   private stamp = 0;
@@ -415,7 +448,7 @@ export class LiveBroker implements PresenceSource {
   private readonly presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly presenceListeners = new Set<(user: string) => void>();
 
-  constructor(private readonly source: LiveUpstreamSource, options: LiveBrokerOptions = {}) {
+  constructor(private readonly source: LiveUpstreamSource, private readonly options: LiveBrokerOptions = {}) {
     this.lingerMs = options.lingerMs ?? LIVE_LINGER_MS;
     this.replayBufferBytes = options.replayBufferBytes ?? LIVE_REPLAY_BUFFER_BYTES;
     this.retryMinMs = options.retryMinMs ?? RETRY_MIN_MS;
@@ -484,13 +517,19 @@ export class LiveBroker implements PresenceSource {
 
   // Attaches a client sink to one workspace topic. The subscription's
   // cursor is where the sink resumes from (absent: the current position).
-  subscribe(sink: LiveSink, workspaceId: string, subscription: LiveSubscription): LiveAttachment {
+  subscribe(sink: LiveSink, workspaceId: string, subscription: LiveSubscription, options: LiveAttachmentOptions = {}): LiveAttachment {
+    if (subscription.topic === "personal") throw new Error("personal topics belong to the authenticated endpoint");
     if (this.disposed) throw new Error("live broker is disposed");
-    return this.attachSink(sink, workspaceId, subscription.topic, subscription.key, subscription.cursor);
+    return this.attachSink(sink, workspaceId, subscription.topic, subscription.key, subscription.cursor, options.reconnect === true);
   }
 
-  private attachSink(sink: LiveSink, workspaceId: string, topic: LiveTopic, key: string | undefined, cursor: string | undefined): LiveAttachment {
+  observeWorkerConversations(observer: LiveBrokerOptions["observeConversation"]): void {
+    this.options.observeConversation = observer;
+  }
+
+  private attachSink(sink: LiveSink, workspaceId: string, topic: BrokerTopic, key: string | undefined, cursor: string | undefined, reconnect = false): LiveAttachment {
     const subscriber: Subscriber = {
+      reconnect,
       sink,
       workspaceId,
       topic,
@@ -611,6 +650,7 @@ export class LiveBroker implements PresenceSource {
   // either happens, inheriting the old workspace's finish.
   forgetWorkspace(workspaceId: string): void {
     if (this.disposed) return;
+    this.forgetConversationTrailers(workspaceId);
     this.unwatchActivity(workspaceId);
     this.forgetMarks(workspaceId);
     for (const feed of this.feeds.values()) feed.last.delete(workspaceId);
@@ -666,6 +706,8 @@ export class LiveBroker implements PresenceSource {
     // alone: the hub is going down, not the workspaces.
     for (const workspaceId of [...this.activityWatches.keys()]) this.unwatchActivity(workspaceId);
     for (const upstream of [...this.upstreams.values()]) this.drop(upstream, false);
+    for (const owner of this.conversationTrailers.values()) owner.clear();
+    this.conversationTrailers.clear();
     this.feeds.clear();
     for (const timer of this.presenceTimers.values()) clearTimeout(timer);
     this.presenceTimers.clear();
@@ -675,7 +717,7 @@ export class LiveBroker implements PresenceSource {
   // ---------------------------------------------------------------------
   // Subscriptions
 
-  private attachSubscriber(subscriber: Subscriber, topic: LiveTopic, key: string | undefined): void {
+  private attachSubscriber(subscriber: Subscriber, topic: BrokerTopic, key: string | undefined): void {
     const id = upstreamId(subscriber.workspaceId, topic, key);
     let upstream = this.upstreams.get(id);
     if (!upstream) {
@@ -823,8 +865,54 @@ export class LiveBroker implements PresenceSource {
     }
   }
 
+  private forgetConversationTrailers(workspaceId: string): void {
+    this.conversationTrailers.get(workspaceId)?.clear();
+    this.conversationTrailers.delete(workspaceId);
+  }
+
+  private rememberConversationTrailer(upstream: Upstream, frame: SseFrame, data: unknown, boundary: string | undefined): void {
+    const owner = upstream.conversationTrailerOwner;
+    if (this.disposed || !owner || this.conversationTrailers.get(upstream.workspaceId) !== owner
+      || this.upstreams.get(upstream.id) !== upstream || upstream.state === "closed"
+      || !frame.id || frame.id !== boundary || Buffer.byteLength(frame.id) > LIVE_MAX_CURSOR_BYTES) return;
+    const at = decodeReplayCursor(frame.id);
+    const event = data as { type?: unknown; reason?: unknown; generation?: unknown; sequence?: unknown; conversationId?: unknown } | null;
+    if (!at || !event || typeof upstream.key !== "string" || event.type !== "resync" || event.reason !== "conversation-rewritten"
+      || event.generation !== at.generation || event.sequence !== at.sequence || event.conversationId !== upstream.key) return;
+    // Only a validated child cursor-preserving rewrite: an actual chat frame
+    // at this cursor, or the child's private visual-trailer response hint.
+    // Retention/generation failures, malformed frames and Hub-generated replay
+    // failure/watchdog resyncs never establish this fact. Native cursor-
+    // preserving overflow rewrites need the same missed-signal repair too.
+    const previous = owner.get(upstream.id);
+    const known = previous ? decodeReplayCursor(previous) : null;
+    if (known && known.generation === at.generation && known.sequence > at.sequence) return;
+    owner.set(upstream.id, frame.id);
+  }
+
   private attachConversation(upstream: Upstream, subscriber: Subscriber): void {
     subscriber.skip = null;
+    if (subscriber.reconnect && subscriber.cursor !== undefined) {
+      const requested = decodeReplayCursor(subscriber.cursor);
+      const head = upstream.head || upstream.originCursor;
+      const at = head ? decodeReplayCursor(head) : null;
+      if (requested && at && requested.generation === at.generation && requested.sequence < at.sequence) {
+        // Preserve missed native status/error payloads before visual recovery.
+        // This explicit recovery rides the existing bounded private replay.
+        this.catchUp(upstream, subscriber);
+        return;
+      }
+      subscriber.reconnect = false;
+      if (subscriber.cursor === head && this.conversationTrailers.get(upstream.workspaceId)?.get(upstream.id) === subscriber.cursor) {
+        // This browser may have acknowledged the native event but lost the
+        // observed same-cursor trailer. A replacement healthy shared stream
+        // cannot replay it. No trailer evidence means ordinary at-head ready,
+        // not a full history read on every foreground/network reconnect.
+        subscriber.sink.write(this.envelope(subscriber, { kind: "resync" }, subscriber.cursor));
+        this.detach(subscriber);
+        return;
+      }
+    }
     if (subscriber.cursor === undefined || subscriber.cursor === upstream.head) {
       subscriber.live = true;
       this.emitSignal(subscriber, { kind: "ready" }, upstream);
@@ -890,6 +978,8 @@ export class LiveBroker implements PresenceSource {
   // shared upstream holds (or is about to), then merged. The child's resync
   // for an unreplayable cursor is forwarded as the topic-scoped `resync`.
   private catchUp(upstream: Upstream, subscriber: Subscriber): void {
+    const reconnect = subscriber.reconnect;
+    subscriber.reconnect = false;
     subscriber.live = false;
     subscriber.catchUp?.abort();
     subscriber.catchUp = null;
@@ -906,9 +996,31 @@ export class LiveBroker implements PresenceSource {
     upstream.catchUpOwner = subscriber;
     const controller = new AbortController();
     subscriber.catchUp = controller;
-    const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}`;
+    const requested = subscriber.cursor ? decodeReplayCursor(subscriber.cursor) : null;
+    const originCursor = upstream.head || upstream.originCursor;
+    const origin = originCursor ? decodeReplayCursor(originCursor) : null;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let trailerTimer: unknown;
+    let timerArmed = false;
+    const clock = this.options.catchUpTrailerClock ?? {
+      setTimer(run: () => void, ms: number) { const timer = setTimeout(run, ms); timer.unref?.(); return timer; },
+      clearTimer(timer: unknown) { clearTimeout(timer as ReturnType<typeof setTimeout>); },
+    };
+    const clearTrailerTimer = () => {
+      if (!timerArmed) return;
+      timerArmed = false;
+      clock.clearTimer(trailerTimer);
+    };
+    controller.signal.addEventListener("abort", () => {
+      clearTrailerTimer();
+      if (subscriber.catchUp === controller) { subscriber.catchUp = null; subscriber.catchUpTrailer = undefined; }
+      if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
+      void reader?.cancel().catch(() => undefined);
+    }, { once: true });
+    const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}${reconnect ? "&reconnect=1" : ""}`;
     const release = () => {
-      subscriber.catchUp = null;
+      clearTrailerTimer();
+      if (subscriber.catchUp === controller) { subscriber.catchUp = null; subscriber.catchUpTrailer = undefined; }
       if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
       controller.abort();
     };
@@ -947,25 +1059,78 @@ export class LiveBroker implements PresenceSource {
         finishWithoutMerging();
         return;
       }
+      if (controller.signal.aborted || subscriber.detached) {
+        await response.body.cancel().catch(() => undefined);
+        return;
+      }
+      const hintedCursor = response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER);
+      const hint = hintedCursor && Buffer.byteLength(hintedCursor) <= LIVE_MAX_CURSOR_BYTES ? decodeReplayCursor(hintedCursor) : null;
+      // A hint is authority only within this requested replay and shared
+      // origin. Stale/foreign hints retain the ordinary, nonvisual merge path.
+      const owed = hint && requested && origin && hint.generation === requested.generation && hint.generation === origin.generation
+        && requested.sequence < hint.sequence && origin.sequence <= hint.sequence ? hint : null;
+      let awaitingTrailer = false;
+      let lastChatCursor: string | undefined;
+      if (owed) subscriber.catchUpTrailer = { generation: owed.generation, recover: finishWithoutMerging };
       const parser = new SseFrameParser();
-      const reader = response.body.getReader();
+      const streamReader = response.body.getReader();
+      reader = streamReader;
+      let batchBytes = 0;
       try {
         for (;;) {
-          const next = await reader.read();
+          const next = await streamReader.read();
           if (next.done) break;
           for (const frame of parser.push(next.value)) {
-            if ("comment" in frame) continue;
             if (controller.signal.aborted || subscriber.detached) return;
+            if ("comment" in frame) {
+              // Once the boundary was delivered, any non-trailer frame is a
+              // broken promise, not evidence that visual reconciliation ran.
+              if (awaitingTrailer) { finishWithoutMerging(); return; }
+              continue;
+            }
+            const data = parseJson(frame.data);
             if (frame.event === "resync") {
-              finishWithResync(parseJson(frame.data));
+              if (owed) {
+                const event = data as { type?: unknown; generation?: unknown; sequence?: unknown; conversationId?: unknown } | undefined;
+                if (frame.id !== hintedCursor || event?.type !== "resync" || event.generation !== owed.generation
+                  || event.sequence !== owed.sequence || event.conversationId !== upstream.key) {
+                  finishWithoutMerging(); return;
+                }
+              }
+              this.rememberConversationTrailer(upstream, frame, data, owed ? hintedCursor ?? undefined : lastChatCursor);
+              finishWithResync(data);
               return;
             }
+            if (awaitingTrailer) { finishWithoutMerging(); return; }
+            if (owed && frame.event === CHILD_CONVERSATION_OPEN_EVENT && (data as { cursor?: unknown } | undefined)?.cursor !== hintedCursor) {
+              finishWithoutMerging(); return;
+            }
             if (frame.event !== "chat" || frame.id === undefined) continue;
-            this.emitData(subscriber, parseJson(frame.data), frame.id);
-            if (this.mergeCatchUp(upstream, subscriber, frame.id)) {
+            const at = owed ? decodeReplayCursor(frame.id) : null;
+            if (owed && (!at || at.generation !== owed.generation || at.sequence > owed.sequence)) { finishWithoutMerging(); return; }
+            this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
+            this.emitData(subscriber, data, frame.id);
+            lastChatCursor = frame.id;
+            if (controller.signal.aborted || subscriber.detached) return;
+            if (owed && at?.sequence === owed.sequence) {
+              awaitingTrailer = true;
+            }
+            if (owed && at && !timerArmed && at.sequence >= origin!.sequence) {
+              // A deadline is failure recovery only. It never certifies a
+              // replay, and never covers initial network/capture/replay work.
+              timerArmed = true;
+              trailerTimer = clock.setTimer(() => { timerArmed = false; finishWithoutMerging(); }, CATCH_UP_TRAILER_TIMEOUT_MS);
+            }
+            if (!owed && this.mergeCatchUp(upstream, subscriber, frame.id)) {
               release();
-              await reader.cancel().catch(() => undefined);
+              await streamReader.cancel().catch(() => undefined);
               return;
+            }
+            batchBytes += Buffer.byteLength(frame.data);
+            if (batchBytes >= LIVE_DELIVERY_BATCH_BYTES) {
+              batchBytes = 0;
+              await new Promise<void>(resolve => setImmediate(resolve));
+              if (controller.signal.aborted || subscriber.detached) return;
             }
           }
         }
@@ -1003,7 +1168,7 @@ export class LiveBroker implements PresenceSource {
   // ---------------------------------------------------------------------
   // Upstream lifecycle
 
-  private childPath(upstream: Upstream): string {
+  private childPath(upstream: Upstream, reconnect: boolean): string {
     switch (upstream.topic) {
       case "document":
         return upstream.key ? `${CHILD_DOCUMENT_EVENTS_PATH}?${upstream.key}` : CHILD_DOCUMENT_EVENTS_PATH;
@@ -1012,7 +1177,11 @@ export class LiveBroker implements PresenceSource {
       case "conversation": {
         const base = childConversationEventsPath(upstream.key ?? "");
         const from = upstream.head || upstream.originCursor;
-        return from ? `${base}?cursor=${encodeURIComponent(from)}` : base;
+        // A cursor alone also describes a fresh post-history attachment.
+        // Only recovery of this existing transport may request equal-cursor
+        // visual reconciliation; carrying it onto fresh topics would loop.
+        if (!from) return reconnect ? `${base}?reconnect=1` : base;
+        return `${base}?cursor=${encodeURIComponent(from)}${reconnect ? "&reconnect=1" : ""}`;
       }
       case "activity":
         return CHILD_ACTIVITY_PATH;
@@ -1036,9 +1205,15 @@ export class LiveBroker implements PresenceSource {
       return;
     }
     if (upstream.topic === "conversation") {
+      let owner = this.conversationTrailers.get(upstream.workspaceId);
+      if (!owner) this.conversationTrailers.set(upstream.workspaceId, owner = new Map());
+      upstream.conversationTrailerOwner = owner;
+      upstream.visualResyncCursor = undefined;
+    }
+    if (upstream.topic === "conversation") {
       // A fresh open resumes from the head the hub last saw, or from the
       // first subscriber's cursor so the child replays what it holds.
-      if (!upstream.head) {
+      if (!upstream.head && !upstream.originCursor) {
         const first = [...upstream.subscribers][0];
         upstream.originCursor = first?.cursor;
       }
@@ -1056,9 +1231,15 @@ export class LiveBroker implements PresenceSource {
     upstream.state = "opening";
     // Every attempt is an open; only the first moves the active gauge — a
     // retry is the same logical upstream.
+    const first = upstream.subscribers.values().next().value;
+    const reconnect = upstream.counted || (upstream.topic === "conversation" && first?.reconnect === true);
+    // The creating attachment's recovery is handled by the child request.
+    // Later recovering joiners retain their own flag for scoped invalidation;
+    // never OR browser intent into the shared upstream's persistent state.
+    if (upstream.topic === "conversation" && first) first.reconnect = false;
     this.metrics.opened(childUpstreamTopic(upstream.topic)!, { reopen: upstream.counted });
     upstream.counted = true;
-    const path = this.childPath(upstream);
+    const path = this.childPath(upstream, reconnect);
     // Presumed live after the grace unless refused first — see
     // LiveBrokerOptions.inventoryOpenGraceMs. Runs until the first chunk or
     // a refusal, whichever comes first, not merely until the fetch settles.
@@ -1096,7 +1277,7 @@ export class LiveBroker implements PresenceSource {
         upstream.state = "unsupported";
         upstream.retryDelayMs = 0;
         upstream.failing = false;
-        this.recordActivity(upstream, RUNNING_UNKNOWN);
+        this.recordActivity(upstream, { ...RUNNING_UNKNOWN, unresolved: false });
         for (const subscriber of [...upstream.subscribers]) {
           if (!subscriber.live) this.attachLive(upstream, subscriber);
         }
@@ -1108,9 +1289,13 @@ export class LiveBroker implements PresenceSource {
         this.fail(upstream, statusCategoryOf(status));
         return;
       }
+      const visualCursor = response.headers.get(CHILD_CONVERSATION_REPLAY_RESYNC_HEADER);
+      upstream.visualResyncCursor = upstream.topic === "conversation" && visualCursor
+        && Buffer.byteLength(visualCursor) <= LIVE_MAX_CURSOR_BYTES && decodeReplayCursor(visualCursor) ? visualCursor : undefined;
       const parser = new SseFrameParser();
       const reader = response.body.getReader();
       let sawResync = false;
+      let batchBytes = 0;
       try {
         for (;;) {
           const next = await reader.read();
@@ -1122,6 +1307,12 @@ export class LiveBroker implements PresenceSource {
             if (this.handleFrame(upstream, frame)) {
               sawResync = true;
               break;
+            }
+            batchBytes += Buffer.byteLength(frame.data);
+            if (batchBytes >= LIVE_DELIVERY_BATCH_BYTES) {
+              batchBytes = 0;
+              await new Promise<void>(resolve => setImmediate(resolve));
+              if (upstream.abort !== controller || controller.signal.aborted) return;
             }
           }
           if (sawResync) break;
@@ -1183,7 +1374,14 @@ export class LiveBroker implements PresenceSource {
       }
       case "conversation": {
         const data = parseJson(frame.data);
+        const observedCursor = frame.event === "chat" ? frame.id
+          : frame.event === CHILD_CONVERSATION_OPEN_EVENT ? (data as { cursor?: unknown } | undefined)?.cursor : undefined;
+        const observed = typeof observedCursor === "string" ? decodeReplayCursor(observedCursor) : null;
+        const trailer = upstream.catchUpOwner?.catchUpTrailer;
+        if (observed && trailer && observed.generation !== trailer.generation) trailer.recover();
         if (frame.event === "resync") {
+          this.rememberConversationTrailer(upstream, frame, data,
+            frame.id === upstream.visualResyncCursor ? upstream.visualResyncCursor : upstream.head || undefined);
           for (const subscriber of [...upstream.subscribers]) {
             subscriber.catchUp?.abort();
             subscriber.catchUp = null;
@@ -1196,6 +1394,9 @@ export class LiveBroker implements PresenceSource {
           return true;
         }
         if (frame.event === CHILD_CONVERSATION_OPEN_EVENT) {
+          // The existing private hint names this fetch's snapshot, never a
+          // different opening boundary (or a later native generation).
+          if (upstream.visualResyncCursor !== (data as { cursor?: unknown } | undefined)?.cursor) upstream.visualResyncCursor = undefined;
           // Where a stream opened without a cursor begins. A stream opened
           // from a cursor already knows, and the child replays from it.
           if (!upstream.head && !upstream.originCursor) {
@@ -1205,6 +1406,7 @@ export class LiveBroker implements PresenceSource {
           return false;
         }
         if (frame.event !== "chat" || frame.id === undefined) return false;
+        this.observeConversation(upstream.workspaceId, upstream.key ?? "", data);
         upstream.head = frame.id;
         this.bufferPush(upstream, frame.id, data, frame.data.length);
         this.fanOut(upstream, data, frame.id);
@@ -1213,7 +1415,7 @@ export class LiveBroker implements PresenceSource {
       case "activity": {
         if (frame.event !== CHILD_ACTIVITY_EVENT) return false;
         const record = (typeof parseJson(frame.data) === "object" ? parseJson(frame.data) : {}) as Record<string, unknown>;
-        this.recordActivity(upstream, sanitizeWorkspaceActivity({ running: true, ...record }));
+        this.recordActivity(upstream, { ...sanitizeWorkspaceActivity({ running: true, ...record }), unresolved: record.unresolved === true });
         return false;
       }
       case "worktrees":
@@ -1222,11 +1424,15 @@ export class LiveBroker implements PresenceSource {
     }
   }
 
-  private recordActivity(upstream: Upstream, activity: WorkspaceActivity): void {
+  private observeConversation(workspaceId: string, conversationId: string, data: unknown): void {
+    try { this.options.observeConversation?.(workspaceId, conversationId, data); } catch { /* Personal persistence never interrupts chat. */ }
+  }
+
+  private recordActivity(upstream: Upstream, activity: WorkspaceActivity & { unresolved: boolean }): void {
     const cursor = this.nextHubCursor(upstream);
     upstream.latest = { cursor, data: activity };
     this.fanOut(upstream, activity, cursor);
-    this.notifyWorktrees(observer => observer.activity(upstream.workspaceId, activity));
+    this.notifyWorktrees(observer => observer.activity(upstream.workspaceId, sanitizeWorkspaceActivity(activity)));
   }
 
   private nextHubCursor(upstream: Upstream): string {
@@ -1329,6 +1535,7 @@ export class LiveBroker implements PresenceSource {
   }
 
   private onSessionChange(change: LiveSessionChange): void {
+    if (!change.running) this.forgetConversationTrailers(change.workspaceId);
     for (const upstream of [...this.upstreams.values()]) {
       if (upstream.workspaceId !== change.workspaceId) continue;
       // A hub-local topic does not describe the child, so a start or stop
@@ -1409,7 +1616,8 @@ export class LiveBroker implements PresenceSource {
         if (released) return;
         switch (envelope.event.kind) {
           case "data":
-            this.observeActivity(workspaceId, sanitizeWorkspaceActivity(envelope.event.data));
+            this.observeActivity(workspaceId, { ...sanitizeWorkspaceActivity(envelope.event.data),
+              unresolved: (envelope.event.data as { unresolved?: unknown } | null)?.unresolved === true });
             return;
           case "unavailable":
             // The child is unreachable although the session table still
@@ -1451,6 +1659,8 @@ export class LiveBroker implements PresenceSource {
     const watch = this.activityWatches.get(workspaceId);
     if (!watch) return;
     this.activityWatches.delete(workspaceId);
+    const observed = this.observed.get(workspaceId);
+    if (observed) delete observed.completionPending;
     watch.detach();
   }
 
@@ -1482,18 +1692,19 @@ export class LiveBroker implements PresenceSource {
   // the fact is about the workspace, not about who happened to be looking.
   // The facts are the same for every user, so every feed is re-derived; the
   // per-user part is only `viewedAt`.
-  private observeActivity(workspaceId: string, activity: WorkspaceActivity): void {
+  private observeActivity(workspaceId: string, activity: WorkspaceActivity & { unresolved: boolean }): void {
     const previous = this.observed.get(workspaceId);
-    this.observed.set(workspaceId, activity);
+    // Awaiting cancels eligibility as before. Only positive Working arms
+    // it; unresolved alone can retain an observed epoch, never invent one.
+    const completionPending = !activity.awaiting && (activity.working || activity.unresolved && previous?.completionPending === true);
+    this.observed.set(workspaceId, { ...activity, completionPending });
     if (activity.working || activity.awaiting) {
       // Work resumed, or an interaction awaits: whatever finished before
       // is superseded by what the user will look at now.
       if (this.finishedAt.delete(workspaceId)) this.persistMarks();
-    } else if (previous?.working && !previous.awaiting) {
-      // Working → quiet. Not from unknown (a page opening onto an idle
-      // workspace invents nothing), not from awaiting (the answer was given
-      // from somewhere the user was looking — a pending question keeps the
-      // turn in flight, so "working and awaiting" is the awaiting case).
+    } else if (!activity.unresolved && previous?.completionPending) {
+      // Observed Working → genuinely quiet, possibly through an unresolved
+      // interval. First-seen unknown and cleared attention invent no finish.
       this.finishedAt.set(workspaceId, this.nextStamp());
       this.persistMarks();
     }
@@ -1507,8 +1718,8 @@ export class LiveBroker implements PresenceSource {
     }
   }
 
-  private composeActivity(user: string, workspaceId: string, facts: WorkspaceActivity): WorkspaceActivity {
-    const quiet = facts.running && !facts.working && !facts.awaiting;
+  private composeActivity(user: string, workspaceId: string, facts: WorkspaceActivity & { unresolved?: boolean }): WorkspaceActivity {
+    const quiet = facts.running && !facts.working && !facts.awaiting && !facts.unresolved;
     const finishedAt = this.finishedAt.get(workspaceId);
     const viewedAt = this.viewedAt.get(user)?.get(workspaceId) ?? -Infinity;
     return {

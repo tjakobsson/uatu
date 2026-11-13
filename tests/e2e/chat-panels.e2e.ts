@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationConfiguration, ConversationItem } from "../../src/chat/types";
-import { chooseChatModel, openChatConfiguration, openChatPanel } from "./chat-helpers";
+import { chooseChatModel, openChatConfiguration, openChatPanel, openChatWorkers } from "./chat-helpers";
 import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 
@@ -215,8 +215,8 @@ test.describe("chat panels and navigation", () => {
     await seedAndOpen(page, request, "Fan-out", [
       { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Read it all", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
     ]);
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Read it all" }).click();
+    await page.locator("#chat-compact-workers summary").click();
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Read it all$/ }) }).click();
 
     const older = page.locator("#chat-drilldown-older");
     await expect(page.locator("#chat-drilldown-items")).toContainText("the newest finding");
@@ -243,8 +243,8 @@ test.describe("chat panels and navigation", () => {
     ]);
     await expect(page.locator("#chat-items .chat-activity-group[data-working-since]")).toHaveCount(0);
 
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Long task" }).click();
+    await page.locator("#chat-compact-workers summary").click();
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Long task$/ }) }).click();
     const line = page.locator("#chat-drilldown-items .chat-activity-group[data-working-since]");
     await expect(line).toHaveCount(1);
     const label = line.locator("> summary .chat-group-count");
@@ -272,8 +272,8 @@ test.describe("chat panels and navigation", () => {
       id: "tool:open-a", type: "tool", createdAt: 2, name: "task", status: "completed", childConversationId: childA.conversation.id,
       input: JSON.stringify({ description: "Open A", subagent_type: "explore", prompt: "go" }),
     }]);
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Open A" }).click();
+    await page.locator("#chat-compact-workers summary").click();
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Open A$/ }) }).click();
     await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Open A");
 
     await control(request, { action: "failOlderHistory" });
@@ -296,7 +296,7 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-drilldown-items")).toContainText("older child B finding");
   });
 
-  test("subagents pin as a track, dismiss finished, and open their transcript", async ({ page, request }) => {
+  test("the canonical worker card retains finished history and opens the selected transcript", async ({ page, request }) => {
     const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
       { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
     ] }) as { conversation: { id: string } };
@@ -306,15 +306,17 @@ test.describe("chat panels and navigation", () => {
       { id: "tool:agent2", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Audit styles", subagent_type: "general", prompt: "go" }) },
     ]);
 
-    const track = page.locator("#chat-subagents");
+    const track = page.locator("#chat-compact-workers");
     await expect(track).toBeVisible();
-    await expect(track.locator("summary")).toContainText("1 of 2 subagents working · Audit styles");
+    await expect(track.locator("summary")).toContainText("1 working · 1 finished");
     await expect(page.locator('[data-chat-item-id="part:parent"] [data-chat-copy="answer"]')).toHaveCount(0);
 
-    // Open already: it holds a running subagent.
     await expect(track).toHaveAttribute("open", "");
+    await openChatWorkers(page);
     await expect(track.locator("li")).toHaveCount(2);
-    await track.getByRole("button", { name: "explore · Review renderer" }).click();
+    const inspect = track.locator('.chat-worker-row[data-worker-id="tool:agent1"] .chat-worker-inspect');
+    await expect(track.locator('.chat-worker-row[data-worker-id="tool:agent2"] .chat-worker-name')).toHaveText("Audit styles");
+    await inspect.click();
 
     // A drill-down over the parent, not a conversation switch: the child's
     // transcript renders in its own layer and the picker never moves.
@@ -341,7 +343,7 @@ test.describe("chat panels and navigation", () => {
     // not navigate the document behind it, because the entry it pops is the
     // drill-down's own.
     const documentUrl = page.url();
-    await page.getByRole("button", { name: "explore · Review renderer" }).click();
+    await inspect.click();
     await expect(drilldown).toBeVisible();
     await page.goBack();
     await expect(drilldown).toBeHidden();
@@ -357,7 +359,7 @@ test.describe("chat panels and navigation", () => {
     // A direct close can retire the drill-down below a later document entry.
     // Back skips toward the older live entry; Forward must then skip the same
     // marker in the opposite direction and reach that later entry.
-    await page.getByRole("button", { name: "explore · Review renderer" }).click();
+    await inspect.click();
     await expect(drilldown).toBeVisible();
     await page.evaluate(() => history.pushState({ laterDocument: true }, "", `${location.pathname}${location.search}#later`));
     await page.locator("#chat-drilldown-back").click();
@@ -388,10 +390,10 @@ test.describe("chat panels and navigation", () => {
       { id: "part:parent", type: "assistant_message", createdAt: 4, markdown: "The subagent found README.md and notes.txt." },
     ]);
 
-    const track = page.locator("#chat-subagents");
+    const track = page.locator("#chat-compact-workers");
     await expect(track).toBeVisible();
     await track.locator("summary").click();
-    await expect(track.getByRole("button", { name: "general · List files in current directory" })).toBeVisible();
+    await expect(track.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^List files in current directory$/ }) })).toBeVisible();
 
     // The row itself is an Agent card: the agent, its assignment, and the
     // report without the machine envelope.
@@ -421,9 +423,8 @@ test.describe("chat panels and navigation", () => {
       id: "tool:agent-question", type: "tool", createdAt: 2, name: "task", status: "running", childConversationId: child.conversation.id,
       input: JSON.stringify({ description: "Ask reader", subagent_type: "explore", prompt: "go" }),
     }]);
-    // Open already: it holds a running subagent.
-    await expect(page.locator("#chat-subagents")).toHaveAttribute("open", "");
-    await page.getByRole("button", { name: "explore · Ask reader" }).click();
+    await openChatWorkers(page);
+    await page.locator('.chat-worker-row[data-worker-id="tool:agent-question"] .chat-worker-inspect').click();
     const drilldown = page.locator("#chat-drilldown");
     await expect(drilldown).toBeVisible();
 
@@ -443,8 +444,8 @@ test.describe("chat panels and navigation", () => {
       input: JSON.stringify({ description: "Close safely", subagent_type: "explore", prompt: "go" }),
     }]);
     await page.evaluate(() => history.pushState({ sentinel: true }, "", `${location.pathname}${location.search}#sentinel`));
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Close safely" }).click();
+    await page.locator("#chat-compact-workers summary").click();
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Close safely$/ }) }).click();
     const drilldown = page.locator("#chat-drilldown");
     await expect(drilldown).toBeVisible();
 
@@ -467,8 +468,8 @@ test.describe("chat panels and navigation", () => {
 
     // Left of the summary: the outstanding-request pill is pinned over its
     // right end, and that pill is the subject of this test.
-    await page.locator("#chat-subagents summary").click({ position: { x: 8, y: 8 } });
-    await page.getByRole("button", { name: "explore · Review renderer" }).click();
+    await page.locator("#chat-compact-workers summary").click({ position: { x: 8, y: 8 } });
+    await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Review renderer$/ }) }).click();
     await expect(page.locator("#chat-drilldown")).toBeVisible();
 
     // The parent's pinned request pill is not covered by the child, and taking
@@ -489,21 +490,23 @@ test.describe("chat panels and navigation", () => {
       { id: "tool:agent2", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Still going", prompt: "go" }) },
     ]);
 
-    const track = page.locator("#chat-subagents");
-    await track.locator("summary").click();
+    const track = page.locator("#chat-compact-workers");
+    await openChatWorkers(page);
     await expect(track.locator("li")).toHaveCount(2);
     await page.getByRole("button", { name: "Dismiss finished" }).click();
     await expect(track.locator("li")).toHaveCount(1);
-    await expect(track.locator("summary")).toContainText("1 of 1 subagent working · Still going");
+    await expect(track.locator("summary")).toContainText("1 working");
+    await expect(track.locator(".chat-worker-name")).toHaveText("Still going");
 
     // Dismissal is a user statement — reloading the conversation must not
     // resurrect the dismissed strip.
     await page.reload();
     await openChatPanel(page);
     await expect(track).toBeVisible();
-    await track.locator("summary").click();
+    await openChatWorkers(page);
     await expect(track.locator("li")).toHaveCount(1);
-    await expect(track.locator("summary")).toContainText("1 of 1 subagent working · Still going");
+    await expect(track.locator("summary")).toContainText("1 working");
+    await expect(track.locator(".chat-worker-name")).toHaveText("Still going");
   });
 
   // A conversation gave no sign of how full its context window was until it
@@ -609,11 +612,13 @@ test.describe("chat panels and navigation", () => {
     await openChatConfiguration(page);
     await expect(page.locator("#chat-configuration-models-section")).toBeVisible();
     await page.locator("#chat-configuration-done").click();
-    const track = page.locator("#chat-subagents");
+    const track = page.locator("#chat-compact-workers");
     await track.locator("summary").click();
-    await expect(track.locator("li")).toContainText("explore · Review renderer");
+    await expect(track.locator(".chat-worker-name")).toHaveText("Review renderer");
+    await expect(track.locator(".chat-worker-meta")).toHaveAttribute("title", /explore/);
     // The model still names itself; only the token figure is gated.
-    await expect(track.locator(".chat-subagent-attribution")).toHaveText("claude-sonnet-4-5");
+    await expect(track.locator(".chat-worker-model-name")).toHaveText("claude-sonnet-4-5");
+    await expect(track.locator(".chat-worker-tokens")).toHaveText("—");
     // Restored before leaving: this worker's service is shared with whatever
     // runs next against it, and a narrowed agent is this test's setup only.
     await control(request, { action: "declareOnly", capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"] });
@@ -625,7 +630,8 @@ test.describe("chat panels and navigation", () => {
       id: "tool:legacy-agent", type: "tool", createdAt: 2, name: "task", status: "completed", childConversationId: "legacy-child",
       input: JSON.stringify({ description: "Old task", subagent_type: "explore", prompt: "go" }),
     }]);
-    await expect(page.locator("#chat-subagents")).toBeHidden();
+    await expect(page.locator('[data-chat-item-id="tool:legacy-agent"]')).toBeAttached();
+    await expect(page.locator("#chat-compact-workers")).toBeHidden();
     const row = page.locator('[data-chat-item-id="tool:legacy-agent"]');
     await row.locator(":scope > summary").click();
     await expect(row.locator("[data-open-conversation]")).toHaveCount(0);
@@ -638,16 +644,20 @@ test.describe("chat panels and navigation", () => {
       { id: "tool:agent2", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Audit styles", subagent_type: "general", prompt: "go" }) },
     ]);
 
-    const track = page.locator("#chat-subagents");
-    await track.locator("summary").click();
+    const track = page.locator("#chat-compact-workers");
+    await openChatWorkers(page);
     const rows = track.locator("li");
     await expect(rows).toHaveCount(2);
     // Spend, so output counts here — unlike the context fill, which asks what
     // occupies the window right now.
-    await expect(rows.nth(0)).toContainText("claude-sonnet-4-5 · 17k tokens");
+    const attributed = rows.filter({ has: page.getByText("Review renderer", { exact: true }) });
+    await expect(attributed.locator(".chat-worker-model-name")).toHaveText("claude-sonnet-4-5");
+    await expect(attributed.locator(".chat-worker-tokens")).toHaveText("Σ 17k");
     // The unattributed one stays a readable row and asserts no figure.
-    await expect(rows.nth(1)).toContainText("general · Audit styles");
-    await expect(rows.nth(1).locator(".chat-subagent-attribution")).toHaveCount(0);
+    const unattributed = rows.filter({ has: page.getByText("Audit styles", { exact: true }) });
+    await expect(unattributed.locator(".chat-worker-meta")).toContainText("general");
+    await expect(unattributed.locator(".chat-worker-model-name")).toHaveText("—");
+    await expect(unattributed.locator(".chat-worker-tokens")).toHaveText("—");
   });
 
   test("a long subagent report expands without splitting its Markdown", async ({ page, request }) => {

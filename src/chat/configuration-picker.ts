@@ -527,7 +527,8 @@ export function createChatConfigurationPicker(
     const doc = elements.trigger.ownerDocument;
     const active = doc.activeElement;
     const stranded = !active || active === doc.body || elements.dialog.contains(active);
-    if (stranded && doc.body.contains(elements.trigger)) elements.trigger.focus();
+    const invoker = elements.trigger;
+    if (stranded && doc.body.contains(invoker)) invoker.focus();
   };
 
   const close = (): void => {
@@ -622,6 +623,10 @@ export function createChatConfigurationPicker(
   viewport?.addEventListener("resize", applyGeometry);
   viewport?.addEventListener("scroll", applyGeometry);
   environment.addResizeListener(applyGeometry);
+  // Chat applies viewport changes on its next animation frame. Re-read the
+  // resulting surface rather than retaining its pre-resize rectangle.
+  const surfaceObserver = typeof ResizeObserver === "function" ? new ResizeObserver(applyGeometry) : null;
+  surfaceObserver?.observe(elements.surface);
   const releaseMode = environment.onModeChange(applyGeometry);
 
   renderModels();
@@ -665,6 +670,7 @@ export function createChatConfigurationPicker(
       viewport?.removeEventListener("resize", applyGeometry);
       viewport?.removeEventListener("scroll", applyGeometry);
       environment.removeResizeListener(applyGeometry);
+      surfaceObserver?.disconnect();
       releaseMode();
     },
   };

@@ -43,19 +43,14 @@ The project SHALL document how to run the document render benchmarks locally and
 
 ### Requirement: Comparative source-render benchmark gates the source-view wrap implementation
 
-The project SHALL provide a repeatable, throwaway benchmark harness (under
-`tests/`, not `src/`) that renders identical source fixtures two ways — the
-current highlight.js source renderer and the `@pierre/diffs` virtualized
-code viewer — **both without word-wrap** — and reports comparable metrics
-so the team can choose the source-view wrap implementation on evidence.
-The harness SHALL exercise a file-size curve (at least: small ~100 lines,
-medium ~2k lines, large ~20k lines, and near the source highlight size
-cap) across at least one light grammar and one heavy grammar. It SHALL
-report, per case, time-to-first-paint, a cold-vs-warm distinction, rendered
-DOM node count, and a scroll-smoothness signal on the large fixture. The
-benchmark's pass criteria SHALL be recorded before the measurement is run,
-and the outcome SHALL determine whether source-view wrap is implemented via
-a homegrown per-line gutter or by adopting the Pierre code viewer.
+A repeatable throwaway benchmark under tests/ SHALL compare identical unwrapped highlight.js and Pierre source fixtures over specified sizes and grammar weights. Pre-recorded pass criteria and comparable paint, warm/cold, DOM, and scrolling evidence SHALL determine the source-view wrap implementation.
+
+#### Scenario: The team benchmarks source renderers before selecting the homegrown gutter or Pierre viewer for wrap implementation
+- **WHEN** the team benchmarks source renderers before selecting the homegrown gutter or Pierre viewer for wrap implementation
+- **THEN** The project SHALL provide a repeatable, throwaway benchmark harness (under `tests/`, not `src/`) that renders identical source fixtures two ways — the current highlight.js source renderer and the `@pierre/diffs` virtualized code viewer — **both without word-wrap** — and reports comparable metrics so the team can choose the source-view wrap implementation on evidence.
+- **AND** The harness SHALL exercise a file-size curve (at least: small ~100 lines, medium ~2k lines, large ~20k lines, and near the source highlight size cap) across at least one light grammar and one heavy grammar.
+- **AND** It SHALL report, per case, time-to-first-paint, a cold-vs-warm distinction, rendered DOM node count, and a scroll-smoothness signal on the large fixture.
+- **AND** The benchmark's pass criteria SHALL be recorded before the measurement is run, and the outcome SHALL determine whether source-view wrap is implemented via a homegrown per-line gutter or by adopting the Pierre code viewer.
 
 #### Scenario: Harness compares both renderers on the same fixtures
 - **WHEN** the benchmark is run

@@ -2,6 +2,237 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 15 / Workspace 37 - Unreleased (inline assistant visuals and recovery intent)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- `assistant_message` gains optional `visuals`: ordered references to immutable PNG, JPEG, and SVG snapshots captured from explicit Markdown images and fenced SVG. References report pending, ready, or unavailable state; image bytes remain outside the conversation stream.
+- Local images retain the first successful capture for each occurrence. Existing workspace file-access policy still applies. External images and SVG resource requests are blocked. Internal authenticated workspace routes serve previews and inert original SVG source.
+- Admission is permanent for the first eight observed logical occurrences per native API assistant message, shared across its text parts and including refusals. Each reference's `index` is its current rendered position, not its admission slot; it can exceed seven after reordering. The `visuals` array still contains at most eight entries, and each image is bounded to 10 MiB.
+- A streamed assistant text delta may arrive as a full `item.upsert` carrying newly captured visuals. A terminal capture can request the existing conversation resync rather than introducing synthetic sequence identifiers.
+- The closed Hub `LiveSubscription` conversation variant now publishes optional boolean `reconnect` for both opening GET `subs` and later `hubUpdateLiveSubscriptions` additions. True requires a nonempty cursor of at most 1024 UTF-8 bytes. Other topics do not accept the field. The GET's `reconnect=1` is a recovery-intent default for opening conversations, not diagnostics alone; a per-conversation boolean overrides it. Later POST additions use only their own flag.
+- Recovery repairs possibly missed same-cursor visual metadata only when visual evidence calls for it. A healthy shared conversation already at its head requests resync only when the presented cursor equals its last remembered visual-trailer cursor; otherwise it sends ready without a full snapshot. No new event or cursor fields are introduced.
+- Bundled-web revision 4 refreshes older cached web assets before they consume the new assistant payload.
+
+### Migration
+
+Regenerate Hub request types and strict validators for revision 15: revision 14's closed conversation subscription schema rejects the optional `reconnect` property. For a replacement stream, set the GET query `reconnect=1` and present retained cursors in `subs`; an explicit conversation `reconnect: false` overrides that default for a fresh attachment. When URL limits defer a recovering conversation until the POST, send its retained nonempty cursor and `reconnect: true`. Later additions with omitted or false flags remain fresh, independent of the opening GET. Do not expect a snapshot on every reconnect; honor ready, replay and the existing resync signal. Older Hubs may ignore the optional field, so deferred visual repair is not guaranteed with a new client and an old Hub. Existing requests without the field remain valid.
+
+Regenerate strict workspace payload validators for revision 37: `assistant_message` is a closed object, so revision 36 validators reject its new `visuals` field. Apply `item.upsert` as replacement by item id and honor the existing resync protocol. Clients that do not present visuals can continue to show the original Markdown. This Hub correction leaves workspace revision 37 and bundled-web revision 4 unchanged; it does not add a public workspace-child HTTP route.
+
+Match references by their current rendered `index`, accepting nonnegative safe integers rather than assuming indexes zero through seven. Occurrences omitted from an explicit `visuals` array were not admitted; retain their inert fallback instead of fetching their original destinations.
+
+Compatibility with admission choices made by intermediate unreleased test builds is not supported. Existing stored files, IDs, and bytes remain untouched and resolvable. Permanent admission begins on first processing by the new implementation; an old test conversation may therefore display a different set of up to eight previews after upgrading.
+
+## Hub 14 / Workspace 36 - Unreleased (ignored folders listed on demand)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Uatu hides only VS Code's `files.exclude` defaults (`.git`, `.svn`, `.hg`, `.jj`, `.DS_Store`, `Thumbs.db`). Dependency, build, cache and secret-like paths are no longer excluded by name; Git-ignore visibility and explicit `.uatu.json` exclusions govern them.
+- A folder Git ignores as a whole is published as a `FolderEntry` instead of being read up front. Snapshot roots carry `folders`, and document patches carry `folderUpserts` and `folderRemovals`. A client lists one level of such a folder on demand; the listing reaches every client as an ordinary patch that upserts the level's documents and subfolder entries and marks the entry `listed`.
+- Files written inside unlisted levels during the session are indexed with `gitIgnoreStatus: "ignored"`, at most 2,000 per root, newest first. Files inside ignored folders arrive already classified and are never Follow targets.
+
+### Migration
+
+Workspace revision 36 consumers must regenerate document and live-topic readers for the closed-object `folders` field on snapshot roots and the `folderUpserts` and `folderRemovals` patch fields. Apply folder upserts and removals with the same revision ordering as document upserts and removals. Do not infer that a folder entry is empty: an unlisted entry's contents are unknown until it is listed. Files formerly hidden by name, including secret-like files, now appear unless the project excludes them in `.uatu.json`.
+
+## Hub 14 / Workspace 35 - Unreleased (atomic worker dismissal groups)
+
+Compatibility: breaking (Hub schema); additive (accepted requests)
+
+### Changes
+
+- `POST /s/{workspaceId}/api/personal-worker-dismissals` now publishes a request union of the existing singleton mutation and a version-1 bulk dismissal. This changes the generated request type from an object to a union, so the conservative contract policy requires a Hub revision even though existing singleton requests remain valid.
+- Bulk dismissals carry 1–8192 unique execution targets with independent `expectedRevision` values and a 4 MiB body bound. The Hub validates all targets against complete authoritative evidence before applying any selected dismissal and persists successful changes atomically. Account scope, exact execution identity and activity fences remain enforced; bulk requests cannot retire marks or control provider work.
+
+### Migration
+
+Hub clients generating request types from OpenAPI must regenerate against Hub revision 14 to use the request union. Existing singleton callers may keep their version-1 body and 4096-byte bound unchanged. To dismiss a group, send `{version:1, conversationId, operation:"dismiss", targets:[{executionId, expectedRevision}]}` to the same endpoint; do not mix singleton fields with `targets`. On a stale-revision `409`, refetch personal state and current evidence rather than overwriting or assuming any selected dismissal succeeded. Keep retirement as a singleton operation. Stored version-1 records require no migration. Workspace revision remains 35 and bundled-web revision remains 3.
+
+## Hub 13 / Workspace 35 - Unreleased (Recent and ignored Files state)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- Personal workspace state accepts `recent` alongside `all` and `changed` for `filesFilter`. Partial updates retain unrelated preferences; an open client's view remains local.
+- Personal state accepts boolean `showIgnored`. Permitted Gitignored files remain in the shared inventory, with independent `gitIgnoreStatus` and optional Uatu visibility exceptions. Snapshots and patches carry the client's ignored-visibility context; snapshots supply the legacy initial default independently of the saved preference.
+
+### Migration
+
+Hub revision 13 consumers must regenerate strict personal-state readers for the `filesFilter` value `recent` and the closed-object `showIgnored` field. Existing All/Changed records retain their meaning and an absent Files view defaults to All. Partial updates retain unrelated preferences.
+
+Workspace revision 35 consumers must regenerate document and live-topic readers for `gitIgnoreStatus`, optional `ignoreVisibilityException`, and the `showIgnored` and `initialShowIgnored` snapshot/patch fields. Preserve these fields through document updates and keep ignored classification separate from exposure policy. Unknown classification stays visible without an ignored/clean assertion.
+
+Files presentation does not override explicit preview URLs. Saved ignored visibility wins; otherwise --no-gitignore shows, otherwise any watched root explicitly requesting respectGitignore=true initially hides, otherwise ignored files show. This aggregation is root-order independent and never rejects conflicting legacy defaults. Git-ignore rules are browsing visibility, not an exposure boundary: use explicit Uatu excludes to prevent delivery.
+
+## Hub 12 / Workspace 34 - Unreleased (permission queue order)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed permission items may carry optional `queueOrder`, a nonnegative number ordering pending permissions within the current adapter generation. Smaller positions are answered first per owning conversation, independently of transcript timestamps and lexical request ids. Recovery preserves the provider's pending-list order.
+- The renderer, request shortcut, and server approval guard select the same FIFO head. A parent recovery also retires externally answered permissions from a retained owning projection, so a missed reply cannot block the next approval.
+
+### Migration
+
+Strict workspace-payload consumers must regenerate against revision 34 because revision 33's closed permission object rejects the optional field. Preserve `queueOrder` through snapshots and live updates and use it to select the first pending permission per owner. Positions are presentation ordering within one adapter generation, not durable identities or timestamps. Continue addressing replies by the owning conversation and request id. Hub revision remains 12 and bundled-web revision remains 3; workspace revision participates in matching-assets checks.
+
+## Hub 12 / Workspace 33 - Unreleased (partial launch continuity)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `WorkerActivity` payloads may carry optional `launchRef`, an opaque provider-proven reference connecting partial live observations to the same launch's qualified execution identity. It supports automatic private dismissal recovery without matching by row, child session, display clocks or UI folding.
+- The reference is presentation-continuity data only. It is not a saved-dismissal identity or alias and grants no Stop permission. Genuine reuse or contradictory native evidence must not inherit it; it may be absent or change when the provider observation lifetime ends.
+- Dismissal recovery still requires authoritative retirement confirmation for the qualified execution identities. A reference alone cannot clear unresolved identity, persistence or visibility fences.
+
+### Migration
+
+Strict workspace-payload consumers must regenerate against revision 33 because revision 32's closed activity object rejects the optional field. Preserve it through conversation snapshots and live updates without adding it to dismissal keys or Stop requests. Keep unknown or unmatched occurrences visible and retain failure guidance when retirement is unconfirmed. Hub revision remains 12 and bundled-web revision remains 3; workspace revision participates in matching-assets checks.
+
+## Hub 12 / Workspace 32 - Unreleased (worker activity and private dismissal)
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- Closed background-task payloads can carry independent `activity` and `control` observations. Verified task activity, active-session-only evidence and occurrence-specific end without a result are distinct. Working does not authorize Stop; current ownership and retained exact-occurrence proof still govern every native mutation. Unresolved never implies successful completion.
+- The existing single live stream accepts an opt-in, no-cursor `personal` topic carrying only `{category:"worker-dismissals"}`. Its account/workspace-scoped invalidations bypass shared child-topic fanout. Fetch personal state on attachment/reconnect and invalidation; never put personal marks in shared activity or conversation events.
+- Authenticated workspace-prefixed personal worker-dismissal GET/POST operations persist exact-execution marks privately per account. Conditional per-entry revisions merge concurrent device dismissals without changing provider history, work, terminal outcomes or canonical requests. The API rejects principal selectors, invalid scope, stale evidence and full/unavailable storage.
+- Verified activity and pending requests remain visible despite old dismissals. Successful retirement is durable. If retirement persistence fails or is unconfirmed, chat stays available with personal-storage failure guidance; an old mark can reapply to an unavailable row after restart during that failure, never to currently verified activity or pending requests.
+- Internal child activity carries a content-free `unresolved` fact alongside `working` and `awaiting`. Unverified background work no longer counts as verified Working; the Hub retains an observed-work epoch through uncertainty instead of manufacturing a Finished badge. Genuine quiet after resolution can finish that epoch without an intervening return to Working. Existing Awaiting behavior remains unchanged: attention cancels prior completion eligibility; clearing a request alone does not create a finish. First-seen unresolved/quiet state does not invent prior work. Public workspace-summary fields and revisions are unchanged; this child route is internal and unversioned.
+
+### Migration
+
+Strict clients must regenerate the expanded Hub live-topic vocabulary and workspace background-task schemas. Interpret activity independently of Stop availability, preserve last-seen/end provenance and treat missing evidence conservatively. Do not create another EventSource, infer task ownership from a reused child session, reply to requests twice or replay native mutations. Personal dismissal revisions are not Stop authorization tokens. Existing device-local dismissal IDs are not migrated into Hub account state. Bundled-web revision remains 3; the workspace API revision participates in asset matching.
+
+For strongly identified OpenCode V2 executions, only provider-proven execution identities and aliases match dismissal marks. Older unqualified call/task marks remain stored unchanged but are not honored for these executions: previously dismissed V2 rows can reappear and may be dismissed again using their current qualified identity. Do not bridge these identities through a shared call, task or child identifier; contradictory native launch facts can denote another execution.
+
+Notification-only V2 rows can carry a separate qualified provisional identity naming the admitted native notification, not a launch execution. It remains stable through replay/restart without clocks, status or display text. It supplies no activity or Stop authority. The consumed native data does not prove exact notification-to-launch association, so a later launch row may reappear instead of inheriting the provisional dismissal through a child/time match or UI fold. Contradictory source/worker evidence does not inherit that mark.
+
+When a V2 activity envelope withholds identity because native evidence is incomplete, keep the row visible with dismissal guidance. Missing qualified identity is not permission to substitute a bare call, task or result key.
+
+## Hub 11 / Workspace 31 - Unreleased (explicit local discard)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `QueuedMessage` payloads may carry `admissionUncertaintyId`, a fresh opaque server token only for classified settled unknown steer admission. In-flight admission, resume and withdrawal uncertainty do not qualify. Generic `unconfirmed` alone does not permit discard; the existing scoped cancellation-only withdrawal retry is unchanged.
+- Internal authenticated, origin-checked `POST /api/chat/conversations/:conversationId/queue/:messageId/discard-unconfirmed` accepts only `{requestId, uncertaintyId}` and returns only `{discarded:true, outcomeUnconfirmed:true}`. It refuses stale tokens and confirmed records. The existing `removed` queue change denotes local record removal, not native cancellation or delivery acknowledgement.
+- The Hub namespaces discard request IDs by its verified account, running workspace and operation path. The adapter also scopes its receipt to the conversation, message and uncertainty token. Client-supplied privileged headers grant no identity or policy authority; discard does not consult or apply automatic background preferences.
+- Discard never sends, cancels, resumes or backgrounds anything. The original may still arrive. Other messages stay queued until explicit Send now or a later normal idle transition; an old pending drain does not authorize delivery. Original unknown receipts remain unknown. Read-side absence never proves non-application.
+
+### Migration
+
+Strict workspace consumers must regenerate against revision 31 because revision 30's closed queue payload rejects the optional token. Confirm the local-only warning before sending the same entry's current token, and require both true acknowledgement fields. Do not fall back to ordinary Remove, restore the discarded copy into the draft, or replay the original operation. Hub revision remains 11 and bundled-web revision remains 3; the workspace revision participates in the matching-assets handshake. The new route remains covered by the existing internal workspace API exclusion rather than becoming a public Hub operation.
+
+## Hub 11 / Workspace 30 - Unreleased (native worker report clocks)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `background_task` items can carry optional `terminalReportedAt` in Unix epoch milliseconds. It preserves a native terminal notification's provider clock for newest-first finished ordering, including notification-first correlation. Zero is valid; missing/invalid clocks remain absent, never local receipt time or a missing-time zero fallback.
+- This is **not** execution completion: OpenCode V2 live inbox events time admission, while stored synthetic messages time delivery. Recovery can therefore change the available report clock and order. The clock adds no worker-state, usage, duration or cost authority. Launcher tool completion remains separate from the independent worker's report.
+
+### Migration
+
+Strict workspace consumers must regenerate against revision 30 because revision 29's closed background item rejects the new property. Preserve its optionality and report provenance. Prefer a worker's actual execution completion when available; otherwise use its terminal report, reported execution duration, then launch time for finished ordering. Label report clocks as **Reported**, not an exact finish time. Do not substitute an aliased launcher's end clock for its worker. Hub revision stays 11.
+
+## Hub 11 / Workspace 29 - Unreleased (pending submission identity)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `QueuedMessage` payloads can carry `submissionId`, a server-owned opaque identity scoped to one conversation's pending submission. Its initial held/native ID is preserved through queue/steer switches, uncertain admissions and recovery while known to the adapter. Newly recovered native entries without a known identity start with their native ID. It carries no account metadata and does not replace the original client `requestId` echo.
+- Pending action labels keep their number through native handle changes and intermediate empty withdrawal snapshots. The renderer retains live identities plus at most 64 recently absent identities, never absent DOM nodes. Conversation reset clears numbering. This is bounded presentation state, not durable identity or mutation deduplication; adapter recreation can lose a previously converted identity.
+- Pause bookkeeping follows observed settlement identity rather than wall time: late wake acknowledgements cannot erase a newer interruption. Confirmed or ambiguous Stop application retains held-queue dormancy; a delivery-only switch to Queue does not authorize restarting execution. This corrects existing behavior without adding payload fields.
+
+### Migration
+
+Strict workspace payload consumers must regenerate against revision 29 because revision 28's closed `QueuedMessage` rejects the new property. Use `submissionId` only to correlate pending presentation within a conversation; fall back to `id` for older payloads or unexpected duplicate logical IDs. Continue targeting every mutation by the current `id`. Do not infer identity from client request IDs, timestamps, content, accounts or generations, and do not replay mutations. Retain live numbering and only a bounded recent-transition window, clearing it when switching conversations. Hub revision remains 11.
+
+## Hub 11 / Workspace 28 - Unreleased (native side answers)
+
+Compatibility: additive from workspace revision 27; breaking (workspace) from revision 24
+
+### Changes
+
+- OpenCode V2 declares `side-generation`. Internal authenticated, origin-checked `POST /api/chat/conversations/:conversationId/aside` accepts only `{requestId, question}` (nonempty, at most 16,384 UTF-8 bytes) and returns only `{text}` with no-store. It uses native `session.generate`, not prompt/interrupt/background, and does not admit conversation history or run an agent tool loop. Missing capability returns 409; foreign conversations return 404. V1/Claude do not offer the command.
+- `/btw` uses the isolated action and page-local answer presentation. A tool-call-only native result can be empty; no Uatu tool executor or automatic retry is introduced. Personal side answers are not cached in shared workspace receipts. The initiating page prevents concurrent duplicate clicks; a fresh explicit request performs fresh inference, without a durable exactly-once claim.
+- An unconfirmed steer withdrawal returns 409 with the additive code `steer-withdrawal-unconfirmed`, not a missing-entry conflict. The existing `unconfirmed:true` pending marker also covers withdrawal: retain input and attachments and reconcile read-only; passive absence, including filtered/reverted history, does not confirm cancellation. A client with withdrawal-specific uncertainty may offer an explicit **Retry withdrawal**, cancelling only the original inbox ID without editing, conversion or resubmission. Admission/resume uncertainty remains read-only. No mutation is retried automatically, and per-entry in-flight locks prevent duplicate/conflicting clicks. Retry classification is page-local; the generic marker alone does not grant the exception after reload. No new payload fields or closed-enum values are introduced.
+
+### Migration
+
+Strict workspace payload consumers upgrading from revision 24 must regenerate against revision 28, including the revision 25–27 pending-input and worker changes below. Preserve `delivery`, `paused`, `unconfirmed`, worker-session identity, and worker uncertainty; accept the new queue change kinds and recover unknown mutations read-only rather than resubmitting them. The Hub revision remains 11. Same-build web clients use the new side-answer endpoint; it remains an excluded internal child route, not a public Hub operation. Existing personal background policy and strict pending-input contracts remain unchanged.
+
+## Hub 11 / Workspace 27 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `QueuedMessage` payloads can carry `unconfirmed:true` when steer admission or paused-batch resume may have applied. Retain the input and attachments, suppress repeat/edit/remove/batch mutations, and recover state read-only. Inbox presence confirms admission, not a batch resume. Late acknowledgements may update visible state but never initiate a delayed background follow-up.
+- Internal same-build steer action responses can carry `automaticBackground`: `not-needed`, `accepted`, `unavailable`, `failed` or `unknown`. Primary acceptance survives partial/unknown background outcomes; accepted means only native request acknowledgement, not delivery, affected counts or worker completion.
+- Retained composite receipts are initiating-account scoped and snapshot the first policy. Accepted and primary/follow-up unknown results remain bounded by the existing 1,000-entry, 512 KiB, 15-minute in-memory receipt limits. Expiry, eviction, adapter recreation or process restart end receipt protection. Unknown handles are bounded by the existing pending dock; no durable journal or reconnect/reload mutation replay is introduced.
+- Native steer/resume unknown receipts remain retained even without automatic-policy context. Missing private child trust does not merge authenticated accounts: a separate opaque internal operation key preserves deduplication without asserting a principal or enabling automation. The original client correlation ID is preserved; degraded Hub feedback snapshots have their own bounded first-decision lifetime. Queue → Steer / Send now browser transport loss and 5xx show persistent page-local unconfirmed guidance and read-only recovery.
+
+### Migration
+
+Strict workspace payload consumers must regenerate for revision 27 and preserve the unconfirmed marker explicitly. Do not treat an uncertain action as a failed draft to resubmit. Hub revision remains 11; personal preference endpoints are additive. Policy production and compact touch integration are implemented. The degraded-receipt correction changes no public body/response fields or policy authority.
+
+## Hub 11 / Workspace 26 - Unreleased (personal chat preferences)
+
+Compatibility: additive
+
+### Changes
+
+- `hubGetPersonalChatPreferences` and `hubUpdatePersonalChatPreferences` read/save the authenticated account's chat preference across its Hub devices and workspaces, independently of operator/workspace/device state. The closed version-1 contract uses compare-revision writes; stale saves return 409 with only that account's current state. Responses are no-store.
+- Missing records default ON; corrupt/unreadable/unsupported persisted state is unavailable and never silently resets saved OFF. Cookie mutations require same origin; caller-selected identity is not supported.
+
+### Migration
+
+None. These are new operations; existing wire contracts and revision identities are unchanged. Automatic dispatch integration is separate from preference persistence.
+
+## Hub 11 / Workspace 26 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Background task payloads can carry `stateUncertain`: retain known content but do not treat it as current execution evidence or authorize a worker stop. The schema also includes the existing child-inspection, usage, and foreground-task fields.
+- `resultId` identifies one provider notification across pending, delivered and recovered forms. `toolUseIds` links multiple launcher calls to one worker occurrence; keep their individual task/cost rows without counting each alias as another worker.
+- The internal session-child mutation `POST …/conversations/:id/background {requestId}` requests native parent-wide backgrounding of all eligible blockers, including shells; known acceptance is `{accepted:true}`, not a count. Capability `background-blocking-work` gates the operation.
+- Background and V2 worker-stop operations retain ambiguous dispatched outcomes as `operation_outcome_unknown`/409. Accepted and unknown receipts are in memory only, retained up to 15 minutes after settlement, subject to earlier count/byte eviction. Adapter recreation or process restart loses them. An old request ID beyond retention can dispatch anew; clients must not automatically replay unknown operations on reconnect or reload.
+
+### Migration
+
+Strict workspace consumers must regenerate against revision 26, preserve uncertainty explicitly, and recover state read-only after an unknown operation. Internal child routes remain excluded from the public Hub API. Hub revision stays 11.
+
+## Hub 11 / Workspace 25 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `QueuedMessage` gains a required `delivery` (`steer` or `queue`) and an optional `paused` (`true` when present). A `queue` message is held by the workspace until the running turn ends; a `steer` is pending with the agent, which delivers it into its running turn at the next step boundary. Only a conversation whose agent declares the new `steering` capability can carry a steer. A paused entry is pending but nothing delivers it on its own: a held message behind a cancellation or a staged revert, or a steer enqueued before the conversation last went idle.
+- The `conversation.queue` event's `change.kind` gains `steered`, `switched`, `paused`, and `resumed`. Its `queued` list, and a conversation snapshot's `queued`, are in delivery order: steers first in enqueue order, then held messages in submission order.
+- Two new agent capabilities can appear in a chat status: `steering` (OpenCode 2.x) and `send-now` (OpenCode 2.x and Claude Code). OpenCode 1.x declares neither.
+- Internal session-child routes under the excluded `/s/{workspaceId}/api/*` family change with this build: the prompt mutation accepts an optional `delivery` and reports `pending` plus `delivery` instead of `held`; `PATCH …/queue/{messageId}` switches a pending message's delivery; `POST …/queue/{messageId}/send-now` sends it now; the existing `DELETE` also withdraws a steer. They stay outside the public contract.
+
+### Migration
+
+Strict workspace live-payload consumers must regenerate against workspace revision 25: `QueuedMessage` is closed, so a revision 24 validator rejects every pending message for its `delivery`, and a closed `change.kind` enum rejects the four new kinds. Label pending messages by `delivery` and present `paused` ones as waiting; treat the list order as the delivery order. A consumer that offers queue actions should offer them only where the conversation's agent declares the capability behind them (`steering`, `send-now`). The Hub revision remains 11.
+
 ## Hub 11 / Workspace 24 - Unreleased
 
 Compatibility: breaking (hub, workspace)

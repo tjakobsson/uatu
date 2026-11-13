@@ -6,10 +6,25 @@ Provide a persistent, resizable sidebar shell whose independently scrolling pane
 Throughout this spec, "phone-class viewport" means a viewport that is BOTH
 coarse-pointer (`pointer: coarse`) AND narrower than the 900-pixel stacked-layout
 breakpoint. iPads in landscape and narrow desktop windows are not phone-class.
+
 ## Requirements
 
 ### Requirement: Organize sidebar content into resizable panes
-The browser UI SHALL organize the expanded sidebar as a stack of panes. The pane catalog SHALL include `Change Overview`, `Files`, and `Git Log`, all available regardless of session state — the user MAY toggle any pane's visibility via the per-pane visibility menu. The document tree SHALL render inside the `Files` pane and MUST preserve existing document selection and follow-mode interaction (see the `follow-mode` capability). Tree-internal behaviors that are owned by the `@pierre/trees` library — directory expansion handling, binary-entry presentation, and any future row-annotation behavior such as relative-time labels — are governed by the `document-tree` capability rather than this requirement, and this requirement no longer asserts that they survive the library swap. Pane visibility, collapsed state, and vertical sizing SHALL persist across reloads in the same browser for that origin under a single set of storage keys (no per-Mode partitioning). The pane stack SHALL fill the available expanded-sidebar height and MUST NOT force the whole sidebar body to scroll. Scrollbars used inside panes and preview overflow regions SHOULD be thin and visually light while remaining discoverable. The existing whole-sidebar collapse and expand controls MUST remain separate from per-pane visibility and collapse controls.
+The expanded sidebar SHALL be a pane stack including `Change Overview`, `Files`, and `Git Log`, available regardless of session state with visibility toggles via the per-pane visibility menu. The `Files` tree MUST preserve document selection and `follow-mode` interaction. Persistence, scrolling, and separation from whole-sidebar controls SHALL follow the rules below.
+
+#### Scenario: Pane arrangement is changed and restored
+- **WHEN** a user changes pane visibility, collapsed state, or vertical sizing and reloads in the same browser for that origin
+- **THEN** those preferences SHALL persist under one set of storage keys without per-Mode partitioning
+
+#### Scenario: Sidebar and preview layout preserve independent scrolling and controls
+- **WHEN** the browser UI is displayed, whether or not pane preferences changed
+- **THEN** the pane stack SHALL fill available expanded-sidebar height and MUST NOT force whole-sidebar body scrolling
+- **AND** pane and preview-overflow scrollbars SHOULD be thin and visually light while discoverable
+- **AND** existing whole-sidebar collapse/expand controls MUST remain separate from per-pane visibility/collapse controls
+
+#### Scenario: Tree-library internals determine Files behavior
+- **WHEN** `@pierre/trees` handles directory expansion, binary-entry presentation, or future row annotations such as relative-time labels
+- **THEN** the `document-tree` capability governs those behaviors rather than this requirement, which does not assert their survival across the library swap
 
 #### Scenario: Sidebar opens with default panes
 - **WHEN** a user opens the browser UI with no pane preferences stored
@@ -65,7 +80,14 @@ The browser UI SHALL allow users to resize the expanded sidebar horizontally. Th
 - **THEN** the expanded sidebar returns to the resized width
 
 ### Requirement: Render bounded commit history in the Git Log pane
-The browser UI SHALL render the bounded commit log for the selected or only detected repository in the `Git Log` pane. Each visible commit row MUST show at minimum the short SHA and subject. Each visible commit row SHALL show the commit's age, derived from its commit time. Displayed ages SHALL stay current while the page is open, without new repository data and without refetching repository data. Each visible commit row MUST be a same-origin link to that commit's preview URL so standard browser link affordances are available. If multiple repositories are detected, the pane SHALL make clear which repository each log belongs to or provide a repository grouping/selection. The pane SHALL provide a history-length control for selecting how many commit rows are visible from the bounded data supplied by the server. The `Git Log` pane body SHALL scroll internally when the visible commit rows exceed its allocated height. If no commit log is available, the pane SHALL show an empty or unavailable state instead of failing to render. The Git Log pane is available at all times — it is not gated by Mode.
+The `Git Log` pane SHALL render bounded history for the selected or only detected repository. Each visible row MUST show at least short SHA and subject, MUST be a same-origin commit-preview link, and SHALL show commit-time-derived age. The pane SHALL remain available at all times, not gated by Mode, with the history, freshness, and fallback behavior below.
+
+#### Scenario: A reader keeps a bounded Git Log open
+- **WHEN** the Git Log is displayed
+- **THEN** ages SHALL stay current while the page is open without new or refetched repository data, and row links MUST support standard browser link affordances
+- **AND** multiple repositories SHALL be clearly labelled or offer grouping/selection
+- **AND** a history-length control SHALL select visible row count from server-bounded data, and the body SHALL scroll internally when rows exceed its allocated height
+- **AND** an absent log SHALL produce an empty or unavailable state instead of render failure
 
 #### Scenario: Single repository has commits
 - **WHEN** the browser receives a commit log for one detected repository
@@ -113,7 +135,11 @@ The browser UI SHALL render the bounded commit log for the selected or only dete
 - **AND** the rest of the sidebar remains usable
 
 ### Requirement: Display build identifier in the browser UI
-The browser UI SHALL display a build identifier in its header derived from build-time metadata. For compiled release binaries the identifier MUST include the embedded semantic version and short git commit sha. For local development runs (for example under `bun run dev`) the identifier MUST include the current git branch name and short commit sha. When git metadata is unavailable in a development run, the identifier MUST still display the branch placeholder `main` paired with `unknown` rather than hiding the field.
+The browser header SHALL display a build identifier derived from build-time metadata. Compiled releases MUST include embedded semantic version and short git commit sha; local development (for example `bun run dev`) MUST include current branch and short commit sha. Missing development git metadata MUST use `main` paired with `unknown`, not hide the field.
+
+#### Scenario: Development metadata cannot supply an identifier
+- **WHEN** git metadata is unavailable during a development run
+- **THEN** the header MUST still display the build identifier using branch placeholder `main` and commit placeholder `unknown`
 
 #### Scenario: Release build shows version and commit
 - **WHEN** a user opens the browser UI served from a compiled release binary
@@ -128,7 +154,12 @@ The browser UI SHALL display a build identifier in its header derived from build
 - **THEN** the header shows `main@unknown`
 
 ### Requirement: Collapse and expand the sidebar
-The browser UI SHALL provide a control that collapses the sidebar into a narrow rail and another (or the same, toggled) control that expands it back to full width. The collapsed/expanded preference SHALL persist across reloads in the same browser for that origin. While collapsed, the preview pane MUST expand to use the freed horizontal space. The collapsed rail SHALL also expose a Follow toggle and a Terminal toggle as icon controls, driving the same state as their expanded-sidebar counterparts, so neither capability requires expanding the sidebar or a keyboard shortcut (which touch devices cannot produce). Each rail toggle MUST reflect its current state (`aria-pressed` mirroring `followEnabled`; the terminal control mirroring panel visibility) and MUST be reachable by pointer and keyboard.
+The browser UI SHALL provide a control to collapse the sidebar to a narrow rail and a control (or the same toggled control) to restore full width. The preference SHALL persist across reloads in the same browser for that origin; the preview MUST use freed width. The rail SHALL expose Follow and Terminal icon toggles with the state and access behavior below.
+
+#### Scenario: Collapsed-sidebar controls are used by pointer or keyboard
+- **WHEN** the sidebar is collapsed
+- **THEN** rail Follow and Terminal toggles SHALL drive the same state as expanded-sidebar counterparts without requiring expansion or a keyboard shortcut, including on touch devices
+- **AND** each toggle MUST be pointer- and keyboard-reachable and reflect its current state: `aria-pressed` mirrors `followEnabled`, and the terminal control mirrors panel visibility
 
 #### Scenario: Collapsing hides the document list
 - **WHEN** a user clicks the sidebar collapse control
@@ -154,7 +185,42 @@ The browser UI SHALL provide a control that collapses the sidebar into a narrow 
 - **THEN** the document list returns to its previous width
 
 ### Requirement: Animate the live connection indicator
-While the browser UI has received and applied authoritative state from its current live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The indicator MUST remain reconnecting until a current replacement channel has supplied authoritative state, and MUST return to connected immediately after that recovery succeeds rather than waiting for a later file change. The pulse MUST be disabled when the user's operating system requests reduced motion. The indicator's label MUST read `Connected` while the channel is confirmed live, `Reconnecting` while it is recovering, `Connecting` before the first successful connect, and — on a hub-served page — `Stopped` while the hub reports the current workspace's session not running and the channel is not confirmed live. A stopped session MUST NOT be presented as `Reconnecting`: the word is reserved for a transport gap or an unreachable child of a running session. The `Stopped` state SHALL be sourced from the hub's own report of the session (the activity topic prompting a read of the hub's workspace state), so a running session whose child is momentarily unreachable stays `Reconnecting`, and it SHALL clear from the stream when the session is started from anywhere, without a reload. The indicator MUST expose a hover tooltip whose text describes the current connection state to the uatu backend (for example, `Connected to the uatu backend`, or for a stopped session, `The workspace session is stopped`). The connection indicator SHALL be rendered inside the sidebar header, stacked beneath the `UatuCode` wordmark, so the indicator visually belongs to the application chrome rather than the per-document preview controls. As a tradeoff of this placement, collapsing the sidebar MAY hide the indicator along with the rest of the sidebar chrome. The indicator's label and animation MUST NOT vary by any Mode-equivalent state - the SPA is a single mode. On a hub-served page the live update channel is the hub's brokered stream, and the indicator SHALL reflect that stream's transport state together with the current workspace's applied `document` state; a topic-scoped resync or unavailability for a chat topic MUST NOT change the shell indicator, and Chat transport status SHALL remain scoped to the Chat surface. A page served directly, without a hub, never shows `Stopped`.
+The sidebar connection indicator SHALL communicate the current live-channel state with labels, tooltip, and a subtle connected pulse. It MUST reflect authoritative state, distinguish recovery from a stopped Hub session, and respect reduced motion. Placement, lifecycle transitions, and independence from Chat and Mode SHALL follow the rules below.
+
+#### Scenario: The channel connects or begins recovery
+- **WHEN** the current live channel has supplied authoritative state that the UI received and applied
+- **THEN** the indicator SHALL subtly pulse to distinguish live state from a static label, and its label MUST read `Connected`
+- **AND** the pulse MUST be disabled for operating-system reduced motion
+
+#### Scenario: Initial connection and recovery have distinct pending labels
+- **WHEN** the first successful connection has not occurred
+- **THEN** the indicator's label MUST be `Connecting`
+- **WHEN** the connection is recovering
+- **THEN** its label MUST be `Reconnecting` without animation
+- **AND** the pulse MUST stop when the channel enters reconnecting state
+- **AND** it MUST remain reconnecting until a current replacement supplies authoritative state, then return immediately to connected without waiting for a file change
+
+#### Scenario: Hub session state distinguishes stopped from unreachable
+- **WHEN** a hub-served channel is not confirmed live
+- **THEN** the label MUST be `Stopped` if the hub reports the current session not running, sourced from the activity topic prompting a read of Hub workspace state
+- **AND** a stopped session MUST NOT read `Reconnecting`, which is reserved for transport gaps or an unreachable child of a running session
+- **AND** a running session whose child is momentarily unreachable SHALL stay `Reconnecting`
+- **AND** a start from anywhere SHALL clear `Stopped` via the stream without reload
+
+#### Scenario: Connection chrome is displayed beside independent Chat status
+- **WHEN** the shell renders its connection indicator
+- **THEN** it SHALL be inside the sidebar header beneath the `UatuCode` wordmark, not per-document preview controls; sidebar collapse MAY hide it with the chrome
+- **AND** its hover tooltip MUST describe the current uatu backend connection state, for example `Connected to the uatu backend` or `The workspace session is stopped`
+- **AND** label and animation MUST NOT vary by Mode-equivalent state because the SPA is single-mode
+- **AND** on Hub pages it SHALL reflect brokered-stream transport and the current workspace's applied `document` state; Chat-topic resync or unavailability MUST NOT change it, and Chat status SHALL remain in Chat
+
+#### Scenario: A page is served directly without a Hub
+- **WHEN** a directly served page displays connection state without a Hub
+- **THEN** it never shows `Stopped`
+
+#### Scenario: A Chat topic resyncs independently of shell connection rendering
+- **WHEN** a Chat topic reports scoped resync or unavailability
+- **THEN** it MUST NOT change the shell connection indicator, and Chat transport status SHALL remain scoped to the Chat surface
 
 #### Scenario: The indicator pulses while connected to the server
 - **WHEN** the browser UI's current event channel supplies authoritative state that the client applies
@@ -220,59 +286,84 @@ The sidebar SHALL scroll within its own container and MUST NOT scroll together w
 - **AND** the sidebar header remains visible at the top of the sidebar
 
 ### Requirement: Provide a Files-pane filter chip with single persisted state
+Files SHALL provide a compact All/Recent/Changed control, defaulting to All and persisting as personal workspace state across clients. All/Changed SHALL show the hierarchical view; Recent SHALL show the flat disk-write-ordered view defined by `recent-files`. Changes SHALL affect only the current client's Files presentation and future resume state under the isolation rules below.
 
-The browser UI SHALL render the existing segmented `All`/`Changed` chip beside the Files count. Its default SHALL be `All`; its selected value SHALL persist as personal workspace state and follow the user to another client. Changing it SHALL affect only the current client's rendered Files path set and future resume state, not another open client, Follow, pane visibility, or active selection. Existing empty-state behavior for empty, non-git, and unavailable change sets SHALL remain unchanged.
+#### Scenario: A user changes Files view or opens Files options
+- **WHEN** the Files view changes
+- **THEN** another open client, Follow, pane visibility, active preview selection, and active playback SHALL remain unchanged
+- **AND** existing Changed empty-state behavior for empty, non-git, and unavailable change sets SHALL remain unchanged
+
+#### Scenario: Changed opens with no usable change set before any view switch
+- **WHEN** Files displays Changed with an empty, non-git, or unavailable change set, including on initial load
+- **THEN** its existing empty-state behavior SHALL remain unchanged
+
+#### Scenario: Files options open without changing the current Files view
+- **WHEN** Files options are displayed, whether or not the view changed
+- **THEN** they SHALL expose Show ignored files and, when media browsing is available, the media-type filter without crowding the main view control
 
 #### Scenario: Default state is All
-- **WHEN** the user has no saved Files filter
-- **THEN** the chip selects `All`
-- **AND** the full path set renders
+- **WHEN** the user has no saved Files view
+- **THEN** the control selects All and the full eligible hierarchical view renders
 
 #### Scenario: Filter follows the user to another browser
-- **WHEN** a user selects `Changed`
-- **AND** later opens the workspace root in another browser
-- **THEN** the new client restores `Changed`
+- **WHEN** a user selects Changed or Recent and later opens the workspace root in another browser
+- **THEN** the new client restores that saved Files view
 
 #### Scenario: Open clients retain independent filters
-- **WHEN** two clients are open and one changes its Files filter
-- **THEN** the other client's rendered tree does not change
+- **WHEN** two clients are open and one changes its Files view
+- **THEN** the other client's rendered Files presentation does not change
 
 #### Scenario: Empty state names the review base
-- **WHEN** the filter is `Changed`, review data is available, and no changed path intersects the tree
-- **THEN** the Files pane shows an empty state naming the resolved review base
+- **WHEN** the view is Changed, review data is available, and no changed path intersects the eligible set
+- **THEN** Files shows an empty state naming the resolved review base
 
 #### Scenario: Non-git empty state explains unavailability
-- **WHEN** the filter is `Changed` and review data is non-git or unavailable
-- **THEN** the Files pane explains that the Changed filter is unavailable
+- **WHEN** the view is Changed and review data is non-git or unavailable
+- **THEN** Files explains that Changed is unavailable
 
 #### Scenario: Toggling to All clears the empty state
-- **WHEN** a Changed-filter empty state is visible and the user selects `All`
-- **THEN** the full tree returns
+- **WHEN** a Changed empty state is visible and the user selects All
+- **THEN** the full eligible tree returns
 
 #### Scenario: Chip does not alter Follow or selection
-- **WHEN** the user toggles the Files filter
-- **THEN** Follow and active document selection remain unchanged
+- **WHEN** the user changes the Files view
+- **THEN** Follow, active preview selection, and active playback remain unchanged
+
+#### Scenario: Recent does not reset the tree arrangement
+- **WHEN** the user leaves All for Recent and returns to All
+- **THEN** the tree retains its manual directory expansion and selection state
 
 ### Requirement: Pane headers render title and metadata without visual overlap
-Every sidebar pane header SHALL render its title (`<h2>`) and its metadata block (file count, filter chip, and any action buttons) without visual overlap at every supported sidebar width. When the metadata and action blocks together would otherwise crowd the title to the point of overlap, the title MUST clip with an ellipsis rather than paint into the metadata block's coordinate space. The metadata and action blocks MUST NOT shrink at any width — they hold the time-varying information the user reads at a glance. The horizontal gap between title and metadata MUST be non-zero so the layout remains visually parsable even when the title is heavily clipped.
+Every sidebar pane header SHALL render title and metadata without overlap at supported widths. Files SHALL show one quiet eligible-result count for the selected view/query with an accessible file-count label, without binary breakdown, hidden segment, or filtered-versus-total wording. Status and controls SHALL remain independently usable under the layout rules below.
+
+#### Scenario: All pane controls remain reachable at constrained widths and on touch
+- **WHEN** any sidebar pane is displayed at minimum sidebar width or on a touch device
+- **THEN** its controls SHALL remain reachable
+- **AND** the Files view control SHALL wrap to its own row when necessary rather than forcing important controls offscreen
+
+#### Scenario: Header status and metadata stay legible at every supported width
+- **WHEN** pane headers display status or metadata at any supported width, including wide desktop
+- **THEN** indexing/error/retry status SHALL remain independently visible
+- **AND** other pane headers SHALL preserve nonoverlapping title/metadata, ellipsizing a title that cannot fit beside metadata
 
 #### Scenario: Files-pane header is legible at default sidebar width
-- **WHEN** the sidebar is at its default width
-- **AND** the workspace contains enough files that the document-count text is non-empty (e.g. "65 files · 5 binary")
-- **THEN** the Files-pane title bounding rectangle does NOT overlap the document-count bounding rectangle
-- **AND** the All/Changed filter chip remains visible
-- **AND** the collapse and hide action buttons remain visible
+- **WHEN** Files displays a large result count at the default sidebar width
+- **THEN** the title, count, All/Recent/Changed control, and pane actions do not overlap
+- **AND** no binary subcount is displayed
 
 #### Scenario: Files-pane header is legible at minimum sidebar width
-- **WHEN** the sidebar is at its minimum supported width (320px)
-- **AND** the document-count text is non-empty
-- **THEN** the Files-pane title bounding rectangle does NOT overlap the document-count bounding rectangle
-- **AND** if the title cannot fit alongside the metadata, the title clips with an ellipsis rather than overlapping the count
+- **WHEN** Files is at its minimum supported sidebar width of 320px
+- **THEN** view controls, count, and pane actions remain reachable without horizontal overflow
+- **AND** the control uses another row if needed
 
 #### Scenario: Other pane headers benefit from the same rule
-- **WHEN** any sidebar pane header is rendered (Change Overview, Files, Git Log)
-- **AND** the metadata block contains visible content
-- **THEN** the title and metadata block do NOT visually overlap
+- **WHEN** another sidebar pane header contains visible metadata
+- **THEN** its title and metadata do not overlap
+
+#### Scenario: Discovery is incomplete
+- **WHEN** only part of the inventory is known
+- **THEN** the current known-result count is accompanied by the indexing indication
+- **AND** it does not imply discovery is complete
 
 ### Requirement: Sidebar interaction never moves keyboard focus out of the sidebar
 
@@ -322,7 +413,29 @@ on demand by its shortcut.
 - **THEN** the pane becomes visible and expanded without disturbing the other panes' persisted state
 
 ### Requirement: The sidebar hosts a Usage pane in the pane stack
-The sidebar SHALL include a Usage pane participating in the existing pane-stack behavior: it can be collapsed, hidden, resized, and restored from the panels menu, and its visibility and height SHALL persist across reloads like the other panes. The pane SHALL show the workspace's last-known plan-usage windows — each window's name, percentage used, and reset time — with the time they were read and how long ago; a report older than ten minutes SHALL be marked stale while remaining readable. The pane SHALL show the last-known report as soon as the client loads, without waiting for a conversation to be opened or a turn to end, and SHALL follow every newer report from any Claude Code conversation. The pane SHALL offer a control that reads plan usage now, subject to the same rules as the chat readout's control: a live Claude Code session answers without interruption, an idle conversation is started and retired for the read, the control shows a read in flight, and a failed read keeps the figures and states why. Opening the pane while its report is stale and a Claude Code session is live SHALL refresh through that session unasked. When no report has ever been read, the pane SHALL show an empty state that offers the read control. The pane SHALL default to hidden. When the chat's plan readout is open and the sidebar is displayed beside the chat, the readout SHALL offer a control that reveals the Usage pane.
+The sidebar SHALL include a Usage pane, hidden by default, with the existing pane-stack collapse, hide, resize, and panels-menu restore behavior and persisted visibility/height across reloads. It SHALL display last-known plan usage and offer a read-now control under the freshness and session-lifecycle rules below.
+
+#### Scenario: A client loads an existing plan-usage report
+- **WHEN** the client loads
+- **THEN** Usage SHALL immediately show the workspace's last-known windows, each with name, percentage used, and reset time, plus read time and elapsed age, without waiting for a conversation to open or turn to end
+- **AND** if no report has ever been read, an empty state SHALL offer the read control
+
+#### Scenario: An existing Usage report ages or a newer report arrives
+- **WHEN** the pane's report becomes older than ten minutes or any Claude Code conversation supplies a newer report
+- **THEN** an older-than-ten-minutes report SHALL remain readable and be marked stale
+- **AND** every newer report SHALL update the pane's last-known windows, names, percentage used, reset times, read time, and elapsed age
+
+#### Scenario: Usage is read on demand or a stale pane is opened
+- **WHEN** the user activates the pane's read-now control
+- **THEN** the same rules as the chat readout SHALL apply: a live Claude Code session answers without interruption, an idle conversation is started and retired for the read, the control shows an in-flight read, and failure keeps figures and states why
+
+#### Scenario: Opening stale Usage refreshes without a read-now activation
+- **WHEN** a stale pane is opened while a Claude Code session is live
+- **THEN** it SHALL refresh through that session unasked
+
+#### Scenario: The plan readout offers to reveal Usage independently of reads
+- **WHEN** the chat plan readout is open beside a displayed sidebar
+- **THEN** the readout SHALL offer a control revealing Usage
 
 #### Scenario: Usage pane behaves like its siblings
 - **WHEN** the user collapses, hides, and then restores the Usage pane from the panels menu
@@ -367,7 +480,11 @@ In desktop mode's stacked (≤900px) layout the `Files` pane body SHALL receive 
 - **AND** other panes and the preview remain reachable by scrolling the page
 
 ### Requirement: Fresh clients default to a lean pane set
-On a client with no stored pane state, the sidebar SHALL default to `Change Overview` and `Files` visible, with `Git Log`, `Search`, and `Usage` hidden. Hidden-by-default panes SHALL remain available through the per-pane visibility menu. Stored pane state SHALL always take precedence over defaults — changing defaults MUST NOT alter any client's existing arrangement. The pane-state reader SHALL ignore stored entries for pane ids that no longer exist, without error and without discarding the rest of the stored state.
+Without stored pane state, the sidebar SHALL show `Change Overview` and `Files` and hide `Git Log`, `Search`, and `Usage`, which SHALL remain available through the per-pane visibility menu. Stored state SHALL always take precedence; changing defaults MUST NOT alter existing arrangements.
+
+#### Scenario: Stored pane state contains removed pane ids
+- **WHEN** the pane-state reader encounters a stored id that no longer exists
+- **THEN** it SHALL ignore that entry without error or discarding the rest of the stored state
 
 #### Scenario: First visit shows the lean sidebar
 - **WHEN** the app loads on a client with no `uatu:sidebar-panes` stored state
@@ -383,7 +500,14 @@ On a client with no stored pane state, the sidebar SHALL default to `Change Over
 - **THEN** the app boots normally and the remaining pane entries are honored
 
 ### Requirement: Render repository change context in the Change Overview pane
-The browser UI SHALL render repository and change-context data in the `Change Overview` pane when that data is available. The pane MUST show whether the watched root is inside a git repository, the current branch or detached commit, dirty status, and the resolved compare anchor (base ref or fallback mode). The pane MUST NOT list raw mechanical statistics such as changed-file count, touched-line count, diff-hunk count, or directory spread directly in the sidebar. When the workspace contains at least one untracked entry, the pane MUST additionally render a categorical indicator that surfaces the presence of untracked files; the indicator answers a workspace-state question ("are there untracked files at all?") over the changed-files list. That indicator MUST NOT include a count and MUST NOT render when no untracked entries are present. When `.uatu.json` parsing produces configuration warnings, the pane MUST display them. The pane MUST NOT render a review-burden score, level, meter, or score explanation — no such concepts exist. If repository data is unavailable, the pane SHALL show a clear unavailable or non-git message instead of failing to render.
+`Change Overview` SHALL render available repository/change-context data and MUST show Git membership, branch or detached commit, dirty status, and resolved compare anchor (base ref or fallback mode). It MUST show `.uatu.json` parsing warnings and SHALL show a clear unavailable/non-git message rather than fail when data is unavailable. Statistics and untracked presence SHALL follow the rules below.
+
+#### Scenario: Change Overview summarizes a workspace's changes
+- **WHEN** Change Overview is displayed, whether or not repository and changed-files data are available
+- **THEN** the sidebar MUST NOT list raw mechanical statistics such as changed-file count, touched-line count, diff-hunk count, or directory spread
+- **AND** the pane MUST NOT render a review-burden score, level, meter, or score explanation; no such concepts exist
+- **AND** when the workspace contains at least one untracked entry, the pane MUST render a count-free categorical presence indicator answering the workspace-state question "are there untracked files at all?" over the changed-files list
+- **AND** no untracked entries MUST mean no such indicator is rendered
 
 #### Scenario: Git-backed change has repository data
 - **WHEN** the browser receives repository metadata and a computed changed-files context
@@ -413,11 +537,29 @@ The browser UI SHALL render repository and change-context data in the `Change Ov
 - **AND** the pane shows no placeholder, empty row, or "0 untracked" affordance for that category
 
 ### Requirement: The connection indicator offers a manual reconnect
-The connection indicator SHALL be an actionable control whenever the connection is not confirmed live, so a user can ask for recovery without depending on browser chrome. It MUST be operable by pointer, touch, and keyboard, MUST carry an accessible name describing the action rather than only the current state, and MUST present a touch target no smaller than the application's other touch-mode controls. While the connection is confirmed live the indicator MAY be inert.
+The connection indicator SHALL offer manual recovery whenever not confirmed live. It MUST support pointer, touch, and keyboard, an action-describing accessible name, and a touch target no smaller than other application touch-mode controls. Confirmed-live indicators MAY be inert. The control MUST communicate an attempt underway and MUST NOT start a second concurrent attempt. Recovery and stopped-session startup follow below.
 
-Activating the control SHALL first attempt recovery in place: reconcile authoritative state and re-establish the live channel, preserving the previewed document, scroll position, sidebar selection, and any Chat draft or timeline position. If the connection is not confirmed live within a bounded period after that attempt, the control SHALL reload the page, because an in-place recovery cannot rescue a page whose own recovery machinery is no longer running. The control MUST communicate that an attempt is under way and MUST NOT start a second concurrent attempt while one is in flight.
+#### Scenario: Manual reconnect attempts recovery before reload
+- **GIVEN** the session is not reported as `Stopped`
+- **WHEN** the user activates recovery for a connection not confirmed live
+- **THEN** the control SHALL first reconcile authoritative state and re-establish the live channel in place, preserving document, scroll, sidebar selection, and any Chat draft or timeline position
+- **AND** if not confirmed live within a bounded period it SHALL reload, since a dead recovery mechanism cannot repair itself in place
+- **AND** it MUST communicate an attempt under way and MUST NOT start a second concurrent attempt
 
-While the indicator reads `Stopped`, its action SHALL be to start the workspace's session through the hub instead of reconnecting, and its accessible name SHALL say so. A successful start SHALL return the page to `Connected` in place, preserving the previewed document, scroll position, sidebar selection, and any Chat draft or timeline position; the page MUST NOT reload as part of the start. The control MUST NOT fall back to reloading the page while the session is stopped — a reload cannot offer more than the control already does — and a recovery attempt already in flight when the session stopped MUST settle without reloading. A start the hub refuses because the workspace's credentials are locked SHALL hand off to the hub dashboard's unlock flow; any other refusal SHALL be shown at the indicator and the control SHALL remain available. If the hub accepts the start but the channel is not confirmed live within the bounded period, the indicator SHALL return to `Reconnecting` with its ordinary reconnect action.
+#### Scenario: A stopped-session action starts rather than reloads
+- **WHEN** the indicator reads `Stopped`
+- **THEN** its action SHALL be to start the workspace session through the hub instead of reconnecting, with an accessible name saying so before activation
+- **AND** successful start SHALL return to `Connected` in place while preserving document, scroll, sidebar selection, and any Chat draft or timeline position; it MUST NOT reload as part of start
+- **AND** the control MUST NOT fall back to reload while stopped, and a recovery already in flight when stopped MUST settle without reload
+
+#### Scenario: The session stops during an existing recovery attempt
+- **WHEN** a recovery attempt is already in flight when the session stops
+- **THEN** it MUST settle without reloading; the control MUST NOT fall back to reload while the session is stopped
+
+#### Scenario: Hub start is refused or fails to become live promptly
+- **WHEN** a stopped-session start request completes
+- **THEN** locked-credential refusal SHALL hand off to the hub dashboard unlock flow; other refusals SHALL appear at the indicator with the control still available
+- **AND** if accepted but not confirmed live within the bounded period, the indicator SHALL return to `Reconnecting` with its ordinary reconnect action
 
 #### Scenario: Activating the indicator recovers in place
 - **WHEN** a user activates the connection indicator while it reads `Reconnecting` and an in-place recovery succeeds
