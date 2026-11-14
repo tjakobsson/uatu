@@ -30,15 +30,18 @@ export class SessionChanges {
       release: () => { if (!released) { released = true; state.owners--; } } };
   }
 
-  observe(session: string, facet: string, value: unknown, delta = false): void {
+  /** A successful local mutation fences every earlier capture, even on replay. */
+  advance(session: string): void { this.state(session).revision++; }
+
+  observe(session: string, facet: string, value: unknown, initialChange = false): void {
     const state = this.state(session);
     const key = facet.startsWith("event:") ? `event:${createHash("sha256").update(facet).digest("hex")}` : facet;
     const digest = createHash("sha256").update(JSON.stringify(canonical(value)) ?? "undefined").digest("hex");
     const previous = state.facets.get(key);
     if (previous === digest) return;
-    // Unknown complete facets initialize state. A delta describes an actual
-    // change, not a complete baseline, and therefore advances even when new.
-    if (previous !== undefined || delta) state.revision++;
+    // Unknown complete facets initialize state. Native deltas and relevant
+    // positive counterproof can explicitly deny an earlier capture even when new.
+    if (previous !== undefined || initialChange) state.revision++;
     state.facets.delete(key);
     state.facets.set(key, digest);
     // Complete native facets must not lose their baseline to streaming traffic.

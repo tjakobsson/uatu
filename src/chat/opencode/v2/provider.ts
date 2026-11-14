@@ -1755,7 +1755,6 @@ export class OpenCodeV2Provider implements ChatProvider {
     const started = ++this.parentHistoryReadClock;
     const entries = await this.client.session.inbox.list({ sessionID: sessionId }, { signal });
     signal.throwIfAborted();
-    this.sessionChanges.observe(sessionId, "inbox", entries);
     const completed = ++this.parentHistoryReadClock;
     const reports: Array<{ child: string; at?: number; digest: string }> = [], seen = new Set<string>();
     let bytes = 0, overflow: true | undefined;
@@ -1771,6 +1770,12 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (reports.length >= parentCounterproofMaxFacts || bytes + size > parentCounterproofMaxBytes) { overflow = true; break; }
       reports.push(fact); seen.add(digest); bytes += size;
     }
+    // Even a first complete inbox can contradict a completion already inferred
+    // by a consumer. Scope that positive baseline to its native launcher children;
+    // empty or unrelated first observations remain ordinary initialization.
+    const counterproof = [...this.historyWorkerSources].some(source => source.parent === sessionId
+      && source.historyParentLaunches?.size && (overflow || reports.some(report => source.historyParentLaunches!.has(report.child))));
+    this.sessionChanges.observe(sessionId, "inbox", entries, counterproof);
     return { entries, observation: { started, completed, reports, ...(overflow ? { overflow } : {}) } satisfies PendingOutcomeRead };
   }
 
@@ -2897,6 +2902,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.historyReuse.invalidate(sessionId);
     if (context.turns[index + 1]) return this.stageRevert(sessionId, context, index + 1);
     await this.client.session.revert.clear({ sessionID: sessionId });
+    this.sessionChanges.advance(sessionId);
     return { outcome: "changed", state: reversibleState(context.turns) };
   }
 
@@ -2905,6 +2911,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     const target = context.turns[index];
     if (!target) throw new ReversibleHistoryTargetError();
     await this.client.session.revert.stage({ sessionID: sessionId, messageID: target.providerId });
+    this.sessionChanges.advance(sessionId);
     return { outcome: "changed", state: reversibleState(context.turns, index), restoredDraft: target.draft };
   }
 

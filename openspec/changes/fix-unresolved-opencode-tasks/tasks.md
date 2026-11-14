@@ -413,3 +413,31 @@ full CI passes 11,344 tests, 17 skipped, zero failed in 603.62 seconds at code
 commit `9a4bd3ab`; its whole-source manifest is unchanged. This completion record
 updates documentation only. Publication text/accepted-limit approval and external
 review remain outstanding; no push, PR-body update or deployment has occurred.
+
+### Published-head review corrections
+
+The preceding paragraph records the pre-publication checkpoint. Commit `37a10407`
+was subsequently pushed to PR #625 with the approved body and one Codex request.
+Codex reviewed that head and reported two further outcome-publication gaps.
+
+- [x] 6.12 Reproduce and correct first relevant positive inbox observations that initialize an unknown facet after an inference was captured. Preserve quiet empty/unrelated observations, identical replays, explicit reports and bounded history attempts.
+- [x] 6.13 Reproduce and correct successful local revert acknowledgements that leave captured outcomes publishable before follow-up native records or SSE arrive. Cover shared stage/clear paths, failed mutations, explicit reports and later independent reads without adding ordering state.
+- [x] 6.14 Verify the corrections with focused checks, typecheck, the race suite and 10,000 existing property seeds. Twenty public provider/adapter regressions pass after six dismissal-authority failures on unchanged production; all original 583 race cases remain unchanged and pass. Additional checks: 115 focused recovery/adapter/counter tests, 19 sanitized session fixtures, 158 selected provider checks and typecheck. The 10,000-seed campaign reports A=0/B=0/harnessErrors=0, maximum logical attempts 2/4 and physical parent reads 3. Fresh independent affected review reports no actionable findings; inspection and execution evidence are separate.
+- [ ] 6.15 Push for GitHub full CI and external review as requested. Keep the approved PR body/title/state unchanged. Do not claim that the two previously observed GitHub unit failures are explained by these corrections.
+
+The user requested these fixes and a push, leaving full CI and review to GitHub.
+No local runtime upgrade, full local CI, merge, deployment or native-session
+mutation is included. The existing published-head CI failed the history
+`native-ended` withdrawal case and an indexing later-render timeout; both remain
+unclassified despite local selected/race passes. Browser and performance jobs
+passed for that head. New-head results must be reported separately.
+
+The inbox correction uses the existing digest/counter mechanism after parsing:
+first positive reports relevant to a consuming parent's native launcher scope
+deny earlier inferences without granting report or activity authority. Empty,
+unrelated and identical observations remain quiet. Successful stage and clear
+acknowledgements directly advance the existing session revision before returning;
+failed mutations do not. No native requests, retries, ordering maps, caches,
+dependencies or public schema fields were added. The original property checker
+is unchanged; the new first-baseline and local-ACK orderings have focused public
+HTTP-barrier coverage rather than a second reference model.
