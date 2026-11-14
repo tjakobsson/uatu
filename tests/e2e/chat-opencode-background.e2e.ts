@@ -101,6 +101,51 @@ async function revealTouchWorkers(page: Page) {
 const liveWorkerInspections = '#chat-compact-workers-items .chat-worker-row:is([data-state="working"], [data-state="unknown"]) [data-inspect-task]';
 const activeTask = (page: Page, taskId: string) => page.locator(`.chat-worker-row:is([data-state="working"], [data-state="unknown"])[data-background-task="${taskId}"]`);
 
+for (const engine of ["chromium", "webkit"] as const) test(`fresh inventory restores Working after OpenCode reconnect: ${engine}`, async ({ launchBrowser, request, baseURL }) => {
+  test.setTimeout(60_000);
+  const browser = await launchBrowser(engine);
+  const page = await browser.newPage({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  try {
+    const conversationId = await boot(page, request);
+    const worker = await control(request, { op: "launchRequestWorker", conversationId });
+    await revealTouchWorkers(page);
+    const row = activeTask(page, worker.taskId);
+    await expect(row).toHaveAttribute("data-state", "working");
+    await page.locator("#chat-input").fill("Keep my draft through reconnect");
+    await control(request, { op: "pauseEvents" });
+    await expect(row).toHaveAttribute("data-state", "unknown");
+    await control(request, { op: "reconnectEvents" });
+    await expect(row).toHaveAttribute("data-state", "working");
+    await expect(page.locator("#chat-compact-workers-label")).toHaveText("1 working");
+    await expect(row.locator("[data-stop-task]")).toBeDisabled();
+    await expect(page.locator("#chat-input")).toHaveValue("Keep my draft through reconnect");
+    await page.reload(); await page.locator("#touch-tab-chat").tap();
+    await revealTouchWorkers(page);
+    await expect(row).toHaveAttribute("data-state", "working");
+    await control(request, { op: "settleWorker", childId: worker.childId, text: "Recovered worker finished" });
+    await expect(page.locator("#chat-compact-workers-label")).toHaveText("1 finished");
+    expect((await control(request, { op: "state" })).unhandled).toEqual([]);
+  } finally { await control(request, { op: "reconnectEvents" }); await page.close(); await browser.close(); }
+});
+
+for (const engine of ["chromium", "webkit"] as const) test(`resumed child remains Working beside its finished occurrence: ${engine}`, async ({ launchBrowser, request, baseURL }) => {
+  const browser = await launchBrowser(engine);
+  const page = await browser.newPage({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  try {
+    const conversationId = await boot(page, request);
+    const first = await control(request, { op: "launchWorker", conversationId });
+    await control(request, { op: "settleWorker", childId: first.childId, text: "First execution finished" });
+    const resumed = await control(request, { op: "launchWorker", conversationId, childId: first.childId });
+    // Fresh complete inventory, including a still-pending old notification.
+    await page.reload(); await page.locator("#touch-tab-chat").tap();
+    await revealTouchWorkers(page);
+    await expect(activeTask(page, resumed.taskId)).toHaveAttribute("data-state", "working");
+    await expect(page.locator("#chat-compact-workers-label")).toHaveText("1 working · 1 finished");
+    await control(request, { op: "settleWorker", childId: resumed.childId, text: "Resumed execution finished" });
+    await expect(page.locator("#chat-compact-workers-label")).toHaveText("2 finished");
+  } finally { await page.close(); await browser.close(); }
+});
+
 for (const engine of ["chromium", "webkit"] as const) test(`large resumed-worker recovery does not loop while reading: ${engine}`, async ({ launchBrowser, request, baseURL }) => {
   const browser = await launchBrowser(engine);
   const page = await browser.newPage({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, reducedMotion: "reduce" });

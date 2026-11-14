@@ -1,4 +1,4 @@
-import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, MessageDelivery, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+import type { AgentUsageReport, BackgroundTaskItem, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, MessageDelivery, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
 
 // One user entry pending in the agent's own inbox — a steer the agent holds
 // until its running turn's next step boundary (opencode-v2-steering D3). The
@@ -193,7 +193,13 @@ export type WorkerOrigin = { messageId: string; toolUseId?: string; childConvers
 // Internal evidence lease, independent of the message transport deadline.
 // Retention must happen while the previous owner is current; every successor
 // has its own bounded signal and releases without retiring sibling readers.
-export type WorkerSourceGuard = { isCurrent: () => boolean; retain: (signal: AbortSignal) => WorkerSourceGuard };
+export type WorkerSourceGuard = {
+  isCurrent: () => boolean;
+  retain: (signal: AbortSignal) => WorkerSourceGuard;
+  // Recheck report-free inferred outcomes at final publication. A mismatch
+  // withholds only that outcome; it does not invalidate or retry the source.
+  projectInferredOutcome?: (item: BackgroundTaskItem) => BackgroundTaskItem;
+};
 // Invalidation-only watch for retained associations, registered before I/O.
 // A snapshot contains only scoped counterproof, never ownership admission.
 // Successive snapshots belong to the same bounded owner, so a failed transport

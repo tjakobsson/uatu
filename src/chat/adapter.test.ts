@@ -1591,17 +1591,31 @@ describe("production recovery Checking presentation", () => {
     activity: { kind: "unavailable", executionId: "execution:checking", executionAliases: ["launch:checking"], generation: 7, observedAt: 1234 },
     control: { available: false, reason: "No current proof" } };
 
-  test("a hanging real read publishes Checking, expires despite unrelated updates, and accepts a late current result", async () => {
+  for (const startup of ["normal", "held-session"] as const)
+  test(`a hanging real read publishes Checking, expires despite unrelated updates, and accepts a late current result${startup === "held-session" ? " (held session lookup)" : ""}`, async () => {
     const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let sessionEntered!: () => void, releaseSession!: () => void, readEntered!: () => void;
+    const sessionPending = new Promise<void>(resolve => { sessionEntered = resolve; }), sessionGate = new Promise<void>(resolve => { releaseSession = resolve; });
+    const reading = new Promise<void>(resolve => { readEntered = resolve; });
+    const getSession = provider.getSession.bind(provider);
+    if (startup === "held-session") provider.getSession = async id => { sessionEntered(); await sessionGate; return getSession(id); };
     let release!: () => void, reads = 0;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const working: BackgroundTaskItem = { ...unavailable, stateUncertain: false, activity: { ...unavailable.activity!, kind: "working", observedAt: 2345 } };
-    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; await gate; return [working]; } });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; readEntered(); await gate; return [working]; } });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
     const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
     jest.useFakeTimers(); const pump = adapter.startEventPump();
     try {
-      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      if (startup === "held-session") {
+        await sessionPending;
+        // Unrelated IO completions cannot prove recovery passed session lookup
+        // and workspace confinement. Keep that startup order deterministic.
+        await flushRecoveryIo(); expect(reads).toBe(0);
+        releaseSession();
+      }
+      await reading;
       expect(reads).toBe(1);
       expect(projection.get(unavailable.id)).toMatchObject({ activity: { ...unavailable.activity!, kind: "checking" }, control: unavailable.control });
       const activityBefore = adapter.activity();
@@ -1617,7 +1631,7 @@ describe("production recovery Checking presentation", () => {
       expect(reads).toBe(1); // Presentation expiry did not invalidate its read fence.
       expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
       expect(provider.permissionReplies).toEqual([]); expect(provider.questionReplies).toEqual([]);
-    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+    } finally { releaseSession(); release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
   });
 
   for (const result of ["failed", "inconclusive"] as const) test(`${result} read ends Checking without resetting on retry reads`, async () => {
@@ -4900,6 +4914,14 @@ async function flushUntil(predicate: () => boolean): Promise<void> {
 // Let actual workspace-confinement IO settle without advancing fake deadlines.
 async function flushRecoveryIo(): Promise<void> {
   for (let turn = 0; turn < 32; turn++) await realpath(process.cwd());
+}
+
+// Wait for the owned recovery boundary, not a fixed number of unrelated IO
+// completions. Fake deadlines stay frozen, so an inherited retry timer cannot
+// satisfy this condition by elapsing while workspace confinement settles.
+async function flushRecoveryIoUntil(predicate: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 1_000 && !predicate(); turn++) await realpath(process.cwd());
+  expect(predicate()).toBe(true);
 }
 
 async function admissionsApplied(adapter: ChatAdapter): Promise<void> {
@@ -8224,6 +8246,29 @@ describe("prompt, abort, permission, and question mutations", () => {
     }
   });
 
+  test("connected generation rearms after owned workspace IO without advancing fake deadlines", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let reads = 0, classifications = 0, entered = false, releaseRead!: () => void, releaseScope!: () => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; }), scopeGate = new Promise<void>(resolve => { releaseScope = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      if (++reads === 1) await readGate;
+      return [{ id: "task:unknown", type: "background_task", taskId: "unknown", description: "Unknown", createdAt: 1, status: "running", stateUncertain: true }];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const scope = adapter as unknown as { requireSession(id: string): Promise<unknown> };
+    const requireSession = scope.requireSession.bind(adapter);
+    scope.requireSession = async id => { if (++classifications === 2) { entered = true; await scopeGate; } return requireSession(id); };
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await waitUntil(() => reads === 1);
+      jest.useFakeTimers(); releaseRead(); await flushRecoveryIo();
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIoUntil(() => entered);
+      await flushRecoveryIo(); expect(reads).toBe(1); // Unrelated IO turns cannot authorize this held read.
+      releaseScope(); await flushRecoveryIoUntil(() => reads === 2);
+      expect(reads).toBe(2); // No fake timer was advanced to admit the new generation.
+    } finally { releaseRead(); releaseScope(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
   test("a new connected generation immediately rearms the inconclusive cycle instead of inheriting its old timer", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -8241,7 +8286,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await waitUntil(() => reads === 1);
       jest.useFakeTimers(); release(); await flushRecoveryIo();
       provider.eventQueue.push({ type: "server.connected", data: {} });
-      await flushRecoveryIo();
+      await flushRecoveryIoUntil(() => reads === 2);
       expect(reads).toBe(2);
       for (let retry = 0; retry < 5; retry++) { jest.advanceTimersByTime(30_000); await flushRecoveryIo(); }
       expect(reads).toBe(4);

@@ -1,6 +1,24 @@
 import { expect, test } from "bun:test";
 import { HistoryReuse, historyPageCursor, historyPageEnd } from "./history-reuse";
 
+test("entry observations follow pending ownership, replacement, eviction and disposal", async () => {
+  let sequence = 0, release!: (value: string) => void;
+  const cache = new HistoryReuse<string, { order: number }>(1024, 1, () => ({ order: ++sequence }));
+  const old = cache.read("child", "generation", () => new Promise<string>(resolve => { release = resolve; }));
+  await Promise.resolve();
+  const first = cache.peekObservation("child", "generation"); expect(first).toEqual({ order: 1 });
+  expect(cache.peek("child", "generation")).toBeUndefined(); expect(cache.peekObservation("other", "generation")).toBeUndefined();
+  cache.invalidate("child"); expect(cache.peekObservation("child", "generation")).toBeUndefined();
+  expect(await cache.read("child", "generation", async () => "fresh")).toBe("fresh");
+  const current = cache.peekObservation("child", "generation"); expect(current).toEqual({ order: 2 });
+  release("obsolete"); expect(await old).toBe("obsolete");
+  expect(cache.peek("child", "generation")).toBe("fresh"); expect(cache.peekObservation("child", "generation")).toBe(current);
+  await cache.read("other", "generation", async () => "other");
+  expect(cache.peekObservation("child", "generation")).toBeUndefined(); expect(cache.size).toBe(1);
+  expect(cache.peekObservation("other", undefined)).toBeUndefined();
+  cache.dispose(); expect(cache.peekObservation("other", "generation")).toBeUndefined(); expect(cache.retainedBytes).toBe(0);
+});
+
 test("shares concurrent reads, reuses verified versions, and isolates conversations", async () => {
   const cache = new HistoryReuse<number>();
   let calls = 0;

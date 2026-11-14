@@ -47,7 +47,7 @@ describe("API contract structure", () => {
   test("admission uncertainty remains optional, closed, and restricted to unconfirmed entries", async () => {
     const { parseQueuedMessages } = await import("../src/chat/validation");
     const { WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION } = await import("../src/shared/version");
-    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([37, 15, 4]);
+    expect([WORKSPACE_API_REVISION, HUB_API_REVISION, BUNDLED_WEB_REVISION]).toEqual([38, 15, 4]);
     const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const schema = spec.components.schemas.QueuedMessage as { properties: Record<string, object> };
     const validate = createAjv().compile(schemaForAjv(schema, spec.components.schemas));
@@ -65,6 +65,37 @@ describe("API contract structure", () => {
     expect(previous(entry)).toBe(false);
     const { admissionUncertaintyId: _value, ...legacy } = entry;
     expect(previous(legacy)).toBe(true);
+  });
+  test("withheld outcomes agree across closed worker schemas and deny dismissal", async () => {
+    const { parseConversationItem, parseChatEvent } = await import("../src/chat/validation");
+    const { workerDismissalEvidence } = await import("../src/chat/worker-dismissal-evidence");
+    const spec = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const schemas = spec.components.schemas;
+    const validate = createAjv().compile(schemaForAjv(schemas.ConversationItem, schemas));
+    const legacy = { id: "worker", type: "background_task", taskId: "worker", description: "Worker", status: "running", createdAt: 0,
+      activity: { kind: "unavailable", executionId: "v1:fixture" } };
+    expect(validate(legacy), JSON.stringify(validate.errors)).toBe(true);
+    expect(parseConversationItem(legacy)).toEqual(legacy);
+    for (const outcomeWithheld of [true, false]) {
+      const item = { ...legacy, outcomeWithheld };
+      expect(validate(item), JSON.stringify(validate.errors)).toBe(true);
+      expect(parseConversationItem(item)).toEqual(item);
+      expect(parseChatEvent({ generation: "generation", sequence: 1, conversationId: "opencode:parent", type: "item.upsert", item })).toMatchObject({ type: "item.upsert", item });
+      expect(workerDismissalEvidence(item)?.dismissible).toBe(!outcomeWithheld);
+    }
+    for (const outcomeWithheld of [null, "true", 1]) {
+      expect(validate({ ...legacy, outcomeWithheld })).toBe(false);
+      expect(() => parseConversationItem({ ...legacy, outcomeWithheld })).toThrow();
+    }
+    const schema = schemas.ConversationItem as { oneOf: Array<{ properties?: Record<string, unknown> }> };
+    const previous = { ...schema, oneOf: schema.oneOf.map(variant => {
+      if (!variant.properties?.outcomeWithheld) return variant;
+      const { outcomeWithheld: _withheld, ...properties } = variant.properties;
+      return { ...variant, properties };
+    }) };
+    const old = createAjv().compile(schemaForAjv(previous, schemas));
+    expect(old(legacy)).toBe(true);
+    expect(old({ ...legacy, outcomeWithheld: true })).toBe(false);
   });
   test("worker launch references are optional continuity data in the expanded closed activity schema", async () => {
     const { parseConversationItem } = await import("../src/chat/validation");

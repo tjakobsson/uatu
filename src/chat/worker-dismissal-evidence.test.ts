@@ -36,6 +36,19 @@ function nativeAliasFixture(complete: boolean): BackgroundTaskItem[] {
   });
 }
 
+test("withheld inference is nondismissible compact evidence, including Unavailable and Ended fallbacks", () => {
+  const native = nativeAliasFixture(true)[0]!;
+  for (const kind of ["unavailable", "ended"] as const) {
+    const withheld: BackgroundTaskItem = { ...native, outcomeWithheld: true, stateUncertain: true, activity: { ...native.activity!, kind } };
+    expect(workerSourceIsProtected(withheld)).toBe(true);
+    expect(compactWorkerEvidence([withheld]).every(entry => !entry.dismissible)).toBe(true);
+    expect(() => workerDismissalSourceStrength([withheld])([{ ...withheld, outcomeWithheld: false }])).toThrow("weakened");
+    const reported: BackgroundTaskItem = { ...native, status: "completed", resultId: "actual-result", stateUncertain: false, activity: { ...native.activity!, kind: "ended" } };
+    expect(() => workerDismissalSourceStrength([withheld])([reported])).not.toThrow();
+    expect(compactWorkerEvidence([reported]).every(entry => entry.dismissible)).toBe(true);
+  }
+});
+
 test("native complete history certifies call-scoped alias shadows without creating completion", () => {
   const before = nativeAliasFixture(false), current = nativeAliasFixture(true);
   expect(before).toHaveLength(2); expect(current).toHaveLength(1);

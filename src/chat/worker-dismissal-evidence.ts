@@ -77,8 +77,8 @@ export function workerDismissalEvidence(value: unknown): WorkerDismissalEvidence
   const ids = workerDismissalIdentities(item); if (!ids.length) return null;
   if (item.activity === undefined) {
     if (!["completed", "failed", "stopped", "error", "cancelled"].includes(item.status as string)) return null;
-    const signature = createHash("sha256").update(JSON.stringify(["terminal", item.status])).digest("hex");
-    return { executionId: ids[0]!, signature, active: false, dismissible: true };
+    const signature = createHash("sha256").update(JSON.stringify(["terminal", item.status, ...(item.outcomeWithheld === true ? ["outcome-withheld"] : [])])).digest("hex");
+    return { executionId: ids[0]!, signature, active: false, dismissible: item.outcomeWithheld !== true };
   }
   if (item.type !== "background_task") return null;
   const activity = record(item.activity);
@@ -86,13 +86,13 @@ export function workerDismissalEvidence(value: unknown): WorkerDismissalEvidence
     || !["working", "needs-answer", "checking", "session-active", "unavailable", "ended"].includes(activity.kind as string)
     || !["running", "completed", "failed", "stopped"].includes(item.status as string)) return null;
   const active = activity.kind === "working" || activity.kind === "needs-answer";
-  const dismissible = !active && (item.status !== "running" || activity.kind === "unavailable" || activity.kind === "ended");
+  const dismissible = item.outcomeWithheld !== true && !active && (item.status !== "running" || activity.kind === "unavailable" || activity.kind === "ended");
   if ((activity.generation !== undefined && (!Number.isSafeInteger(activity.generation) || (activity.generation as number) < 0))
     || (activity.endedAt !== undefined && (typeof activity.endedAt !== "number" || !Number.isFinite(activity.endedAt) || activity.endedAt < 0))) return null;
   const request = record(activity.request);
   if (activity.request !== undefined && (!request || !dismissalIdentifier(request.id) || (request.kind !== "permission" && request.kind !== "question"))) return null;
   const signature = createHash("sha256").update(JSON.stringify([[...ids].sort(), activity.kind, activity.generation ?? null, activity.endedAt ?? null, item.status,
-    request ? { id: request.id, kind: request.kind } : null])).digest("hex");
+    request ? { id: request.id, kind: request.kind } : null, ...(item.outcomeWithheld === true ? ["outcome-withheld"] : [])])).digest("hex");
   return { executionId: ids[0]!, signature, active, dismissible };
 }
 export function workerDismissalEvidenceForItem(value: unknown): WorkerDismissalEvidence[] {
@@ -178,6 +178,7 @@ export function validatedWorkerDismissalSource(items: readonly ConversationItem[
 }
 
 export function workerSourceIsProtected(item: ConversationItem): boolean {
+  if (item.type === "background_task" && item.outcomeWithheld) return true;
   if (item.type !== "background_task" || !item.activity) return false;
   return item.activity.kind === "working" || item.activity.kind === "needs-answer"
     || item.status === "running" && (item.activity.kind === "checking" || item.activity.kind === "session-active");
@@ -208,7 +209,8 @@ export function workerDismissalSourceStrength(source: readonly ConversationItem[
       if (item.type !== "background_task" || !item.activity) return weakened();
       const active = item.activity.kind === "working" || item.activity.kind === "needs-answer";
       const protectedRow = workerSourceIsProtected(item);
-      if (witness.active && !active || witness.protectedRow && !protectedRow) weakened();
+      const explicitReplacement = witness.item.outcomeWithheld && item.status !== "running" && !item.stateUncertain && !!item.resultId;
+      if (witness.active && !active || witness.protectedRow && !protectedRow && !explicitReplacement) weakened();
       if (witness.generation !== undefined && (item.activity.generation === undefined || item.activity.generation < witness.generation)) weakened();
     }
   };

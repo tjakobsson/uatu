@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 15 / Workspace 38 - Unreleased (withheld worker outcomes)
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Closed `background_task` rows gain optional boolean `outcomeWithheld`. True means an inferred outcome was withheld after native observations changed during recovery. The row cannot authorize dismissal, including when its activity is Unavailable or Ended. It grants no result, ownership or Stop authority.
+- Parent history does not retry or fail solely because that inferred outcome was withheld. Explicit parent reports and independently verified activity retain their own authority.
+- The Hub API and saved-dismissal format are unchanged.
+
+### Migration
+
+Regenerate strict workspace validators for revision 38: revision 37's closed background row rejects `outcomeWithheld`. Preserve this marker on replacement rows and do not allow an Unavailable or Ended fallback to override a true value. Fresh authoritative terminal evidence can clear it; do not clear it merely because a sparse running update omits the field. Clients must continue to use authoritative Hub evidence and conditional revisions for dismissal saves. No stored-data migration is required. Hub revision remains 15 and bundled-web revision remains 4.
+
 ## Hub 15 / Workspace 37 - Unreleased (inline assistant visuals and recovery intent)
 
 Compatibility: breaking (Hub and workspace)

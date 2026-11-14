@@ -556,7 +556,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectContextWindow(record.window);
       break;
     case "background_task":
-      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground", "stateUncertain", "resultId", "toolUseIds", "workerSession", "terminalReportedAt", "activity", "control"], type);
+      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground", "stateUncertain", "outcomeWithheld", "resultId", "toolUseIds", "workerSession", "terminalReportedAt", "activity", "control"], type);
       if (record.activity !== undefined) {
         const activity = expectRecord(record.activity, "worker activity");
         expectKeys(activity, ["kind", "launchRef", "observedAt", "endedAt", "executionId", "executionAliases", "generation", "reason", "request"], "worker activity");
@@ -592,6 +592,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.terminalReportedAt, "terminalReportedAt");
       expectWorkerSession(record.workerSession);
       if (record.stateUncertain !== undefined && typeof record.stateUncertain !== "boolean") throw new Error("background task uncertainty must be a boolean");
+      if (record.outcomeWithheld !== undefined && typeof record.outcomeWithheld !== "boolean") throw new Error("background task withheld outcome must be a boolean");
       expectOptionalIdentity(record.resultId, "background result id");
       if (record.toolUseIds !== undefined) {
         expectStringArray(record.toolUseIds, "background launch ids", true);

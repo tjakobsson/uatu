@@ -100,7 +100,9 @@ coverage, not a cached browser projection. Transcript text and tool output never
 enter the compact evidence response. Legacy incomplete sources retain a bounded
 fallback and fail closed on exhaustion. See
 [the dismissal protocol guide](api/guides/worker-dismissals.md) for bounds,
-failure behavior and remaining provider-read costs.
+failure behavior and remaining provider-read costs, and
+[dismissal read architecture](docs/worker-dismissal-read-architecture.md) for
+storage ownership, evidence deadlines and browser-cache recovery.
 
 ## The 30-second map
 
@@ -1161,19 +1163,332 @@ window, not an exact job start: `time.ran` precedes permission approval, while
 accepted-running tool success (`time.completed`, or its native success-event
 clock) bounds admission from above. Input-content order can differ from call
 order. Aliases require complete child history placing both windows wholly within
-one interval, with distinct native start coordinates. A boundary strictly between
-the incoming window and every prior alias's window preserves that separate
-occurrence for later aliases, rather than superseding it by content position.
+one interval, with distinct native start coordinates. A boundary strictly after
+one complete window and before another invocation's native start preserves their
+separate occurrences, rather than superseding by content position. Excluding the
+later invocation does not require its acceptance clock and does not prove aliasing.
 Missing, tied, reversed or boundary-straddling windows cannot supply this proof.
 This history-only exception preserves parent transcript order; live supersession
 and retained control revocations are unchanged.
 
-An idle boundary alone never completes a worker. Explicit reports remain readable
-when their occurrence is ambiguous; in particular, a report before or tied to a
+Activity recovery is independent of Stop authorization. A fresh, complete,
+workspace-owned agent transcript plus active-session inventory can verify the
+single unambiguous running occurrence after any stream reconnect. Finished
+occurrences do not compete with that current run; ambiguous running occurrences
+still do. Missing child history, foreign ownership, a later idle boundary,
+or retained live contradictions still withhold Working. Shells retain their
+cold-start generation fence because their history cannot reconstruct equivalent
+execution intervals. None of these activity reads restores revoked Stop proof.
+Before granting history-only Working, recovery also consults the existing scoped
+execution ledger, even when no launcher was retained. An observed end at or after
+the admission window's lower bound, or a later distinct execution starting beyond
+its upper bound, vetoes attribution of active-session membership to that launch.
+Scoped native end proofs observed before the first child ownership read are kept
+under the same ledger budget, without admitting a parent/child association.
+A committed child revert cannot erase this already processed counterproof.
+The old row becomes activity-unavailable with no invented outcome/end clock or
+new Stop authority; its execution clock does not restart. Boundaries before a
+new admission, unrelated/foreign events, a first execution starting after
+background admission, and exact start replays do not create that veto. This is a
+read of the existing bounded ledger, not another observation cache or buffer.
+Distinct-start counterproof keeps the greatest observed native start clock (or
+an unknown-clock veto) in one scalar inside the existing ledger record. An older
+start replay may not erase that negative evidence or revive the old execution;
+the scalar never supplies a positive start, end, outcome or Stop timestamp.
+Outcome/activity attribution retains up to 128 distinct native start-proof
+digests with their clocks per child in that same byte-budgeted record. Full
+proof identity includes native ID, clock, durable coordinates and semantic
+fingerprint: equal clocks alone do not make two proofs a replay. Replays coalesce;
+exceeding the cap
+leaves a sticky attribution-only unknown rather than discarding an intervening
+start. A later start beyond an outcome cannot erase an earlier start inside
+its interval. Start comparisons use the candidate admission's preceding scoped
+observed/transcript end, not the globally earliest start. The first start in
+that interval remains compatible with admission, including a delayed first
+start; multiple distinct starts in the candidate interval veto uniqueness even
+inside the admission window, before launcher acceptance returns. Without an
+enclosing boundary, starts before this admission alone do not compete with it;
+the existing scalar remains conservative. Unknown clocks and caps fail closed.
+Transcript interval context is veto-only: it never enters live execution,
+ownership or Stop ledgers. Cold read leases retain only one interval lower-bound
+scalar per scoped child. Admission clocks are required to compare scoped observed
+start/end counterproof, not as an additional positive activity prerequisite when
+no such counterproof exists. Fresh owned history plus active inventory can still
+establish cold activity in that case; it does not establish Stop readiness.
+Unknown observed starts and retention gaps remain conservative.
+A captured activity source that merely read a prior typed idle does not gain a
+blanket execution-event fence for the new admission. Historical outcomes use
+the separate session-counter publication rule below. Aggregate ledger saturation
+still withholds inferred outcomes, not independently covered control/history recovery.
+
+Exact retained start proofs, including nonconsecutive replays, coalesce without a live
+occurrence or pending binding. Changed identity, clock or payload is not replay;
+deduplication grants no ownership, new occurrence or Stop authority. Capped
+proof digests remain deny-only through ledger retirement; no native proof bodies
+or additional event log are retained for multiplicity.
+
+Cold Working also requires absence of competing unclassified same-child agent
+invocations in the complete parent history, including hidden calls. Requested
+child identity is deny-only and never authorizes child IO, a worker row or Stop;
+reported child identity takes precedence. Calls disjoint before the candidate's
+preceding child end do not compete. Exact launcher restatement is not another
+invocation. An ambiguous active child can remain session-active, not Working.
+
+**Report-free outcome publication.** `opencode/v2/session-changes.ts` maintains
+one change counter per observed session. A source captures the parent counter
+before its first native request and each child counter before that child's first
+ownership/history request. Complete history, session-record, inbox and active
+membership facets initialize without a bump; subsequent differing observations
+advance the counter. New or changed native stream deltas advance it too.
+Identical already-known observations do not. This rule uses observation order:
+even a differing older or ownerless response can withhold inference, without
+gaining authority to replace a newer cache value.
+
+At final synchronous publication, the optional source-guard operation
+`projectInferredOutcome` compares the parent and child counters for each
+report-free inferred terminal row. Mismatch projects only that row as Unresolved
+(`status: "running"`, `stateUncertain: true`, `outcomeWithheld: true`) and
+nondismissible. It does not fail the parent read or trigger an automatic retry.
+The adapter repeats this per-item projection at publication. `isCurrent` and
+`retain` continue to own the separate ownership, activity and bounded-lifetime
+contract; explicit parent reports and independently verified activity/Stop do
+not derive authority from the counter.
+
+Parent history can finish while children stream, but historical inference
+requires an unchanged observation window. Even ordinary new output can withhold
+an otherwise unchanged old idle outcome. This deliberately conservative rule
+replaces selective outcome counterproof and transfer/retry machinery. The store
+keeps digests only: four complete facets and at most 256 delta facets per
+session, with a normal 8192-session capacity plus live read pins. Pins prevent
+eviction from resetting a consumer's counter; release ends their lifetime.
+
+Covered same-execution Ended activity without a result also withdraws an older
+report-free inferred outcome. It preserves the native end clock and legitimate
+dismissibility unless `outcomeWithheld: true` independently forbids dismissal;
+it creates no result, running clock or Stop authority. Sparse updates cannot
+erase the withheld-outcome barrier. A fresh authoritative terminal result can
+replace or clear it, including when the previous activity was Unavailable or Ended.
+
+**History reuse remains request-ordered.** Relevant native inbox reports can
+invalidate reusable parent history without starting IO or supplying report
+authority. Cache retirement is separate from outcome projection.
+An already warmed parent entry also owns a native inbox request cutoff before
+any worker source consumes it. Later relevant report signatures absent from its
+actual stored transcript retire only that entry, without IO or report authority.
+Prelaunch/unrelated reports and exact reports already in the transcript do not
+retire it; requests begun before a newer load cannot claim that load. Overflow
+abstains conservatively within the existing native fact budget.
+While the first parent load is pending, launcher scope is unknown. A positive
+native report requested after that entry registered retires only its installation
+slot, preserving existing waiters and newer replacement loads. No report facts
+or payload are retained beyond the bounded native observation; the subsequent
+requested read obtains actual storage. Prelaunch positives can conservatively
+retire such an unknown load, but cannot create a failure outcome.
+Exact terminal replay identities, like starts, remain in the same serialized,
+aggregate-budgeted execution ledger across negative-only retirement. Up to 128
+distinct terminal identities per child are recognized; overflow sets sticky
+recovery-only uncertainty. Replaying an earlier observed terminal after a later
+one cannot revoke a current lease or bind that proof to a new occurrence.
+
+Before any dependent parent read exists, transcript cache entries own a
+constant-size native visibility observation from load registration, before a
+value exists. The metadata transfers to retained values and retires with the
+entry. Native request-start order keeps the newest visibility baseline. A late
+intermediate stage can deny reuse of a load registered before it when a newer
+cleared reply arrived first; it never replaces that newer baseline or affects
+a replacement load registered after the stage/clear pair. A staged→cleared
+change retires a pending entry before its obsolete
+response can install or overwrite a replacement. No session keys are added.
+Entering a staged boundary retains the complete raw transcript and
+refreshes native cost/visibility filtering on each fold. Leaving or changing an
+existing boundary can commit removed content and therefore invalidates reuse.
+Unchanged or unrelated observations preserve reuse, and overlapping older
+records cannot replace a newer baseline. Cache-owned metadata adds no retained
+session keys, global visibility map, ownership or read phase. Eviction,
+generation invalidation and disposal release the cache entry as before.
+
+Stream retirement strips the existing worker ledger down to negative execution
+continuity instead of discarding it. Scoped end boundaries, start-clock vetoes,
+unknown-clock/retention gaps and exact execution replay tombstones survive across
+subscriptions of the same provider. Ownership, births, tasks, invocations,
+requests, outcomes and occurrence/pending bindings do not survive. Replay proof
+identity is deny-only and cannot supply activity, execution timestamps or Stop
+witnesses for a new generation. Current history/inventory can still establish
+unrelated or compatible new-admission cold activity without borrowing live proof.
+The same entry/byte accounting includes the retained control ledger; no second
+counterproof cache is created. Saturation remains fail-closed across reconnect,
+not reset into an assertion that lost negative facts never concerned this child.
+Disconnected reads consult the stripped ledger too. Provider disposal releases
+it; workspace/provider instances never share it.
+
+Cold activity publication has a separate native active-inventory dependency.
+After parent history declares its bounded child scope, recovery starts the
+existing active-inventory read and retains only one ordered membership bit per
+scoped child on the existing source lease. A newer inactive observation marks
+only dependent cold activity unavailable and revokes an already returned cold
+activity lease. Request order protects newer evidence from older overlapping
+responses; cancellation is checked before observation. Unchanged membership,
+other-child changes and independently live controls do not borrow this cold
+authority. No global inventory snapshot, extra read, outcome or Stop proof is
+retained. Starting inventory after scope declaration trades some read
+parallelism for bounded pending-read counterproof without a workspace-wide buffer.
+
+Pending notifications are folded after stored messages, not necessarily in their
+native chronological order. During complete-history recovery, a dated report
+cannot invalidate an occurrence whose launch begins after that report. It may
+settle its eligible earlier occurrence; undated reports remain conservative.
+Covered Running/session-active evidence can withdraw a report-free historical
+completion under the same row/task/type/child and proven execution-alias checks
+as Working evidence. Session-active does not restart an execution clock, grant
+Stop, or remain dismissible as a terminal outcome. Explicit reports and changed
+executions retain their precedence and identity boundaries.
+
+A bare idle boundary alone never completes a worker.
+Exact terminal-event replay is recognized from its retained native proof even
+without a retained worker occurrence. ID, clock, durable metadata and semantic
+payload must still match. Replay grants no ownership/outcome/Stop authority and
+cannot settle a newly admitted occurrence. Missing proof retention after saturation
+does not suppress a potentially new boundary; recovery remains conservative.
+
+Native child idle records
+with an explicit `succeeded`, `failed` or `interrupted` outcome can recover the
+corresponding terminal status when a parent notification is missing. This requires
+complete scoped child history and exactly one occurrence whose entire admission
+window lies after the previous idle and before this first enclosing idle.
+Missing-clock, tied, straddling and already-terminal competing occurrences still
+block attribution. Unknown outcomes remain boundaries only. This history-only
+fold also uses scoped observed execution ends that survive transcript reverts
+as veto-only interval boundaries. Matching observed/transcript clocks are not
+counted twice, while duplicate transcript clocks remain ambiguous. An earlier
+observed end or a distinct start separating the admission from a later outcome
+vetoes that outcome; a matching unique terminal can still settle its admission.
+An undated observed end leaves a sticky unknown-clock veto in the existing
+budgeted ledger record. These extra boundaries and retention gaps apply inside
+outcome inference only, not the shared control/admission or visibility fold.
+They cannot suppress compatible ended activity or independently covered Stop
+recovery after unrelated projection saturation. None of these retained events supplies a positive
+outcome, report timestamp or Stop proof, and explicit parent reports retain
+precedence. This history-only attribution counts the complete native parent's
+competing occurrences even when
+a staged parent revert hides their rows. Prefix visibility cannot turn an
+ambiguous child outcome into a terminal result; launches proven to belong to
+separate child intervals or other children do not compete for that outcome.
+Foreground subagent invocations also supply negative interval evidence for the
+same owned child, without becoming worker rows or outcome targets. Pending or
+running calls that only request that independently owned child are veto-only
+evidence too: they establish no ownership, requested-child reads, rows or
+controls, and a reported accepted child takes precedence over requested intent.
+The complete parent history supplies these vetoes even for hidden invocations.
+Publication then applies the session-counter rule above, rather than selectively
+revalidating individual inferred outcomes.
+Stored parent report clocks describe delivery, not the child's execution end.
+A report delivered after multiple runs cannot be assigned by excluding all but
+the latest admission. Otherwise ambiguous reused-child correlation requires a
+unique exact match to a terminal child response within an unambiguous owned
+execution interval. Missing or duplicate matches remain uncorrelated; matching
+descriptions, aggregate child success and delivery order supply no identity.
+The adapter also retracts an already cached history-only completion when the
+covered complete source returns the same qualified execution as unresolved.
+That replacement clears stale terminal fields instead of merging them back.
+It also accepts covered Working/Needs-answer evidence after a committed child
+revert removes an inferred end, restoring running state, progress and the
+execution clock. Missing Stop proof does not negate that activity authority.
+Explicit parent reports and terminal updates received during the read retain
+their existing precedence; an unguarded provider or ambiguous identity supplies
+no such replacement authority.
+Automatic scheduler admission uses that same exact-execution, report-free
+replacement predicate under its source and row-change fences, rather than
+allowing sparse upsert merging to retain a revoked inferred completion.
+This fallback invents neither result text nor a parent result ID. A fresh scoped
+child record supplies outcome visibility: only typed outcomes in the visible
+prefix can settle work. A staged suffix is not positive evidence; clearing it
+restores eligibility, while committing removes it. Complete stored boundaries
+still supply conservative admission/control vetoes. Unavailable ownership or
+visibility withholds inference. The counter projection governs inferred-outcome
+publication; native request ordering still governs reusable history and the
+separate activity guards. Existing ownership, stream-generation and Stop fences
+remain required. See [Worker dismissal reads](docs/worker-dismissal-read-architecture.md)
+for the bounded counter contract and Hub/browser persistence boundary.
+When a returned result still relies on history-only activity, its source also
+retains that publication dependency. A later owned terminal event or ordered
+child-history or parent-launch counterproof revokes the returned guard, including while an
+automatic recovery awaits interactions. Before return, deny-only activity
+withdrawal still permits fresh outcome folding; retained live occurrences keep
+their independent current-lifecycle projection and Stop rules.
+That activity dependency also covers a distinct execution start with no observed
+end. Its existing child slot retains the exact immutable cold occurrence, so
+processed starts are checked against the same admission predicate as a fresh
+recovery, not every launcher ever seen for that child. Before return, a
+contradicting start withdraws Working without blanket control-read invalidation;
+after return it revokes the activity lease through scheduler admission. First
+late starts, exact replays, text noise and unrelated/foreign events do not create
+this veto. The slot keeps its existing read lease/deadline and child scope; no
+event log, global cache or new positive/Stop authority is introduced.
+When fresh covered evidence withdraws a published report-free outcome, the
+adapter matches intersecting proven execution alias sets, not just their sorted
+primary IDs. Row/task/type/child checks and explicit-report precedence remain
+required. This identity match cannot supply a Stop basis.
+If a compatible retained alias cohort grows while an older row is awaiting
+publication, the older row stays inspectable with activity unavailable. Neither
+activity nor Stop projection borrows the newer cohort's valid basis.
+Native-read and SSE parent-launch counterproof protect returned cold activity.
+A source with already observed launch
+counterproof cannot acquire new history-only activity publication authority.
+The parent-launch baseline is registered before the first child ownership await.
+Each read owns its baseline from native parent-history consumption through its
+visible/full folds and publication; an overlapping older response cannot assign
+facts to a newer read, even when transcript transport is shared.
+An overlapping response that abstains is not promoted to a new native
+counterproof baseline against later reuse of the newer observation. Direct
+child-history owners retain their own ordered observations for the same rule.
+Launcher events received before that initial response are buffered on the read and compared when
+its inventory becomes known. The deny-only buffer coalesces exact replays and is
+limited to 256 facts / 64 KiB of serialized UTF-16 evidence; saturation withholds
+dependent history authority rather than granting ownership or Stop authority.
+Changes observed there remain deny-only until activity authority is used:
+unverified launch intent grants neither ownership, child reads nor Stop,
+and collecting counterproof alone does not invalidate unrelated control reads.
+Activity-only child observation also remains continuous before return, including
+the final parent lookup. Ordered idle counterproof is retained during that
+window without blanket invalidation of prepublication Stop reads; acquiring
+history-only activity authority checks the retained counterproof.
+The cold native-read dependency is registered when the fold captures Working,
+before that final lookup, but capture is not publication. A newer inactive
+inventory downgrade cannot hide ordered child-history counterproof by removing
+the row from the later Working scan. A stream boundary received before return
+instead withdraws pending Working and retires that pending capture without
+blanket-invalidating the control read. The final visibility fold may consume
+the actual outcome under its own source. Already-published activity still
+revokes on a relevant stream boundary; that publication fence is not relaxed.
+After return, the same change revokes the retained publication dependency.
+Staged-parent visibility rereads own an additional bounded source lease, since
+their visible/full-history folds can first consume an outcome after the inventory
+source is captured. That lease is published to source observers and checked
+alongside inventory authority before returning the reconciled workers.
+Automatic background recovery retains those same sources while its concurrent
+permission and question reads finish, and validates them again at projection
+admission. One cycle owner uses the covered-history deadline (25 seconds by
+default), starting when native source evidence transfers rather than during
+queue/ownership IO; completion, error, cancellation, reconnect and retirement
+release its leases. Cancelled transports still drain before another read takes
+their scheduler slot. Identical pending-notice enqueue replays are checked by
+normalized content, not delivery clocks; changed payloads and delivery/removal
+still revoke the source. Superseded evidence cannot publish activity or consume
+recovery progress. Report-free outcomes also pass the final counter projection;
+compatible output can proceed without preserving historical outcome inference.
+
+Explicit reports remain readable when their occurrence is ambiguous; in particular, a report before or tied to a
 known accepted-running success cannot settle that launch, and an ambiguous
 admission window cannot justify report assignment. A unique explicit report may
 still settle a legacy launch without a recorded acceptance clock, but missing
-clocks never prove aliasing. An old result cannot settle a newer run.
+clocks never prove aliasing. An old result cannot settle a newer run, and an
+aggregate successor name cannot select an arbitrary worker.
+For complete-history subagent reports, `historicalReportSeparated` excludes an
+older admission only when two distinct native end boundaries at or before the
+report prove its whole window lies before the earlier boundary. One end alone
+cannot distinguish a delayed older report. A missing first report therefore
+need not make a later uniquely attributable run uncertain; unknown, tied,
+straddling or overlapping intervals still abstain.
 
 Live projection correlation and control evidence share a bound of 8,192 entries /
 4 MiB of conservative serialized UTF-16 payload, not a heap guarantee.
