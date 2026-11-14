@@ -155,3 +155,11 @@ test("privileged skill jobs pin the fixed trusted checkout rather than an event 
     expect(job.steps[checkout + 1].run).toBe('echo "TRUSTED_BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"');
   }
 });
+
+test("helper scratch uses runner context only at the executing step", async () => {
+  const workflow = Bun.YAML.parse(await readFile(resolve(import.meta.dir, "../.github/workflows/update-skills.yml"), "utf8"));
+  const job = workflow.jobs.generate;
+  expect(job.env.SKILLS_SCRATCH).toBeUndefined();
+  const generation = job.steps.find((step: any) => step.run?.includes("scripts/skills.ts update"));
+  expect(generation.env.SKILLS_SCRATCH).toBe("${{ runner.temp }}/skills-scratch");
+});

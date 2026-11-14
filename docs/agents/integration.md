@@ -151,8 +151,8 @@ Review the resulting instructions before merge; skill updates are not automerged
 
 Renovate owns the update PR. A narrowly scoped same-PR helper is intended to
 refresh generated skills/lock from trusted base code, reject unauthorized or
-stale candidates, and trigger CI for the regenerated head. Hosted extraction,
-push/dispatch, required-check association, and external-review authorization
+stale candidates, and trigger CI for the regenerated head. Hosted update PR
+creation, push/dispatch, required-check association, and external-review authorization
 remain **unverified** until an authorized dry run demonstrates them on the
 actual target repository. A token push or successful workflow dispatch alone
 does not prove the required PR checks attach to the new SHA. Report blockers;

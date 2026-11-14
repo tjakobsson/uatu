@@ -23,7 +23,6 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       REQUEST_ACTOR: ${{ github.actor }}
-      SKILLS_SCRATCH: ${{ runner.temp }}/skills-scratch
     steps:
       - name: Check out trusted base policy only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,6 +41,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bun scripts/skills-pr.ts prepare "$RUNNER_TEMP/generated"
       - name: Generate without credentials or candidate code
+        env:
+          SKILLS_SCRATCH: ${{ runner.temp }}/skills-scratch
         run: |
           bun scripts/skills.ts update "$RUNNER_TEMP/generated"
           bun scripts/skills-pr.ts pack "$RUNNER_TEMP/generated" "$RUNNER_TEMP/skills-payload.json"
