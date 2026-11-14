@@ -423,7 +423,9 @@ Codex reviewed that head and reported two further outcome-publication gaps.
 - [x] 6.12 Reproduce and correct first relevant positive inbox observations that initialize an unknown facet after an inference was captured. Preserve quiet empty/unrelated observations, identical replays, explicit reports and bounded history attempts.
 - [x] 6.13 Reproduce and correct successful local revert acknowledgements that leave captured outcomes publishable before follow-up native records or SSE arrive. Cover shared stage/clear paths, failed mutations, explicit reports and later independent reads without adding ordering state.
 - [x] 6.14 Verify the corrections with focused checks, typecheck, the race suite and 10,000 existing property seeds. Twenty public provider/adapter regressions pass after six dismissal-authority failures on unchanged production; all original 583 race cases remain unchanged and pass. Additional checks: 115 focused recovery/adapter/counter tests, 19 sanitized session fixtures, 158 selected provider checks and typecheck. The 10,000-seed campaign reports A=0/B=0/harnessErrors=0, maximum logical attempts 2/4 and physical parent reads 3. Fresh independent affected review reports no actionable findings; inspection and execution evidence are separate.
-- [ ] 6.15 Push for GitHub full CI and external review as requested. Keep the approved PR body/title/state unchanged. Do not claim that the two previously observed GitHub unit failures are explained by these corrections.
+- [x] 6.15 Push for GitHub full CI and external review as requested. Commit `5c4283b4` passed all 11 executed GitHub checks, including unit, both browser legs, performance and aggregate validation; `e2e-report` was skipped. One fresh Codex review was requested after CI passed and completed with a further finding, not a clean verdict. PR body/title/state stayed unchanged. The two earlier unit failures are not causally explained by these passes.
+- [x] 6.16 Reproduce and correct known positive inbox evidence recorded before a new history source. Re-reading an identical failure denies that consumer's report-free inferred completion when inventory is unavailable, without turning unchanged inbox observations into retries or granting report/identity authority. Two provider/adapter dismissal failures reproduced on unchanged production. Eight additive cases cover two new consumers each, identical repeats, lease retirement and canonical native report reconciliation. All earlier first-baseline/local-acknowledgement cases and 583 race assertions are unchanged. Final checks: 28 local cases, 611 combined races, 115 focused recovery checks, 19 sanitized session fixtures, 158 selected provider checks, typecheck and 10,000 seeds with A=0/B=0/harnessErrors=0 (max logical attempts 2/4, physical reads 3). Fresh independent affected inspection found no actionable defects; it did not execute tests.
+- [ ] 6.17 Push the per-consumer correction for GitHub full CI, then request one fresh external review after the current-head CI gate passes. Keep PR text/state unchanged; do not characterize unrelated historical failures as diagnosed by later passes.
 
 The user requested these fixes and a push, leaving full CI and review to GitHub.
 No local runtime upgrade, full local CI, merge, deployment or native-session
@@ -441,3 +443,12 @@ failed mutations do not. No native requests, retries, ordering maps, caches,
 dependencies or public schema fields were added. The original property checker
 is unchanged; the new first-baseline and local-ACK orderings have focused public
 HTTP-barrier coverage rather than a second reference model.
+
+The further per-consumer correction reuses the existing source-local negative
+veto when an already-inferred consumer observes a relevant parsed pending report.
+The outcome handoff checks that veto even if the shared inbox digest is unchanged.
+It adds no retained fields or shared-counter increments for identical reports,
+and leaves activity request ordering and explicit parent report authority intact.
+Pre-consumption observations are not retroactively applied merely because launcher
+scope becomes known later. Full local CI was not rerun; GitHub remains the full
+integration gate requested for these corrections.

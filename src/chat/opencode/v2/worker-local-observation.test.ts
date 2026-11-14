@@ -97,6 +97,92 @@ test(`first successful inbox after consumed history (${observation}/${seam})`, a
   }
 }, 10_000);
 
+for (const observation of ["relevant", "empty", "unrelated", "explicit"] as const)
+for (const seam of ["provider", "adapter"] as const)
+test(`known unchanged inbox counterproof applies to each new consumer (${observation}/${seam})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, admission: ReturnType<typeof gate> | undefined;
+  let admitted: ReturnType<typeof gate> | undefined, parentReads = 0, attempts = 0, inboxReads = 0;
+  const report = () => ({ id: "known-native-failure", type: "synthetic", time: { created: 45 }, payload: {
+    text: "Known native failure", metadata: { source: "subagent", childID: observation === "unrelated" ? "other-child" : child, state: "error" },
+  } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === `/api/session/${parent}/inbox`) {
+      inboxReads++;
+      if (admission) { const release = admitted!; admission.release(); admission = undefined; await release.promise; }
+      return Response.json({ data: observation === "empty" ? [] : [report()] });
+    }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      parentReads++;
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      const result = report();
+      return Response.json({ data: [launch, ...(observation === "explicit" ? [{ ...result.payload, id: result.id, type: result.type, time: result.time }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeHistory = provider.listMessages.bind(provider), nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+  let lease = new AbortController(), page: Awaited<ReturnType<typeof provider.listMessages>> | undefined, guard: WorkerSourceGuard | undefined;
+  provider.listMessages = async (id, options) => {
+    const result = await nativeHistory(id, options);
+    if (id === parent) { attempts++; page = result; guard = result.workerSource!.retain(lease.signal); }
+    return result;
+  };
+  provider.reconcileBackgroundTasks = async () => { throw new Error("Native inventory unavailable"); };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 2_000 });
+  let reading: ReturnType<typeof adapter.history> | undefined;
+  try {
+    parent = (await provider.createSession("Known inbox before each consumer")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    // The actual failure is known before any history source exists. No empty priming.
+    expect(await provider.listPendingInbox!(parent)).toEqual([]);
+    expect(inboxReads).toBe(1);
+    for (let consumer = 0; consumer < 2; consumer++) {
+      lease = new AbortController(); admission = gate(); admitted = gate();
+      const entered = admission.promise, beforeAttempts = attempts, beforeReads = parentReads;
+      reading = adapter.history(parent); void reading.catch(() => undefined);
+      await Promise.race([entered, reading.then(() => { throw new Error("History completed before inbox admission"); })]);
+      const row = page!.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId)!;
+      expect(row).toMatchObject({ status: observation === "explicit" ? "failed" : "completed" });
+      expect(workerDismissalEvidence(row)?.dismissible).toBe(true);
+      await provider.listPendingInbox!(parent); // Same bytes/digest as the pre-source native response.
+      expect(guard!.isCurrent()).toBe(true);
+      const projected = guard!.projectInferredOutcome!(row);
+      if (seam === "provider") {
+        if (observation === "relevant") withheld(projected);
+        else expect(projected).toEqual(row);
+      }
+      await provider.listPendingInbox!(parent);
+      expect(guard!.isCurrent()).toBe(true);
+      expect(guard!.projectInferredOutcome!(row)).toEqual(projected); // Same-source repetition stays quiet.
+      admitted.release();
+      const snapshot = await reading;
+      const published = snapshot.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      if (observation === "relevant") withheld(published);
+      else if (observation === "explicit") expect(published).toMatchObject({ status: "failed", resultId: "known-native-failure", summary: "Known native failure" });
+      else expect(published).toMatchObject({ status: "completed" });
+      expect(attempts - beforeAttempts).toBe(1);
+      expect(parentReads - beforeReads).toBe(consumer === 1 && observation !== "relevant" ? 0 : 1);
+      lease.abort();
+      expect(guard!.isCurrent()).toBe(false);
+      if (observation === "relevant") withheld(guard!.projectInferredOutcome!(row));
+    }
+    const canonical = await nativeRecovery(parent, { fresh: true });
+    const known = canonical.find(item => item.taskId === worker.taskId);
+    expect(known).toMatchObject(observation === "relevant" || observation === "explicit"
+      ? { status: "failed", resultId: "known-native-failure", summary: "Known native failure" }
+      : { status: "completed" });
+    expect(workerDismissalEvidence(known)?.dismissible).toBe(true);
+    expect(fake.state().unhandled).toEqual([]);
+  } finally {
+    admitted?.release(); lease.abort(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop();
+  }
+}, 10_000);
+
 for (const operation of ["stage", "clear"] as const)
 for (const outcome of ["success", "failure", "explicit"] as const)
 for (const seam of ["provider", "adapter"] as const)

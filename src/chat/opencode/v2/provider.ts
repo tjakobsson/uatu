@@ -1534,7 +1534,8 @@ export class OpenCodeV2Provider implements ChatProvider {
   private projectInferredOutcome(source: HistoryWorkerSource, item: import("../../types").BackgroundTaskItem, leaseLive = true): import("../../types").BackgroundTaskItem {
     if (!source.inferred.has(item.id) || item.resultId || item.status === "running") return item;
     const child = item.childConversationId;
-    if (leaseLive && source.counters.get(source.parent)?.unchanged() && child && source.counters.get(child)?.unchanged()) return item;
+    if (leaseLive && source.counters.get(source.parent)?.unchanged() && child
+      && !source.historyParentChanges.has(child) && source.counters.get(child)?.unchanged()) return item;
     const independentlyActive = item.activity?.kind === "working" || item.activity?.kind === "needs-answer";
     const { endedAt: _end, request: _request, ...activity } = item.activity ?? { kind: "unavailable" as const };
     return { ...item, status: "running", stateUncertain: true, outcomeWithheld: true,
@@ -1826,6 +1827,13 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Pending reports still revoke independently recovered activity. This is
     // not outcome publication authority and never supplies report content.
     for (const source of this.historyWorkerSources) if (source.parent === parent) {
+      // Shared digest equality is not a baseline for a new inferred consumer.
+      // Apply positive native counterproof to its existing negative veto, without
+      // granting report content or revoking independently recovered activity.
+      if (source.inferred.size) for (const [child, launches] of source.historyParentLaunches ?? []) {
+        if (observation.overflow || this.pendingOutcomeSignature(observation, child, launches) !== undefined)
+          source.historyParentChanges.add(child);
+      }
       const previous = source.activityPending;
       // Activity follows native request order, independently of the outcome
       // counter (which already observed every different delivered response).
