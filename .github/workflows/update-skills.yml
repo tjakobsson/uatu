@@ -1,0 +1,97 @@
+name: Refresh Renovate skills
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - skills-source.json
+
+permissions: {}
+
+concurrency:
+  group: skills-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    if: github.actor == 'renovate[bot]' && github.event.pull_request.user.login == 'renovate[bot]' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'renovate/mattpocock-skills'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REQUEST_ACTOR: ${{ github.actor }}
+      SKILLS_SCRATCH: ${{ runner.temp }}/skills-scratch
+    steps:
+      - name: Check out trusted base policy only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Pin the checked-out trusted policy
+        run: echo "TRUSTED_BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Install trusted locked tooling without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Validate candidate metadata as data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/skills-pr.ts prepare "$RUNNER_TEMP/generated"
+      - name: Generate without credentials or candidate code
+        run: |
+          bun scripts/skills.ts update "$RUNNER_TEMP/generated"
+          bun scripts/skills-pr.ts pack "$RUNNER_TEMP/generated" "$RUNNER_TEMP/skills-payload.json"
+      - name: Transfer generated data only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: skills-payload
+          path: ${{ runner.temp }}/skills-payload.json
+          retention-days: 1
+
+  writeback:
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: read
+      actions: write
+      checks: read
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REQUEST_ACTOR: ${{ github.actor }}
+    steps:
+      - name: Check out trusted base code, never candidate code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Pin the checked-out trusted policy
+        run: echo "TRUSTED_BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: skills-payload
+          path: ${{ runner.temp }}/payload
+      - name: Revalidate, compare exact head, write same branch and dispatch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/skills-pr.ts publish "$RUNNER_TEMP/payload/skills-payload.json" "$RUNNER_TEMP/generated-head"
+      - name: Require CI evidence for regenerated PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Workflow dispatch may not associate required checks with the PR.
+          # That remains a deployment blocker, not a green stale-head result.
+          for attempt in $(seq 1 80); do
+            if bun scripts/skills-pr.ts verify-ci "$RUNNER_TEMP/generated-head"; then exit 0; fi
+            sleep 30
+          done
+          echo '::error::UNVERIFIED: authorize and prove required PR checks on the regenerated SHA; no credential fallback was attempted.'
+          exit 1

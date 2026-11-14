@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review": {
+      "source": "mattpocock/skills",
+      "ref": "5ae481693d13b37d4d2c2c92d0b66d299c93e695",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/code-review/SKILL.md",
+      "computedHash": "c2745e2be960b82b9fddd82cf45265f42431e7b045c403f297b25f0f311e9210"
+    },
+    "pr": {
+      "source": "mattpocock/skills",
+      "ref": "5ae481693d13b37d4d2c2c92d0b66d299c93e695",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/pr/SKILL.md",
+      "computedHash": "22a15d4d469344b38e03eb0e95772478393975836289393b1bad3c0febcdc679"
+    }
+  }
+}

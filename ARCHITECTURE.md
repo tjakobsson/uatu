@@ -2,7 +2,7 @@
 
 This document is the codebase-orientation guide for **uatu** (a.k.a. UatuCode). It's written for a new contributor — human or AI — who wants to know what the moving parts are, where to look for each one, and how a request or state change flows through the system.
 
-For the user-facing pitch (features, install, usage), see [README.md](./README.md). For terse navigation cues during a Claude Code session, see [CLAUDE.md](./CLAUDE.md).
+For the user-facing pitch (features, install, usage), see [README.md](./README.md). For agent entry points, see [AGENTS.md](./AGENTS.md); the detailed feature map and code conventions are in [the codebase reference](./docs/agents/codebase.md).
 
 ## What uatu is
 

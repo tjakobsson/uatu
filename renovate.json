@@ -5,11 +5,29 @@
     ":dependencyDashboard",
     ":semanticCommits"
   ],
-  "enabledManagers": ["bun", "github-actions", "npm"],
+  "enabledManagers": ["bun", "github-actions", "npm", "custom.regex"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^skills-source\\.json$/"],
+      "matchStrings": ["\"repository\":\\s*\"mattpocock/skills\",\\s*\"ref\":\\s*\"(?<currentValue>main)\",\\s*\"revision\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""],
+      "depNameTemplate": "mattpocock/skills",
+      "packageNameTemplate": "https://github.com/mattpocock/skills",
+      "datasourceTemplate": "git-refs"
+    }
+  ],
   "labels": ["dependencies"],
   "semanticCommitType": "chore",
   "semanticCommitScope": "deps",
   "packageRules": [
+    {
+      "matchPackageNames": ["https://github.com/mattpocock/skills"],
+      "matchDatasources": ["git-refs"],
+      "branchTopic": "mattpocock-skills",
+      "groupName": null,
+      "pinDigests": true,
+      "automerge": false
+    },
     {
       "matchPackageNames": ["*"],
       "semanticCommitType": "chore",
