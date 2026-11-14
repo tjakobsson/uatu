@@ -6,8 +6,22 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { workerCanStop, workerExecutionClockRuns } from "../../worker-state";
 import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
 
+// Assert the real row at the public publication seam, not just its source lease.
+function expectWithheld(row: import("../../types").BackgroundTaskItem | undefined) {
+  expect(row).toMatchObject({ status: "running", stateUncertain: true, outcomeWithheld: true, control: { available: false } });
+  expect(row?.resultId).toBeUndefined();
+  expect(row?.summary).toBeUndefined();
+  expect(row?.terminalReportedAt).toBeUndefined();
+  expect(row?.activity?.endedAt).toBeUndefined();
+  expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
+  expect(workerCanStop(row!)).toBe(false);
+}
+function projectRetained(guards: import("../../provider").WorkerSourceGuard[], row: import("../../types").BackgroundTaskItem) {
+  return guards.reduce((item, guard) => guard.projectInferredOutcome?.(item) ?? item, row);
+}
+
 for (const mode of ["newer-duplicate-seed", "older-seed", "older-merge", "older-merge-with-newer-unrelated", "older-overflow-seed", "cancelled", "reconnect", "unknown-guard", "original-deadline", "unrelated-cohort", "older-report", "current-report"] as const)
-test(`covered pending watch preserves native order and original ownership (${mode})`, async () => {
+test(`retained outcome projection separates inbox changes from source lifetime (${mode})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, observing = false, storedAt: number | undefined, inboxReads = 0;
   const olderObservation = mode === "newer-duplicate-seed" || mode === "older-seed" || mode === "older-merge" || mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed";
@@ -47,6 +61,7 @@ test(`covered pending watch preserves native order and original ownership (${mod
   let inbox: ReturnType<NonNullable<typeof provider.listPendingInbox>> | undefined, pump: Promise<void> | undefined, secondPump: Promise<void> | undefined;
   try {
     parent = (await provider.createSession("Owned retry counterproof order")).id; child = fake.launchRequestWorker(parent).childId;
+    await provider.listPendingInbox!(parent, { signal: owner.signal });
     if (mode === "reconnect") { pump = (async () => { for await (const _event of provider.events(stream.signal)) {} })(); await provider.waitForEventStream!(stream.signal); }
     if (olderObservation) {
       observing = true; inbox = provider.listPendingInbox!(parent, { signal: owner.signal }); void inbox.catch(() => undefined); await pending;
@@ -55,20 +70,21 @@ test(`covered pending watch preserves native order and original ownership (${mod
     const rows = page.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
     expect(page.workerSource?.isCurrent()).toBe(true);
     const longOwner = AbortSignal.any([lifetime.signal, stream.signal, realTimeout(60_000)]);
-    let watch = mode === "newer-duplicate-seed" || mode === "older-seed" || mode === "older-overflow-seed" ? undefined : page.workerSource!.retainPendingCounterproof!(longOwner);
+    const watch = page.workerSource!.retain(longOwner);
     if (olderObservation) {
       release(); await inbox; expect(page.workerSource?.isCurrent()).toBe(true);
+      expectWithheld(watch.projectInferredOutcome!(rows[0]!));
       if (mode === "newer-duplicate-seed" || mode === "older-merge-with-newer-unrelated" || mode === "older-overflow-seed") await provider.listPendingInbox!(parent, { signal: owner.signal });
-      watch ??= page.workerSource!.retainPendingCounterproof!(longOwner);
       if (mode === "newer-duplicate-seed" || mode === "older-overflow-seed") {
-        if (mode === "newer-duplicate-seed") expect(page.workerSource?.isCurrent()).toBe(false);
+        expect(page.workerSource?.isCurrent()).toBe(true);
         const retry = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
         expect(retry.workerSource?.isCurrent()).toBe(true);
-        expect(watch.applyTo(retry.workerSource!, retry.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task")).isCurrent()).toBe(false);
-      } else expect(watch.applyTo(page.workerSource!, rows).isCurrent()).toBe(true);
+        expect(watch.isCurrent()).toBe(true);
+      } else expect(watch.isCurrent()).toBe(true);
     } else {
       observing = true; await provider.listPendingInbox!(parent, { signal: owner.signal });
-      expect(page.workerSource?.isCurrent()).toBe(false);
+      expect(page.workerSource?.isCurrent()).toBe(true);
+      expectWithheld(watch.projectInferredOutcome!(rows[0]!));
       if (mode === "cancelled") lifetime.abort();
       if (mode === "original-deadline") { expect(deadlines.length).toBeGreaterThan(1); deadlines[0]!.abort(); expect(longOwner.aborted).toBe(false); }
       if (mode === "reconnect") {
@@ -78,14 +94,18 @@ test(`covered pending watch preserves native order and original ownership (${mod
       storedAt = mode === "older-report" ? 30 : mode === "current-report" ? 50 : undefined;
       const next = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
       const nextRows = next.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
-      if (mode === "cancelled" || mode === "original-deadline" || mode === "reconnect") expect(() => watch!.applyTo(next.workerSource!, nextRows)).toThrow("expired");
-      else if (mode === "unknown-guard") expect(() => watch!.applyTo({ isCurrent: next.workerSource!.isCurrent, retain: next.workerSource!.retain }, nextRows)).toThrow("source unavailable");
+      if (mode === "cancelled" || mode === "original-deadline" || mode === "reconnect") expect(watch.isCurrent()).toBe(false);
+      else if (mode === "unknown-guard") {
+        // There is no transfer API: an independent read owns only its own rows.
+        expect(next.workerSource?.isCurrent()).toBe(true);
+        expectWithheld(watch.projectInferredOutcome!(rows[0]!));
+      }
       else if (mode === "unrelated-cohort") {
         const other = (await provider.createSession("Different enclosing cohort")).id; fake.launchRequestWorker(other);
         const unrelated = await provider.listMessages(other, { limit: 100, signal: owner.signal });
-        expect(() => watch!.applyTo(unrelated.workerSource!, [])).toThrow("source unavailable");
+        expect(unrelated.items).toContainEqual(expect.objectContaining({ type: "background_task" }));
       } else {
-        expect(watch!.applyTo(next.workerSource!, nextRows).isCurrent()).toBe(mode === "current-report");
+        expect(watch.isCurrent()).toBe(true);
         if (mode === "current-report") expect(nextRows).toContainEqual(expect.objectContaining({ status: "failed", resultId: "queued-failure", terminalReportedAt: 50 }));
       }
     }
@@ -131,13 +151,11 @@ test(`prebaseline native positives retain scope and order (${carrier}/${mode})`,
     phase = "second"; expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]);
     release(); releaseInbox();
     const result = await reading.then(value => ({ value }), error => ({ error }));
-    if (mode === "ordered-baseline") {
-      expect(result).toHaveProperty("value");
-      if ("value" in result && Array.isArray(result.value)) expect(result.value[0]?.status).toBe("completed");
-    } else if (carrier === "consumer") expect(result).toHaveProperty("error");
-    else {
-      expect(result).toHaveProperty("value");
-      if ("value" in result && !Array.isArray(result.value)) expect(result.value.workerSource?.isCurrent()).toBe(false);
+    expect(result).toHaveProperty("value");
+    if ("value" in result) {
+      const rows = Array.isArray(result.value) ? result.value : result.value.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+      expect(rows).toHaveLength(1); expectWithheld(rows[0]);
+      if (!Array.isArray(result.value)) expect(result.value.workerSource?.isCurrent()).toBe(true);
     }
   } finally { release(); releaseInbox(); abort.abort(); await reading?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
@@ -191,11 +209,11 @@ test(`inventory provisional positives merge independently of response order (${m
     releaseOlder(); await older; releaseParent(); releaseOwned();
     const result = await reading.then(value => ({ value }), error => ({ error }));
     const ownedReport = mode === "prebaseline-owned-report" || mode === "prebaseline-owned-cover";
-    const denied = !ownedReport && !["older-stale", "older-stale-overflow", "prebaseline-older-only", "unrelated"].includes(mode);
+    const denied = !ownedReport;
     if (denied) expect(result).not.toMatchObject({ value: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] });
     expect(guards.length).toBeGreaterThan(0);
-    expect(guards.every(guard => guard.isCurrent())).toBe(!denied);
-    if (denied) expect(result).toHaveProperty("error");
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (denied) { expect(result).toHaveProperty("value"); if ("value" in result) expectWithheld(result.value.find(item => item.taskId === worker.taskId)); }
     else expect(result).toMatchObject({ value: [expect.objectContaining({ taskId: worker.taskId, status: ownedReport ? "failed" : "completed",
       ...(ownedReport ? { resultId: "actual-provisional-failure", summary: "Actual provisional failure", terminalReportedAt: 45 } : {}) })] });
     final = true;
@@ -244,15 +262,17 @@ test(`transcript pending order survives a late older snapshot envelope (${mode},
     reading = provider.listMessages(parent, { limit: 100, signal: abort.signal }); void reading.catch(() => undefined); await parentPending;
     await explicit.run("newer", () => provider.listPendingInbox!(parent!, { signal: abort.signal }));
     releaseInbox(); await older; releaseParent(); const page = await reading;
-    expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
-    expect(page.workerSource?.isCurrent()).toBe(mode !== "newer-relevant" && mode !== "newer-overflow");
+    const row = page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    if (mode === "newer-unrelated" && !stagedPrefix) expect(row).toMatchObject({ status: "completed" });
+    else expectWithheld(row);
+    expect(page.workerSource?.isCurrent()).toBe(true);
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: "failed", resultId: "actual-ordered-failure", summary: "Actual ordered failure", terminalReportedAt: 45 });
   } finally { releaseInbox(); releaseParent(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const mode of ["pending-only", "delivered", "unrelated", "prelaunch"] as const)
-test(`covered history keeps pending counterproof across failed-inventory retries (${mode})`, async () => {
+test(`covered history projects inbox changes without failed-inventory retries (${mode})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, captured = false, released = false, delivered = false, observing = false, parentReads = 0, attempts = 0;
   let entered!: () => void, release!: () => void;
@@ -274,7 +294,7 @@ test(`covered history keeps pending counterproof across failed-inventory retries
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
-  const nativeHistory = provider.listMessages.bind(provider), abort = new AbortController();
+  const nativeHistory = provider.listMessages.bind(provider), nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
   const guards: import("../../provider").WorkerSourceGuard[] = [];
   provider.listMessages = async (id, options) => {
     const page = await nativeHistory(id, options);
@@ -286,22 +306,19 @@ test(`covered history keeps pending counterproof across failed-inventory retries
   let history: ReturnType<typeof adapter.history> | undefined;
   try {
     parent = (await provider.createSession("One covered read, repeated transcript attempts")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    await provider.listPendingInbox!(parent, { signal: abort.signal });
     history = adapter.history(parent); void history.catch(() => undefined); await pending;
     expect(guards[0]?.isCurrent()).toBe(true);
     observing = true;
     await provider.listPendingInbox!(parent, { signal: abort.signal });
-    expect(guards[0]?.isCurrent()).toBe(mode === "unrelated" || mode === "prelaunch");
+    expect(guards[0]?.isCurrent()).toBe(true);
     delivered = mode === "delivered"; released = true; release();
     const result = await history.then(value => ({ value }), error => ({ error }));
-    if (mode === "pending-only") {
-      expect(result).toHaveProperty("error");
-      expect(attempts).toBeGreaterThan(1);
-    } else {
-      expect(result).toHaveProperty("value");
-      if ("value" in result) expect(result.value.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId,
-        status: mode === "delivered" ? "failed" : "completed", ...(mode === "delivered" ? { resultId: "actual-failed-report", summary: "Actual parent failure", terminalReportedAt: 45 } : {}) }));
-      if (mode === "delivered") expect(parentReads).toBeGreaterThan(1);
-    }
+    expect(result).toHaveProperty("value");
+    if ("value" in result) expectWithheld(result.value.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId));
+    expect(attempts).toBe(1); expect(parentReads).toBe(1);
+    const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    expect(quiet.find(item => item.taskId === worker.taskId)).toMatchObject({ status: mode === "delivered" || mode === "pending-only" ? "failed" : "completed" });
   } finally { released = true; release(); abort.abort(); await history?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
@@ -335,7 +352,7 @@ test(`paginated adapter retains newer duplicate pending observation (delivered=$
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
-  const nativeHistory = provider.listMessages.bind(provider), abort = new AbortController();
+  const nativeHistory = provider.listMessages.bind(provider), nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
   let older: ReturnType<NonNullable<typeof provider.listPendingInbox>> | undefined;
   provider.listMessages = async (id, options) => {
     const page = await nativeHistory(id, options);
@@ -343,7 +360,7 @@ test(`paginated adapter retains newer duplicate pending observation (delivered=$
       expect(page.nextCursor).toBeDefined(); expect(page.workerSource?.isCurrent()).toBe(true);
       release(); await older; expect(page.workerSource?.isCurrent()).toBe(true);
       await explicitObservation.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal }));
-      expect(page.workerSource?.isCurrent()).toBe(false);
+      expect(page.workerSource?.isCurrent()).toBe(true);
       stored = delivered;
     }
     return page;
@@ -352,27 +369,24 @@ test(`paginated adapter retains newer duplicate pending observation (delivered=$
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 400 });
   try {
     parent = (await provider.createSession("Duplicate observation pagination")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId; report.payload.metadata.childID = child;
+    await provider.listPendingInbox!(parent, { signal: abort.signal });
     older = explicitObservation.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal })); void older.catch(() => undefined); await pending;
     const newest = pageKind === "older" ? await adapter.history(parent, { limit: 1 }) : undefined;
     if (newest) expect(newest.olderCursor).toBeDefined();
     armed = true;
     let result = await adapter.history(parent, { limit: 2, ...(newest ? { cursor: newest.olderCursor } : {}) }).then(value => ({ value }), error => ({ error }));
-    if (pageKind === "older" && delivered) {
-      // Delivery changes the native history version. The old cursor must not
-      // publish; canonical stored content is obtained by a new public read.
-      expect(result).toHaveProperty("error");
-      result = await adapter.history(parent, { limit: 100 }).then(value => ({ value }), error => ({ error }));
-    }
-    expect(attempts).toBeGreaterThan(1);
-    if (!delivered) {
-      if ("value" in result) expect(result.value.items).not.toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
-      expect(result).toHaveProperty("error");
-    }
-    else {
-      expect(result).toHaveProperty("value");
-      if ("value" in result) expect(result.value.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "failed",
-        resultId: report.id, summary: report.payload.text, terminalReportedAt: 45 }));
-    }
+    expect(attempts).toBe(1);
+    expect(result).toHaveProperty("value");
+    if ("value" in result) expectWithheld(result.value.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId));
+    // Inventory is deliberately unavailable to the adapter. A separate native
+    // fresh reader, not an automatic retry, expires the old transport cache.
+    await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    const nativeQuiet = await nativeHistory(parent, { limit: 100, signal: abort.signal });
+    expect(nativeQuiet.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: delivered ? "failed" : "completed" }));
+    const quiet = await adapter.history(parent, { limit: 100 });
+    expect(quiet.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: delivered ? "failed" : "completed",
+      ...(delivered ? { resultId: report.id, summary: report.payload.text, terminalReportedAt: 45 } : {}) }));
+    if (newest && delivered) await expect(adapter.history(parent, { limit: 2, cursor: newest.olderCursor })).rejects.toBeInstanceOf(Error);
   } finally { release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
@@ -435,9 +449,11 @@ test(`${read} recognizes a retained history-only ${boundary} replay (${change})`
       frame(eventType, { sessionID: change === "other-child" ? "another-child" : child, ...(change === "changed-payload" ? { reason: "different payload" } : {}) },
         change === "changed-id" ? "different-proof" : proofId, change === "changed-clock" ? 25 : nativeAt, change === "foreign" ? `${directory}/foreign` : directory);
       await barrier();
-      expect(page.workerSource?.isCurrent()).toBe(["exact", "other-child", "foreign"].includes(change));
+      expect(page.workerSource?.isCurrent()).toBe(true);
       const row = page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
       expect(workerCanStop(row!)).toBe(false); expect(row?.resultId).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();
+      if (["exact", "other-child", "foreign"].includes(change)) expect(page.workerSource!.projectInferredOutcome!(row!)).toMatchObject({ status: "completed" });
+      else expectWithheld(page.workerSource!.projectInferredOutcome!(row!));
     }
   } finally { firstAbort.abort(); abort.abort(); if (adapter) await adapter.dispose(); else await provider.dispose!(); await firstPump; await pump; await fake.stop(); }
 }, 10_000);
@@ -467,6 +483,7 @@ test(`consumed transcript source preserves paged reuse for pending facts (${chan
   const stream = provider.events(abort.signal)[Symbol.asyncIterator]();
   try {
     parent = (await provider.createSession("Consumed paged source")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    await provider.listPendingInbox!(parent, { signal: abort.signal });
     await stream.next();
     const initial = await provider.listMessages(parent, { limit: 1, signal: abort.signal });
     expect(initial.nextCursor).toBeDefined(); expect(initial.workerSource?.isCurrent()).toBe(true); expect(reads).toBe(2);
@@ -475,7 +492,11 @@ test(`consumed transcript source preserves paged reuse for pending facts (${chan
     for (let iteration = 0; iteration < 2; iteration++) {
       await provider.listPendingInbox!(parent, { signal: abort.signal });
       expect(reads).toBe(change === "relevant" && iteration > 0 ? 4 : 2);
-      expect(initial.workerSource?.isCurrent()).toBe(change !== "relevant");
+      expect(initial.workerSource?.isCurrent()).toBe(true);
+      if (change === "relevant") {
+        const retained = initial.completeItems?.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+        expectWithheld(initial.workerSource!.projectInferredOutcome!(retained!));
+      }
       const page = await provider.listMessages(parent, { limit: 1, ...(change !== "relevant" ? { cursor: initial.nextCursor } : {}), signal: abort.signal });
       expect(page.items.length).toBeGreaterThan(0);
       expect(reads).toBe(change === "relevant" ? 4 : 2);
@@ -545,7 +566,8 @@ test(`native inbox counterproof retires only affected preconsumer parent reuse (
     // that actual report; its cache lifetime, not a global report set, owns it.
     reportPresent = change === "pending-only" || change === "warm-pending-inbox";
     const row = (await adapter.history(parent)).items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-    expect(row?.status).toBe(relevant || change === "newer-load" || change === "warm-pending-old-inbox" ? "failed" : "completed");
+    if (change === "prelaunch" || change === "warm-pending-prelaunch") expectWithheld(row);
+    else expect(row?.status).toBe(relevant || change === "newer-load" || change === "warm-pending-old-inbox" ? "failed" : "completed");
     if (relevant || change === "newer-load" || change === "warm-pending-old-inbox") expect(row).toMatchObject({ resultId: "preconsumer-failure", summary: "Actual stored native failure", terminalReportedAt: 45 });
     expect(preconsumerReads).toBe(change === "warm-pending-replaced" ? 2 : warming ? 1 : relevant ? 2 : 1);
     if (stored) {
@@ -553,6 +575,10 @@ test(`native inbox counterproof retires only affected preconsumer parent reuse (
       const before = reads;
       await older.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal }));
       await provider.getReversibleHistoryState!(parent); expect(reads).toBe(before);
+    }
+    if (change === "prelaunch" || change === "warm-pending-prelaunch") {
+      const quiet = await adapter.history(parent);
+      expect(quiet.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
     }
   } finally { releaseWarm(); release(); abort.abort(); await warm?.catch(() => undefined); await old?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
@@ -614,28 +640,31 @@ test(`transcript fallback fences ${carrier} pending counterproof after inventory
     changed = true;
     if (carrier !== "streamed") {
       const fresh = await nativeRecovery(parent, { fresh: true });
-      expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(change === "failed-report" ? "failed" : "completed");
+      if (change === "failed-report" || change === "same-report") expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(change === "failed-report" ? "failed" : "completed");
+      else expectWithheld(fresh.find(task => task.taskId === worker.taskId));
     } else {
       const result = report(); frame("session.inbox.enqueued", { sessionID: parent, inboxID: result.id, item: result }, result.time.created);
       frame("diagnostic.transcript-report-applied", {}); await observed;
     }
     const current = guards.every(guard => guard.isCurrent());
+    if (carrier === "native-independent-veto") revokePage?.();
     released = true; release(); const result = await history.then(value => ({ value }), error => ({ error }));
     expect(failedInventory).toBe(true);
     expect(result).toHaveProperty("value");
     if ("value" in result) {
       expect(result.value.items.some(item => item.type === "assistant_message" && item.markdown.includes("Transcript text keeps its own authority."))).toBe(true);
       const row = result.value.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-      expect(row?.status).toBe(change === "failed-report" ? "failed" : "completed");
-      if (change === "failed-report") expect(row).toMatchObject({ resultId: "pending-result", summary: "Native report", terminalReportedAt: 45 });
+      if (carrier === "native-independent-veto") expect(row).toMatchObject({ status: "failed", resultId: "pending-result", summary: "Native report", terminalReportedAt: 45 });
+      else if (change === "same-report") expect(row).toMatchObject({ status: "completed", resultId: "pending-result" });
+      else expectWithheld(row);
     }
-    expect(current).toBe(change !== "failed-report");
+    expect(current).toBe(true);
     if (carrier === "native-independent-veto") expect(successfulHistoryInventories).toBeGreaterThan(1);
   } finally { released = true; release(); await history?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
 for (const mode of ["qualified", "changed-execution", "changed-child", "report-free", "released", "ownership", "revert", "independent-outcome", "partial-coverage", "inventory-change", "transfer-budget"] as const)
-test(`explicit inventory report relinquishes only qualified transcript outcomes (${mode})`, async () => {
+test(`explicit inventory reports remain independent of retained transcript inference (${mode})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, other: string | undefined, changed = false, foreign = false, reverted = false, secondReport = false, reportText = "Real explicit failure";
   const cohort: string[] = [];
@@ -670,6 +699,7 @@ test(`explicit inventory report relinquishes only qualified transcript outcomes 
   const guards: import("../../provider").WorkerSourceGuard[] = [];
   try {
     parent = (await provider.createSession("Qualified explicit outcome transfer")).id; child = fake.launchRequestWorker(parent).childId; other = fake.launchRequestWorker(parent).childId;
+    await provider.listPendingInbox!(parent, { signal: owner.signal });
     if (mode === "transfer-budget") { cohort.push(child, other); while (cohort.length < 80) cohort.push(fake.launchRequestWorker(parent).childId); }
     const page = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
     expect(page.items).toContainEqual(expect.objectContaining({ status: "completed", childConversationId: child }));
@@ -680,24 +710,28 @@ test(`explicit inventory report relinquishes only qualified transcript outcomes 
     const reports = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: inventory.signal,
       onSource: source => guards.push(source.workerSource.retain(inventory.signal)) });
     expect(guards.every(guard => guard.isCurrent())).toBe(true);
-    const narrowed = page.workerSource?.withoutInferredOutcomes?.(reports);
-    const qualifies = !["changed-execution", "changed-child", "report-free", "released", "partial-coverage", "transfer-budget"].includes(mode);
-    if (!qualifies) expect(narrowed).toBeUndefined();
+    const projected = page.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task")
+      .map(item => page.workerSource!.projectInferredOutcome!(item));
+    expect(projected.length).toBeGreaterThan(0);
+    expect(page.workerSource?.isCurrent()).toBe(mode !== "released");
+    if (mode === "report-free") expect(projected).toContainEqual(expect.objectContaining({ childConversationId: child, status: "completed" }));
     else {
-      expect(page.workerSource?.isCurrent()).toBe(false); // The stale whole-source lease is never restored.
-      expect(narrowed?.isCurrent()).toBe(true);
-      if (mode === "ownership") { foreign = true; await provider.getSession(child); expect(narrowed?.isCurrent()).toBe(false); }
-      if (mode === "revert") { reverted = true; await provider.getSession(child); expect(narrowed?.isCurrent()).toBe(false); }
+      expectWithheld(projected.find(item => item.childConversationId === child));
+      expect(reports).toContainEqual(expect.objectContaining({ status: "failed", resultId: `result-${child}` }));
+      if (mode === "ownership") { foreign = true; await provider.getSession(child); expect(page.workerSource?.isCurrent()).toBe(false); }
+      if (mode === "revert") { reverted = true; await provider.getSession(child); expectWithheld(page.workerSource!.projectInferredOutcome!(page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.childConversationId === child)!)); }
       if (mode === "independent-outcome") {
         secondReport = true; await provider.listPendingInbox!(parent, { signal: inventory.signal });
-        expect(narrowed?.isCurrent()).toBe(false); // A covered sibling cannot exempt this other inference.
+        expect(projected).toContainEqual(expect.objectContaining({ status: "running", outcomeWithheld: true }));
       }
       if (mode === "inventory-change") {
         reportText = "Newer explicit content"; await provider.listPendingInbox!(parent, { signal: inventory.signal });
-        expect(narrowed?.isCurrent()).toBe(true); // Text authority does not own the replacement report.
-        expect(guards.every(guard => guard.isCurrent())).toBe(false); // Inventory authority must still veto admission.
+        expect(reports).toContainEqual(expect.objectContaining({ summary: "Real explicit failure" }));
+        expect(guards.every(guard => guard.isCurrent())).toBe(true);
+        const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: inventory.signal });
+        expect(fresh).toContainEqual(expect.objectContaining({ status: "failed", resultId: `result-${child}`, summary: "Newer explicit content" }));
       }
-      owner.abort(); expect(narrowed?.isCurrent()).toBe(false);
+      owner.abort(); expect(page.workerSource?.isCurrent()).toBe(false);
     }
   } finally { owner.abort(); inventory.abort(); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
@@ -764,7 +798,10 @@ test(`transcript pending counterproof uses owned native request order (${order})
         if (order === "native-pending-delivered") { delivered = true; expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]); }
       }
       release(); const page = await history;
-      expect(page.workerSource?.isCurrent()).toBe(false);
+      expect(page.workerSource?.isCurrent()).toBe(true);
+      const row = page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+      if (order === "newer-inbox") expect(row).toMatchObject({ status: "completed" }); // First-known complete facet initializes without a bump.
+      else expectWithheld(row);
       if (order === "native-pending-delivered") {
         const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
         expect(fresh).toContainEqual(expect.objectContaining({ status: "failed", resultId: "pending-result", summary: "Native failed report" }));
@@ -1015,6 +1052,13 @@ test(`${read} keeps observed execution boundaries as outcome vetoes (${scenario}
       expect(before.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe("unavailable");
     finished = true; frame("session.execution.failed", { sessionID: child, error: { type: "unknown", message: "Later execution failed" } }, 40);
     await barrier("diagnostic.outcome-after-final-idle");
+    const observation = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    const observedRow = observation.find(task => task.taskId === worker.taskId);
+    const reportedNow = scenario === "explicit-report" || scenario === "explicit-after-undated";
+    expect(observedRow?.status).toBe(reportedNow ? "completed" : "running");
+    if (!reportedNow && !["later-outcome", "start-only", "third-start", "third-start-older-replay", "delayed-reuse", "missing-clock", "undated-idle", "undated-end", "duplicate-idles"].includes(scenario)) expectWithheld(observedRow);
+    // The changed complete child facet costs this observational pass. The
+    // independent quiet read below must still enforce every interval veto.
     if (scenario.startsWith("third-start") || scenario === "delayed-third-start" || scenario === "unique-after-start" || scenario === "unique-late-after-start") {
       const initial = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
       expect(initial.find(task => task.taskId === worker.taskId)?.status).toBe(scenario.startsWith("third-start") && !laterAdmission ? "running" : "failed");
@@ -1351,7 +1395,7 @@ test(`negative execution evidence survives generation 2 to 3 (${scenario})`, asy
 }, 10_000);
 
 for (const change of ["overlap-delivered", "overlap-unrelated", "overlap-prelaunch", "overlap-empty", "delivered", "pending-only", "unchanged", "unrelated", "prelaunch"] as const)
-test(`automatic retry revalidates parent history after native pending report (${change})`, async () => {
+test(`automatic publication withholds changed inbox inference without retry (${change})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, observing = false, delivered = false, parentReads = 0, attempts = 0;
   let entered!: () => void, release!: () => void, folded!: () => void;
@@ -1417,15 +1461,17 @@ test(`automatic retry revalidates parent history after native pending report (${
     else { observing = true; await external.run(true, () => provider.listPendingInbox!(parent!, { signal: abort.signal })); }
     const relevant = change === "delivered" || change === "pending-only" || change === "overlap-delivered";
     const currentBeforePublication = guards.every(guard => guard.isCurrent());
-    if (!overlap) expect(currentBeforePublication).toBe(!relevant);
+    expect(currentBeforePublication).toBe(true);
     expect(parentReads).toBe(1); // Counterproof invalidates reuse without starting IO.
     delivered = change === "delivered" || change === "overlap-delivered"; release(); const row = await publication;
-    expect(row.status).toBe(relevant ? "failed" : "completed");
-    if (overlap) expect(currentBeforePublication).toBe(!relevant);
-    if (relevant) { expect(row).toMatchObject({ resultId: "automatic-native-failure", summary: "Actual automatic retry failure", terminalReportedAt: 45 }); expect(attempts).toBe(2); expect(parentReads).toBeGreaterThan(1); }
-    else { expect(attempts).toBe(1); expect(parentReads).toBe(1); expect(row.resultId).toBeUndefined(); }
+    if (change === "unchanged" || change === "overlap-empty") expect(row.status).toBe("completed");
+    else expectWithheld(row);
+    expect(attempts).toBe(1); expect(parentReads).toBe(1); expect(row.resultId).toBeUndefined();
     const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
-    expect(fresh.find(item => item.taskId === worker.taskId)?.status).toBe(relevant ? "failed" : "completed");
+    if (!relevant && change !== "unchanged" && change !== "overlap-empty") expectWithheld(fresh.find(item => item.taskId === worker.taskId));
+    else expect(fresh.find(item => item.taskId === worker.taskId)?.status).toBe(relevant ? "failed" : "completed");
+    const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    expect(quiet.find(item => item.taskId === worker.taskId)?.status).toBe(relevant ? "failed" : "completed");
   } finally { releaseOwn(); releaseExternal(); release(); abort.abort(); await observed?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
@@ -1519,6 +1565,7 @@ test(`scheduler inferred outcome retains native parent visibility through public
       await provider.getReversibleHistoryState!(change === "other-parent" ? other : parent);
       const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
       if (hidden) expect(fresh).toEqual([]);
+      else if (change === "append") expectWithheld(fresh.find(item => item.taskId === worker.taskId));
       else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
     }
     if (scenario === "retained-prefix-earlier-consumer") {
@@ -1534,17 +1581,22 @@ test(`scheduler inferred outcome retains native parent visibility through public
     // Positive assertions require the actual target worker publication.
     releaseInteractions(); if (hidden) await admitted; else await publication;
     const row = adapter.projectionForTests(parent).items().find(item => item.type === "background_task" && item.taskId === worker.taskId);
-    if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true); expect(row).toBeUndefined(); }
+    if (hidden || ["captured-retained-prefix", "retained-prefix", "append", "stale-response"].includes(change)) expectWithheld(row?.type === "background_task" ? row : undefined);
     else expect(row).toMatchObject({ status: "completed" });
-    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (change === "captured-retained-prefix") expect(parentRead).toBe(1);
     if (lateCaptured) {
       const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
       if (hidden) {
         expect(fresh).toEqual([]);
         expect((await adapter.workerEvidence(parent)).entries).toEqual([]);
-      } else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+      } else if (change === "captured-retained-prefix") expectWithheld(fresh.find(item => item.taskId === worker.taskId));
+      else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
       if (change === "captured-newer-source") { expect(newerGuards.length).toBeGreaterThan(0); expect(newerGuards.every(guard => guard.isCurrent())).toBe(true); }
+    }
+    if (!hidden) {
+      const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+      expect(quiet).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
     }
   } finally { releaseOlder(); releaseInteractions(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await publication; await fake.stop(); }
 }, 10_000);
@@ -1615,7 +1667,7 @@ test(`${surface} fences overlapping ownerless parent report history (${change})`
       await nativeRecovery(peer, { fresh: true, signal: abort.signal });
       changed = true; observed = external.run(true, () => provider.getReversibleHistoryState!(change === "other-parent" ? other! : parent!)); void observed.catch(() => undefined); await secondPending;
     }
-    releaseFirst(); await returned; await reading;
+    releaseFirst(); await returned; const returnedRows = await reading;
     expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (change === "newer-source") { const currentParent = parent; await nativeRecovery(currentParent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) }); }
     const readsBeforeObservation = parentReads;
@@ -1624,15 +1676,19 @@ test(`${surface} fences overlapping ownerless parent report history (${change})`
     const contradicted = change === "failed-report" || change === "newer-source";
     if (adapter) {
       releaseInteractions(); const row = await publication!;
-      expect(row.status).toBe(contradicted ? "failed" : "completed");
-      if (contradicted) expect(row).toMatchObject({ resultId: "overlapping-parent-failure", summary: "Actual overlapping parent failure", terminalReportedAt: 45 });
-      expect(attempts).toBe(contradicted ? 2 : 1);
+      if (["failed-report", "append", "older-reply", "newer-source"].includes(change)) expectWithheld(row);
+      else expect(row.status).toBe("completed");
+      expect(attempts).toBe(1);
     }
-    expect(guards.every(guard => guard.isCurrent())).toBe(!contradicted);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (returnedRows && ["failed-report", "append", "older-reply", "newer-source"].includes(change)) expectWithheld(projectRetained(guards, returnedRows.find(item => item.taskId === worker.taskId)!));
     if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
-    expect(fresh?.status).toBe(changed && change !== "append" && change !== "unchanged" && change !== "other-parent" ? "failed" : "completed");
+    if (change === "older-reply") expectWithheld(fresh);
+    else expect(fresh?.status).toBe(changed && change !== "append" && change !== "unchanged" && change !== "other-parent" ? "failed" : "completed");
     if (contradicted) expect(fresh).toMatchObject({ resultId: "overlapping-parent-failure", summary: "Actual overlapping parent failure", terminalReportedAt: 45 });
+    const quiet = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(quiet?.status).toBe(changed && change !== "append" && change !== "unchanged" && change !== "other-parent" ? "failed" : "completed");
   } finally { releaseFirst(); releaseSecond(); releaseInteractions(); abort.abort(); await reading?.catch(() => undefined); await observed?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await pump; await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
@@ -1699,11 +1755,17 @@ test(`scheduler fences overlapping ownerless raw child history (${change})`, asy
     releaseSecond(); await observed; releaseInteractions(); const row = await publication;
     const hidden = change === "removed" || change === "newer-source";
     if (hidden) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
-    expect(row.status).toBe(hidden ? "running" : "completed"); expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    if (hidden || change === "older-reply") expectWithheld(row);
+    else expect(row.status).toBe("completed");
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (hidden) { expect(workerCanStop(row)).toBe(false); expect(row.resultId).toBeUndefined(); expect(row.activity?.endedAt).toBeUndefined(); }
     if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
-    expect(fresh?.status).toBe(hidden ? "running" : "completed"); if (hidden) expect(fresh?.activity?.kind).toBe("working");
+    if (change === "older-reply") expectWithheld(fresh);
+    else expect(fresh?.status).toBe(hidden ? "running" : "completed");
+    if (hidden) expect(fresh?.activity?.kind).toBe("working");
+    const quiet = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(quiet?.status).toBe(hidden ? "running" : "completed");
   } finally { releaseFirst(); releaseSecond(); releaseInteractions(); abort.abort(); await observed?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
@@ -1761,26 +1823,31 @@ test(`${surface} fences overlapping moves between staged child boundaries (${cha
     } else { reading = provider.reconcileBackgroundTasks!(parent, { signal: abort.signal }); void reading.catch(() => undefined); }
     await ownPending;
     if (change !== "older-reply") { observed = external.run(true, () => provider.getSession(change === "other-child" ? other! : child!)); void observed.catch(() => undefined); await observedPending; }
-    releaseOwn(); await returned; await reading;
+    releaseOwn(); await returned; const returnedRows = await reading;
     expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (change !== "older-reply" && change !== "other-child") boundary = target;
     if (change === "newer-source") { const currentParent = parent; await nativeRecovery(currentParent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) }); }
     releaseObserved(); await observed;
     const hidden = change === "hidden" || change === "newer-source";
+    if (returnedRows && (hidden || change === "prefix" || change === "older-reply")) expectWithheld(projectRetained(guards, returnedRows.find(item => item.taskId === worker.taskId)!));
     if (adapter) {
       releaseInteractions(); const row = await publication!;
-      expect(row.status).toBe(hidden ? "running" : "completed");
+      if (hidden || change === "prefix" || change === "older-reply") expectWithheld(row);
+      else expect(row.status).toBe("completed");
       if (hidden) {
         expect(workerDismissalEvidence(row)?.dismissible).toBe(false); expect(workerCanStop(row)).toBe(false); expect(row.resultId).toBeUndefined(); expect(row.terminalReportedAt).toBeUndefined(); expect(row.activity?.endedAt).toBeUndefined();
         const evidence = await adapter.workerEvidence(parent);
         expect(evidence.entries.find(entry => entry.executionId === row.activity?.executionId)?.dismissible).toBe(false);
       }
     }
-    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
-    expect(fresh?.status).toBe(hidden ? "running" : "completed");
+    if (change === "older-reply") expectWithheld(fresh);
+    else expect(fresh?.status).toBe(hidden ? "running" : "completed");
     if (hidden) { expect(workerDismissalEvidence(fresh)?.dismissible).toBe(false); expect(fresh?.activity?.kind).toBe("session-active"); }
+    const quiet = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
+    expect(quiet?.status).toBe(hidden ? "running" : "completed");
   } finally { releaseOwn(); releaseObserved(); releaseInteractions(); abort.abort(); await reading?.catch(() => undefined); await observed?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await pump; await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
@@ -1866,21 +1933,28 @@ test(`scheduler captured child outcome observes late staged native record (${cha
     if (collecting) { releaseChild(); await returned; }
     release(); await admitted;
     const row = adapter.projectionForTests(parent).items().find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-    if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true); expect(row?.status).not.toBe("completed"); }
+    if (hidden || ["load-overlap-prefix", "owned-overlap-prefix", "collecting-prefix", "retained-prefix"].includes(change)) expectWithheld(row);
     else expect(row).toMatchObject({ status: "completed" });
-    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
-    expect(fresh?.status).toBe(hidden ? "running" : "completed");
+    if (change === "retained-prefix") expectWithheld(fresh);
+    else expect(fresh?.status).toBe(hidden ? "running" : "completed");
     if (hidden) {
       expect(fresh?.activity?.kind).toBe("working");
       expect(fresh?.activity?.endedAt).toBeUndefined(); expect(fresh?.resultId).toBeUndefined();
       expect(fresh?.terminalReportedAt).toBeUndefined();
-      const current = (await adapter.history(parent)).items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      // Startup's still-owned history may share its completed observational
+      // pass. Request a separate page rather than expecting it to auto-retry.
+      const current = (await adapter.history(parent, { limit: 100 })).items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
       expect(current?.activity?.kind).toBe("working");
       const evidence = await adapter.workerEvidence(parent);
       expect(evidence.entries.find(entry => entry.executionId === current?.activity?.executionId)?.dismissible).toBe(false);
     }
     if (change === "newer-source" || change === "owned-overlap-newer-source") { expect(newerGuards.length).toBeGreaterThan(0); expect(newerGuards.every(guard => guard.isCurrent())).toBe(true); }
+    if (!hidden) {
+      const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+      expect(quiet.find(item => item.taskId === worker.taskId)?.status).toBe("completed");
+    }
   } finally { releaseOwn(); releaseChild(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
@@ -1925,11 +1999,11 @@ test(`repeated child stage remains distinct during raw revalidation (${change})`
   provider.events = async function* (signal) { for await (const event of nativeEvents(signal)) { yield event; if (event.eventType === "server.connected") connectedHandled(); } };
   provider.reconcileBackgroundTasks = async (id, options) => {
     const tasks = await nativeRecovery(id, { ...options, onSource: source => { options?.onSource?.(source); if (id === parent && !captured) guards.push(source.workerSource.retain(abort.signal)); } });
-    if (id === parent && !captured) { captured = true; expect(tasks).toContainEqual(expect.objectContaining({ status: "completed" })); folded(); }
+    if (id === parent && !captured) { captured = true; expectWithheld(tasks.find(task => task.childConversationId === child)); folded(); }
     return tasks;
   };
   const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 });
-  let old: ReturnType<typeof provider.getSession> | undefined, publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
+  let old: ReturnType<typeof provider.getSession> | undefined, raw: ReturnType<NonNullable<typeof provider.getReversibleHistoryState>> | undefined, publication: Promise<import("../../types").BackgroundTaskItem> | undefined;
   try {
     parent = (await provider.createSession("Repeated stage during requested raw revalidation")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
     other = (await provider.createSession("Unrelated stage owner")).id;
@@ -1937,25 +2011,35 @@ test(`repeated child stage remains distinct during raw revalidation (${change})`
     const subscription = await adapter.subscribe(parent, { signal: abort.signal });
     publication = (async () => { for await (const event of subscription.events) if (event.type === "item.upsert" && event.item.type === "background_task" && event.item.taskId === worker.taskId) return event.item;
       throw new Error("No target worker publication"); })(); void publication.catch(() => undefined);
+    await returned;
+    // The outcome rule no longer starts a raw revalidation retry. A separate
+    // public reader supplies the overlapping second response explicitly.
+    const peer = (await provider.createSession("Independent raw cache expiry")).id;
+    await nativeRecovery(peer, { fresh: true, signal: abort.signal });
+    raw = provider.getReversibleHistoryState!(child); void raw.catch(() => undefined);
     await rawPending; expect(childReads).toBe(2);
     const subject = change === "other-child" ? other : child, hidden = change === "hidden" || change === "newer-source";
     old = oldRead.run(true, () => provider.getSession(subject!)); void old.catch(() => undefined); await oldPending;
     removed = hidden; await provider.getSession(subject); // Second stage's committed successor returns first.
-    expect(childReads).toBe(2); releaseRaw(); await returned;
+    expect(childReads).toBe(2); releaseRaw(); await raw;
     expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (change === "newer-source") await nativeRecovery(parent, { fresh: true, signal: abort.signal, onSource: source => newer.push(source.workerSource.retain(abort.signal)) });
     releaseOld(); await old;
     if (change !== "newer-source") expect(childReads).toBe(2); // Native observation starts no revalidation IO.
     releaseInteractions(); const row = await publication;
     if (hidden) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
-    expect(row.status).toBe(hidden ? "running" : "completed");
-    expect(guards.every(guard => guard.isCurrent())).toBe(!hidden);
+    expectWithheld(row);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
     if (hidden) { expect(workerDismissalEvidence(row)?.dismissible).toBe(false); expect(workerCanStop(row)).toBe(false); expect(row.activity?.endedAt).toBeUndefined(); expect(row.resultId).toBeUndefined(); expect(row.terminalReportedAt).toBeUndefined(); }
+    const observation = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    const observed = observation.find(item => item.taskId === worker.taskId);
+    if (change === "prefix") expectWithheld(observed);
+    else expect(observed?.status).toBe(hidden ? "running" : "completed");
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
     expect(fresh?.status).toBe(hidden ? "running" : "completed");
     if (hidden) { expect(fresh?.activity?.kind).toBe("working"); const evidence = await adapter.workerEvidence(parent); expect(evidence.entries.find(entry => entry.executionId === row.activity?.executionId)?.dismissible).toBe(false); }
     if (change === "newer-source") { expect(newer.length).toBeGreaterThan(0); expect(newer.every(guard => guard.isCurrent())).toBe(true); }
-  } finally { releaseOld(); releaseRaw(); releaseInteractions(); abort.abort(); await old?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
+  } finally { releaseOld(); releaseRaw(); releaseInteractions(); abort.abort(); await raw?.catch(() => undefined); await old?.catch(() => undefined); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["commit", "restore", "prefix", "stage-only"] as const)
@@ -2006,8 +2090,9 @@ test(`cached ownership preserves staged warm child qualification (${change})`, a
     staged = change === "stage-only"; removed = change === "commit"; releaseLookup(); releaseInteractions();
     const row = await publication; const hidden = change === "commit" || change === "stage-only";
     if (hidden) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
-    expect(row.status).toBe(hidden ? "running" : "completed");
-    if (change === "commit") { expect(guards.some(guard => !guard.isCurrent())).toBe(true); expect(row.activity?.endedAt).toBeUndefined(); expect(row.resultId).toBeUndefined(); }
+    if (change !== "stage-only") expectWithheld(row);
+    else expect(row.status).toBe("running");
+    if (change === "commit") { expect(guards.every(guard => guard.isCurrent())).toBe(true); expect(row.activity?.endedAt).toBeUndefined(); expect(row.resultId).toBeUndefined(); }
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
     expect(fresh?.status).toBe(hidden ? "running" : "completed"); if (change === "commit") expect(fresh?.activity?.kind).toBe("working");
   } finally { releaseLookup(); releaseInteractions(); abort.abort(); await adapter.dispose(); await publication?.catch(() => undefined); await fake.stop(); }
@@ -2195,7 +2280,11 @@ test(`parent counterproof survives the ${boundary === "ownership" ? "first owner
     // required lookup. Counterproof must be recorded before that enrichment.
     await observed; release();
     const result = await recovery.then(tasks => ({ tasks }), error => ({ error }));
-    if (changed) { expect(result).toMatchObject({ error: expect.any(Error) }); expect(guards.some(guard => !guard.isCurrent())).toBe(true); }
+    if (change !== "unrelated-parent" && change !== "included-launch") {
+      expect(result).toHaveProperty("tasks");
+      if ("tasks" in result) expectWithheld(result.tasks.find(task => task.taskId === worker.taskId));
+      expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    }
     else if (change === "included-launch") {
       const tasks = "tasks" in result ? result.tasks : undefined;
       expect(tasks).toHaveLength(2);
@@ -2259,7 +2348,11 @@ test(`native parent-result counterproof is scoped and compact (${mode})`, async 
     }
     await provider.getReversibleHistoryState!(parent); releaseSecond(); await delayed; release();
     const stale = await older, contradicted = mode === "prebaseline" || mode === "late-ownerless" || mode === "report-budget-over" || mode === "report-change-without-part-clocks";
-    expect(stale.workerSource?.isCurrent()).toBe(!contradicted);
+    expect(stale.workerSource?.isCurrent()).toBe(true);
+    const staleRow = stale.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    if (!hasInitialReport) expectWithheld(staleRow);
+    else if (mode === "many-reports") expect(stale.completeItems).toContainEqual(expect.objectContaining({ status: "completed", resultId: "native-report" }));
+    else expect(staleRow).toMatchObject({ status: "completed", resultId: "native-report" });
     expect(foreignLookups).toBe(0);
     await provider.getReversibleHistoryState!(parent); expect(reads).toBe(mode === "late-ownerless" ? 3 : 2);
     repaired = true;
@@ -2363,6 +2456,7 @@ test(`${carrier === "native" ? "pending" : carrier === "streamed" ? "streamed pe
     }
     parent = (await provider.createSession("Pending outcome retention")).id;
     const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    await provider.listPendingInbox!(parent, { signal: owner.signal });
     const initial = carrier === "transcript" ? await provider.listMessages(parent, { limit: 100, signal: owner.signal }).then(page => {
       guards.push(page.workerSource!.retain(owner.signal)); return page.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
     }) : await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: owner.signal,
@@ -2384,8 +2478,9 @@ test(`${carrier === "native" ? "pending" : carrier === "streamed" ? "streamed pe
       if (mode === "cancelled") { await pending; probe.abort(); release(); await observing.catch(() => undefined); }
       else expect(await observing).toEqual([]); // No worker report is exposed as a user steer.
     }
-    const denied = ["newer-observation", "released-owner", "count-over", "bytes-over"].includes(mode);
-    expect(guards.every(guard => guard.isCurrent())).toBe(!denied);
+    expect(guards.every(guard => guard.isCurrent())).toBe(mode !== "released-owner");
+    if (mode === "cancelled") expect(guards[0]!.projectInferredOutcome!(initial[0]!)).toMatchObject({ status: "completed" });
+    else expectWithheld(guards[0]!.projectInferredOutcome!(initial[0]!));
     // SSE already verifies reported children; native inbox observation does
     // not. The counterproof itself must add no inbox or ownership reads.
     const expectedLookups = carrier !== "streamed" ? 0 : mode === "count-at" ? 256 : mode === "count-over" ? 257 : mode === "duplicates" ? 400 : 0;
@@ -2453,7 +2548,7 @@ test(`pending outcome native order cannot be replaced by response arrival (${arr
       } else expect(await provider.listPendingInbox!(parent, { signal: abort.signal })).toEqual([]);
       release();
       if (arrival === "streamed-replay-overlap") expect((await recovery)[0]?.status).toBe("failed");
-      else await expect(recovery).rejects.toBeInstanceOf(Error);
+      else expectWithheld((await recovery).find(task => task.taskId === worker.taskId));
       const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
       expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe("failed");
     } else {
@@ -2555,10 +2650,14 @@ test(`automatic recovery guards native ${carrier === "stored" ? "parent" : carri
       if (failed) expect(inboxReads).toBe(readsBefore);
       const currentBeforePublication = guards.every(guard => guard.isCurrent());
       release(); const published = await events;
-      expect(published.status).toBe(failed ? "failed" : "completed");
-      expect(currentBeforePublication).toBe(!failed);
+      if (change === "same-report" || change === "foreign-workspace") expect(published.status).toBe("completed");
+      else expectWithheld(published);
+      expect(currentBeforePublication).toBe(true);
       const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
-      expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(failed ? "failed" : "completed");
+      if (["other-child", "earlier-report", "append-text"].includes(change)) expectWithheld(fresh.find(task => task.taskId === worker.taskId));
+      else expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(failed ? "failed" : "completed");
+      const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+      expect(quiet.find(task => task.taskId === worker.taskId)?.status).toBe(failed ? "failed" : "completed");
       return;
     }
     // This native read, not SSE, discovers the parent report before the older
@@ -2566,13 +2665,17 @@ test(`automatic recovery guards native ${carrier === "stored" ? "parent" : carri
     const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
     const failed = change === "failed-report" || change === "report-before-idle";
     const expected = failed ? "failed" : change === "hidden-report" ? "running" : "completed";
-    expect(current.find(task => task.taskId === worker.taskId)?.status).toBe(expected);
+    if (["other-child", "earlier-report", "append-text"].includes(change)) expectWithheld(current.find(task => task.taskId === worker.taskId));
+    else expect(current.find(task => task.taskId === worker.taskId)?.status).toBe(expected);
     if (!failed && change !== "hidden-report") expect(guards.every(guard => guard.isCurrent())).toBe(true);
     release(); const published = await events;
-    expect(published.status).toBe(expected);
-    if (failed) expect(guards.some(guard => !guard.isCurrent())).toBe(true);
-    if (failed || change === "same-report") expect(published).toMatchObject({ resultId: "native-parent-result", summary: "Native parent result" });
-    else expect(published.resultId).toBeUndefined();
+    if (change === "same-report") expect(published).toMatchObject({ status: "completed", resultId: "native-parent-result", summary: "Native parent result" });
+    else if (change === "hidden-report") expect(published.status).toBe("running");
+    else expectWithheld(published);
+    expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    expect(quiet.find(task => task.taskId === worker.taskId)?.status).toBe(expected);
+    if (failed) expect(quiet.find(task => task.taskId === worker.taskId)).toMatchObject({ resultId: "native-parent-result", summary: "Native parent result" });
   } finally { release(); abort.abort(); await adapter.dispose(); await pump; await events?.catch(() => undefined); await fake.stop(); }
 }, 10_000);
 
@@ -2669,7 +2772,8 @@ test(`pending warm child history observes native visibility before installation 
     if (older) { releaseLookup(); await older; }
     const history = await adapter.history(parent);
     const row = history.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
-    expect(row?.status).toBe(removed || staged ? "running" : "completed");
+    if (change === "stale-overlap") expectWithheld(row);
+    else expect(row?.status).toBe(removed || staged ? "running" : "completed");
     if (removed) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
     expect(childReads).toBe(removed ? 2 : 1);
     if (removed) {
@@ -2723,10 +2827,16 @@ test(`collecting parent source observes native visibility before first record ($
     if (change.startsWith("reverse")) { releaseLookup(); await older; }
     release(); const result = await reading;
     if (older) { releaseLookup(); await older; }
-    if (removed || staged) expect(result.items.some(item => item.type === "background_task" && item.taskId === worker.taskId)).toBe(false);
+    if (removed || change === "reverse-retained-prefix") expectWithheld(result.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId));
+    else if (staged) expect(result.items.some(item => item.type === "background_task" && item.taskId === worker.taskId)).toBe(false);
     else expect(result.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
     const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
-    if (removed || staged) expect(fresh).toEqual([]); else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    if (removed || staged) expect(fresh).toEqual([]);
+    else if (["reverse-retained-prefix", "append", "stale-response"].includes(change)) expectWithheld(fresh.find(item => item.taskId === worker.taskId));
+    else expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    if (removed || staged) expect(quiet).toEqual([]);
+    else expect(quiet).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
     if (change === "reverse-newer-source") { expect(newerGuards.length).toBeGreaterThan(0); expect(newerGuards.every(guard => guard.isCurrent())).toBe(true); }
   } finally { release(); releaseLookup(); abort.abort(); await reading?.catch(() => undefined); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
@@ -2784,6 +2894,12 @@ for (const scenario of ["initial-owned-clear", "initial-fresh", "initial-commit"
 if (read === "adapter" || scenario !== "reverse-during-lookup-late-consumer")
 test(`${read} retains boundary transitions during the first child transcript (${scenario})`, async () => {
   const lateConsumer = scenario === "reverse-during-lookup-late-consumer";
+  const controlledAppend = read === "adapter" && scenario === "append";
+  const freshReader = new AsyncLocalStorage<boolean>();
+  let freshEntered!: () => void, releaseFresh!: () => void, reportHandled!: () => void;
+  const freshPending = new Promise<void>(resolve => { freshEntered = resolve; });
+  const freshHeld = new Promise<void>(resolve => { releaseFresh = resolve; });
+  let reportPending = new Promise<void>(resolve => { reportHandled = resolve; });
   const change = lateConsumer ? "reverse-during-lookup" : scenario;
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, staged = change.startsWith("initial-") && change !== "initial-other", removed = false, heldOnce = false, childReads = 0;
@@ -2813,6 +2929,7 @@ test(`${read} retains boundary transitions during the first child transcript (${
       const data = [{ id: "child-prompt", type: "user", text: "Current execution", time: { created: 15 } },
         ...(!removed ? [{ id: "removed-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : []),
         ...(change === "initial-prefix" && !staged ? [] : [{ id: "retained-suffix", type: "user", text: "Independent suffix", time: { created: 50 } }])];
+      if (controlledAppend && freshReader.getStore()) { freshEntered(); await freshHeld; }
       if (!heldOnce) { heldOnce = true; entered(); await held; }
       return Response.json({ data, cursor: {} });
     }
@@ -2826,6 +2943,15 @@ test(`${read} retains boundary transitions during the first child transcript (${
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  if (controlledAppend) {
+    const nativeEvents = provider.events.bind(provider);
+    provider.events = async function* (signal) {
+      for await (const event of nativeEvents(signal)) {
+        yield event;
+        if (event.eventType === "session.usage.updated" && event.conversationId === child) reportHandled();
+      }
+    };
+  }
   const nativeMessages = provider.listMessages.bind(provider);
   if (lateConsumer) provider.listMessages = async (...args) => {
     if (args[0] === parent) await parentHeld;
@@ -2864,17 +2990,50 @@ test(`${read} retains boundary transitions during the first child transcript (${
     if (change === "append") fake.workerReport(child, "Independent model", "high", 0.001);
     release(); const result = await reading;
     const hidden = removed || change === "initial-stage-only";
-    if (!adapter && change.startsWith("initial-")) expect(childReads).toBe(change === "initial-commit" || change === "initial-owned-clear" ? 2 : 1);
-    if (adapter) expect(result.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: hidden ? "running" : "completed" }));
-    else expect((result as import("../../provider").ProviderHistoryPage).workerSource?.isCurrent()).toBe(!removed || change === "initial-fresh");
+    if (!adapter && change.startsWith("initial-")) expect(childReads).toBe(1); // No inferred-outcome retry.
+    const row = result.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    if (["initial-prefix", "reverse-prefix", "append"].includes(change)) expectWithheld(row);
+    else expect(row).toMatchObject({ status: hidden ? "running" : "completed" });
+    if (!adapter) expect((result as import("../../provider").ProviderHistoryPage).workerSource?.isCurrent()).toBe(true);
     if (adapter && removed) {
       const row = result.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
       expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
     }
-    const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
-    expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: hidden ? "running" : "completed",
+    if (controlledAppend) {
+      await reportPending;
+      await provider.getSession(child);
+      // The first append is already observed: an independent quiet read must
+      // recover, regardless of when startup's auxiliary metadata read finished.
+      const settled = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      expect(settled.find(item => item.taskId === worker.taskId)).toMatchObject({
+        taskId: worker.taskId, childConversationId: child, status: "completed", stateUncertain: false,
+      });
+      expect(settled.find(item => item.taskId === worker.taskId)?.outcomeWithheld).toBeUndefined();
+    }
+    const freshRead = freshReader.run(controlledAppend, () => provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal }));
+    if (controlledAppend) {
+      // Pin a distinct native fact inside this independent source's child request
+      // window, instead of relying on startup enrichment being late.
+      await freshPending;
+      reportPending = new Promise<void>(resolve => { reportHandled = resolve; });
+      fake.workerReport(child, "Independent model", "high", 0.001);
+      await reportPending;
+      await provider.getSession(child);
+      releaseFresh();
+    }
+    const fresh = await freshRead;
+    if (change === "initial-prefix" || adapter && change === "append") expectWithheld(fresh.find(item => item.taskId === worker.taskId));
+    else expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: hidden ? "running" : "completed",
       ...(removed ? { activity: expect.objectContaining({ kind: "working" }) } : {}) });
-  } finally { releaseParent(); releaseOutcome(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
+    const quiet = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    expect(quiet.find(item => item.taskId === worker.taskId)?.status).toBe(hidden ? "running" : "completed");
+    if (controlledAppend) {
+      expect(quiet.find(item => item.taskId === worker.taskId)).toMatchObject({
+        taskId: worker.taskId, childConversationId: child, status: "completed", stateUncertain: false,
+      });
+      expect(quiet.find(item => item.taskId === worker.taskId)?.outcomeWithheld).toBeUndefined();
+    }
+  } finally { releaseFresh(); releaseParent(); releaseOutcome(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["stale-cleared", "stale-staged", "unchanged", "newer-change"] as const)
@@ -2914,16 +3073,23 @@ test(`ownerless session lookup cannot claim a collecting visibility read (${chan
     staged = change === "stale-cleared"; releaseHistory();
     const page = await read;
     expect(page.workerSource?.isCurrent()).toBe(true);
-    expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: staged ? "running" : "completed" }));
+    if (change === "stale-staged") expectWithheld(page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId));
+    else expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: staged ? "running" : "completed" }));
     releaseLookup(); await ownerless;
     expect(page.workerSource?.isCurrent()).toBe(true);
     if (change === "newer-change") {
       staged = true; await provider.getSession(child);
-      expect(page.workerSource?.isCurrent()).toBe(false);
+      expect(page.workerSource?.isCurrent()).toBe(true);
+      const row = page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      expectWithheld(page.workerSource!.projectInferredOutcome!(row!));
     }
     const current = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
     expect(current.workerSource?.isCurrent()).toBe(true);
-    expect(current.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: staged ? "running" : "completed" }));
+    if (change === "stale-staged") {
+      expectWithheld(current.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId));
+      const quiet = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
+      expect(quiet.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    } else expect(current.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: staged ? "running" : "completed" }));
   } finally { releaseHistory(); releaseLookup(); abort.abort(); await read?.catch(() => undefined); await ownerless?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
@@ -2988,15 +3154,21 @@ test(`ownerless parent inventory covers its first pending response (${change})`,
     expect(reads).toBe(nativeReads);
     releaseSecond(); await delayed; release();
     const stale = await older, contradicted = change === "competing" || change === "late-ownerless" || saturated;
-    expect(stale.workerSource?.isCurrent()).toBe(!contradicted);
-    if (!contradicted) expect(stale.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    expect(stale.workerSource?.isCurrent()).toBe(true);
+    const staleRow = stale.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    if (change === "unchanged") expect(staleRow).toMatchObject({ status: "completed" });
+    else expectWithheld(staleRow);
     await provider.getReversibleHistoryState!(parent);
     expect(reads).toBe(nativeReads);
     expect(unknownLookups).toBe(0); // Provisional native facts never grant child IO.
     recovered = true;
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh).toHaveLength(!bounded && (contradicted || change === "other-child") ? 2 : 1);
-    expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(contradicted && !bounded ? "running" : "completed");
+    if (change === "append" || change === "other-child") {
+      expectWithheld(fresh.find(task => task.taskId === worker.taskId));
+      const quiet = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      expect(quiet.find(task => task.taskId === worker.taskId)?.status).toBe("completed");
+    } else expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(contradicted && !bounded ? "running" : "completed");
     if (contradicted && !bounded) expect(fresh.every(task => task.status === "running")).toBe(true);
     expect(unknownLookups).toBe(0);
   } finally { release(); releaseSecond(); abort.abort(); await older?.catch(() => undefined); await delayed?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
@@ -3114,14 +3286,20 @@ test(`ownerless reversible history covers the first pending child response (${ch
     releaseSecond(); await delayed;
     release();
     const stale = await older;
-    expect(stale.workerSource?.isCurrent()).toBe(!reverted);
-    if (!reverted) expect(stale.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    expect(stale.workerSource?.isCurrent()).toBe(true);
+    const staleRow = stale.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    if (change === "unchanged") expect(staleRow).toMatchObject({ status: "completed" });
+    else expectWithheld(staleRow);
     // Reuse must still contain the newer transcript, not the late old response.
     expect((await provider.getReversibleHistoryState!(child)).canUndo).toBe(!reverted);
     expect(reads).toBe(change === "late-ownerless" ? 3 : 2);
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh).toHaveLength(1);
-    expect(fresh[0]?.status).toBe(reverted ? "running" : "completed");
+    if (change === "append") {
+      expectWithheld(fresh[0]);
+      const quiet = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      expect(quiet[0]?.status).toBe("completed");
+    } else expect(fresh[0]?.status).toBe(reverted ? "running" : "completed");
   } finally { release(); releaseSecond(); abort.abort(); await older?.catch(() => undefined); await delayed?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
@@ -3167,7 +3345,9 @@ test(`a stale ownerless reversible response cannot revoke later owned child evid
     void recovery.catch(() => undefined);
     if (arrival === "while-owned-pending") { await newerPending; release(); await older; releaseNewer(); }
     const current = await recovery;
-    expect(current[0]?.status).toBe("failed"); expect(guards.length).toBeGreaterThan(0);
+    if (arrival === "while-owned-pending") expectWithheld(current[0]);
+    else expect(current[0]?.status).toBe("failed");
+    expect(guards.length).toBeGreaterThan(0);
     release(); await older;
     expect(guards.every(guard => guard.isCurrent())).toBe(true);
     const reused = await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal });
@@ -3238,11 +3418,16 @@ test(`prebaseline buffer ${pressure} preserves bounded ${outcome} authority`, as
     const result = await recovery.then(tasks => ({ tasks }), error => ({ error }));
     const saturated = pressure === "count-over-limit" || pressure === "bytes-over-limit";
     expect(guards.length).toBeGreaterThan(0);
-    if (saturated) {
+    if (outcome === "terminal") {
+      expect(result).toHaveProperty("tasks");
+      if ("tasks" in result) { expect(result.tasks).toHaveLength(1); expectWithheld(result.tasks[0]); }
+      expect(guards.every(guard => guard.isCurrent())).toBe(true);
+      const quiet = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+      expect(quiet).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed", activity: expect.objectContaining({ kind: "ended" }) }));
+    } else if (saturated) {
       const error = "error" in result ? result.error : undefined;
       expect(error).toBeInstanceOf(Error);
-      if (outcome === "terminal") expect(guards.some(guard => !guard.isCurrent())).toBe(true);
-      else {
+      {
         // Inventory/ownership evidence can remain current, but its later
         // history-only activity publication must fail the retained counterproof.
         expect(error?.message).toBe("Background launch inventory changed during recovery");
@@ -3250,8 +3435,7 @@ test(`prebaseline buffer ${pressure} preserves bounded ${outcome} authority`, as
     } else {
       const tasks = "tasks" in result ? result.tasks : undefined;
       expect(tasks).toHaveLength(1);
-      expect(tasks?.[0]).toMatchObject({ taskId: worker.taskId, status: outcome === "terminal" ? "completed" : "running",
-        activity: { kind: outcome === "terminal" ? "ended" : "working" } });
+      expect(tasks?.[0]).toMatchObject({ taskId: worker.taskId, status: "running", activity: { kind: "working" } });
       expect(guards.every(guard => guard.isCurrent())).toBe(true);
     }
     await expect(provider.stopTask!(parent, `v2:${parent}:n0`)).rejects.toMatchObject({ name: "BackgroundTaskUnavailableError" });
@@ -3421,7 +3605,8 @@ test(`${read} retains activity-only child observation through the final parent l
     changed = true;
     if (change !== "append") fake.workerObservation(child, false);
     const current = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
-    expect(current.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe(change === "completed" ? "ended" : change === "bare-boundary" ? "unavailable" : "working");
+    expect(current.find(task => task.taskId === worker.taskId)?.activity?.kind).toBe(change === "append" ? "working" : "unavailable");
+    if (change === "completed") expectWithheld(current.find(task => task.taskId === worker.taskId));
     release();
     const result = await pending!.then(value => ({ value }), error => ({ error }));
     if (adapter) {
@@ -3496,10 +3681,9 @@ test(`${read} progresses through repeated requested-child snapshots (${mutation}
       const guards: import("../../provider").WorkerSourceGuard[] = [];
       const result = await explicitRead.run(true, () => provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal, onSource: source => guards.push(source.workerSource.retain(abort.signal)) }))
         .then(tasks => ({ tasks }), error => ({ error }));
-      if (mutation === "replay") {
-        expect(result).toMatchObject({ tasks: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] });
-        expect(guards.every(guard => guard.isCurrent())).toBe(true);
-      } else { expect(result).toMatchObject({ error: expect.any(Error) }); expect(guards.some(guard => !guard.isCurrent())).toBe(true); }
+      expect(result).toHaveProperty("tasks");
+      if ("tasks" in result) expectWithheld(result.tasks.find(task => task.taskId === worker.taskId));
+      expect(guards.every(guard => guard.isCurrent())).toBe(true);
     }
     expect(updates).toBeGreaterThan(0);
   } finally { streaming = false; abort.abort(); await pump; if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
@@ -3620,9 +3804,14 @@ test(`${read} retains boundary counterproof while its first outcome visibility l
     }
     release();
     const result = await older.then(value => ({ value }), error => ({ error }));
-    if (read === "listMessages" && "value" in result) expect((result.value as Awaited<ReturnType<typeof provider.listMessages>>).workerSource?.isCurrent()).toBe(!staged);
-    else if (staged) expect(result).toMatchObject({ error: expect.any(Error) });
-    else expect(result).toMatchObject({ value: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] });
+    expect(result).toHaveProperty("value");
+    if ("value" in result) {
+      const page = result.value as Awaited<ReturnType<typeof provider.listMessages>>;
+      const rows = Array.isArray(result.value) ? result.value as import("../../types").BackgroundTaskItem[] : page.items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+      if (staged) expectWithheld(rows.find(task => task.taskId === worker.taskId));
+      else expect(rows).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+      if (!Array.isArray(result.value)) expect(page.workerSource?.isCurrent()).toBe(true);
+    }
     const fresh = current ?? await provider.listMessages(parent, { limit: 100, signal: abort.signal });
     expect(fresh.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: staged ? "running" : "completed" }));
     expect(fresh.workerSource?.isCurrent()).toBe(true);
@@ -3766,7 +3955,9 @@ test(`a direct child history ${change} observes consumed parent outcome counterp
     expect(earlier.workerSource?.isCurrent()).toBe(true);
     changed = true;
     await provider.listMessages(child, { limit: 100, signal: abort.signal });
-    expect(earlier.workerSource?.isCurrent()).toBe(change === "append");
+    expect(earlier.workerSource?.isCurrent()).toBe(true);
+    const retained = earlier.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    expectWithheld(earlier.workerSource!.projectInferredOutcome!(retained!));
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh[0]?.status).toBe(change === "remove" ? "running" : change === "alter" ? "failed" : "completed");
   } finally { abort.abort(); await provider.dispose!(); await fake.stop(); }
@@ -3845,7 +4036,8 @@ test(`automatic recovery retains consumed outcomes through pending interactions 
     release();
     if (change === "reconnect") pump = adapter.startEventPump();
     const published = await events;
-    expect(published.status).toBe(status);
+    if (change === "append") expectWithheld(published);
+    else expect(published.status).toBe(status);
     if (change === "parent-report") expect(published).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
     if (leases.length) {
       await Promise.all(released);
@@ -3899,7 +4091,9 @@ test("an overlapping older parent history cannot revoke the later consumed launc
     expect(current.workerSource?.isCurrent()).toBe(true);
     release();
     const stale = await older;
-    expect(stale.workerSource?.isCurrent()).toBe(false);
+    expect(stale.workerSource?.isCurrent()).toBe(true);
+    const staleRow = stale.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+    expectWithheld(stale.workerSource!.projectInferredOutcome!(staleRow!));
     expect(current.workerSource?.isCurrent()).toBe(true);
   } finally { release(); abort.abort(); await pump; await older?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 });
@@ -3959,13 +4153,19 @@ test(`${read} observes later parent history ${change} before SSE without requiri
     expect(sources.every(source => source.isCurrent())).toBe(true);
     changed = true;
     const fresh = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
-    expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(change === "competing-launch" ? "running" : "completed");
+    if (change === "competing-launch") expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe("running");
+    else expectWithheld(fresh.find(task => task.taskId === worker.taskId));
     release();
     if (adapter) {
       const snapshot = await pending as Awaited<ReturnType<ChatAdapter["history"]>>;
-      expect(snapshot.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: change === "competing-launch" ? "running" : "completed" }));
-    } else await pending;
-    expect(sources.every(source => source.isCurrent())).toBe(change !== "competing-launch");
+      expectWithheld(snapshot.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId));
+    } else {
+      const rows = await pending as import("../../types").BackgroundTaskItem[];
+      expectWithheld(sources[0]!.projectInferredOutcome!(rows.find(task => task.taskId === worker.taskId)!));
+    }
+    expect(sources.every(source => source.isCurrent())).toBe(true);
+    const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
+    expect(quiet.find(task => task.taskId === worker.taskId)?.status).toBe(change === "competing-launch" ? "running" : "completed");
   } finally { release(); abort.abort(); await pending?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
@@ -4043,8 +4243,16 @@ test(`${read} fences ${change} in the consumed parent launch inventory (cached t
     const result = await recovery.then(value => ({ value }), error => ({ error }));
     if ("value" in result) {
       const tasks = Array.isArray(result.value) ? result.value : result.value.items.filter((item: any) => item.type === "background_task");
-      if (changed && read === "listMessages") expect(result.value.workerSource.isCurrent()).toBe(false);
-      else expect(tasks.find((task: any) => task.taskId === worker.taskId)?.status).toBe(changed && !parentReport ? "running" : "completed");
+      if (read === "listMessages") expect(result.value.workerSource.isCurrent()).toBe(true);
+      if (adapter && changed && !cachedTerminal) {
+        // The adapter's separate inventory already sees both competing launches:
+        // there is no attributable inference to discard in this fold.
+        const row = tasks.find((task: any) => task.taskId === worker.taskId);
+        expect(row).toMatchObject({ status: "running", stateUncertain: true, activity: { kind: "unavailable" }, control: { available: false } });
+        expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true);
+        expect(workerCanStop(row)).toBe(false);
+      } else if (!parentReport) expectWithheld(tasks.find((task: any) => task.taskId === worker.taskId));
+      else expect(tasks.find((task: any) => task.taskId === worker.taskId)?.status).toBe("completed");
       if (parentReport) expect(tasks.find((task: any) => task.taskId === worker.taskId)).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
     } else { expect(change).toBe("competing-launch"); expect(result.error).toBeInstanceOf(Error); }
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
@@ -4154,7 +4362,9 @@ test(`an overlapping older child response cannot revoke the later consumed histo
     expect(current.workerSource?.isCurrent()).toBe(true);
     release();
     const stale = await older;
-    expect(stale.workerSource?.isCurrent()).toBe(false);
+    expect(stale.workerSource?.isCurrent()).toBe(true);
+    const staleRow = stale.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
+    expectWithheld(stale.workerSource!.projectInferredOutcome!(staleRow!));
     expect(current.workerSource?.isCurrent()).toBe(true);
   } finally { release(); abort.abort(); await pump; await older?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 });
@@ -4191,9 +4401,8 @@ test(`a later nonoverlapping child history ${change} fences only changed consume
     // Both child session lookups have a null revert boundary. No SSE is sent.
     const raced = await provider.reconcileBackgroundTasks!(parent, { fresh: true, onSource: () => { changed = true; } })
       .then(tasks => ({ tasks }), error => ({ error }));
-    if (change === "append") expect(raced).toMatchObject({ tasks: [expect.objectContaining({ taskId: worker.taskId, status: "completed" })] });
-    else if ("tasks" in raced) expect(raced.tasks).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: change === "alter" ? "failed" : "running" }));
-    else expect(raced.error).toBeInstanceOf(Error);
+    expect(raced).toHaveProperty("tasks");
+    if ("tasks" in raced) expectWithheld(raced.tasks.find(task => task.taskId === worker.taskId));
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true });
     expect(fresh).toHaveLength(1);
     expect(fresh[0]).toMatchObject({ taskId: worker.taskId, status: change === "remove" ? "running" : change === "alter" ? "failed" : "completed" });
@@ -4252,8 +4461,11 @@ test(`covered ${read} finishes while a consumed child keeps appending output`, a
     streaming = true;
     const result = await adapter[read](parent);
     expect(outputUpdates).toBeGreaterThan(0);
-    if ("items" in result) expect(result.items).toContainEqual(expect.objectContaining({ type: "background_task", status: "completed" }));
-    else { expect(result.complete).toBe(true); expect(result.entries).toHaveLength(1); }
+    if ("items" in result) expectWithheld(result.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task"));
+    else { expect(result.complete).toBe(true); expect(result.entries).toHaveLength(1); expect(result.entries[0]?.dismissible).toBe(false); }
+    streaming = false;
+    const quiet = await adapter.history(parent);
+    expect(quiet.items).toContainEqual(expect.objectContaining({ type: "background_task", status: "completed" }));
   } finally { await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
@@ -4311,10 +4523,8 @@ test(`consumed child outcomes allow ${mutation} progress only when their proof i
     else frame("session.revert.staged", { sessionID: child, revert: { messageID: "idle-outcome" } });
     frame("diagnostic.mutation-applied", {});
     await observed; release();
-    if (mutation === "append") {
-      expect(await recovery).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
-      expect(sources.every(source => source.isCurrent())).toBe(true);
-    } else await expect(recovery).rejects.toThrow();
+    expectWithheld((await recovery).find(task => task.taskId === worker.taskId));
+    expect(sources.every(source => source.isCurrent())).toBe(true);
   } finally { release(); abort.abort(); await pump; await recovery?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
@@ -4427,11 +4637,9 @@ test(`an outcome first consumed by a staged parent visibility reread fences ${sc
     frame("session.revert.committed", { sessionID: scope === "dependent" ? child : unrelatedChild, to: "child-reverted" });
     frame("diagnostic.revert-applied", {});
     await revertApplied; release();
-    if (scope === "dependent") {
-      const result = await recovery.then(tasks => ({ tasks }), error => ({ error }));
-      expect(result).toMatchObject({ error: expect.any(Error) });
-    }
-    else expect(await recovery).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed" }));
+    // This read observed the child outcome appearing after its initial empty
+    // history, even when the subsequent revert belongs to an unrelated child.
+    expectWithheld((await recovery).find(task => task.taskId === worker.taskId));
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal });
     expect(fresh).toHaveLength(1);
     expect(fresh[0]).toMatchObject({ taskId: worker.taskId, status: scope === "dependent" ? "running" : "completed" });
@@ -4481,7 +4689,8 @@ test("fresh parent outcomes follow child staged, cleared and committed visibilit
     };
     await read("running");
     visibility = "cleared";
-    await read("completed");
+    await read("running"); // The changed session record withholds this pass.
+    await read("completed"); // A separate quiet read recovers the outcome.
     visibility = "staged";
     await read("running");
     visibility = "committed";
@@ -4555,12 +4764,17 @@ test(`a ${scope} child revert ${lifecycle} after history consumption fences only
       { type: "diagnostic.revert-applied", data: {} },
     ]) wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, location: { directory } })}\n\n`));
     await observed; release();
-    if (scope === "dependent") await expect(recovery).rejects.toThrow();
+    if (scope === "dependent" && lifecycle !== "cleared") expectWithheld((await recovery).find(task => task.taskId === worker.taskId));
+    else if (scope === "dependent") expect((await recovery).find(task => task.taskId === worker.taskId)).toMatchObject({ status: "running", stateUncertain: true });
     else expect(await recovery).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "completed", stateUncertain: false }));
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal });
     expect(fresh).toHaveLength(1);
     const unresolved = scope === "dependent" && lifecycle !== "cleared";
-    expect(fresh[0]).toMatchObject({ taskId: worker.taskId, status: unresolved ? "running" : "completed", stateUncertain: unresolved });
+    if (scope === "dependent" && lifecycle === "cleared") {
+      expectWithheld(fresh[0]);
+      const quiet = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal });
+      expect(quiet[0]).toMatchObject({ taskId: worker.taskId, status: "completed", stateUncertain: false });
+    } else expect(fresh[0]).toMatchObject({ taskId: worker.taskId, status: unresolved ? "running" : "completed", stateUncertain: unresolved });
     expect(fresh[0]?.control?.available).not.toBe(true);
     expect(fresh[0]?.resultId).toBeUndefined();
     expect(fresh[0]?.summary).toBeUndefined();

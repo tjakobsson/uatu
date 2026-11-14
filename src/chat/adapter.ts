@@ -4,6 +4,7 @@ import { AgentNotificationTracker, type AgentNotificationEvent } from "./notific
 
 import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
+import { chatNow, chatTimeout, clearChatTimeout, type ChatTaskScheduler } from "./task-scheduler";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import type { InboxDelta, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle, StoredMessageAccounting, ProviderHistoryPage, WorkerSourceGuard, WorkerResultFallback, WorkerRecoverySource, WorkerAssociationWatch } from "./provider";
 import { describeToolDetail } from "./tool-detail";
@@ -20,7 +21,7 @@ import { OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE
 import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
-import { unverifyWorkerTask, workerState } from "./worker-state";
+import { unverifyWorkerTask, workerExecutionClockRuns, workerState } from "./worker-state";
 import type {
   BackgroundTaskOutput,
   BackgroundTaskItem,
@@ -99,6 +100,13 @@ function workerRecoveryProgress(item: BackgroundTaskItem): WorkerRecoveryProgres
   return { startedAt: item.createdAt, reportedAt: item.status === "running" ? -Infinity : item.terminalReportedAt ?? -Infinity, terminal: item.status !== "running" };
 }
 
+function needsInconclusiveWorkerRecovery(item: ConversationItem): boolean {
+  // Counter-withheld inference awaits an external observation, not a timed
+  // outcome retry. Other uncertain rows, dirty activity sources and failed IO
+  // retain their independent recovery paths and existing budgets.
+  return item.type === "background_task" && item.status === "running" && item.stateUncertain === true && item.outcomeWithheld !== true;
+}
+
 function mergeWorkerRecoveryProgress(previous: WorkerRecoveryProgress | undefined, incoming: WorkerRecoveryProgress): WorkerRecoveryProgress {
   if (!previous) return incoming;
   const startedAt = Math.max(previous.startedAt, incoming.startedAt);
@@ -154,7 +162,7 @@ type InventorySessionMetadata = {
   deleted: boolean;
 };
 type CachedAssociationCounterproof = { parentId: string; childIds: readonly string[]; transcriptKeys: ReadonlySet<string> };
-type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; carryWorkerHistory: (source: WorkerSourceGuard, reports: readonly BackgroundTaskItem[]) => WorkerSourceGuard; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; questionTick: number; replacement?: true };
+type HistoryCoverage = { signal: AbortSignal; projection: ConversationProjection; workerSources: WorkerSourceRead; cachedAssociations: readonly CachedAssociationCounterproof[]; refreshAttribution: boolean; assertCurrent: () => void; dirty: () => boolean; revertExclusions: Set<string>; merge: (items: ConversationItem[]) => ConversationItem[]; changed: (id: string) => boolean; conversation: () => ConversationSummary | undefined; inboxReconciled: boolean; markInboxReconciled: () => void; steerCorrelations: ReadonlyMap<string, string>; questionTick: number; replacement?: true };
 class HistoryReadChangedError extends Error {}
 
 /** Evidence flows from shared accounting owners to each enclosing read before
@@ -184,6 +192,12 @@ class WorkerSourceRead {
   }
   isCurrent(): boolean { return !this.signal.aborted && this.guards.every(({ guard }) => guard.isCurrent()); }
   hasSources(): boolean { return this.guards.length > 0; }
+  project(item: ConversationItem): ConversationItem {
+    if (item.type !== "background_task") return item;
+    let projected = item;
+    for (const { guard } of this.guards) projected = guard.projectInferredOutcome?.(projected) ?? projected;
+    return projected;
+  }
   hasAccountingPage(key: string): boolean {
     return this.guards.some(({ accountingKey }) => accountingKey === key);
   }
@@ -517,6 +531,8 @@ export type ChatAdapterOptions = {
   receiptTtlMs?: number;
   maxProjections?: number;
   coalesceWindowMs?: number;
+  /** Optional scheduler for detached recovery work; native scheduling by default. */
+  taskScheduler?: ChatTaskScheduler;
   // Optional diagnostic sink. When present the pump counts events it could not
   // use, so an operator can discover what a live workspace is discarding.
   metrics?: ChatEventMetrics;
@@ -624,6 +640,7 @@ export class ChatAdapter {
   private lastActivity: ChatActivity = { working: false, awaiting: false, unresolved: false };
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
+  private readonly taskScheduler: ChatTaskScheduler | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
   private readonly countedEventTypes = new Set<string>();
   // Provider-owned state. This cache only avoids repeated reads while a
@@ -760,6 +777,7 @@ export class ChatAdapter {
     this.replayBytes = options.replayBytes ?? 256 * 1024;
     this.maxProjections = options.maxProjections ?? 64;
     this.coalesceWindowMs = options.coalesceWindowMs;
+    this.taskScheduler = options.taskScheduler;
     this.metrics = options.metrics;
     this.id = options.id ?? randomUUID;
     this.steerWithdrawTimeoutMs = options.steerWithdrawTimeoutMs ?? DEFAULT_STEER_WITHDRAW_TIMEOUT_MS;
@@ -967,12 +985,8 @@ export class ChatAdapter {
         // Dirty replacement retries belong to the same read. They must not
         // turn its later accepted announcements into pre-read retirement targets.
         const questionTick = this.interactionClock;
-        let pendingCounterproof: ReturnType<NonNullable<WorkerSourceGuard["retainPendingCounterproof"]>> | undefined;
-        const carryWorkerHistory = (source: WorkerSourceGuard, reports: readonly BackgroundTaskItem[]) => {
-          pendingCounterproof ??= source.retainPendingCounterproof?.(signal);
-          return pendingCounterproof?.applyTo(source, reports) ?? source;
-        };
         while (true) {
+          if (this.taskScheduler) await this.taskScheduler.run(`history.attempt:${id}`, () => undefined);
           recovery.dirty = false;
           const readProjection = this.projection(id);
           fence = readProjection.beginHistoryRead();
@@ -982,7 +996,7 @@ export class ChatAdapter {
           const associations = associationRead?.begin(workerSources);
           const cachedAssociations = associations?.evidence ?? [];
           try {
-            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, carryWorkerHistory, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, questionTick, ...(replacement ? { replacement: true } : {}) });
+            const snapshot = await this.readHistory(id, options, { signal: attemptSignal, projection: readProjection, workerSources, cachedAssociations, refreshAttribution, assertCurrent, dirty: () => recovery.dirty, revertExclusions, merge: fence.merge, changed: fence.changed, conversation: fence.conversation, inboxReconciled, markInboxReconciled: () => { inboxReconciled = true; }, steerCorrelations, questionTick, ...(replacement ? { replacement: true } : {}) });
             inboxReconciled = true;
             assertCurrent();
             if (!recovery.dirty) return snapshot;
@@ -1047,13 +1061,11 @@ export class ChatAdapter {
     const independentSourceCurrent = page.isWorkerSourceCurrent && page.isWorkerSourceCurrent !== page.workerSource?.isCurrent
       ? page.isWorkerSourceCurrent.bind(page) : undefined;
     if (coverage && page.workerSource) {
-      const guard = coverage.carryWorkerHistory(page.workerSource, (page.completeItems ?? page.items)
-        .filter((item): item is BackgroundTaskItem => item.type === "background_task"));
+      const guard = coverage.workerSources.observe(page.workerSource) ?? page.workerSource;
       page = { ...page, workerSource: guard, isWorkerSourceCurrent: () => guard.isCurrent() && (independentSourceCurrent?.() ?? true) };
     }
     if (independentSourceCurrent && !independentSourceCurrent()) throw new HistoryReadChangedError();
-    if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()
-      && !(coverage && page.workerSource?.canRevalidateInferredOutcomes?.())) throw new HistoryReadChangedError();
+    if (page.isWorkerSourceCurrent && !page.isWorkerSourceCurrent()) throw new HistoryReadChangedError();
     // Capture the requested provider slice, not the later augmented snapshot:
     // accounting, launcher backfills and coverage.merge may add rows from far
     // outside this page. Only an actual page message establishes its frontier.
@@ -1390,16 +1402,6 @@ export class ChatAdapter {
       }
       coverage?.assertCurrent();
       coverage?.workerSources.assertCurrent();
-      if (coverage && recovered.length && recoverySources.some(source => source.workerResultFallbacks.length === 0 && source.workerSource.isCurrent())) {
-        // Inventory owns actual explicit report content. Relinquish only exact
-        // transcript inferences it replaces; text/ownership/revert/other-worker
-        // fences and every inventory lease remain required through admission.
-        const textSource = page.workerSource?.withoutInferredOutcomes?.(recovered);
-        if (textSource?.isCurrent()) {
-          const guard = textSource.retain(coverage.signal);
-          page = { ...page, workerSource: guard, isWorkerSourceCurrent: () => guard.isCurrent() && (independentSourceCurrent?.() ?? true) };
-        }
-      }
       if (options.workers) recovered = validatedWorkerDismissalSource(recovered) as BackgroundTaskItem[];
       for (const source of recoverySources) {
         for (const child of source.workerAssociationContradictions) revokedChildren.add(child);
@@ -1411,7 +1413,13 @@ export class ChatAdapter {
       if (this.provider.waitForEventStream) for (const task of recovered) if (task.status === "running" && !task.foreground) nativeLiveTasks.add(task.id);
       const { byId, supersedes } = indexRecoveredBackgroundTasks(recovered);
       const currentIds = options.workers ? new Set(items.map(item => item.id)) : undefined;
-      const knownRows = options.workers ? [...items, ...this.projection(id).items()] : [...this.projection(id).items(), ...items];
+      const retainedRows = this.projection(id).items().filter(known => !(known.type === "background_task" && known.outcomeWithheld
+        && items.some(item => item.type === "background_task" && item.id === known.id && item.status !== "running" && !item.stateUncertain)));
+      // A fresh page can discharge a prior inference veto even when the
+      // independent inventory is unavailable. Its retained counter projection
+      // still gets the final publication veto; the old fallback is not evidence
+      // against the new page's explicit report or quiet-interval inference.
+      const knownRows = options.workers ? [...items, ...retainedRows] : [...retainedRows, ...items];
       for (const known of knownRows) {
         if (known.type !== "background_task" || byId.has(known.id)) continue;
         if (supersedes(known) && !coverage?.changed(known.id)) {
@@ -1885,7 +1893,7 @@ export class ChatAdapter {
         // Only previously observed exact native origins can disappear. A
         // successful current inbox/live recovery has its own positive source;
         // unresolved running work is never settled by transcript absence.
-        if (known.type === "background_task" && known.status !== "running" && !known.foreground
+        if (known.type === "background_task" && (known.status !== "running" || known.outcomeWithheld) && !known.foreground
           && !recoveredWorkerIds.has(known.id) && !coverage.changed(known.id)
           && projection.workerOriginsAbsent(known, page.workerOriginCoverage)) excluded.add(known.id);
         if (known.type === "notice" && !positiveFallbacks.has(known.id) && !coverage.changed(known.id)
@@ -1962,6 +1970,14 @@ export class ChatAdapter {
           }
           allocationCommits.push({ owner: publication.owner, floor: undefined });
         }
+      }
+      // No await follows this per-outcome admission. Whole-source ownership
+      // guards still validate independently in the atomic publication below.
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index]!;
+        const projected = coverage ? coverage.workerSources.project(item)
+          : item.type === "background_task" ? page.workerSource?.projectInferredOutcome?.(item) ?? item : item;
+        if (projected !== item) { items[index] = projected; revokedRows.add(item.id); }
       }
       const replace = coverage?.replacement && (reversibleHistory && !sameReversibleHistory(previousReversibleHistory, reversibleHistory)
         || !sameConversationItems(projection.items(), items));
@@ -2178,7 +2194,7 @@ export class ChatAdapter {
     const recovery = this.backgroundRecoveries.get(conversationId);
     recovery?.checking?.finish();
     recovery?.readLifetime?.abort();
-    if (recovery) clearTimeout(recovery.timer);
+    if (recovery) clearChatTimeout(this.taskScheduler, recovery.timer);
     this.backgroundRecoveries.delete(conversationId);
     for (const [key, admission] of this.admittingSteers) if (admission.conversationId === conversationId) {
       admission.retired = true;
@@ -2242,12 +2258,12 @@ export class ChatAdapter {
     this.questionReads.clear();
     for (const admission of this.admittingSteers.values()) admission.retired = true;
     this.admittingSteers.clear();
-    for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.checking?.finish(); recovery.readLifetime?.abort(); }
+    for (const recovery of this.backgroundRecoveries.values()) { clearChatTimeout(this.taskScheduler, recovery.timer); recovery.checking?.finish(); recovery.readLifetime?.abort(); }
     this.backgroundRecoveries.clear();
     this.backgroundRecoveryFloorUntil = 0;
     this.backgroundRecoverySourceStartedAt = -Infinity;
     for (const pending of this.revertReconciliations.values()) {
-      if (pending.timer !== null) clearTimeout(pending.timer);
+      if (pending.timer !== null) clearChatTimeout(this.taskScheduler, pending.timer);
     }
     this.revertReconciliations.clear();
     this.inventory.dispose();
@@ -3817,7 +3833,7 @@ export class ChatAdapter {
       timer: null,
     };
     this.revertReconciliations.set(conversationId, pending);
-    void this.runRevertReconciliation(conversationId, pending);
+    void this.runTask(`history.revert:${conversationId}`, () => this.runRevertReconciliation(conversationId, pending));
   }
 
   private async runRevertReconciliation(conversationId: string, pending: RevertReconciliation): Promise<void> {
@@ -3836,7 +3852,7 @@ export class ChatAdapter {
       pending.failures = 0;
       if (this.disposed || this.revertReconciliations.get(conversationId) !== pending) return;
       if (pending.revision !== revision) {
-        void this.runRevertReconciliation(conversationId, pending);
+        void this.runTask(`history.revert:${conversationId}`, () => this.runRevertReconciliation(conversationId, pending));
         return;
       }
       this.finishRevertReconciliation(conversationId, pending);
@@ -3845,22 +3861,22 @@ export class ChatAdapter {
       if (this.disposed || this.revertReconciliations.get(conversationId) !== pending) return;
       if (pending.revision !== revision) {
         pending.failures = 0;
-        void this.runRevertReconciliation(conversationId, pending);
+        void this.runTask(`history.revert:${conversationId}`, () => this.runRevertReconciliation(conversationId, pending));
         return;
       }
       pending.failures = Math.min(pending.failures + 1, 5);
       const exponent = Math.min(pending.failures - 1, 4);
       const delay = Math.min(REVERT_RECONCILIATION_INITIAL_RETRY_MS * 2 ** exponent, REVERT_RECONCILIATION_MAX_RETRY_MS);
-      pending.timer = setTimeout(() => {
+      pending.timer = chatTimeout(this.taskScheduler, `history.revert-retry:${conversationId}`, () => {
         pending.timer = null;
-        void this.runRevertReconciliation(conversationId, pending);
+        void this.runTask(`history.revert:${conversationId}`, () => this.runRevertReconciliation(conversationId, pending));
       }, delay);
     }
   }
 
   private finishRevertReconciliation(conversationId: string, pending: RevertReconciliation): void {
     if (this.revertReconciliations.get(conversationId) !== pending) return;
-    if (pending.timer !== null) clearTimeout(pending.timer);
+    if (pending.timer !== null) clearChatTimeout(this.taskScheduler, pending.timer);
     this.revertReconciliations.delete(conversationId);
     this.scheduleDelivery(conversationId);
   }
@@ -3869,7 +3885,7 @@ export class ChatAdapter {
     const pending = this.revertReconciliations.get(conversationId);
     if (!pending) return;
     pending.revision += 1;
-    if (pending.timer !== null) clearTimeout(pending.timer);
+    if (pending.timer !== null) clearChatTimeout(this.taskScheduler, pending.timer);
     this.revertReconciliations.delete(conversationId);
   }
 
@@ -5402,6 +5418,10 @@ export class ChatAdapter {
     return this.settledTurns.size;
   }
 
+  private runTask<T>(name: string, work: () => Promise<T>): Promise<T> {
+    return this.taskScheduler ? this.taskScheduler.run(name, work) : work();
+  }
+
   private async pump(signal: AbortSignal): Promise<void> {
     // Metadata follows coalescer-owned item objects, never the wire item.
     // Discarded/unmaterialized updates leave no projection provenance entry.
@@ -5410,6 +5430,7 @@ export class ChatAdapter {
     const sourceFallbacks = new WeakMap<ConversationItem, WorkerResultFallback[]>();
     const coalescer = new ProviderUpdateCoalescer({
       windowMs: this.coalesceWindowMs,
+      taskScheduler: this.taskScheduler,
       // The window folds repeated upserts the way the projection applies
       // them, so a sparse frame landing right behind a full one cannot
       // strip what the full one carried (a 2.x tool call's input).
@@ -5528,7 +5549,7 @@ export class ChatAdapter {
     this.eventCoalescer = coalescer;
     const reconcileInboxes = () => {
       for (const id of new Set([...this.projections.keys(), ...this.pendingSteers.keys()])) {
-        if (this.provider.waitForEventStream) void this.history(id).catch(() => undefined);
+        if (this.provider.waitForEventStream) void this.runTask(`stream.history:${id}`, () => this.history(id).catch(() => undefined));
         else void this.reconcilePendingSteers(id).catch(() => undefined);
       }
     };
@@ -5538,6 +5559,18 @@ export class ChatAdapter {
     if (!this.provider.waitForEventStream) reconcileInboxes();
     try {
       for await (const normalized of this.provider.events(signal)) {
+        // An injected scheduler can acknowledge the complete event consumer,
+        // including metadata awaits; iterator yield alone only acknowledges
+        // delivery. The omitted-scheduler path adds no await or queued work.
+        let finishTask: (() => void) | undefined;
+        if (this.taskScheduler) {
+          let start!: () => void, rejectStart!: (error: unknown) => void;
+          const started = new Promise<void>((resolve, reject) => { start = resolve; rejectStart = reject; });
+          const finished = new Promise<void>(resolve => { finishTask = resolve; });
+          void this.taskScheduler.run(`stream.event:${normalized.eventType}`, () => { start(); return finished; }).catch(rejectStart);
+          await started;
+        }
+        try {
         if (signal.aborted) break;
         if ((this.provider.reconcileBackgroundTasks || this.provider.waitForEventStream) && normalized.eventType === "server.connected") {
           if (this.provider.waitForEventStream) this.invalidateNativeHistoryAccounting();
@@ -5551,7 +5584,7 @@ export class ChatAdapter {
             recovery.readLifetime?.abort();
             recovery.checking?.finish();
             delete recovery.checkingStarted;
-            clearTimeout(recovery.timer);
+            clearChatTimeout(this.taskScheduler, recovery.timer);
             recovery.timer = undefined;
             recovery.failures = 0;
             recovery.inconclusiveReads = 0;
@@ -5567,20 +5600,21 @@ export class ChatAdapter {
           this.drainBackgroundRecoveries();
           // Only an initialized, connected provider is read. Activity itself
           // remains memory-only and cannot start a runtime.
-          void this.provider.listSessions().then(async sessions => {
+          void this.runTask("stream.discovery", () => this.provider.listSessions().then(async sessions => {
             for (const session of sessions) {
               if (signal.aborted || this.disposed) break;
               if (!session.parentId && await this.isInWorkspace(session)) this.scheduleBackgroundRecovery(session.id);
             }
-          }).catch(() => undefined);
+          }).catch(() => undefined));
         }
         if (this.provider.waitForEventStream && normalized.eventType === "server.connected") reconcileInboxes();
         const interactionUpdate = normalized.updates.some(update => update.kind === "upsert" && (update.item.type === "permission" || update.item.type === "question")
           || update.kind === "remove" && /^(permission|question):/.test(update.itemId));
         if (this.provider.reconcileBackgroundTasks && normalized.conversationId && (interactionUpdate || /^(session\.(inbox\.(enqueued|delivered)|tool\.success|message\.content\.updated|execution\.(succeeded|failed|interrupted)))$/.test(normalized.eventType))) {
-          void this.requireSession(normalized.conversationId).then(session => {
+          const conversationId = normalized.conversationId;
+          void this.runTask(`event.background:${conversationId}`, () => this.requireSession(conversationId).then(session => {
             this.scheduleBackgroundRecovery(session.parentId ?? session.id);
-          }).catch(() => undefined);
+          }).catch(() => undefined));
         }
         if (normalized.catalogsChanged) {
           this.catalogSequence += 1;
@@ -5674,7 +5708,10 @@ export class ChatAdapter {
         if (this.provider.waitForEventStream && normalized.updates.some(update => update.kind === "inbox" && update.delta.kind === "settled"
           && update.delta.outcome === "delivered" && !this.projection(normalized.conversationId!).has(`message:${update.delta.id}`)
           && !timelineUpdates.some(candidate => candidate.kind === "upsert" && candidate.item.id === `message:${update.delta.id}`))) {
-          if (!this.markNativeHistoryDirty(normalized.conversationId)) void this.history(normalized.conversationId).catch(() => undefined);
+          if (!this.markNativeHistoryDirty(normalized.conversationId)) {
+            const conversationId = normalized.conversationId;
+            void this.runTask(`event.history:${conversationId}`, () => this.history(conversationId).catch(() => undefined));
+          }
         }
         // OpenCode never emits `question.v2.asked`, so the arrival of the
         // `question` tool part is the only live signal that a question was
@@ -5698,6 +5735,7 @@ export class ChatAdapter {
         // And for the subagents a subagent launches itself: they are rows in
         // ITS timeline, so the conversation above it learns of them here.
         await this.trackLaunchers(normalized.conversationId, normalized.updates, coalescer);
+        } finally { finishTask?.(); }
       }
     } finally {
       coalescer.dispose();
@@ -5707,7 +5745,7 @@ export class ChatAdapter {
       this.backgroundReadyResolve = undefined;
       this.backgroundStreamGeneration++;
       if (this.provider.waitForEventStream) this.invalidateNativeHistoryAccounting();
-      for (const recovery of this.backgroundRecoveries.values()) { clearTimeout(recovery.timer); recovery.timer = undefined; recovery.checking?.finish(); delete recovery.checkingStarted; }
+      for (const recovery of this.backgroundRecoveries.values()) { clearChatTimeout(this.taskScheduler, recovery.timer); recovery.timer = undefined; recovery.checking?.finish(); delete recovery.checkingStarted; }
       if (this.provider.reconcileBackgroundTasks && !this.disposed) {
         for (const [id, projection] of this.projections) {
           for (const item of projection.items()) if (item.type === "background_task" && item.status === "running") projection.apply({ kind: "upsert", item: unverifyWorkerTask(item) });
@@ -5730,7 +5768,7 @@ export class ChatAdapter {
     const existing = this.backgroundRecoveries.get(id);
     if (existing) {
       if (existing.exhaustedAt !== undefined) {
-        if (!workerProgress && Date.now() - existing.exhaustedAt < BACKGROUND_EXHAUSTED_COOLDOWN_MS) return;
+        if (!workerProgress && chatNow(this.taskScheduler) - existing.exhaustedAt < BACKGROUND_EXHAUSTED_COOLDOWN_MS) return;
         delete existing.exhaustedAt;
         existing.inconclusiveReads = 0;
         delete existing.checkingStarted;
@@ -5740,7 +5778,7 @@ export class ChatAdapter {
       this.drainBackgroundRecoveries();
       return;
     }
-    if (!workerProgress && Date.now() < this.backgroundRecoveryFloorUntil) return;
+    if (!workerProgress && chatNow(this.taskScheduler) < this.backgroundRecoveryFloorUntil) return;
     if (this.backgroundRecoveries.size >= INVENTORY_SESSION_LIMIT) {
       // Only inactive parked records are disposable here. Active/queued/error
       // recovery keeps its place; overflow waits for another native trigger or
@@ -5750,7 +5788,7 @@ export class ChatAdapter {
       this.retireBackgroundRecovery(oldest[0]);
     }
     const recovery: BackgroundRecovery = { dirty: true, running: false, failures: 0, inconclusiveReads: 0, progress: this.backgroundProgressBaseline(id),
-      ...(Date.now() < this.backgroundRecoveryFloorUntil ? { sourceProgressLost: true as const } : {}) };
+      ...(chatNow(this.taskScheduler) < this.backgroundRecoveryFloorUntil ? { sourceProgressLost: true as const } : {}) };
     this.seedBackgroundSource(id, recovery);
     this.backgroundRecoveries.set(id, recovery);
     this.drainBackgroundRecoveries();
@@ -5761,7 +5799,7 @@ export class ChatAdapter {
     recovery?.checking?.finish();
     recovery?.readLifetime?.abort();
     if (recovery?.exhaustedAt !== undefined) {
-      if (Date.now() >= this.backgroundRecoveryFloorUntil) this.backgroundRecoverySourceStartedAt = -Infinity;
+      if (chatNow(this.taskScheduler) >= this.backgroundRecoveryFloorUntil) this.backgroundRecoverySourceStartedAt = -Infinity;
       this.backgroundRecoveryFloorUntil = Math.max(this.backgroundRecoveryFloorUntil, recovery.exhaustedAt + BACKGROUND_EXHAUSTED_COOLDOWN_MS);
       this.backgroundRecoverySourceStartedAt = Math.max(this.backgroundRecoverySourceStartedAt, recovery.sourceStartedAt ?? -Infinity);
       for (const marker of recovery.progress.values()) this.backgroundRecoverySourceStartedAt = Math.max(this.backgroundRecoverySourceStartedAt, marker.startedAt);
@@ -5812,7 +5850,7 @@ export class ChatAdapter {
   }
 
   private backgroundProgressAliases(recovery: BackgroundRecovery | undefined, projection: ConversationProjection): Map<string, WorkerRecoveryProgress> {
-    const lost = recovery?.sourceProgressLost || !recovery && Date.now() < this.backgroundRecoveryFloorUntil;
+    const lost = recovery?.sourceProgressLost || !recovery && chatNow(this.taskScheduler) < this.backgroundRecoveryFloorUntil;
     const aliases = new Map(recovery?.sourceProgress);
     for (const item of projection.filter(item => item.type === "background_task")) {
       if (item.type !== "background_task") continue;
@@ -5835,7 +5873,7 @@ export class ChatAdapter {
     }
     const marker = item.stateUncertain ? previous : mergeWorkerRecoveryProgress(previous, workerRecoveryProgress(item));
     if (!marker) return false;
-    const lost = recovery?.sourceProgressLost || !recovery && Date.now() < this.backgroundRecoveryFloorUntil;
+    const lost = recovery?.sourceProgressLost || !recovery && chatNow(this.taskScheduler) < this.backgroundRecoveryFloorUntil;
     const nativeBasis = nativeAliases.some(alias => aliases.has(alias));
     // Verified first discovery may extend a read cycle. After a retention gap,
     // both paths require retained-native progress or a newer verified start;
@@ -5927,7 +5965,7 @@ export class ChatAdapter {
       const signal = AbortSignal.any([lifetime.signal, ...(this.pumpController ? [this.pumpController.signal] : [])]);
       const workerSources = new WorkerSourceRead(signal);
       let sourceDeadline: ReturnType<typeof setTimeout> | undefined;
-      const pending = this.requireSession(id).then(() => {
+      const pending = this.runTask(`background.recovery:${id}`, () => this.requireSession(id).then(() => {
         if (this.disposed || signal.aborted) throw new Error("Background recovery disposed");
         return Promise.all([
           this.provider.reconcileBackgroundTasks!(id, { signal, onSource: source => {
@@ -5953,7 +5991,8 @@ export class ChatAdapter {
         }
         // A busy source does not invalidate independent facts. Read-lifetime
         // alias fences include rows added and removed entirely during the read.
-        const safeTasks = tasks.filter(item => !fence.changed(item.id) && !fence.workerChanged(item));
+        const safeTasks = tasks.filter(item => !fence.changed(item.id) && !fence.workerChanged(item))
+          .map(item => workerSources.project(item) as BackgroundTaskItem);
         const progressAliases = this.backgroundProgressAliases(recovery, projection);
         const { byId, supersedes } = indexRecoveredBackgroundTasks(safeTasks);
         const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
@@ -6013,7 +6052,9 @@ export class ChatAdapter {
         this.syncBackgroundState(id);
         recovery.failures = interactions.some(result => result.status === "rejected") ? recovery.failures + 1 : 0;
         if (progress) recovery.inconclusiveReads = 0;
-        recovery.inconclusiveReads = recovery.dirty || projection.find(item => item.type === "background_task" && item.status === "running" && item.stateUncertain === true) ? recovery.inconclusiveReads + 1 : 0;
+        // A retained deny-only marker may outlive its original reason. Classify
+        // current recovered evidence before merge preserves that safety marker.
+        recovery.inconclusiveReads = recovery.dirty || projection.find(item => needsInconclusiveWorkerRecovery(byId.get(item.id) ?? item)) ? recovery.inconclusiveReads + 1 : 0;
       }, () => {
         if (this.disposed || this.backgroundRecoveries.get(id) !== recovery || generation !== this.backgroundStreamGeneration) return;
         if (!workerSources.isCurrent()) {
@@ -6048,10 +6089,10 @@ export class ChatAdapter {
           recovery.dirty = true;
         }
         if (recovery.failures) {
-          recovery.timer = setTimeout(() => { recovery.timer = undefined; this.drainBackgroundRecoveries(); }, Math.min(30_000, 1_000 * 2 ** Math.min(5, recovery.failures - 1)));
+          recovery.timer = chatTimeout(this.taskScheduler, `background.retry:${id}`, () => { recovery.timer = undefined; this.drainBackgroundRecoveries(); }, Math.min(30_000, 1_000 * 2 ** Math.min(5, recovery.failures - 1)));
           recovery.timer.unref?.();
         } else if (recovery.inconclusiveReads >= BACKGROUND_INCONCLUSIVE_READ_LIMIT) {
-          recovery.exhaustedAt = Date.now();
+          recovery.exhaustedAt = chatNow(this.taskScheduler);
           // Remember recovered knowledge without treating the read itself as
           // a source-progress exception or extending the exhausted budget.
           this.seedBackgroundSource(id, recovery);
@@ -6061,11 +6102,11 @@ export class ChatAdapter {
           this.backgroundRecoveries.delete(id);
           this.backgroundRecoveries.set(id, recovery);
         } else if (recovery.inconclusiveReads) {
-          recovery.timer = setTimeout(() => { recovery.timer = undefined; this.drainBackgroundRecoveries(); }, recovery.dirty ? BACKGROUND_DIRTY_RETRY_MS : 1_000 * 2 ** (recovery.inconclusiveReads - 1));
+          recovery.timer = chatTimeout(this.taskScheduler, `background.retry:${id}`, () => { recovery.timer = undefined; this.drainBackgroundRecoveries(); }, recovery.dirty ? BACKGROUND_DIRTY_RETRY_MS : 1_000 * 2 ** (recovery.inconclusiveReads - 1));
           recovery.timer.unref?.();
         } else if (!recovery.dirty && generation === this.backgroundStreamGeneration) this.backgroundRecoveries.delete(id);
         this.drainBackgroundRecoveries();
-      });
+      }));
       this.backgroundPending.add(pending);
     }
   }
@@ -6400,7 +6441,7 @@ export class ChatAdapter {
   private refreshQuestions(conversationId: string, coalescer: ProviderUpdateCoalescer, parentId?: string): void {
     if (!this.provider.listQuestions || this.questionRefreshes.has(conversationId)) return;
     this.questionRefreshes.add(conversationId);
-    void (async () => {
+    void this.runTask(`questions.refresh:${conversationId}`, async () => {
       try {
         const scope = await this.questionReadScope(conversationId, parentId);
         const questionTick = this.interactionClock;
@@ -6468,7 +6509,7 @@ export class ChatAdapter {
       // leave the agent blocked with nothing on screen to answer.
       catch { /* a failed refresh leaves the next tool update to retry */ }
       finally { this.questionRefreshes.delete(conversationId); }
-    })();
+    });
   }
 
   /**
@@ -6835,6 +6876,13 @@ export class ConversationProjection {
 
   workerOriginsAbsent(item: BackgroundTaskItem, source: NonNullable<ProviderHistoryPage["workerOriginCoverage"]>): boolean {
     const prior = this.workerOrigins.get(item.id);
+    // Automatic recovery can publish a native-only inference veto before this
+    // projection has read its parent page. Its exact native call identity still
+    // permits a later complete parent source to withdraw that historical row;
+    // absence never establishes an outcome, activity or Stop authority.
+    if (!prior && item.outcomeWithheld && item.taskType === "agent" && item.toolUseId
+      && item.id === `task:${item.taskId}` && item.taskId.startsWith("v2:") && item.taskId.endsWith(`:${item.toolUseId}`)
+      && !item.resultId && !workerExecutionClockRuns(item)) return this.matchingWorkerOrigins(item, source).size === 0;
     if (!prior || prior.createdAt !== item.createdAt || prior.worker !== (item.childConversationId ?? item.outputFile) || prior.taskType !== item.taskType) return false;
     const current = this.matchingWorkerOrigins(item, source);
     return ![...prior.keys].some(key => current.has(key));
@@ -7685,6 +7733,12 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
       status: keepTerminal && incoming.status === "running" ? current.status : incoming.status,
       ...(incoming.summary ?? current.summary ? { summary: incoming.summary ?? current.summary } : {}),
     };
+    // Fresh authoritative terminal evidence discharges the deny-only marker.
+    // Canonical unwithheld rows OMIT it; false is not a second wire state.
+    // Sparse running/activity updates retain an existing true marker.
+    if (incoming.status === "running" && current.outcomeWithheld) merged.outcomeWithheld = true;
+    if (incoming.status !== "running" && !incoming.stateUncertain && !incoming.outcomeWithheld
+      || merged.outcomeWithheld === false) delete merged.outcomeWithheld;
     // A progress note belongs to a running task only.
     if (merged.status !== "running") delete merged.progress;
     return merged;

@@ -196,20 +196,9 @@ export type WorkerOrigin = { messageId: string; toolUseId?: string; childConvers
 export type WorkerSourceGuard = {
   isCurrent: () => boolean;
   retain: (signal: AbortSignal) => WorkerSourceGuard;
-  // A covered explicit inventory report may replace exact inferred outcomes.
-  // The returned view relinquishes only those outcomes, preserving all other
-  // source fences and the original deadline. It grants no report/Stop authority;
-  // callers must retain the successful inventory's own current source too.
-  withoutInferredOutcomes?: (reports: readonly BackgroundTaskItem[]) => WorkerSourceGuard | undefined;
-  // Deny-only continuity across attempts of one bounded covered read. Actual
-  // current report rows may discharge facts; the watch supplies no row content.
-  retainPendingCounterproof?: (signal: AbortSignal) => WorkerHistoryCounterproof;
-  // Permission to read replacement evidence, never to publish a stale source.
-  // Final admission still requires current source or qualified report transfer.
-  canRevalidateInferredOutcomes?: () => boolean;
-};
-export type WorkerHistoryCounterproof = {
-  applyTo: (source: WorkerSourceGuard, reports: readonly BackgroundTaskItem[]) => WorkerSourceGuard;
+  // Recheck report-free inferred outcomes at final publication. A mismatch
+  // withholds only that outcome; it does not invalidate or retry the source.
+  projectInferredOutcome?: (item: BackgroundTaskItem) => BackgroundTaskItem;
 };
 // Invalidation-only watch for retained associations, registered before I/O.
 // A snapshot contains only scoped counterproof, never ownership admission.

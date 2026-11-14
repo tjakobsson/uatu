@@ -139,6 +139,13 @@ test(`${read} cannot gain a child outcome by hiding a competing parent launch ($
     expect(complete.find(task => task.taskId === worker.taskId)?.status).toBe(status);
     expect(complete.find(task => task.toolUseId === "competing-call")?.status).toBe(scenario === "separate-intervals" ? "failed" : "running");
     staged = true;
+    // The first changed native parent record withholds report-free outcomes;
+    // it neither retries nor makes a hidden competitor disappear. A separate
+    // quiet read must retain the original attribution assertions below.
+    const changedPrefix = await tasks();
+    expect(changedPrefix).toHaveLength(1);
+    expect(changedPrefix[0]).toMatchObject({ taskId: worker.taskId, status: "running", stateUncertain: true });
+    expect(changedPrefix[0]?.control?.available).not.toBe(true);
     const prefix = await tasks();
     expect(prefix).toHaveLength(1);
     expect(prefix[0]).toMatchObject({ taskId: worker.taskId, status, stateUncertain: status === "running" });

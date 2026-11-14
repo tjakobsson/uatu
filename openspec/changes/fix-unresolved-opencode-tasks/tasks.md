@@ -1,3 +1,12 @@
+The checked implementation history below is not verification of the replacement
+in design.md. The user approved implementing the combined counter-safety and
+actual-session attribution direction. The pre-change baseline and local production
+implementation are complete; final acceptance remains outstanding. The user also
+approved the simpler verification contract in design.md: cold final-state results
+and activity, extra cautious warnings permitted, authority checked separately.
+The previous per-finding review loop remains stopped; the Hub timeout was isolated
+in merged PR #634.
+
 ## 1. Existing implementation recorded retrospectively
 
 - [x] 1.1 Recover reconnect/resumed-worker activity without restoring Stop; verified by worker-recovery.test.ts and the background-worker Chromium/WebKit suite before review round one.
@@ -110,7 +119,7 @@ These results describe the initial PR publication; verification of subsequent re
 - [x] 5.81 Fence a second stage of the same child boundary during raw revalidation by actual request-order provenance, preserving compatibility for genuinely older initial-stage observations and newer consumed history. Boundary equality cannot exempt a later native request as the initial observation; existing consumed-load cutoffs still exclude old replies.
 - [x] 5.82 Preserve staged visibility provenance when cached child ownership reuses a warmed transcript, revalidating uncertain consumed raw history rather than accepting a cleared record as fresh authority. Existing immutable-array metadata carries its load-owned visibility observation through cache retirement into bounded requested revalidation.
 - [x] 5.83 Fence relevant positive inbox observations begun during the consuming owned inbox request by actual request-start order, preserving stale/unrelated precision and stored-report progress. Newer positive facts/overflow target the consuming source deny-only; exact baseline facts are subtracted and the owned baseline is not replaced.
-- [ ] 5.84 Verify the corrections through targeted local regressions and GitHub CI, publish the fixes, and obtain a clean Codex review of the updated head without unresolved actionable findings.
+- [ ] 5.84 Historical final-verification gate, not completed. The previous review loop is stopped; follow the counter-design approval and acceptance gates in section 6 instead of requesting another review for this implementation.
 
 First correction checks: all 16 outcome-race tests, 79 worker browser tests, build/smoke, typecheck and strict validation pass. Two local full-CI runs each passed 10,044 tests with 16 skipped and one failure: a lost-steer-acknowledgement correlation assertion, then the live-aggregate timeout tracked in #605. Their complete files subsequently passed 802 and 222 tests respectively; these isolated passes do not replace failed full-suite results. GitHub unit CI passed for published correction `03889235`.
 
@@ -323,3 +332,43 @@ Controlled startup-order diagnosis identified the false guard as an auxiliary co
 Published `3befd661`; exact-head CI and CodeQL workflow runs exist but remain queued, so absent check runs are not treated as success or a missing trigger. Codex completed with cached-child-ownership staged-history and overlapping positive-inbox-request findings (`discussion_r4543101742`, `discussion_r4543101751`), distinct from the previous repeated-stage case. A capped exact public implementation stage is assigned, preserving immutable raw-history provenance, actual consuming request starts, stored-report authority and original precision/Stop assertions. No duplicate review/run, local review, new push or settings change was started. Exact-head full CI and affirmative approval remain outstanding.
 
 Cached-child/overlapping-inbox checks: each exact scheduler probe reproduced one stale Completed publication among four cases before correction. Warm-stage cached ownership now supplies loaded-array deny context to bounded raw/owned visibility revalidation; overlapping positive inbox reads use consumed request-start fact ordering without replacing full owned authority. Delivered overlap reaches the actual native Failed ID/text/time in exactly two attempts, observation starts no IO, and unrelated/prelaunch/empty controls retain one attempt. Final verification passes 211 targeted tests (190 public, 14 cohort/paging/bootstrap/Stop/Checking, seven cache), all exits zero. All nine frozen hashes, primary logs and diff checks match; original assertion/fixture fixes are preserved, docs aligned, upstream current and CI configuration unchanged. No local review, compiler or broad checks ran. Exhaustive ownership-cache pressure/pending-generation and overlap overflow/subset matrices remain unexecuted; executed native order/cache controls are qualified coverage. Current-head full CI/typecheck and independent Codex approval remain required.
+
+## 6. Counter-design proposal and approval gates
+
+- [x] 6.1 Add and run the seeded mocked-transport property test against the unchanged current production head. Generate parent history, child history, parent/child session records, pending inbox, active inventory and SSE, including child revert stage, clear and commit orderings. For every seed, require each published worker row to equal independent fresh recovery from the final native state or be Unresolved, and never be dismissible unless the fresh row is. Require the parent history read to finish within a fixed attempt bound while the child keeps streaming. Report the seed range, failing-seed count and shortest replayable failing orderings, distinguishing harness errors from invariant failures. Check and report why the unit job is red at `858cd5e1` before the design-approval gate. Completed against unchanged `f3efee65` recovery plus the approved scheduler seam: seeds 0–999 recorded A=21/B=0/union=21 and zero harness errors; the retained shortest-sampled seed428 and reduced ordering each reproduced exactly in three fresh processes, with an additional independent lead replay. Bound: four logical owned history attempts, physical HTTP reads recorded separately. Backend-arrival snapshot and reduction/seed-stability limits remain explicit in design.md. Unit858 failed before tests on three fixture typing errors, already corrected in the local baseline; final compiler verification is still required.
+- [x] 6.2 Obtain approval of the combined counter-safety and actual-session attribution direction before changing production recovery. Approved by “Great lets implement this” after the combined plan; baseline and final verification gates remain required.
+- [x] 6.3 After approval, implement session counters, remove the replaced request-ordering state and preserve existing Stop, ownership and replay assertions. Replaced transfer/revalidation APIs with retained per-item projection; activity request ordering stays independent. Latest lifecycle/race/actual-session selection passes 618 tests; typecheck passes. Final campaign/CI/review gates remain separate.
+- [x] 6.4 Pass at least 10,000 property-test seeds and `bun run test:ci` before requesting Codex review. Final explicit-abstention checker: seeds 0–9,999, A=0/B=0/harnessErrors=0, max logical attempts 2/4 and physical parent reads 3. Final `bun run test:ci`: 11,342 passed, 17 skipped, zero failed; whole-source manifest unchanged. Typecheck passes. Selected diagnostic strict replays remain limited as recorded below; no failed replay was relabelled a pass.
+- [ ] 6.5 Only after those gates, request review; add each finding's ordering to the property test, fix invariant failures, or explain an invariant-preserving case without changing code. Obtain approval before recording accepted limits in the PR body.
+- [x] 6.6 Capture the diagnosed missing-report/reused-child chain in a sanitized public-provider regression. Require canonical finished rows for uniquely separated native runs, preserved later explicit reports, no fabricated first report fields and conservative ambiguous-interval controls; reproduce against the unchanged recovery logic before implementation and pass after it. Original RED receipts retained; the expanded 19-case actual-session fixture passes after exact-response correlation, including delayed delivery, missing/duplicate/noncanonical response and hidden-competitor controls.
+- [x] 6.7 Align the user-approved public `outcomeWithheld` worker field with workspace API revision 38, runtime/contract/OpenAPI revision sources, streaming guidance and strict-client migration instructions. All 42 API/revision tests and 37 API compatibility/workflow tests pass; schema metadata/examples validate. API lint passes with the pre-existing single-schema `WorkspaceConflict.allOf` warning. Hub revision and saved-dismissal format remain unchanged.
+- [x] 6.8 Apply the subsequently approved simpler verification contract instead of replaying public reads and provider cache history into a reference provider. Compare results, report fields and activity with cold final-state recovery or Unresolved; allow extra cautious warnings but not lost required warnings. Independently check native observed revocations, unsupported Stop, unsafe dismissal and withholding-marker shape. Preserve old replay code/receipts and renew campaigns under the explicit new model; prior history-aware runs remain historical, not passing acceptance evidence. The corrected explicit-abstention checker passes 34 focused tests and seeds 0–9,999 with A=0/B=0/errors=0; max logical attempts 2/4, physical reads 3, production manifest unchanged. Typecheck passes. Final independent review and full CI remain separate gates.
+- [x] 6.9 Replace the independently rejected time-only report exclusion with the user-approved unique exact terminal-child-response correlation inside proven owned execution intervals. Cover delayed native delivery, missing/duplicate response matches and unknown/hidden competitors; preserve later report fields without guessing. Restore independent activity's request-order protection and verify the strict false-versus-absent withholding-marker publication regression before renewing the affected independent review and final gates. The 19-case actual-session fixture, activity-order controls and canonical marker regressions pass; the complete native review found no remaining production findings. Its one checker-only Unresolved finding was corrected separately; renewed property review/full CI are still required.
+- [x] 6.10 Correct all three independent property-review findings: attribute witnesses to consumed shared/cache history using the separately approved read-only observer; permit unrelated actors across event metadata awaits; and strictly verify the final minimized representative before labelling it a match. Preserve the earlier campaign receipts as historical, not final acceptance evidence, and renew the affected fresh independent review after correction. The simpler checker retains consumer-owned negative facts rather than replaying cached arrays into a reference provider. Explicit abstention validation rejects invented fields, lost warnings and false-marker shape errors even on Unresolved rows. Fresh native review of the complete change found one checker-only issue; its correction received a fresh whole-checker/contract review with no actionable findings. The final campaign/full-CI gates pass; reviewer inspection and executed checks remain separate evidence.
+
+### Final local implementation verification
+
+The approved `evidence-safety-v3` checker compares final-native results, reports
+and activity, permits only extra conservative warnings, and independently checks
+Stop/dismissal authority. Reference-provider prior-read/cache replay is removed.
+The earlier implementation, RED traces, model-specific campaigns and CI failures
+remain preserved; later passes do not establish every historical failure's cause.
+
+Final corrected checker SHA-256:
+`78b7cce3a29b2fe0b24792a28e6e3c256870ec59370a531367b8f8f0d31c7548`.
+The 10,000-seed campaign and final CI used matching production/checker content;
+the final CI's full manifest also remained unchanged throughout its 555-second run.
+This completion record updates documentation only after those checks.
+
+Model limits remain one parent/child, one page, fixed ownership and response
+snapshots at backend arrival within the request lifetime. Some selected strict
+diagnostic replays diverged at an unavailable action frontier or consumed-input
+observation position. They are not verified replays or production failures; the
+generated final campaign has zero evaluated safety/progress/harness failures.
+No universal seed-only or cross-process replay guarantee is claimed. Unnecessary
+conservative warnings are the user-approved precision tradeoff.
+
+The rewrite remains local and uncommitted. No PR update, external Codex request,
+archive, native record/dismissal mutation or deployment was performed. Publication
+text/accepted-limit approval, external review and before-merge archival remain
+separate follow-ups; the historical stopped gate in 5.84 is not a pending code fix.

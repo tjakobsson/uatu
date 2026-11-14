@@ -1216,11 +1216,10 @@ start/end counterproof, not as an additional positive activity prerequisite when
 no such counterproof exists. Fresh owned history plus active inventory can still
 establish cold activity in that case; it does not establish Stop readiness.
 Unknown observed starts and retention gaps remain conservative.
-A captured source that merely read a prior typed idle
-does not gain a blanket execution-event fence for the new admission; pending
-inference and actually inferred outcomes remain fenced, as do transcript,
-message-removal and revert changes. Aggregate ledger saturation still
-withholds inferred outcomes, not independently covered control/history recovery.
+A captured activity source that merely read a prior typed idle does not gain a
+blanket execution-event fence for the new admission. Historical outcomes use
+the separate session-counter publication rule below. Aggregate ledger saturation
+still withholds inferred outcomes, not independently covered control/history recovery.
 
 Exact retained start proofs, including nonconsecutive replays, coalesce without a live
 occurrence or pending binding. Changed identity, clock or payload is not replay;
@@ -1235,47 +1234,44 @@ reported child identity takes precedence. Calls disjoint before the candidate's
 preceding child end do not compete. Exact launcher restatement is not another
 invocation. An ambiguous active child can remain session-active, not Working.
 
-Pending-report deduplication retains the newest native request-start observation
-for each digest. A later request observing the same report can therefore fence
-a retry across its original parent-read boundary. Stale arrivals, copying facts
-or merging an unrelated newer batch do not renew that report's observation.
-Per-fact timestamps and replacements remain within the existing fact/byte caps;
-overflow stays deny-only and cannot grant report content or control authority.
-Filtering across a parent-read or retry boundary applies to each fact and the
-overflow observation, not the merged snapshot's envelope start: an older reply
-arriving last cannot discard newer counterproof already retained in that slot.
-Provisional inventory baselines likewise merge positive facts before applying
-owned-baseline ordering, even when an older request arrives after a newer
-unrelated response. Both observations can be newer than the consuming empty
-inbox request. The existing compact fact/byte caps and sticky overflow bound
-this merge; stale facts are filtered by their own native request start, not
-renewed or dropped according to the provisional envelope's arrival order.
-When that envelope began before the owned inbox request, its individual newer
-facts and overflow still veto the owned baseline. A provisional snapshot cannot
-invent absence for a child: genuinely stale/unrelated positives do not veto
-actual owned report content, and matching owned reports remain authoritative.
-A positive inbox request begun after the consumed owned
-request started can deny its empty view even when the requests overlap. Only
-new, relevant positive facts/overflow acquire that veto; older requests, empty
-snapshots and exact digests cannot replace the owned baseline or grant authority.
-Consumed transcript sources compare positive facts against their own native
-baseline to veto inference. Cache retirement instead uses the current load's
-cutoff and actual raw reports: a stale source cannot repeatedly evict a newer
-entry that already contains the report. Unrelated, pre-launch and exact consumed
-report replays retain the paged value.
+**Report-free outcome publication.** `opencode/v2/session-changes.ts` maintains
+one change counter per observed session. A source captures the parent counter
+before its first native request and each child counter before that child's first
+ownership/history request. Complete history, session-record, inbox and active
+membership facets initialize without a bump; subsequent differing observations
+advance the counter. New or changed native stream deltas advance it too.
+Identical already-known observations do not. This rule uses observation order:
+even a differing older or ownerless response can withhold inference, without
+gaining authority to replace a newer cache value.
+
+At final synchronous publication, the optional source-guard operation
+`projectInferredOutcome` compares the parent and child counters for each
+report-free inferred terminal row. Mismatch projects only that row as Unresolved
+(`status: "running"`, `stateUncertain: true`, `outcomeWithheld: true`) and
+nondismissible. It does not fail the parent read or trigger an automatic retry.
+The adapter repeats this per-item projection at publication. `isCurrent` and
+`retain` continue to own the separate ownership, activity and bounded-lifetime
+contract; explicit parent reports and independently verified activity/Stop do
+not derive authority from the counter.
+
+Parent history can finish while children stream, but historical inference
+requires an unchanged observation window. Even ordinary new output can withhold
+an otherwise unchanged old idle outcome. This deliberately conservative rule
+replaces selective outcome counterproof and transfer/retry machinery. The store
+keeps digests only: four complete facets and at most 256 delta facets per
+session, with a normal 8192-session capacity plus live read pins. Pins prevent
+eviction from resetting a consumer's counter; release ends their lifetime.
+
 Covered same-execution Ended activity without a result also withdraws an older
 report-free inferred outcome. It preserves the native end clock and legitimate
-dismissibility, without creating a result, running clock or Stop authority.
-Child raw-history counterproof compares actual loaded-array request starts:
-a later-started overlapping ownerless read can deny a consumed idle, even after
-cache ownership replacement. Overlap cannot install a replacement baseline;
-older replies cannot veto a source that consumed a newer request.
-Native pending facts that veto a scoped inventory source also invalidate only
-that parent's reusable transcript. Automatic recovery has no covered-history
-retry watch: its already-requested retry must read actual delivered report
-content, not cached settlement plus an empty inbox. Invalidation starts no IO
-and grants no report authority. Unchanged, unrelated and prelaunch observations
-do not enter this changed-signature path.
+dismissibility unless `outcomeWithheld: true` independently forbids dismissal;
+it creates no result, running clock or Stop authority. Sparse updates cannot
+erase the withheld-outcome barrier. A fresh authoritative terminal result can
+replace or clear it, including when the previous activity was Unavailable or Ended.
+
+**History reuse remains request-ordered.** Relevant native inbox reports can
+invalidate reusable parent history without starting IO or supplying report
+authority. Cache retirement is separate from outcome projection.
 An already warmed parent entry also owns a native inbox request cutoff before
 any worker source consumes it. Later relevant report signatures absent from its
 actual stored transcript retire only that entry, without IO or report authority.
@@ -1294,62 +1290,6 @@ distinct terminal identities per child are recognized; overflow sets sticky
 recovery-only uncertainty. Replaying an earlier observed terminal after a later
 one cannot revoke a current lease or bind that proof to a new occurrence.
 
-Native child revert-boundary observations begin when the read registers its
-pending child-history dependency, before the response classifies positive
-outcomes. Ordered boundary changes are retained in the existing scoped child
-counterproof set and fence a later dependent outcome; outcome-free and control
-reads do not acquire an outcome fence merely by collecting that dependency.
-A newer boundary change also invalidates child-history reuse so a retry cannot
-consume the obsolete held response. Overlapping older ownerless lookups cannot
-replace the newer owned boundary baseline. A late intermediate stage begun after
-the consumed child's owned visibility read supplies deny-only counterproof through captured
-publication. Bounded suffix identities from the consumed child transcript preserve
-known retained prefixes independently of cache eviction (at most 256 suffix IDs
-and 16,384 serialized UTF-16 units per child); overflow abstains.
-The deny rule also covers a later request moving between two non-null staged
-boundaries: moving the stage before the consumed idle cannot preserve its old
-completion merely because the previous stage left that idle visible.
-This does not replace the latest baseline or affect a later child dependency.
-Once a child array is consumed, provisional stage denial uses that raw load's
-native request cutoff. A later consumer of a shared or warm old array must not
-exclude an overlapping stage merely because its own dependency registered later.
-This cutoff is deny-only; owned visibility still supplies positive authority.
-
-Before the first transcript load, the child dependency registers a provisional
-native-record cutoff. A reversed intermediate stage against an ownerless clear
-is retained as deny-only boundary evidence, never as an owned baseline. The
-returned transcript checks that boundary before granting positive idle outcomes;
-the check runs again after the owned visibility await, before provisional evidence
-is replaced, so a clear reply cannot launder a stage observed during that await.
-known retained prefixes survive, unknown or conflicting boundaries abstain.
-An intervening owned visibility read shields its newer authority from old replies.
-Retained start identities, rather than only the greatest start clock, preserve
-an intervening-execution veto without a qualifying prior end. A later start
-cannot authorize an unchanged earlier idle. Qualified new intervals and a single
-delayed first start keep their existing progress rules.
-The captured child cutoff is the actual owned native request's start, carried by
-its lookup observation, not a global clock sampled after awaiting the response.
-A stage requested during that await remains deny-only after capture; a request
-older than the actual consumed transcript load cannot poison its newer authority.
-That load's native-record cutoff survives shared/cache reuse separately from
-the later owned lookup. Candidate verification retains its initial boundary,
-so a compatible older stage is not mistaken for a new transition.
-Compatibility is scoped to the known initial native observation's request order,
-not merely its boundary ID. A later request can observe the same boundary staged
-again after a restore; when newer than the consumed raw load it still supplies
-deny-only counterproof through capture, without replacing the newer clear baseline.
-An initial verified stage that hides idle evidence also qualifies the first raw
-child load. If its later owned record clears/changes, that requested fold
-revalidates child raw history unless the load already followed an observed clear,
-then reads owned visibility again. A clear alone cannot distinguish commit from
-restore. Removed idle content fences the old source; identical current raw
-content preserves compatible authority. Known visible prefixes avoid rereading.
-The immutable loaded array also carries its load-owned visibility observation
-in weak metadata. Cached ownership can skip fresh verification without losing a
-stage already observed while that raw array warmed. Retiring its cache entry does
-not erase this qualification from a consumer already holding the array.
-The initial stage/order remain per-source deny context, not an owned baseline;
-observations start no IO and revalidation keeps the original read deadline.
 Before any dependent parent read exists, transcript cache entries own a
 constant-size native visibility observation from load registration, before a
 value exists. The metadata transfers to retained values and retires with the
@@ -1397,96 +1337,11 @@ Pending notifications are folded after stored messages, not necessarily in their
 native chronological order. During complete-history recovery, a dated report
 cannot invalidate an occurrence whose launch begins after that report. It may
 settle its eligible earlier occurrence; undated reports remain conservative.
-Pending-inbox reports also participate in outcome-source counterproof, including
-when the original inbox was empty and transferred no pending-text lease. Native
-inbox request order is retained in one read-owned snapshot of compact report
-digests (256 facts / 64 KiB serialized UTF-16), under the existing source deadline.
-The outcome source, not the separate text source, carries this dependency through
-scheduler interaction reads and admission. Unchanged, ordinary-text, pre-launch
-and other-child observations do not revoke independent outcomes. Overlapping
-older responses cannot poison later owned evidence; pending ownerless observations
-are provisional deny-only facts. Cancellation is checked before observation and
-released leases retire the slot. Overflow withholds dependent history authority,
-never ownership, fabricated results or Stop proof.
-Transcript outcome sources participate even when a separate inventory recovery
-fails and they never consumed an inbox baseline. A newer positive report is
-compared with their actual native parent-read order, declared child/admission
-scope and consumed stored-report digests; inbox absence is not invented. Empty,
-ordinary-text, other-child, pre-launch and already-consumed report observations
-do not revoke them. Before a native baseline is installed, both native snapshots
-and streamed deltas accumulate positive facts in the existing bounded slot;
-delivery/removal from a later snapshot cannot erase an earlier veto. Exact facts
-coalesce and keep their original observation order. Overflow is sticky and keeps
-the latest lost-fact observation order, so filtering an older overflow cannot
-erase newer uncertainty. An actual later owned inbox baseline still supersedes
-older provisional facts; comparisons filter each fact by native request order.
-Cancellation and lease retirement still govern observation.
-
-One `retainPendingCounterproof` watch belongs to the entire covered-history read,
-not each dirty retry. It uses the same 256-fact / 64 KiB slot and the original
-source deadline plus enclosing cancellation signal. Seeded and merged facts are
-filtered against that owner's initial native parent-read boundary; a newer batch
-cannot renew older facts. Guard identity is resolved only within the provider's
-weakly keyed source scopes. Unknown/wrapped identities, another parent cohort,
-expiration, cancellation and reconnect fail closed rather than dropping a veto.
-The watch is deny-only: it retains neither a global report cache nor an empty
-inbox baseline and supplies no row content or Stop evidence.
-Relevant positive observations invalidate parent transport reuse without starting
-IO. An already requested retry can then read actual delivered native reports.
-Only qualified current explicit reports with matching execution anchors and native
-clocks covering the retained facts can discharge them. An unresolved pending-only
-case remains unavailable through the enclosing deadline, not Completed from cached
-history. `canRevalidateInferredOutcomes` permits reading replacement evidence only
-while all non-relinquishable fences remain current; final publication still needs
-the strict source/qualified inventory guards below.
-A successful covered inventory may own the replacement worker outcome while
-the transcript keeps its text authority. The optional source-guard view
-`withoutInferredOutcomes` relinquishes only inferred outcomes covered by current
-explicit reports for the same row/task/type/child and intersecting proven
-execution aliases. Every inferred execution for an exempted child must be
-covered; report-free, uncertain, undated or mismatched rows cannot qualify.
-The adapter retains the actual inventory sources and uses their actual report
-content, ID and clock. The old full transcript guard stays invalid; the new view
-preserves ownership, transcript/revert, generation, unrelated-outcome and lifetime
-fences. Pending-report vetoes are separate from those non-relinquishable revisions.
-The page's separate `isWorkerSourceCurrent` veto remains required alongside its
-guard. Only direct delegation to the old guard is replaced by a qualified view;
-an independent provider veto is composed through continuity and inventory
-replacement, never overwritten by the new guard's currentness.
 Covered Running/session-active evidence can withdraw a report-free historical
 completion under the same row/task/type/child and proven execution-alias checks
 as Working evidence. Session-active does not restart an execution clock, grant
 Stop, or remain dismissible as a terminal outcome. Explicit reports and changed
 executions retain their precedence and identity boundaries.
-
-Consuming worker sources also retain one ordered native parent-boundary slot,
-including root parents without parentID. Later native visibility changes fence
-inferred outcomes whose launchers are hidden through scheduler publication. A
-qualified cached complete transcript can prove a retained prefix still visible;
-unknown visibility abstains. Explicit read ownership installs the first baseline;
-older overlapping ownerless responses cannot replace it. This source dependency
-adds no IO or retained transcript snapshot and does not evict complete raw parent
-history merely for entering a staged boundary.
-A parent's late intermediate stage is deny-only through collection and captured
-publication when its request began after source registration, even if a newer
-cleared reply arrived first. It cannot replace that baseline or claim a later
-registered source. Captured inferred outcomes are checked against the stage's
-launcher boundary, so a qualified retained prefix is not revoked merely because
-the latest baseline is cleared. Old pending folds revalidate current history;
-hidden outcomes cannot publish through an already-returned lease.
-Qualification metadata reuses immutable occurrences under a 256-entry / 64 KiB
-serialized source budget; overflow declines transfer. No report text is minted
-from a digest, no deadline is renewed and no Stop basis is granted. Thus the
-failed-inventory fallback can publish canonical Failed once a later successful
-inventory covers it, without rereading forever. Genuine uncovered disagreement
-or budget exhaustion still causes the existing bounded handoff to abstain.
-Streamed `session.inbox.enqueued` subagent reports update that same bounded
-read-owned slot before child ownership enrichment can await. An enqueue adds
-counterproof; it is not a complete inbox snapshot and cannot erase unrelated
-baseline reports. Exact report replays coalesce. The shared native-read clock
-orders enqueues against in-flight inbox reads, so an older empty response cannot
-restore inferred outcome authority. This fence requires no extra inbox read and
-does not turn a stream report into ownership or Stop proof.
 
 A bare idle boundary alone never completes a worker.
 Exact terminal-event replay is recognized from its retained native proof even
@@ -1523,51 +1378,15 @@ same owned child, without becoming worker rows or outcome targets. Pending or
 running calls that only request that independently owned child are veto-only
 evidence too: they establish no ownership, requested-child reads, rows or
 controls, and a reported accepted child takes precedence over requested intent.
-The relevant baseline retains those requested-child facts too, using the same
-veto-target selection as replay and native-read comparison. Identical snapshots
-therefore preserve source authority; changed native facts still revoke it.
-The complete parent history supplies these vetoes even for hidden invocations. Read-owned
-sources retain the consumed parent launch inventory: a processed new or changed
-relevant launcher revokes dependent outcome recovery before publication, while
-ordinary parent text and unchanged launch replays do not.
-Later native parent-history reads also compare the relevant launch inventory
-and report digests against retained sources. A later-started native read can deny
-an earlier consumed inference even when the requests overlap and the new reader
-is ownerless. Completion-order fences still prevent overlapping replies from
-replacing the consumed positive baseline. Transport reuse keeps the original native read order, and
-ordinary output or launches for other children do not revoke independent
-outcome authority.
-Idle counterproof is observed at that shared native-history boundary too, so
-direct child history, accounting and inspection reads can revoke an older parent
-outcome. They use the same native ordering and overlapping-response abstention
-as parent inventory reads; returning through worker folding is not required.
-Ownerless reversible-history reads also cover a parent's first pending child
-response. Their idle signature and native read order occupy the existing
-observation slot only for an already registered child dependency, under its
-read lease/deadline. This provisional evidence is deny-only: a later native
-observation can veto an older pending outcome, but an older arrival cannot
-overwrite newer counterproof or veto a later owned response. No global
-observation cache or additional per-read event buffer is retained.
-The same boundary covers a parent's first pending transcript: an ownerless
-parent read retains a provisional launcher snapshot in that source's existing
-parent-observation slot. Only a consuming older native response can be vetoed;
-equal-order shared transport and later owned responses keep their own authority.
-The provisional snapshot coalesces exact facts and uses the same 256-fact /
-64-KiB serialized UTF-16 limits as SSE counterproof. Overflow withholds that
-pending consumer's history authority, never becoming a partial inventory that
-can veto another read. Newer native observations replace the slot without
-accumulation; neither provisional evidence nor saturation grants child IO or Stop.
-Native parent observations also fingerprint relevant explicit subagent results,
-so a report-free inferred completion cannot publish after a newer parent read
-finds a conflicting report. Reports must name native launch children; dated
-reports provably preceding their execution start are excluded. Missing launcher
-clocks cannot prove that a report is irrelevant. One digest per launch child retains neither
-result bodies nor a growing report log; provisional digests share the existing
-256-fact / 64-KiB counterproof budget. The same native-order rules cover owned,
-ownerless and prebaseline reads. Counterproof forces a covered reread, not an
-invented result; public revert-prefix rules still decide whether a report is
-visible. Unchanged reports, unrelated children and ordinary text do not fence
-independent outcomes.
+The complete parent history supplies these vetoes even for hidden invocations.
+Publication then applies the session-counter rule above, rather than selectively
+revalidating individual inferred outcomes.
+Stored parent report clocks describe delivery, not the child's execution end.
+A report delivered after multiple runs cannot be assigned by excluding all but
+the latest admission. Otherwise ambiguous reused-child correlation requires a
+unique exact match to a terminal child response within an unambiguous owned
+execution interval. Missing or duplicate matches remain uncorrelated; matching
+descriptions, aggregate child success and delivery order supply no identity.
 The adapter also retracts an already cached history-only completion when the
 covered complete source returns the same qualified execution as unresolved.
 That replacement clears stale terminal fields instead of merging them back.
@@ -1580,43 +1399,16 @@ no such replacement authority.
 Automatic scheduler admission uses that same exact-execution, report-free
 replacement predicate under its source and row-change fences, rather than
 allowing sparse upsert merging to retain a revoked inferred completion.
-This fallback invents neither result text nor a parent result ID. Before reading a
-child transcript, recovery registers it on the parent's bounded read-owned
-source. When explicit outcomes are present, a fresh scoped child record supplies
-their current revert boundary: only
-outcomes in the visible prefix can settle work. A staged suffix is not positive
-outcome evidence; clearing it restores eligibility, while committing removes it.
-Complete stored idle boundaries still supply conservative admission/control
-vetoes, and unavailable ownership or visibility withholds inference. Retained
-source leases carry that dependency through final publication:
-processed changes to consumed idle records, new execution boundaries, removals
-and reverts revoke dependent results even after the inventory transport retires.
-Fresh scoped session records also revoke an outcome view when they reveal a
-different child revert boundary, without waiting for SSE. Observation begins
-while the first outcome-visibility lookup is pending. Session-record reads carry
-their explicit consuming owner, not all collecting parent folds.
-An older ordinary getSession response cannot revoke a page that consumed a newer
-boundary. Fresh nonoverlapping record changes still revoke dependent pages, and
-the first owned visibility lookup still observes intervening counterproof.
-Native record read order
-keeps a contradictory overlapping response from replacing a newer boundary;
-the older response's own inference abstains. A later nonoverlapping
-child-history read also revokes consumed idle evidence when its records change
-or disappear, even if the child revert boundary stays null. Conflicting
-overlapping responses cannot supersede an already consumed observation; their
-own recovery source abstains. Append-only assistant
-output does not change the historical outcome or its interval and requires no
-quiet window for parent recovery. Unrelated conversations do not revoke those
-sources; consumed execution-event replays do not represent new transcript
-mutations. Boundary-only folds release their outcome dependency so
-compatible live activity and accounting can advance. History-only launches
-retain a separate fence against newly processed terminal execution events;
-retained native occurrences instead project their current lifecycle at
-publication. Terminal markers are source-owned data shared with the snapshot,
-not per-read function identities; their lifetime remains bounded by source
-leases. Other folds' positive
-outcome dependencies remain retained. Dependencies retire with their owning leases. Existing
-ownership, stream-generation and Stop fences remain required.
+This fallback invents neither result text nor a parent result ID. A fresh scoped
+child record supplies outcome visibility: only typed outcomes in the visible
+prefix can settle work. A staged suffix is not positive evidence; clearing it
+restores eligibility, while committing removes it. Complete stored boundaries
+still supply conservative admission/control vetoes. Unavailable ownership or
+visibility withholds inference. The counter projection governs inferred-outcome
+publication; native request ordering still governs reusable history and the
+separate activity guards. Existing ownership, stream-generation and Stop fences
+remain required. See [Worker dismissal reads](docs/worker-dismissal-read-architecture.md)
+for the bounded counter contract and Hub/browser persistence boundary.
 When a returned result still relies on history-only activity, its source also
 retains that publication dependency. A later owned terminal event or ordered
 child-history or parent-launch counterproof revokes the returned guard, including while an
@@ -1639,8 +1431,8 @@ required. This identity match cannot supply a Stop basis.
 If a compatible retained alias cohort grows while an older row is awaiting
 publication, the older row stays inspectable with activity unavailable. Neither
 activity nor Stop projection borrows the newer cohort's valid basis.
-Native-read and SSE parent-launch counterproof use the same dependency predicate
-for outcomes and returned activity. A source with already observed launch
+Native-read and SSE parent-launch counterproof protect returned cold activity.
+A source with already observed launch
 counterproof cannot acquire new history-only activity publication authority.
 The parent-launch baseline is registered before the first child ownership await.
 Each read owns its baseline from native parent-history consumption through its
@@ -1653,13 +1445,13 @@ Launcher events received before that initial response are buffered on the read a
 its inventory becomes known. The deny-only buffer coalesces exact replays and is
 limited to 256 facts / 64 KiB of serialized UTF-16 evidence; saturation withholds
 dependent history authority rather than granting ownership or Stop authority.
-Changes observed there remain deny-only until outcome or activity authority is
-used: unverified launch intent grants neither ownership, child reads nor Stop,
+Changes observed there remain deny-only until activity authority is used:
+unverified launch intent grants neither ownership, child reads nor Stop,
 and collecting counterproof alone does not invalidate unrelated control reads.
 Activity-only child observation also remains continuous before return, including
 the final parent lookup. Ordered idle counterproof is retained during that
 window without blanket invalidation of prepublication Stop reads; acquiring
-outcome or history-only activity authority checks the retained counterproof.
+history-only activity authority checks the retained counterproof.
 The cold native-read dependency is registered when the fold captures Working,
 before that final lookup, but capture is not publication. A newer inactive
 inventory downgrade cannot hide ordered child-history counterproof by removing
@@ -1681,14 +1473,22 @@ queue/ownership IO; completion, error, cancellation, reconnect and retirement
 release its leases. Cancelled transports still drain before another read takes
 their scheduler slot. Identical pending-notice enqueue replays are checked by
 normalized content, not delivery clocks; changed payloads and delivery/removal
-still revoke the source. Superseded evidence cannot publish completion or consume recovery
-progress, while compatible output does not require another quiet window.
+still revoke the source. Superseded evidence cannot publish activity or consume
+recovery progress. Report-free outcomes also pass the final counter projection;
+compatible output can proceed without preserving historical outcome inference.
 
 Explicit reports remain readable when their occurrence is ambiguous; in particular, a report before or tied to a
 known accepted-running success cannot settle that launch, and an ambiguous
 admission window cannot justify report assignment. A unique explicit report may
 still settle a legacy launch without a recorded acceptance clock, but missing
-clocks never prove aliasing. An old result cannot settle a newer run.
+clocks never prove aliasing. An old result cannot settle a newer run, and an
+aggregate successor name cannot select an arbitrary worker.
+For complete-history subagent reports, `historicalReportSeparated` excludes an
+older admission only when two distinct native end boundaries at or before the
+report prove its whole window lies before the earlier boundary. One end alone
+cannot distinguish a delayed older report. A missing first report therefore
+need not make a later uniquely attributable run uncertain; unknown, tied,
+straddling or overlapping intervals still abstain.
 
 Live projection correlation and control evidence share a bound of 8,192 entries /
 4 MiB of conservative serialized UTF-16 payload, not a heap guarantee.

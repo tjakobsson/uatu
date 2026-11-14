@@ -757,6 +757,10 @@ export class BackgroundWorkers {
      * Group occurrences before later idle boundaries revoke unresolved work.
      * Boundary order is irrelevant: consumers scan predicates, not positions. */
     executionHistory?: ReadonlyMap<string, readonly number[]>;
+    /** Per-read exact canonical response proof, checked against ALL parent
+     * invocations before either visible or complete history starts folding. */
+    reportInterval?: (child: string, summary: string) => { after?: number; end: number; responseAt: number } | undefined;
+    reportLaunches?: readonly LauncherEvidence[];
   } = {}) {}
   private readonly parents = new Map<string, string>();
   private readonly births = new Map<string, { parent?: string; proof?: NativeProof; shellCommand?: string; shellIdentity?: ShellBirthIdentity; shellEnd?: NativeProof; contradicted?: true }>();
@@ -1391,7 +1395,8 @@ export class BackgroundWorkers {
       // Pending reports are folded after stored history, even when they belong
       // to an earlier execution. Their native clock cannot invalidate a launch
       // that had not yet begun. Live observation keeps its existing fences.
-      && !(this.budget.executionHistory && terminalReportedAt != null && task.item.createdAt > terminalReportedAt)) this.uncertain(task, false);
+      && !(this.budget.executionHistory && terminalReportedAt != null && task.item.createdAt > terminalReportedAt)
+      && !(prepared.source === "subagent" && this.historicalReportSeparated(task.worker, task.evidence.launches, prepared.summary))) this.uncertain(task, false);
     this.bound();
   }
 
@@ -1546,8 +1551,24 @@ export class BackgroundWorkers {
       || right !== undefined && leftStart !== undefined && end > right.end && end < leftStart);
   }
 
-  private historicalReportCompatible(child: string, launches: readonly LauncherEvidence[], at?: number): boolean {
+  private historicalReportCompatible(child: string, launches: readonly LauncherEvidence[], at?: number, summary = ""): boolean {
     if (!this.budget.executionHistory) return true;
+    const interval = this.budget.reportInterval?.(child, summary);
+    if (interval) return launches.every(launch => this.launchInReportInterval(child, launch, interval));
+    // Complete native competitors prevent an early/terminal/hidden occurrence
+    // from disappearing merely because it has not been folded yet.
+    const possible = this.budget.reportLaunches?.filter(launch => launch.background === true && launch.reportedChild === child
+      && (at === undefined || (launch.ran ?? launch.created) === undefined || (launch.ran ?? launch.created)! <= at)
+      // Preserve sequential explicit-report recovery: an independently joined
+      // native result delivered BEFORE this admission already names the older
+      // occurrence. Mere terminal status or elapsed child ends cannot do this.
+      && ![...this.tasks.values()].some(task => task.worker === child && task.item.resultId
+        && task.item.terminalReportedAt !== undefined && task.item.status !== "running"
+        && task.evidence.launches.some(own => own.call === launch.call && own.message === launch.message)
+        && launches.every(target => (target.ran ?? target.created) !== undefined
+          && task.item.terminalReportedAt! < (target.ran ?? target.created)!)));
+    if (possible && possible.length > 1 && !possible.every(launch => launch === possible[0]
+      || this.sameHistoricalInterval(child, possible[0]!, launch))) return false;
     return at !== undefined && launches.every(launch => {
       // A unique explicit report can settle a legacy clock-sparse launch, but
       // cannot contradict a known acceptance bound or an ambiguous window.
@@ -1556,6 +1577,23 @@ export class BackgroundWorkers {
       const window = this.admissionWindow(launch);
       return window !== undefined && at > window.end
         && !this.ended.get(child)?.some(end => end >= window.start && end <= window.end);
+    });
+  }
+
+  private launchInReportInterval(child: string, launch: LauncherEvidence, interval: { after?: number; end: number; responseAt: number }): boolean {
+    const window = this.historicalAdmission(child, launch);
+    return !launch.conflicted && !!window && window.end < interval.responseAt
+      && (interval.after === undefined || window.start > interval.after);
+  }
+
+  /** Delivery time is not execution evidence. Exclusion requires a unique
+   * exact terminal response in a verified interval, never two elapsed idles. */
+  private historicalReportSeparated(child: string, launches: readonly LauncherEvidence[], summary: string): boolean {
+    const interval = this.budget.reportInterval?.(child, summary);
+    return !!interval && launches.length > 0 && launches.every(launch => {
+      const window = this.historicalAdmission(child, launch);
+      return !launch.conflicted && !!window && (window.start > interval.end
+        || interval.after !== undefined && window.end < interval.after);
     });
   }
 
@@ -1647,7 +1685,7 @@ export class BackgroundWorkers {
     }
     const reports = [...this.unmatched.entries()].filter(([, result]) => result.parent === parent && result.worker === child && result.item.taskType === item.taskType);
     const pending = reports.filter(([, result]) => result.correlatable && result.item.createdAt >= item.createdAt
-      && (shell || this.historicalReportCompatible(child, [fact], result.item.terminalReportedAt)));
+      && (shell || this.historicalReportCompatible(child, [fact], result.item.terminalReportedAt, result.item.summary)));
     // Shell reports alone cannot establish background membership. Once a
     // scoped launch proves it, reveal any reports which cannot safely join it.
     const revealed: NormalizedProviderUpdate[] = [];
@@ -1705,8 +1743,9 @@ export class BackgroundWorkers {
     if (this.notices.has(key)) return [];
     const occurrences = [...this.tasks.values()].filter(task => task.parent === parent && task.worker === child && task.item.taskType === (shell ? "shell" : "agent"));
     const undatedReuse = shell && reportClock.terminalReportedAt === undefined && occurrences.length > 1;
-    const candidates = occurrences.filter(task => task.item.status === "running" && (undatedReuse || task.item.createdAt <= at));
-    const ambiguousAdmission = !shell && candidates.some(task => !this.historicalReportCompatible(child, task.evidence.launches, reportClock.terminalReportedAt));
+    const candidates = occurrences.filter(task => task.item.status === "running" && (undatedReuse || task.item.createdAt <= at)
+      && (shell || !this.historicalReportSeparated(child, task.evidence.launches, summary)));
+    const ambiguousAdmission = !shell && candidates.some(task => !this.historicalReportCompatible(child, task.evidence.launches, reportClock.terminalReportedAt, summary));
     if (candidates.length !== 1 || undatedReuse || ambiguousAdmission) {
       const taskId = notificationTaskId;
       // This names the admitted native inbox record, not a launch occurrence.

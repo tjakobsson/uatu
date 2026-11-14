@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Complete native worker history repairs recoverable unresolved state
 
@@ -26,7 +26,7 @@ Fresh complete owned OpenCode V2 agent history and current execution evidence SH
 
 ### Requirement: Explicit child outcomes settle only their uniquely attributed occurrence
 
-Complete owned child history with an explicit native idle outcome SHALL recover Completed for `succeeded`, Failed for `failed`, and Stopped for `interrupted` only when exactly one unambiguous agent occurrence belongs to that execution interval. Recovery SHALL fabricate neither a parent result ID nor summary nor report timestamp, and SHALL NOT override an explicit parent report.
+Complete owned child history with an explicit native idle outcome SHALL recover Completed for `succeeded`, Failed for `failed`, and Stopped for `interrupted` only for one unambiguous occurrence with unchanged parent/child counters through publication. Changed counters SHALL leave that inferred outcome Unresolved without retrying or failing the parent read. Recovery SHALL fabricate no parent result ID, summary or report timestamp and SHALL NOT override an explicit parent report.
 
 #### Scenario: Every outcome attribution enforces execution boundaries
 - **WHEN** a child outcome is evaluated for attribution
@@ -36,7 +36,7 @@ Complete owned child history with an explicit native idle outcome SHALL recover 
 - **AND** bare idle, unknown outcomes and aggregate session activity SHALL NOT prove a task result
 
 #### Scenario: Parent notification is missing
-- **WHEN** complete owned child history uniquely attributes an explicit succeeded, failed or interrupted outcome to a launcher with no parent notification
+- **WHEN** complete owned child history uniquely attributes an explicit succeeded, failed or interrupted outcome to a launcher with no parent notification and its recorded parent/child counters remain unchanged through publication
 - **THEN** reload and reconnect recover its corresponding terminal status without an extra unresolved row or invented report content
 
 #### Scenario: Attribution is ambiguous
@@ -44,6 +44,25 @@ Complete owned child history with an explicit native idle outcome SHALL recover 
 - **THEN** the outcome does not settle that occurrence
 
 #### Scenario: Child has separate executions
-- **WHEN** native admission windows and idle boundaries uniquely separate multiple executions of one child
+- **WHEN** native admission windows and idle boundaries uniquely separate multiple executions of one child and its recorded parent/child counters remain unchanged through publication
 - **THEN** each explicit outcome settles only its matching occurrence
 - **AND** a later clock-incomplete invocation with a proven later native start remains unresolved without blocking the earlier outcome
+
+#### Scenario: A resumed child keeps changing during recovery
+- **WHEN** a resumed child has an older uniquely attributable finished run and new native observations change that child's counter during recovery
+- **THEN** the older inferred outcome SHALL remain Unresolved until a separate read spans an unchanged interval
+- **AND** the parent history read SHALL finish without retrying that outcome or waiting for the child to become quiet
+- **AND** independently verified activity for the current run SHALL remain unaffected
+
+#### Scenario: A missing report precedes later reported runs of a reused child
+- **WHEN** complete owned native history uniquely separates three runs, the first has an explicit succeeded outcome but no parent report, and the later completed reports uniquely match terminal child responses in their proven execution intervals
+- **THEN** recovery across unchanged counters SHALL produce one canonical finished row for each run without a cascading unresolved launch or duplicate notification row
+- **AND** later explicit report IDs and summaries SHALL remain attached to their matching runs
+- **AND** no parent report ID, summary or timestamp SHALL be invented for the native-only outcome
+- **AND** ambiguous or overlapping execution intervals SHALL remain conservative regardless of matching descriptions
+
+#### Scenario: A stored report is delivered after later executions
+- **WHEN** an earlier run's parent report is delivered only after later executions have ended
+- **THEN** delivery time and the count of preceding idle boundaries SHALL NOT exclude the earlier run or assign its report to a later run
+- **AND** exact terminal-response correlation SHALL require a unique match and an unambiguous owned execution interval
+- **AND** missing or duplicate response matches SHALL remain uncorrelated rather than guessed
