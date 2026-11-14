@@ -369,12 +369,84 @@ test.describe("agent inline visuals", () => {
   });
 });
 
+// Diagnostic comparison only; the full retention tests below remain authoritative.
+for (const mobile of [false, true]) browserTest(`webkit ${mobile ? "mobile" : "desktop"}: Option+Tab Source focus precondition probe`, async ({ launchBrowser, request, baseURL }, testInfo) => {
+  const browser = await launchBrowser("webkit");
+  const page = await browser.newPage({ baseURL, viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile });
+  const route = "Alt+Tab";
+  let count = 0;
+  let phase = "setup";
+  let outcome = "not-established";
+  let evidenceErrors = 0;
+  const snapshots: unknown[] = [];
+  const snapshot = async () => {
+    try {
+      snapshots.push({ count, phase, ...await page.evaluate(() => {
+        const identify = (element: Element | null) => element ? {
+          tag: element.tagName.toLowerCase(),
+          id: ["chat-input", "chat-conversation-select", "chat-timeline", "chat-latest", "chat-items"].includes(element.id) ? element.id : null,
+          control: element.matches('[data-visual-tab="source"]') ? "source"
+            : element.matches('[data-visual-tab="preview"]') ? "preview"
+            : element.matches("[data-visual-copy]") ? "copy" : null,
+        } : null;
+        const state = (selector: string) => {
+          const element = document.querySelector<HTMLElement>(`[data-chat-item-id="growing-focused-svg"] .chat-visual ${selector}`);
+          if (!element) return { connected: false };
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return {
+            ...identify(element), connected: element.isConnected,
+            visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.visibility !== "collapse" && style.display !== "none" && !element.closest("[hidden]"),
+            disabled: element.matches(":disabled"), ariaDisabled: element.getAttribute("aria-disabled") === "true",
+            tabIndex: element.tabIndex, inert: !!element.closest("[inert]"), focused: element === document.activeElement,
+          };
+        };
+        return { active: identify(document.activeElement), documentFocused: document.hasFocus(), source: state('[data-visual-tab="source"]'), copy: state("[data-visual-copy]") };
+      }) });
+    } catch { evidenceErrors++; }
+  };
+  try {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { Reflect.set(window, "__visualCopiedText", text); } } });
+    });
+    const conversationId = await boot(page, request);
+    await control(request, { action: "status", conversationId, status: "running" });
+    const id = "growing-focused-svg";
+    const prefix = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100">\r\n<text x="10" y="40">Exact &amp;';
+    await publish(request, conversationId, id, `\`\`\`svg\r\n${prefix}`);
+    const sourceTab = page.locator(`[data-chat-item-id="${id}"] .chat-visual [data-visual-tab="source"]`);
+    await sourceTab.click();
+    phase = "traversal";
+    await snapshot();
+    while (count < 40 && !await sourceTab.evaluate(element => element === document.activeElement)) {
+      await page.keyboard.press(route);
+      count++;
+      await snapshot();
+    }
+    phase = "assertion";
+    await expect(sourceTab).toBeFocused();
+    outcome = "focused";
+    phase = "complete";
+  } finally {
+    await snapshot();
+    try {
+      await testInfo.attach("option-tab-source-precondition", {
+        body: Buffer.from(JSON.stringify({ engine: "webkit", mobile, route, count, budget: 40, phase, outcome, evidenceErrors, snapshots }, null, 2)),
+        contentType: "application/json",
+      });
+    } catch { /* Diagnostic attachment failures must not replace the verdict. */ }
+    await browser.close();
+  }
+});
+
 for (const engine of ["chromium", "webkit"] as const) {
-  for (const mobile of [false, true]) browserTest(`${engine} ${mobile ? "mobile" : "desktop"}: growing SVG retains Source and logical keyboard focus through capture`, async ({ launchBrowser, request, baseURL }) => {
+  for (const mobile of [false, true]) browserTest(`${engine} ${mobile ? "mobile" : "desktop"}: growing SVG retains Source and logical keyboard focus through capture`, async ({ launchBrowser, request, baseURL }, testInfo) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile });
     let releaseSource!: () => void;
+    const focusRoute = engine === "webkit" ? "Alt+Tab" : "Tab";
     const sourceGate = new Promise<void>(resolve => { releaseSource = resolve; });
+    let focusEvidenceErrors = 0;
     try {
       // Observe the exact clipboard payload without platform-specific clipboard
       // permissions. Real controls and their activation path remain unchanged.
@@ -392,11 +464,90 @@ for (const engine of ["chromium", "webkit"] as const) {
       const sourceTab = visual.locator('[data-visual-tab="source"]');
       const copy = visual.locator("[data-visual-copy]");
       const code = visual.locator(".chat-visual-source code");
-      // Safari may not focus buttons on pointer activation. Use native keyboard
-      // traversal, never locator.focus(), forced clicks or scripted focus.
+      // Diagnostic only: observe public DOM and native events without changing
+      // focus, key defaults, traversal budgets, or the assertions below.
+      try {
+        await page.evaluate(() => {
+          const records: unknown[] = [];
+          const nodes = new WeakMap<Element, number>();
+          let nextNode = 0;
+          let dropped = 0;
+          let recordingErrors = 0;
+          let step = "installed";
+          const identify = (element: EventTarget | null) => {
+            if (!(element instanceof Element)) return null;
+            if (!nodes.has(element)) nodes.set(element, ++nextNode);
+            return {
+              node: nodes.get(element), tag: element.tagName.toLowerCase(),
+              // No text, values, arbitrary attributes, URLs, or transcript IDs.
+              id: ["chat-input", "chat-conversation-select", "chat-timeline", "chat-latest", "chat-items"].includes(element.id) ? element.id : null,
+              control: element.matches('[data-visual-tab="source"]') ? "source"
+                : element.matches('[data-visual-tab="preview"]') ? "preview"
+                : element.matches("[data-visual-copy]") ? "copy" : null,
+            };
+          };
+          const targetState = (selector: string) => {
+            const element = document.querySelector<HTMLElement>(`[data-chat-item-id="growing-focused-svg"] .chat-visual ${selector}`);
+            if (!element) return { connected: false };
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return {
+              ...identify(element), connected: element.isConnected,
+              visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.visibility !== "collapse" && style.display !== "none" && !element.closest("[hidden]"),
+              disabled: element.matches(":disabled"), ariaDisabled: element.getAttribute("aria-disabled") === "true",
+              tabIndex: element.tabIndex, inert: !!element.closest("[inert]"),
+            };
+          };
+          const record = (kind: string, event?: Event) => {
+            try {
+              if (records.length >= 512) { dropped++; return; }
+              records.push({
+                sequence: records.length, ms: performance.now(), step, kind,
+                trusted: event?.isTrusted, eventTarget: identify(event?.target ?? null),
+                relatedTarget: event instanceof FocusEvent ? identify(event.relatedTarget) : null,
+                defaultPrevented: event?.defaultPrevented,
+                key: event instanceof KeyboardEvent ? "Tab" : undefined,
+                alt: event instanceof KeyboardEvent ? event.altKey : undefined,
+                shift: event instanceof KeyboardEvent ? event.shiftKey : undefined,
+                active: identify(document.activeElement), documentFocused: document.hasFocus(),
+                source: targetState('[data-visual-tab="source"]'), copy: targetState("[data-visual-copy]"),
+              });
+            } catch { recordingErrors++; }
+          };
+          const keydown = (event: KeyboardEvent) => { if (event.key === "Tab") record("keydown", event); };
+          const focusin = (event: FocusEvent) => record("focusin", event);
+          document.addEventListener("keydown", keydown, true);
+          document.addEventListener("focusin", focusin, true);
+          Reflect.set(window, "__nativeVisualFocusEvidence", {
+            snapshot(label: string) { step = label; record("snapshot"); },
+            finish() {
+              record("finish");
+              document.removeEventListener("keydown", keydown, true);
+              document.removeEventListener("focusin", focusin, true);
+              Reflect.deleteProperty(window, "__nativeVisualFocusEvidence");
+              return { records, dropped, recordingErrors };
+            },
+          });
+        });
+      } catch { focusEvidenceErrors++; }
+      let focusAttempt = 0;
+      const focusSnapshot = async (label: string) => {
+        try { await page.evaluate(label => Reflect.get(window, "__nativeVisualFocusEvidence")?.snapshot(label), label); }
+        catch { focusEvidenceErrors++; }
+      };
+      // Safari may not focus buttons on pointer activation. The native Option+Tab
+      // comparison establishes its full-control route here; Chromium keeps Tab.
+      // Never use locator.focus(), forced clicks or scripted focus.
       const focusByTab = async (selector: "source" | "copy") => {
         const button = selector === "source" ? sourceTab : copy;
-        for (let i = 0; i < 40 && !await button.evaluate(element => element === document.activeElement); i++) await page.keyboard.press("Tab");
+        const attempt = ++focusAttempt;
+        await focusSnapshot(`${attempt}:${selector}:start`);
+        for (let i = 0; i < 40 && !await button.evaluate(element => element === document.activeElement); i++) {
+          await focusSnapshot(`${attempt}:${selector}:${focusRoute}-${i + 1}:before`);
+          await page.keyboard.press(focusRoute);
+          await focusSnapshot(`${attempt}:${selector}:${focusRoute}-${i + 1}:after`);
+        }
+        await focusSnapshot(`${attempt}:${selector}:assert`);
         await expect(button).toBeFocused();
       };
       await sourceTab.click();
@@ -449,7 +600,20 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(image).toHaveCount(1);
       await expect(image).toHaveAttribute("data-regression-retained", "true");
       expect(await code.textContent()).toBe(source);
-    } finally { releaseSource(); await browser.close(); }
+    } finally {
+      releaseSource();
+      // Best-effort evidence and listener cleanup must not replace a test failure.
+      try {
+        let trace: unknown = { unavailable: true };
+        try { trace = await page.evaluate(() => Reflect.get(window, "__nativeVisualFocusEvidence")?.finish() ?? { unavailable: true }); }
+        catch { focusEvidenceErrors++; }
+        await testInfo.attach("native-visual-focus", {
+          body: Buffer.from(JSON.stringify({ engine, mobile, focusRoute, focusEvidenceErrors, trace }, null, 2)),
+          contentType: "application/json",
+        });
+      } catch { /* Diagnostic failures are never functional verdicts. */ }
+      await browser.close();
+    }
   });
 
   browserTest(`${engine}: streaming keeps keyboard focus on retained visual controls`, async ({ launchBrowser, request, baseURL }) => {

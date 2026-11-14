@@ -1,6 +1,7 @@
 import { expect, test } from "./fixtures";
 import { openChatPanel, openChatPending, openChatWorkers } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
+import { expectWorkLayoutReady } from "./work-panel-assertions";
 
 test("legacy Queue default cannot change Enter or Alt+Enter, including after reload", async ({ page, request }) => {
   await page.addInitScript(() => localStorage.setItem("uatu:presentation:v1:%2F:chat-delivery", "queue"));
@@ -60,6 +61,7 @@ for (const fraction of [0.4, 0.8]) test(`desktop density follows pane width (${f
     await expect(page.locator(".chat-queued-message")).toHaveCount(i + 1);
   }
   await openChatPending(page);
+  await expectWorkLayoutReady(page);
   await expect(page.locator("#chat-keyboard-hint")).toHaveText("Enter: steer · Alt+Enter: queue");
   for (const selector of ["#chat-send", "#chat-stop", "#chat-attach", "#chat-configuration-trigger"]) {
     expect((await page.locator(selector).boundingBox())!.height).toBe(32);
@@ -71,9 +73,17 @@ for (const fraction of [0.4, 0.8]) test(`desktop density follows pane width (${f
   if (fraction > 0.5) expect(paneWidth).toBeGreaterThanOrEqual(640);
   expect(row.height, `actual dock width ${paneWidth}`).toBe(paneWidth >= 640 ? 28 : 44);
   if (fraction > 0.5) {
-    const reading = await page.locator(".chat-transcript-area").evaluate(node => node.getBoundingClientRect().height);
-    expect(reading).toBeGreaterThanOrEqual(200);
-    expect(reading).toBeLessThanOrEqual(281);
+    const layout = await page.evaluate(() => ({
+      reading: document.querySelector(".chat-transcript-area")!.getBoundingClientRect().height,
+      work: document.querySelector(".chat-work-dock")!.getBoundingClientRect().height,
+      reserved: document.querySelector<HTMLElement>("#chat-surface")!.style.getPropertyValue("--chat-expanded-reading"),
+    }));
+    await saveEvidence(info, "expanded-desktop-geometry.json", JSON.stringify(layout, null, 2));
+    // This tall fixture fits both work panes without reducing the preferred
+    // half-height reading band. The former 280px ceiling is no longer policy.
+    expect(layout.reading).toBeGreaterThanOrEqual(200);
+    expect(layout.reading).toBeLessThanOrEqual(421);
+    expect(Math.abs(layout.reading - layout.work), "expanded work and reading share the available height").toBeLessThanOrEqual(2);
   }
   expect(await page.locator("#chat-composer").evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
   expect(await page.locator(".chat-work-dock").evaluate(node => getComputedStyle(node).overflowY)).not.toBe("auto");

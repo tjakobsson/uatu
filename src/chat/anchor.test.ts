@@ -7,6 +7,130 @@ const geometry = (scrollTop: number, scrollHeight = 600, tops = [0, 100, 200]): 
 });
 
 describe("semantic timeline anchoring", () => {
+  test("position capture distinguishes following, semantic reading and an unanchored pause", () => {
+    const controller = new TimelineAnchorController();
+    expect(controller.capturePosition(300)).toEqual({ kind: "following" });
+    controller.pause(geometry(100, 700, [-20, 80, 180]));
+    expect(controller.capturePosition(100)).toEqual({ kind: "anchor", anchor: { itemId: "i0", offset: -20 } });
+    controller.pause({ ...geometry(0), items: [] });
+    const saved = controller.capturePosition(0);
+    expect(saved).toEqual({ kind: "paused", top: 0 });
+    controller.restorePosition(saved);
+    expect(controller.afterMutation(geometry(300), true)).toBe(0);
+    expect(controller.isPinned()).toBe(false);
+    expect(controller.hasUnseen()).toBe(true);
+    controller.observe(geometry(0, 600, [600]), "up");
+    controller.observe(geometry(20, 600, [580]), "down");
+    expect(controller.afterMutation(geometry(20, 700, [580]))).toBe(20);
+    controller.restorePosition({ kind: "following" });
+    expect(controller.afterMutation(geometry(20, 700))).toBe(400);
+    controller.restorePosition({ kind: "anchor", anchor: { itemId: "i0", offset: -20 } });
+    expect(controller.afterMutation(geometry(100, 700, [30, 130, 230]))).toBe(150);
+  });
+
+  test("captures only the item box when every visible block key is ambiguous", () => {
+    const controller = new TimelineAnchorController();
+    controller.pause({
+      scrollTop: 100, clientHeight: 300, scrollHeight: 1400,
+      items: [{ id: "message", top: -100, bottom: 900, content: [
+        { key: "duplicate", top: 40, bottom: 100 },
+        { key: "duplicate", top: 120, bottom: 180 },
+      ] }],
+    });
+    expect(controller.currentAnchor()).toEqual({ itemId: "message", offset: -100 });
+  });
+  test("an explicitly preferred activity anchors its box rather than its visible interior block", () => {
+    const controller = new TimelineAnchorController();
+    const before = {
+      scrollTop: 100, clientHeight: 300, scrollHeight: 1400,
+      items: [{ id: "message", top: -100, bottom: 900,
+        content: [{ key: "block-12", top: 40, bottom: 100 }] }],
+    };
+    controller.pause(before);
+    controller.beforeMutation(before, "message");
+    expect(controller.currentAnchor()).toEqual({ itemId: "message", offset: -100 });
+    expect(controller.afterMutation({
+      ...before, scrollHeight: 1680,
+      items: [{ id: "message", top: -50, bottom: 1180,
+        content: [{ key: "block-12", top: 320, bottom: 380 }] }],
+    })).toBe(150);
+  });
+  test("a missing saved block or omitted block measurement falls back to the item offset", () => {
+    for (const content of [undefined, [{ key: "other", top: 320, bottom: 380 }]]) {
+      const controller = new TimelineAnchorController();
+      controller.restore({ itemId: "message", offset: -100, content: { key: "removed", offset: 40 } });
+      expect(controller.afterMutation({
+        scrollTop: 100, clientHeight: 300, scrollHeight: 1400,
+        items: [{ id: "message", top: -60, bottom: 1000, content }],
+      })).toBe(140);
+      expect(controller.isPinned()).toBe(false);
+    }
+  });
+  test("captures the first visible unambiguous block, skipping duplicates even outside the viewport", () => {
+    const controller = new TimelineAnchorController();
+    controller.pause({
+      scrollTop: 100, clientHeight: 300, scrollHeight: 1400,
+      items: [{ id: "message", top: -100, bottom: 900, content: [
+        { key: "above", top: -100, bottom: -20 },
+        { key: "duplicate", top: 40, bottom: 100 },
+        { key: "unique", top: 120, bottom: 180 },
+        { key: "duplicate", top: 400, bottom: 460 },
+      ] }],
+    });
+    expect(controller.currentAnchor()).toEqual({
+      itemId: "message", offset: -100, content: { key: "unique", offset: 120 },
+    });
+  });
+  test("an ambiguous saved block key falls back to its item rather than either duplicate", () => {
+    const controller = new TimelineAnchorController();
+    controller.restore({ itemId: "message", offset: -100, content: { key: "duplicate", offset: 40 } });
+    expect(controller.afterMutation({
+      scrollTop: 100, clientHeight: 300, scrollHeight: 1400,
+      items: [{ id: "message", top: -60, bottom: 1000, content: [
+        { key: "duplicate", top: 320, bottom: 380 },
+        { key: "duplicate", top: 600, bottom: 660 },
+      ] }],
+    })).toBe(140);
+    expect(controller.isPinned()).toBe(false);
+  });
+  test("legacy restored item anchors remain coarse even when block geometry is available", () => {
+    const controller = new TimelineAnchorController();
+    controller.restore({ itemId: "message", offset: -100 });
+    expect(controller.afterMutation({
+      scrollTop: 100, clientHeight: 300, scrollHeight: 1400,
+      items: [{ id: "message", top: -60, bottom: 1000,
+        content: [{ key: "block-12", top: 320, bottom: 380 }] }],
+    })).toBe(140);
+    expect(controller.isPinned()).toBe(false);
+  });
+  test("preserves the visible block when content grows above it inside the same message", () => {
+    const controller = new TimelineAnchorController();
+    const before = {
+      scrollTop: 100, clientHeight: 300, scrollHeight: 1400,
+      items: [{ id: "message", top: -100, bottom: 900,
+        content: [{ key: "block-12", top: 40, bottom: 100 }] }],
+    };
+    controller.pause(before);
+    controller.beforeMutation(before);
+    const after = {
+      ...before, scrollHeight: 1680,
+      items: [{ id: "message", top: -100, bottom: 1180,
+        content: [{ key: "block-12", top: 320, bottom: 380 }] }],
+    };
+    expect(controller.afterMutation(after, true)).toBe(380);
+    expect(controller.currentAnchor()).toEqual({
+      itemId: "message", offset: -100, content: { key: "block-12", offset: 40 },
+    });
+    expect(controller.isPinned()).toBe(false);
+  });
+  test("downward timeline arrival resumes inclusively within 48px", () => {
+    for (const gap of [49, 48, 47.9, 20, 0.4, 0]) {
+      const controller = new TimelineAnchorController();
+      controller.pause(geometry(200));
+      controller.observe(geometry(300 - gap), "down");
+      expect(controller.isPinned()).toBe(gap <= 48);
+    }
+  });
   test("follows streaming only while pinned and reports unseen content otherwise", () => {
     const controller = new TimelineAnchorController();
     controller.observe(geometry(300));
@@ -18,7 +142,7 @@ describe("semantic timeline anchoring", () => {
     expect(controller.jumpToLatest(geometry(100, 800))).toBe(500);
   });
 
-  test("any upward step unpins, while arriving near the end pins", () => {
+  test("any upward step unpins, while arriving at the bottom pins", () => {
     const controller = new TimelineAnchorController();
     controller.observe(geometry(300));
     expect(controller.isPinned()).toBe(true);
@@ -28,8 +152,10 @@ describe("semantic timeline anchoring", () => {
     expect(controller.isPinned()).toBe(false);
     expect(controller.afterMutation(geometry(288, 700), true)).toBe(288);
     expect(controller.hasUnseen()).toBe(true);
-    // Coming back down to within the threshold follows the stream again.
+    // Coming back down within 48px resumes following.
     controller.observe(geometry(360, 700), "down");
+    expect(controller.isPinned()).toBe(true);
+    controller.observe(geometry(400, 700), "down");
     expect(controller.isPinned()).toBe(true);
     expect(controller.hasUnseen()).toBe(false);
   });
@@ -41,6 +167,18 @@ describe("semantic timeline anchoring", () => {
     expect(controller.isPinned()).toBe(false);
     controller.observe(geometry(288), "none");
     expect(controller.isPinned()).toBe(false);
+  });
+
+  test("fractional downward arrival after a restored-position echo is reader movement", () => {
+    const controller = new TimelineAnchorController();
+    controller.restore({ itemId: "i0", offset: 0 });
+    const restored = geometry(251.8, 600, [0]);
+    expect(controller.afterMutation(restored)).toBe(251.8);
+    controller.observe(restored, "none");
+    controller.observe(restored, "none");
+    expect(controller.isPinned()).toBe(false);
+    controller.observe(geometry(252.1, 600, [-0.3]), "down");
+    expect(controller.isPinned()).toBe(true);
   });
 
   test("a clamped decrease that keeps the end in view stays pinned", () => {
@@ -89,8 +227,10 @@ describe("semantic timeline anchoring", () => {
     controller.observe(restored);
     expect(controller.isPinned()).toBe(false);
     expect(controller.currentAnchor()).not.toBeNull();
-    // A reader scroll to the same neighbourhood afterwards does pin.
+    // A real downward reader step inside the band resumes following.
     controller.observe(geometry(372, 700, [-82, 18, 118]));
+    expect(controller.isPinned()).toBe(true);
+    controller.observe(geometry(400, 700, [-110, -10, 90]));
     expect(controller.isPinned()).toBe(true);
   });
 

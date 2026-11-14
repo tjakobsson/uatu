@@ -6,7 +6,7 @@ import { CoordinatedScrollOwner } from "./coordinated-scroll";
 const disposals: Array<() => void> = [];
 afterEach(() => { for (const dispose of disposals.splice(0).reverse()) dispose(); });
 
-function fixture() {
+function fixture(followMotion?: () => "smooth" | "instant", endThreshold?: number, positions = true) {
   const { document, window } = parseHTML("<html><body><div></div></body></html>");
   const element = document.querySelector("div")! as unknown as HTMLElement;
   const frames = new Map<number, FrameRequestCallback>();
@@ -21,11 +21,12 @@ function fixture() {
     scrollTop: { get: () => top, set: value => { top = Math.max(0, Math.min(value, extent - viewport)); writes.push(top); } },
     scrollHeight: { get: () => extent }, clientHeight: { get: () => viewport },
   });
-  const anchor = new TimelineAnchorController();
+  const anchor = new TimelineAnchorController(endThreshold);
   const options = {
-    anchor, active: () => active,
-    measure: () => ({ scrollTop: top, scrollHeight: extent, clientHeight: viewport,
-      items: [{ id: "line", top: itemTop - top, bottom: itemTop - top + 1000 }] }),
+    followMotion,
+    anchor, position: positions ? anchor : undefined, active: () => active,
+    measure: (includeItems: boolean, _preserveAnchor?: boolean) => ({ scrollTop: top, scrollHeight: extent, clientHeight: viewport,
+      items: includeItems ? [{ id: "line", top: itemTop - top, bottom: itemTop - top + 1000 }] : [] }),
     requestFrame: (callback: FrameRequestCallback) => { frames.set(++sequence, callback); return sequence; },
     cancelFrame: (id: number) => { frames.delete(id); },
   };
@@ -42,7 +43,7 @@ function fixture() {
     eventAt: (target: { dispatchEvent(event: Event): boolean }, name: string, fields = {}) => {
       target.dispatchEvent(Object.assign(new window.Event(name, { bubbles: true }), fields) as unknown as Event);
     },
-    flush: () => { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(sequence); },
+    flush: (timestamp?: number) => { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(timestamp ?? sequence); },
   };
 }
 
@@ -63,6 +64,1252 @@ function withVisibleBand(band: { height: number; offsetTop: number }, run: () =>
 }
 
 describe("coordinated scrolling", () => {
+  test("pending position capture survives empty layout, cancellation and hide until an actual render", () => {
+    const f = fixture();
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -100 } };
+    f.owner.restorePosition(saved);
+    f.owner.beforeMutation();
+    f.owner.request(); f.flush(0);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    expect(f.writes).toEqual([]);
+    f.owner.cancel(); f.hide(); f.owner.flush(20, { rendered: true });
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.show(); f.shift(50);
+    f.owner.flush(40, { rendered: true });
+    expect(f.element.scrollTop).toBe(150);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.writes).toEqual([150]);
+  });
+
+  test("layout, clamps and correction echoes cannot supersede pending intent but a real pause can", () => {
+    const f = fixture();
+    f.owner.request(); f.flush(0);
+    f.move(200); f.anchor.pause(f.options.measure(true));
+    f.shift(20); f.owner.request(); f.flush(20);
+    f.event("scroll");
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -120 } };
+    f.owner.restorePosition(saved);
+    f.event("scroll");
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.grow(450); f.event("scroll"); f.flush(40);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.event("wheel", { deltaY: -1 });
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 150 });
+    f.owner.request(); f.flush(60);
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 150 });
+    f.hide(); f.move(100); f.event("wheel", { deltaY: -1 });
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 150 });
+    f.show(); f.owner.flush(80, { rendered: true });
+    expect(f.element.scrollTop).toBe(150);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("native, key and touch reader pauses supersede restoration without capturing outgoing rows", () => {
+    for (const input of ["native", "key", "touch"] as const) {
+      const f = fixture();
+      f.owner.restorePosition({ kind: "anchor", anchor: { itemId: "incoming", offset: -20 } });
+      if (input === "native") { f.move(250); f.event("scroll"); }
+      else if (input === "key") f.event("keydown", { key: "ArrowUp" });
+      else {
+        f.event("touchstart", { touches: [{ clientY: 100 }] });
+        f.event("touchmove", { touches: [{ clientY: 110 }] });
+      }
+      const top = input === "native" ? 250 : 300;
+      expect(f.owner.capturePosition()).toEqual({ kind: "paused", top });
+      f.event("scroll");
+      expect(f.owner.capturePosition()).toEqual({ kind: "paused", top });
+      f.owner.flush(20, { rendered: true });
+      f.grow(900); f.owner.request(true); f.flush(40);
+      expect(f.element.scrollTop).toBe(top);
+      expect(f.anchor.isPinned()).toBe(false);
+    }
+  });
+
+  test("Latest and native downward arrival supersede pending saved restoration", () => {
+    for (const input of ["latest", "native"] as const) {
+      const f = fixture(() => "smooth");
+      f.move(200);
+      f.owner.restorePosition({ kind: "anchor", anchor: { itemId: "incoming", offset: -20 } });
+      f.event("wheel", { deltaY: -1 });
+      if (input === "latest") f.owner.latest();
+      else { f.move(199); f.event("scroll"); f.move(252); f.event("scroll"); }
+      expect(f.owner.capturePosition()).toEqual({ kind: "following" });
+      f.owner.flush(20, { rendered: true });
+      f.grow(900); f.owner.request(true);
+      for (let timestamp = 40; timestamp <= 400; timestamp += 20) f.flush(timestamp);
+      expect(f.element.scrollTop).toBe(600);
+      expect(f.anchor.isPinned()).toBe(true);
+    }
+  });
+
+  test("a pending pause captures native progress even when the empty outgoing extent masks movement", () => {
+    const f = fixture();
+    f.grow(300); f.move(700);
+    f.owner.restorePosition({ kind: "anchor", anchor: { itemId: "incoming", offset: -20 } });
+    f.event("wheel", { deltaY: -1 });
+    f.move(650); f.event("scroll");
+    expect(f.owner.capturePosition()).toEqual({ kind: "paused", top: 650 });
+    f.grow(2000); f.owner.flush(20, { rendered: true });
+    expect(f.element.scrollTop).toBe(650);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("an actual-render handshake survives an earlier same-frame write and retires queued placement", () => {
+    for (const kind of ["following", "anchor"] as const) {
+      const f = fixture(() => "smooth");
+      f.grow(1000); f.owner.request(); f.flush(20);
+      expect(f.writes).toEqual([700]);
+      f.owner.restorePosition(kind === "following" ? { kind } : { kind, anchor: { itemId: "line", offset: -100 } });
+      f.grow(1200); f.owner.request(); f.flush(20);
+      f.owner.flush(20, { rendered: true });
+      expect(f.writes).toEqual([700]);
+      f.flush(40);
+      expect(f.writes).toEqual([700, kind === "following" ? 900 : 100]);
+      expect(f.frames.size).toBe(0);
+    }
+  });
+
+  test("extent-driven downward placement does not impersonate Latest before initial rendering", () => {
+    const f = fixture();
+    f.owner.restorePosition({ kind: "following" });
+    f.grow(900); f.move(600); f.event("scroll");
+    // The incoming render starts at its own origin, not the loading layout's end.
+    f.move(0);
+    f.owner.flush(20, { rendered: true });
+    expect(f.writes).toEqual([]);
+    f.flush(40);
+    expect(f.writes).toEqual([600]);
+  });
+
+  test("durable capture excludes an answer hold while a later real pause replaces it", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.owner.capturePosition()).toEqual({ kind: "following" });
+    f.owner.cancel();
+    expect(f.owner.capturePosition()).toEqual({ kind: "following" });
+    f.owner.hold(field as unknown as HTMLElement); f.flush(40);
+    f.event("wheel", { deltaY: -1 });
+    expect(f.owner.capturePosition()).toEqual({ kind: "anchor", anchor: { itemId: "line", offset: -140 } });
+    expect(f.owner.isHolding(field as unknown as HTMLElement)).toBe(false);
+  });
+
+  test("adapters without timeline positions retain their original hold release and cancellation behavior", () => {
+    for (const following of [false, true]) for (const ending of ["release", "cancel"] as const) {
+      const f = fixture(undefined, undefined, false);
+      stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+      const field = f.document.createElement("input");
+      f.element.append(field);
+      stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+      f.owner.request(); f.flush(0);
+      if (!following) { f.move(200); f.owner.pause(); }
+      f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+      expect(f.element.scrollTop).toBe(140);
+      const writes = [...f.writes];
+      f.owner[ending]();
+      expect(f.writes).toEqual(writes);
+      expect(f.anchor.isPinned()).toBe(following);
+      f.owner.request(); f.flush(40);
+      expect(f.element.scrollTop).toBe(following ? 300 : 140);
+    }
+  });
+
+  test("cancelling a paused answer hold retains its original semantic position without writing", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.move(200); f.owner.pause();
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -200 } };
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    const writes = [...f.writes];
+    f.owner.cancel();
+    expect(f.writes).toEqual(writes);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.owner.request(); f.flush(40);
+    expect(f.element.scrollTop).toBe(200);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("releasing a paused answer hold retains durable reading without undoing live focus placement", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll");
+    const saved = { kind: "anchor" as const, anchor: { itemId: "line", offset: -200 } };
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    const writes = [...f.writes];
+    f.owner.release();
+    f.owner.release(); // Repeated focus synchronization does not discard it.
+    expect(f.writes).toEqual(writes);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.event("scroll"); // A late echo of the temporary placement is not input.
+    f.shift(50); f.grow(900); f.owner.request(true); f.flush(40);
+    expect(f.element.scrollTop).toBe(190);
+    expect(f.owner.capturePosition()).toEqual(saved);
+    f.owner.cancel(); // Departure restores the durable, not temporary, anchor.
+    f.owner.request(); f.flush(60);
+    expect(f.element.scrollTop).toBe(250);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  for (const positions of [false, true]) for (const following of [false, true]) test(`passive snapshot after answer release preserves live and durable reading with positions=${positions}, following=${following}`, () => {
+    const f = fixture(undefined, undefined, positions);
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    f.element.append(field);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    if (!following) { f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll"); }
+    const saved = positions ? f.owner.capturePosition() : undefined;
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    expect(f.element.scrollTop).toBe(140);
+    f.owner.release(); f.flush(40);
+    const writes = [...f.writes];
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel({ forSnapshot: true });
+    expect(f.writes).toEqual(writes);
+    if (saved) expect(f.owner.capturePosition()).toEqual(saved);
+    f.shift(50); f.grow(900); f.owner.request(true); f.flush(60);
+    expect(f.element.scrollTop).toBe(following ? 600 : 190);
+    if (saved) {
+      expect(f.owner.capturePosition()).toEqual(saved);
+      f.owner.cancel();
+      f.owner.restorePosition(saved);
+      f.shift(100);
+      f.owner.flush(80, { rendered: true }); f.flush(100);
+      expect(f.element.scrollTop).toBe(following ? 600 : 300);
+    }
+  });
+
+  for (const snapshot of [false, true]) for (const choice of ["native focus scroll", "reveal", "activity selection", "pause", "Latest"] as const) test(`${choice} supersedes durable reading after answer release${snapshot ? " and passive snapshot" : ""}`, () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input");
+    const button = f.document.createElement("button");
+    f.element.append(field, button);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    stubRect(button, () => ({ top: 350 - f.element.scrollTop, bottom: 370 - f.element.scrollTop }));
+    f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll");
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    f.owner.release();
+    if (snapshot) f.owner.cancel({ forSnapshot: true });
+    if (choice === "native focus scroll") { f.move(100); f.event("scroll"); }
+    else if (choice === "reveal") { f.owner.reveal(button as unknown as HTMLElement, { align: "end" }); f.flush(40); }
+    else if (choice === "activity selection") f.owner.beforeMutation("line");
+    else if (choice === "pause") f.event("wheel", { deltaY: -1 });
+    else f.owner.latest();
+    const expected = choice === "Latest" ? { kind: "following" as const } : {
+      kind: "anchor" as const, anchor: { itemId: "line", offset: choice === "native focus scroll" ? -100 : choice === "reveal" ? -70 : -140 },
+    };
+    expect(f.owner.capturePosition()).toEqual(expected);
+    f.owner.cancel();
+    expect(f.owner.capturePosition()).toEqual(expected);
+  });
+
+  test("native downward timeline arrival respects the 48px boundary", () => {
+    for (const gap of [49, 48, 47.9, 20, 0.4, 0]) {
+      const f = fixture(() => "smooth");
+      f.move(200); f.owner.pause();
+      f.move(199); f.event("scroll");
+      f.move(300 - gap); f.event("scroll");
+      expect(f.anchor.isPinned()).toBe(gap <= 48);
+    }
+  });
+  for (const shrink of [0, 18]) test(`loaded paused downward arrival resumes with ${shrink}px simultaneous viewport shrink`, () => {
+    const f = fixture();
+    f.resize(606); f.grow(1608); f.move(378); f.owner.pause();
+    f.move(377); f.event("scroll"); // Consume the earlier upward intent.
+    f.resize(606 - shrink); f.move(1001); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(1002 + shrink);
+    f.resize(568); f.owner.request(true); f.flush(40);
+    expect(f.element.scrollTop).toBe(1040);
+  });
+
+  test("layout-only range growth cannot resume a loaded paused reader", () => {
+    const f = fixture();
+    f.move(281); f.owner.pause(); f.move(280); f.event("scroll");
+    f.resize(282); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(280);
+  });
+  test("resize clamping a paused reader into the arrival band does not resume", () => {
+    const f = fixture();
+    f.move(281); f.owner.pause(); f.move(280); f.event("scroll");
+    f.resize(340); f.move(260); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(260);
+  });
+  test("range growth cannot turn an unchanged raw elastic position into downward reader arrival", () => {
+    const f = fixture();
+    f.move(330); f.owner.pause(); f.move(329); f.event("scroll");
+    f.resize(260); f.event("scroll"); // Normalized top rises 300→329; raw top does not.
+    expect(f.anchor.isPinned()).toBe(false);
+    f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(329);
+  });
+  test("a paused correction echo during range growth cannot resume following", () => {
+    const f = fixture();
+    f.move(281); f.owner.pause(); f.move(280); f.event("scroll");
+    f.shift(1); f.owner.request(); f.flush(20);
+    expect(f.element.scrollTop).toBe(281);
+    f.resize(282); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+  for (const position of [{ kind: "following" as const }, { kind: "anchor" as const, anchor: { itemId: "line", offset: -100 } }]) {
+    test(`layout-driven downward movement preserves pending ${position.kind} placement`, () => {
+      const f = fixture();
+      f.owner.restorePosition(position);
+      f.resize(282); f.move(300); f.event("scroll");
+      expect(f.owner.capturePosition()).toEqual(position);
+      f.move(0); f.owner.flush(20, { rendered: true }); f.flush(40);
+      expect(f.element.scrollTop).toBe(position.kind === "following" ? 318 : 100);
+    });
+  }
+  for (const consumed of [false, true]) test(`${consumed ? "consumed" : "unconsumed"} upward intent does not resume inside the arrival band on resize`, () => {
+    const f = fixture();
+    f.move(281); f.owner.pause();
+    if (consumed) { f.move(280); f.event("scroll"); }
+    f.resize(282); f.move(consumed ? 279 : 300); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("tiny native downward steps resume at fractional bottom without rounding", () => {
+    // Also exercise the old arrival policy so restoring 48px cannot hide a
+    // native-movement classification regression.
+    for (const threshold of [undefined, 0.5]) {
+      const f = fixture(() => "smooth", threshold);
+      f.owner.request(); f.flush(0);
+      f.move(299.4); f.anchor.pause(f.options.measure(true));
+      f.event("scroll");
+      expect(f.anchor.isPinned()).toBe(false);
+      f.move(299.6); f.event("scroll");
+      expect(f.anchor.isPinned()).toBe(true);
+      f.flush(16); f.flush(32);
+      expect(f.writes).toEqual([]);
+      expect(f.element.scrollTop).toBe(299.6);
+      f.move(300); f.event("scroll"); f.flush(48);
+      expect(f.writes).toEqual([]);
+      expect(f.element.scrollTop).toBe(300);
+    }
+  });
+  test("tiny native downward steps cross the inclusive timeline arrival band", () => {
+    const f = fixture(() => "smooth");
+    f.move(251.8); f.anchor.pause(f.options.measure(true)); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.move(252.1); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+  test("restored fractional position and correction echoes wait for a real downward arrival", () => {
+    const f = fixture(() => "smooth");
+    f.move(251.8);
+    f.anchor.restore({ itemId: "line", offset: -251.8 });
+    f.owner.request(); f.flush(0);
+    f.event("scroll"); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.writes).toEqual([]);
+    f.move(252.1); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    f.event("wheel", { deltaY: -0.1 });
+    expect(f.anchor.isPinned()).toBe(false);
+    f.move(252); f.event("scroll");
+    f.owner.request(true); f.flush(16); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.element.scrollTop).toBe(252);
+  });
+  test("native elastic scrolling beyond latest is not snapped back by follow frames", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    const before = f.writes.length;
+    // Safari exposes the compositor's elastic excursion through scrollTop.
+    // Native movement can exceed the range; a script assignment clamps it.
+    f.move(330); f.event("scroll");
+    f.flush(16); f.flush(32);
+    expect(f.writes.slice(before)).toEqual([]);
+    expect(f.element.scrollTop).toBe(330);
+  });
+  test("shrinking layout during bottom rebound preserves follow intent and explicit upward pauses", () => {
+    for (const paused of [false, true]) {
+      const f = fixture(() => "smooth");
+      f.owner.request(); f.flush(0);
+      f.move(330); f.event("scroll"); f.flush(16);
+      if (paused) f.event("wheel", { deltaY: -1 });
+      // The native excursion can outlive the extent that started it.
+      f.grow(550); f.move(265); f.event("scroll"); f.flush(32);
+      expect(f.anchor.isPinned()).toBe(!paused);
+      expect(f.element.scrollTop).toBe(265);
+      expect(f.writes).toEqual([]);
+      f.move(250); f.event("scroll"); f.flush(48);
+      expect(f.anchor.isPinned()).toBe(!paused);
+      f.grow(650); f.owner.request(true); f.flush(64); f.flush(304);
+      expect(f.element.scrollTop).toBe(paused ? 250 : 350);
+    }
+  });
+  test("native bottom rebound keeps following until real upward input takes over", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.move(100); f.owner.pause();
+    f.move(90); f.event("scroll");
+    f.move(330); f.event("scroll"); f.flush(16);
+    for (const top of [320, 305, 300]) {
+      f.move(top); f.event("scroll"); f.flush(32 + top);
+      expect(f.anchor.isPinned()).toBe(true);
+      expect(f.element.scrollTop).toBe(top);
+    }
+    expect(f.writes).toEqual([]);
+    f.grow(700); f.owner.request(true); f.flush(400); f.flush(640);
+    expect(f.element.scrollTop).toBe(400);
+    f.move(430); f.event("scroll"); f.flush(660);
+    f.event("wheel", { deltaY: -1 });
+    f.move(390); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(false);
+    f.grow(800); f.owner.request(true); f.flush(700);
+    expect(f.element.scrollTop).toBe(390);
+  });
+  test("native fractional bottom arrival is not rounded by an automatic follow write", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.move(100); f.owner.pause(); f.move(90); f.event("scroll");
+    f.move(299.75); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    f.flush(16); f.flush(32);
+    expect(f.writes).toEqual([]);
+    expect(f.element.scrollTop).toBe(299.75);
+    f.grow(700); f.owner.request(true); f.flush(48); f.flush(288);
+    expect(f.element.scrollTop).toBe(400);
+  });
+  test("native fractional arrival also retires an in-flight catch-up without a final write", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(900); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    const before = f.writes.length;
+    f.move(599.75); f.event("scroll"); f.flush(64); f.flush(304);
+    expect(f.writes.slice(before)).toEqual([]);
+    expect(f.element.scrollTop).toBe(599.75);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+  test("paused elastic excursions are not clamped by unchanged layout work", () => {
+    for (const [excursion, rowOffset] of [[-30, 0], [330, 0], [-30.1, 200.3], [330.1, 200.3]] as const) {
+      const f = fixture(() => "smooth");
+      f.owner.request(); f.flush(0);
+      f.shift(rowOffset);
+      f.move(excursion); f.event("scroll");
+      f.event("wheel", { deltaY: -1 });
+      expect(f.anchor.isPinned()).toBe(false);
+      const before = f.writes.length;
+      f.owner.request(); f.flush(16);
+      expect(f.writes.slice(before)).toEqual([]);
+      expect(f.element.scrollTop).toBe(excursion);
+      f.move(excursion < 0 ? 0 : 300); f.event("scroll");
+      f.owner.request(); f.flush(32);
+      expect(f.anchor.isPinned()).toBe(false);
+      expect(f.writes.slice(before)).toEqual([]);
+    }
+  });
+  test("a targeted geometry adapter keeps the explicitly activated row anchored", () => {
+    const f = fixture();
+    f.move(100); f.owner.pause();
+    const measure = f.options.measure;
+    f.options.measure = (includeItems, preserveAnchor, preferredItemId?: string) => {
+      const geometry = measure(includeItems, preserveAnchor);
+      if (includeItems && preferredItemId === "control") {
+        geometry.items.push({ id: "control", top: 120, bottom: 150 });
+      }
+      return geometry;
+    };
+    f.owner.beforeMutation("control");
+    expect(f.anchor.currentAnchor()).toEqual({ itemId: "control", offset: 120 });
+  });
+  test("renewed upward touch interrupts latest and holds and recaptures after bottom arrival or a new direction", () => {
+    for (const renewal of ["queued latest", "moving latest", "hold", "bottom", "direction", "new touch"] as const) {
+      const f = fixture(() => "smooth");
+      f.grow(900); f.move(300); f.owner.pause(); f.owner.cancel();
+      f.event("touchstart", { touches: [{ clientY: 100 }] });
+      f.event("touchmove", { touches: [{ clientY: 110 }] });
+      const field = f.document.createElement("input") as unknown as HTMLElement;
+      f.element.append(field);
+      if (renewal === "queued latest" || renewal === "moving latest") f.owner.latest();
+      if (renewal === "moving latest") { f.flush(0); f.flush(32); expect(f.element.scrollTop).toBeGreaterThan(300); }
+      if (renewal === "hold") f.owner.hold(field);
+      if (renewal === "bottom") {
+        f.move(280); f.event("scroll");
+        f.move(600); f.event("scroll"); expect(f.anchor.isPinned()).toBe(true);
+      }
+      if (renewal === "direction") f.event("touchmove", { touches: [{ clientY: 90 }] });
+      if (renewal === "new touch") f.event("touchstart", { touches: [{ clientY: 100 }] });
+      const top = f.element.scrollTop;
+      const calls: Array<[boolean, boolean | undefined]> = [];
+      const measure = f.options.measure;
+      f.options.measure = (items, preserve) => { calls.push([items, preserve]); return measure(items, preserve); };
+      f.event("touchmove", { touches: [{ clientY: 120 }] });
+      expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+      expect(f.anchor.isPinned()).toBe(false);
+      expect(f.owner.isHolding(field)).toBe(false);
+      expect(f.frames.size).toBe(0);
+      f.grow(1000); f.owner.request(true); f.flush(400);
+      expect(f.element.scrollTop).toBe(top);
+    }
+  });
+
+  test("new layout work or a correction renews upward touch intent within the same gesture", () => {
+    for (const work of ["request", "correction", "beforeMutation"] as const) {
+      const f = fixture();
+      f.grow(2000); f.move(500); f.owner.pause(); f.owner.cancel();
+      f.event("touchstart", { touches: [{ clientY: 100 }] });
+      f.event("touchmove", { touches: [{ clientY: 110 }] });
+      f.shift(100); f.grow(2100);
+      if (work === "beforeMutation") f.owner.beforeMutation();
+      else f.owner.request(true);
+      if (work === "correction") f.flush(16);
+      const top = f.element.scrollTop;
+      const calls: Array<[boolean, boolean | undefined]> = [];
+      const measure = f.options.measure;
+      f.options.measure = (items, preserve) => { calls.push([items, preserve]); return measure(items, preserve); };
+      f.event("touchmove", { touches: [{ clientY: 120 }] });
+      expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+      expect(f.frames.size).toBe(0);
+      expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: 100 - top });
+      f.owner.request(); f.flush(32);
+      expect(f.element.scrollTop).toBe(top);
+    }
+  });
+
+  test("continuous upward touch captures intent once while native movement and momentum keep capturing fresh positions", () => {
+    const f = fixture();
+    f.grow(2000); f.move(500); f.owner.pause(); f.owner.cancel();
+    const calls: Array<[boolean, boolean | undefined]> = [];
+    const measure = f.options.measure;
+    f.options.measure = (includeItems, preserveAnchor) => {
+      calls.push([includeItems, preserveAnchor]);
+      return measure(includeItems, preserveAnchor);
+    };
+    let changes = 0;
+    Object.assign(f.options, { onChange: () => changes++ });
+    f.event("touchstart", { touches: [{ clientY: 100 }] });
+    for (const y of [110, 110, 120, 130]) f.event("touchmove", { touches: [{ clientY: y }] });
+    expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+    expect(changes).toBe(1);
+    expect(f.anchor.isPinned()).toBe(false);
+    for (const [y, top] of [[140, 480], [150, 460]] as const) {
+      calls.length = 0;
+      f.event("touchmove", { touches: [{ clientY: y }] });
+      f.move(top); f.event("scroll");
+      expect(calls.filter(([items]) => items)).toEqual([[true, false]]);
+      expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: -top });
+    }
+    f.event("touchend", { touches: [] });
+    f.move(440); f.event("scroll");
+    f.shift(100); f.grow(2100); f.owner.request(); f.flush(16);
+    expect(f.element.scrollTop).toBe(540);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("paused native movement measures semantic items once and echoes retain the reading anchor", () => {
+    for (const delta of [-20, 20]) {
+      const f = fixture();
+      f.grow(2000); f.move(500); f.owner.pause();
+      const calls: Array<[boolean, boolean | undefined]> = [];
+      const measure = f.options.measure;
+      f.options.measure = (includeItems, preserveAnchor) => {
+        calls.push([includeItems, preserveAnchor]);
+        return measure(includeItems, preserveAnchor);
+      };
+      // First movement consumes pending input; the next is native momentum.
+      for (const top of [500 + delta, 500 + delta * 2]) {
+        calls.length = 0;
+        f.move(top); f.event("scroll");
+        expect(calls.filter(([includeItems]) => includeItems)).toEqual([[true, false]]);
+        expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: -top });
+        expect(f.anchor.isPinned()).toBe(false);
+        expect(f.writes).toEqual([]);
+      }
+      f.owner.request(); f.flush(16);
+      calls.length = 0;
+      f.event("scroll");
+      expect(calls.filter(([includeItems]) => includeItems)).toEqual([[true, undefined]]);
+      expect(f.anchor.currentAnchor()).toEqual({ itemId: "line", offset: -(500 + delta * 2) });
+      f.shift(100); f.grow(2100); f.owner.request(); f.flush(32);
+      expect(f.element.scrollTop).toBe(600 + delta * 2);
+      expect(f.anchor.isPinned()).toBe(false);
+    }
+  });
+
+  for (const origin of ["outside", "textarea", "programmatic"] as const) test(`ordinary button focus navigation from ${origin} stays visible through a later render`, () => {
+    const f = fixture();
+    f.grow(2000); f.move(1000); f.owner.pause();
+    f.move(920); f.event("scroll");
+    const button = f.document.createElement("button"); f.element.append(button);
+    const previous = f.document.createElement(origin === "textarea" ? "textarea" : "button");
+    if (origin === "textarea") f.element.append(previous);
+    else f.document.body.append(previous);
+    let active = previous;
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => active });
+    stubRect(button, () => ({ top: 1292 - f.element.scrollTop, bottom: 1322 - f.element.scrollTop }));
+    if (origin !== "programmatic") f.eventAt(previous, "keydown", { key: "Tab" });
+    // LinkeDOM does not perform native focus scrolling; supply that external
+    // browser transition, without routing it through a private owner method.
+    active = button;
+    button.dispatchEvent(new f.document.defaultView!.Event("focusin", { bubbles: true }));
+    f.move(1272); f.event("scroll");
+    expect(button.getBoundingClientRect().top).toBe(20);
+    f.owner.beforeMutation(); f.owner.request(); f.flush(16);
+    expect(f.element.scrollTop).toBe(1272);
+    expect(button.getBoundingClientRect().bottom).toBeLessThanOrEqual(300);
+  });
+
+  for (const origin of ["outside Tab", "textarea Tab", "accessibility"] as const) for (const order of ["before", "after"] as const) test(`active smooth follow yields to downward ${origin} control navigation with focusin ${order} native placement`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button");
+    const previous = f.document.createElement(origin === "textarea Tab" ? "textarea" : "button");
+    f.element.append(button);
+    if (origin === "textarea Tab") f.element.append(previous);
+    else f.document.body.append(previous);
+    let active = previous;
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => active });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    expect(button.getBoundingClientRect().top).toBeGreaterThan(300);
+    if (origin !== "accessibility") f.eventAt(previous, "keydown", { key: "Tab" });
+    active = button;
+    if (order === "before") f.eventAt(button, "focusin");
+    // LinkeDOM has no native focus reveal. Model the browser's minimal
+    // downward placement of this offscreen 850..880 control in a 300px band.
+    f.move(580);
+    if (order === "after") f.eventAt(button, "focusin");
+    f.event("scroll");
+    expect(button.getBoundingClientRect().bottom).toBe(300);
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    expect(button.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+    f.owner.beforeMutation(); f.grow(1486); f.owner.request(true);
+    for (const time of [400, 480, 720]) f.flush(time);
+    expect(button.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+    expect(button.getBoundingClientRect().bottom).toBeLessThanOrEqual(300);
+  });
+
+  for (const visibility of ["offscreen", "partial"] as const) for (const order of ["before", "after"] as const) test(`downward native focus during viewport shrink survives focusin ${order} placement of a ${visibility} control`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: f.element.clientHeight }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    let active: Element | null = null;
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => active });
+    let controlTop = 850;
+    stubRect(button, () => ({ top: controlTop - f.element.scrollTop, bottom: controlTop + 30 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    if (visibility === "partial") controlTop = f.element.scrollTop + 290;
+    expect(button.getBoundingClientRect().bottom).toBeGreaterThan(300);
+    if (visibility === "offscreen") expect(button.getBoundingClientRect().top).toBeGreaterThan(300);
+    else expect(button.getBoundingClientRect().top).toBeLessThan(300);
+    active = button;
+    if (order === "before") f.eventAt(button, "focusin");
+    // The viewport loses 20px while the browser reveals this previously
+    // below-band control. Shrinking the viewport expands the native range;
+    // this downward placement is not a range clamp or upward caret offset.
+    f.resize(280); f.move(controlTop + 30 - 280);
+    if (order === "after") f.eventAt(button, "focusin");
+    f.event("scroll");
+    expect(button.getBoundingClientRect().bottom).toBe(280);
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    const afterMotion = button.getBoundingClientRect().top;
+    f.grow(1486); f.owner.request(true); f.flush(400); f.flush(720);
+    expect({ afterMotion, afterAppend: button.getBoundingClientRect().top, bottom: button.getBoundingClientRect().bottom })
+      .toEqual({ afterMotion: 250, afterAppend: 250, bottom: 280 });
+  });
+
+  for (const order of ["before", "after"] as const) test(`resize placement of an already-visible focused control keeps following with focusin ${order}`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: f.element.clientHeight }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 1000 - f.element.scrollTop, bottom: 1030 - f.element.scrollTop }));
+    f.grow(1100); f.owner.request(); f.flush(0);
+    expect(button.getBoundingClientRect().bottom).toBe(230);
+    if (order === "before") f.eventAt(button, "focusin");
+    f.resize(280); f.move(820);
+    if (order === "after") f.eventAt(button, "focusin");
+    f.event("scroll"); f.flush(16);
+    f.grow(1486); f.owner.request(true); f.flush(32); f.flush(320);
+    expect(f.element.scrollTop).toBe(1206);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+
+  test("ordinary focus without native scrolling does not interrupt active smooth follow", () => {
+    const f = fixture(() => "smooth");
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.eventAt(button, "focusin");
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    f.grow(1486); f.owner.request(true); f.flush(400); f.flush(720);
+    expect(f.element.scrollTop).toBe(1186);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+
+  for (const transition of ["native reveal with growth", "growth without movement", "shrink clamp"] as const) test(`focus transition during changed extent: ${transition}`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    const controlTop = transition === "shrink clamp" ? 500 : 850;
+    stubRect(button, () => ({ top: controlTop - f.element.scrollTop, bottom: controlTop + 30 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    if (transition === "shrink clamp") {
+      // Layout clamps the offset, incidentally making an above-band control
+      // visible. Focus alone must not reinterpret that clamp as navigation.
+      f.grow(700);
+    } else {
+      // Realizing deferred activity below the control increases the extent
+      // during native focus placement, without changing the control's top.
+      f.grow(1486);
+      if (transition === "native reveal with growth") f.move(580);
+    }
+    f.eventAt(button, "focusin"); f.event("scroll");
+    if (transition === "native reveal with growth") expect(button.getBoundingClientRect().bottom).toBe(300);
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    const afterMotion = button.getBoundingClientRect().top;
+    f.grow(1786); f.owner.request(true); f.flush(400); f.flush(720);
+    if (transition === "native reveal with growth") {
+      expect({ afterMotion, afterAppend: button.getBoundingClientRect().top }).toEqual({ afterMotion: 270, afterAppend: 270 });
+      expect(f.anchor.isPinned()).toBe(false);
+    } else {
+      expect(f.anchor.isPinned()).toBe(true);
+      expect(f.element.scrollTop).toBe(1486);
+    }
+  });
+
+  for (const layout of ["content clamp", "viewport clamp", "viewport caret placement"] as const) test(`pending focus observation cannot turn ${layout} into a reader pause`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: f.element.clientHeight }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    const targetTop = layout === "viewport caret placement" ? 780 : 700;
+    stubRect(button, () => ({ top: targetTop - f.element.scrollTop, bottom: targetTop + 30 - f.element.scrollTop }));
+    f.grow(1100); f.owner.request(); f.flush(0);
+    expect(f.element.scrollTop).toBe(800);
+    f.eventAt(button, "focusin"); // focus({ preventScroll: true }); no placement.
+    expect(f.element.scrollTop).toBe(800);
+    if (layout === "content clamp") f.grow(900); // Native range clamp: 800 -> 600.
+    else if (layout === "viewport clamp") { f.resize(500); f.move(600); }
+    else {
+      // Same native viewport/caret offset behavior as the composer-resize
+      // regressions: 20px of layout movement, not scrolling to this button.
+      f.resize(280); f.move(780);
+    }
+    f.event("scroll");
+    const followingAfterLayoutEvent = f.anchor.isPinned();
+    f.flush(16);
+    const followingAfterFrame = f.anchor.isPinned();
+    f.grow(900 + f.element.clientHeight); f.owner.request(true); f.flush(32); f.flush(320);
+    expect({ followingAfterLayoutEvent, followingAfterFrame, afterAppend: f.element.scrollTop }).toEqual({
+      followingAfterLayoutEvent: true, followingAfterFrame: true, afterAppend: 900,
+    });
+    // A later, fresh focus transition still owns actual native movement in
+    // the settled viewport; retiring layout evidence is not a focus blanket.
+    const next = f.document.createElement("button"); f.element.append(next);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => next });
+    stubRect(next, () => ({ top: 1500 - f.element.scrollTop, bottom: 1530 - f.element.scrollTop }));
+    f.grow(2100); f.eventAt(next, "focusin");
+    f.move(1530 - f.element.clientHeight); f.event("scroll");
+    f.flush(352); f.grow(2400); f.owner.request(true); f.flush(384); f.flush(704);
+    expect(next.getBoundingClientRect().bottom).toBe(f.element.clientHeight);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("native focus placement is adopted before a delayed scroll event", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.eventAt(button, "focusin"); f.move(580); f.flush(64);
+    f.event("scroll");
+    f.grow(1486); f.owner.request(true); f.flush(80); f.flush(400);
+    expect(f.element.scrollTop).toBe(580);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("offscreen focus without native scrolling expires before later forward progress", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.eventAt(button, "focusin"); f.flush(64); // focus({ preventScroll: true })
+    f.move(800); f.event("scroll");
+    for (const time of [96, 160, 240, 368]) f.flush(time);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.element.scrollTop).toBe(886);
+  });
+
+  test("logical reveal waits for reconciliation without spending a premature correction", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const old = f.document.createElement("div"), current = f.document.createElement("div");
+    f.element.append(old);
+    stubRect(current, () => ({ top: 800 - f.element.scrollTop, bottom: 1000 - f.element.scrollTop }));
+    let reconciled = false, resolutions = 0;
+    f.owner.request(); f.flush(0);
+    f.grow(1600); f.owner.request(true); f.flush(16); f.flush(48);
+    f.owner.reveal(() => {
+      if (!reconciled) return undefined;
+      resolutions++;
+      return current as unknown as HTMLElement;
+    }, { align: "center" });
+    const writes = f.writes.length;
+    f.flush(64);
+    expect(f.writes.length).toBe(writes);
+    expect(resolutions).toBe(0);
+    old.replaceWith(current); reconciled = true;
+    f.owner.flush(80, { rendered: true });
+    expect(resolutions).toBe(1);
+    expect(current.getBoundingClientRect().top).toBe(50);
+    expect(f.writes.length - writes).toBe(1);
+    f.owner.request(); f.owner.flush(80); f.flush(96);
+    expect(f.writes.length - writes).toBe(1);
+    expect(resolutions).toBe(1);
+  });
+
+  for (const choice of ["wheel", "key", "touch", "pointer", "focus", "native scroll", "Latest", "pause", "restore", "cancel"] as const) test(`new ${choice} cancels an unresolved logical reveal`, () => {
+    const f = fixture(() => "smooth");
+    const card = f.document.createElement("div"), button = f.document.createElement("button");
+    f.element.append(card, button);
+    let resolutions = 0;
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; });
+    if (choice === "wheel") f.event("wheel", { deltaY: 4 });
+    if (choice === "key") f.event("keydown", { key: "ArrowDown" });
+    if (choice === "touch") f.event("touchstart", { touches: [{ clientY: 100 }] });
+    if (choice === "pointer") f.event("pointerdown", { pointerType: "mouse", clientX: 100 });
+    if (choice === "focus") f.eventAt(button, "focusin");
+    if (choice === "native scroll") { f.move(f.element.scrollTop + 4); f.event("scroll"); }
+    if (choice === "Latest") f.owner.latest();
+    if (choice === "pause") f.owner.pause();
+    if (choice === "restore") f.owner.restorePosition({ kind: "following" });
+    if (choice === "cancel") f.owner.cancel();
+    f.flush(64); f.owner.flush(80, { rendered: true }); f.flush(96);
+    expect(resolutions).toBe(0);
+  });
+
+  test("native focus placement preserves the actual-render restoration handshake", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.grow(1186); f.owner.restorePosition({ kind: "following" });
+    f.eventAt(button, "focusin"); f.move(580);
+    f.owner.flush(64, { rendered: true });
+    f.owner.beforeMutation(); f.shift(50); f.grow(1486); f.owner.request(true); f.flush(80);
+    expect(f.element.scrollTop).toBe(630);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  for (const height of [200, 500]) test(`centered request reveal of a ${height}px card interrupts follow and stays visible`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const card = f.document.createElement("div"); f.element.append(card);
+    stubRect(card, () => ({ top: 800 - f.element.scrollTop, bottom: 800 + height - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1600); f.owner.request(true); f.flush(16); f.flush(48);
+    f.owner.reveal(card as unknown as HTMLElement, { align: "center" }); f.flush(64);
+    const expectedTop = height > 300 ? 0 : 50;
+    expect(card.getBoundingClientRect().top).toBe(expectedTop);
+    f.grow(2000); f.owner.request(true); f.flush(80); f.flush(400);
+    expect(card.getBoundingClientRect().top).toBe(expectedTop);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  for (const moving of [false, true]) test(`downwheel with an offscreen focused button keeps ${moving ? "moving" : "pending"} follow`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true);
+    if (moving) { f.flush(16); f.flush(48); }
+    f.eventAt(button, "focusin");
+    f.eventAt(button, "wheel", { deltaY: 400 });
+    f.move(800); f.event("scroll");
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.element.scrollTop).toBe(886);
+  });
+
+  test("nested focus navigation pauses only its owner during active smooth follow", () => {
+    const parent = fixture(() => "smooth"), child = fixture(() => "smooth");
+    parent.element.append(child.element);
+    stubRect(child.element, () => ({ top: 0, bottom: 300 }));
+    const button = child.document.createElement("button"); child.element.append(button);
+    for (const document of [parent.document, child.document]) {
+      Object.defineProperty(document, "activeElement", { configurable: true, get: () => button });
+    }
+    stubRect(button, () => ({ top: 850 - child.element.scrollTop, bottom: 880 - child.element.scrollTop }));
+    for (const f of [parent, child]) {
+      f.owner.request(); f.flush(0);
+      f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    }
+    child.eventAt(button, "focusin");
+    child.move(580); child.event("scroll");
+    for (const f of [parent, child]) {
+      for (const time of [64, 128, 240, 368]) f.flush(time);
+      f.grow(1486); f.owner.request(true); f.flush(400); f.flush(720);
+    }
+    expect(child.anchor.isPinned()).toBe(false);
+    expect(button.getBoundingClientRect().bottom).toBe(300);
+    expect(parent.anchor.isPinned()).toBe(true);
+    expect(parent.element.scrollTop).toBe(1186);
+  });
+
+  // The diagnosed pre-click reveal was navigation to an offscreen control,
+  // not a shell mutation. Unrelated input cannot change later focus policy.
+  for (const input of ["Tab", "Space", "cancelled wheel"] as const) test(`non-scrolling ${input} does not prevent later legitimate button focus navigation`, () => {
+    const f = fixture();
+    f.grow(2000); f.move(1000); f.owner.pause();
+    f.move(920); f.event("scroll");
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    const event = Object.assign(new f.document.defaultView!.Event(input === "cancelled wheel" ? "wheel" : "keydown", { bubbles: true, cancelable: true }),
+      input === "cancelled wheel" ? { deltaY: 20 } : { key: input === "Space" ? " " : "Tab" });
+    if (input === "cancelled wheel") event.preventDefault();
+    button.dispatchEvent(event);
+    // No movement or scrollend follows the unrelated input. Focus navigation
+    // must still be adopted rather than inferred from a latched input flag.
+    f.move(1272); f.event("scroll");
+    f.owner.beforeMutation();
+    f.owner.request(); f.flush(16);
+    expect(f.element.scrollTop).toBe(1272);
+  });
+
+  for (const input of ["wheel", "touch", "keyboard", "scrollbar"] as const) test(`${input} reading movement and subsequent button focus navigation remain authoritative`, () => {
+    const f = fixture();
+    f.grow(2000); f.move(1000); f.owner.pause();
+    f.move(920); f.event("scroll");
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    if (input === "wheel") f.event("wheel", { deltaY: 20 });
+    else if (input === "touch") {
+      f.event("touchstart", { touches: [{ clientY: 100 }] });
+      f.event("touchmove", { touches: [{ clientY: 80 }] });
+    } else if (input === "keyboard") f.event("keydown", { key: "ArrowDown" });
+    else {
+      stubRect(f.element, () => ({ top: 0, bottom: 300, left: 0, right: 116 }));
+      Object.defineProperties(f.element, { clientLeft: { value: 0 }, clientWidth: { value: 100 } });
+      f.event("pointerdown", { pointerType: "mouse", clientX: 108 });
+    }
+    f.move(940); f.event("scroll");
+    f.owner.request(); f.flush(16);
+    expect(f.element.scrollTop).toBe(940);
+    // Momentum belongs to that gesture as well, not to the focused control.
+    f.move(960); f.event("scroll");
+    f.owner.request(); f.flush(32);
+    expect(f.element.scrollTop).toBe(960);
+    f.event("scrollend");
+    f.move(1272); f.event("scroll");
+    f.owner.beforeMutation();
+    f.owner.request(); f.flush(48);
+    expect(f.element.scrollTop).toBe(1272);
+  });
+
+  for (const delta of [-20, 4]) test(`${delta < 0 ? "upward" : "downward"} reader movement selects a fresh fine location while correction echoes retain it`, () => {
+    const { document, window } = parseHTML("<html><body><div></div></body></html>");
+    const element = document.querySelector("div")! as unknown as HTMLElement;
+    let top = 1000, moved = false, rewrapped = false;
+    Object.defineProperties(element, {
+      scrollTop: { get: () => top, set: value => { top = value; } },
+      clientHeight: { get: () => 400 }, scrollHeight: { get: () => 12000 },
+    });
+    const anchor = new TimelineAnchorController();
+    anchor.restore({ itemId: "row", offset: -1000, content: { key: "old-character", offset: 0 } });
+    const owner = new CoordinatedScrollOwner(element, {
+      anchor,
+      measure: (includeItems, preserveAnchor = true) => {
+        const old = { key: "old-character", top: (rewrapped ? 900 : 1000) - top, bottom: (rewrapped ? 900 : 1000) - top + 20 };
+        const fresh = { key: moved ? "new-character" : "old-character", top: rewrapped ? 900 - top : 0, bottom: rewrapped ? 920 - top : 20 };
+        return { scrollTop: top, clientHeight: 400, scrollHeight: 12000,
+          items: includeItems ? [{ id: "row", top: -top, bottom: 12000 - top,
+            content: preserveAnchor && moved && anchor.currentAnchor()?.content?.key === old.key ? [old, fresh] : [fresh] }] : [] };
+      },
+      requestFrame: () => 1, cancelFrame() {},
+    });
+    disposals.push(() => owner.dispose());
+    const scroll = () => element.dispatchEvent(new window.Event("scroll"));
+    scroll();
+    expect(anchor.currentAnchor()?.content?.key).toBe("old-character");
+    if (delta < 0) element.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: delta }));
+    top += delta; moved = true; scroll();
+    rewrapped = true;
+    owner.request(); owner.flush(16);
+    expect(top).toBe(900);
+    scroll();
+    expect(anchor.currentAnchor()?.content?.key).toBe("new-character");
+  });
+
+  test("forward reader progress does not restart the layout catch-up deadline", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(128);
+    f.event("wheel", { deltaY: 4 });
+    f.move(f.element.scrollTop + 4); f.event("scroll");
+    f.flush(160); f.flush(316);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(886 - f.element.scrollTop).toBeLessThanOrEqual(2);
+    expect(f.frames.size).toBe(0);
+  });
+  for (const moving of [false, true]) test(`downward reader progress during ${moving ? "moving" : "pending"} catch-up keeps following without pulling backward`, () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true);
+    if (moving) {
+      f.flush(16); f.flush(48);
+      expect(f.element.scrollTop).toBeGreaterThan(300);
+    }
+    expect(f.element.scrollTop).toBeLessThan(800);
+    f.event("wheel", { deltaY: 400 });
+    f.move(800); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    for (const timestamp of [64, 96, 160, 240, 304, 368]) {
+      f.flush(timestamp);
+      expect(f.element.scrollTop).toBeGreaterThanOrEqual(800);
+    }
+    expect(f.element.scrollTop).toBe(886);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+  for (const end of ["release", "detach"] as const) test(`${end} restores a held follow position directly even when streaming motion is smooth`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input"); f.element.append(field);
+    stubRect(field, () => ({ top: 450 - f.element.scrollTop, bottom: 470 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.owner.hold(field as unknown as HTMLElement); f.flush(16);
+    expect(f.element.scrollTop).toBe(170);
+    const before = f.writes.length;
+    if (end === "release") f.owner.release();
+    else { field.remove(); f.owner.request(); }
+    f.flush(32);
+    expect(f.element.scrollTop).toBe(300);
+    expect(f.writes.length - before).toBe(1);
+    expect(f.frames.size).toBe(0);
+  });
+  test("restoring a missing reading anchor places its latest fallback immediately", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(900); f.owner.request(true); f.flush(16); f.flush(48);
+    f.anchor.restore({ itemId: "removed", offset: 0 });
+    f.owner.request(); f.flush(64);
+    expect(f.element.scrollTop).toBe(600);
+    expect(f.frames.size).toBe(0);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+  test("arriving at bottom during smooth following does not pull the reader backward", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.move(886); f.event("scroll"); f.flush(64);
+    expect(f.element.scrollTop).toBe(886);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.frames.size).toBe(0);
+  });
+  test("initial latest and restored reading positions are immediate without disabling later smooth following", () => {
+    const f = fixture(() => "smooth");
+    f.move(100); f.owner.latest({ motion: "instant" }); f.flush(0);
+    expect(f.element.scrollTop).toBe(300);
+    expect(f.frames.size).toBe(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    expect(f.element.scrollTop).toBeLessThan(886);
+    f.anchor.restore({ itemId: "line", offset: -100 });
+    f.owner.request(); f.flush(64);
+    expect(f.element.scrollTop).toBe(100);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.frames.size).toBe(0);
+  });
+  test("snapshot cancellation retains only an unconsumed instant placement across replacements", () => {
+    const f = fixture(() => "smooth");
+    f.move(0); f.owner.latest({ motion: "instant" });
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel({ forSnapshot: true });
+    expect(f.frames.size).toBe(0);
+    expect(f.writes).toEqual([]);
+    f.grow(900); f.owner.request(); f.flush(0);
+    expect(f.element.scrollTop).toBe(600);
+    expect(f.writes).toEqual([600]);
+    // Once consumed, replacement cancellation must not invent another instant
+    // placement: ordinary subsequent output still follows smoothly.
+    f.grow(1200); f.owner.cancel({ forSnapshot: true });
+    f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(600);
+    expect(f.element.scrollTop).toBeLessThan(900);
+  });
+  test("ordinary cancellation clears an unconsumed instant placement", () => {
+    const f = fixture(() => "smooth");
+    f.move(0); f.owner.latest({ motion: "instant" }); f.owner.cancel();
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.request(); f.flush(0); f.flush(32);
+    expect(f.element.scrollTop).toBeGreaterThan(0);
+    expect(f.element.scrollTop).toBeLessThan(300);
+  });
+  test("reader pause cancels initial placement and snapshot cancellation cannot repin it", () => {
+    const f = fixture(() => "smooth");
+    f.move(100); f.owner.latest({ motion: "instant" }); f.owner.pause();
+    f.owner.cancel({ forSnapshot: true });
+    f.grow(900); f.owner.request(true); f.flush(0); f.flush(32);
+    expect(f.anchor.isPinned()).toBe(false);
+    expect(f.element.scrollTop).toBe(100);
+    expect(f.writes).toEqual([]);
+  });
+  test("snapshot cancellation without pending placement does not invent instant following", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(900);
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel({ forSnapshot: true });
+    f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    expect(f.element.scrollTop).toBeLessThan(600);
+  });
+  test("a held control interrupts smooth following with one immediate write", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input"); f.element.append(field);
+    stubRect(field, () => ({ top: 1000 - f.element.scrollTop, bottom: 1020 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    const writesBefore = f.writes.length;
+    f.owner.hold(field as unknown as HTMLElement); f.flush(64);
+    expect(f.element.scrollTop).toBe(720);
+    expect(f.writes.length - writesBefore).toBe(1);
+    expect(f.frames.size).toBe(0);
+    f.owner.request(true); f.flush(80);
+    expect(f.element.scrollTop).toBe(720);
+  });
+  test("disposing a moving follow retires its queued frames and future writes", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    expect(f.frames.size).toBe(1);
+    const writesBefore = f.writes.length;
+    f.owner.dispose();
+    expect(f.frames.size).toBe(0);
+    f.flush(400); f.owner.request(true); f.owner.latest(); f.owner.flush(416);
+    expect(f.writes.length).toBe(writesBefore);
+  });
+  test("switching to instant motion finishes an active follow on its next frame", () => {
+    let motion: "smooth" | "instant" = "smooth";
+    const f = fixture(() => motion);
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    expect(f.element.scrollTop).toBeLessThan(886);
+    motion = "instant";
+    const writesBefore = f.writes.length;
+    f.flush(64);
+    expect(f.element.scrollTop).toBe(886);
+    expect(f.writes.length - writesBefore).toBe(1);
+    expect(f.frames.size).toBe(0);
+    f.flush(400);
+    expect(f.writes.length - writesBefore).toBe(1);
+  });
+  test("upward wheel, touch, and key input cancel both pending and moving smooth latest requests", () => {
+    for (const gesture of ["wheel", "touch", "key"] as const) {
+      for (const moving of [false, true]) {
+        const f = fixture(() => "smooth");
+        f.move(100); f.owner.pause(); f.owner.latest();
+        if (moving) {
+          f.flush(0); f.flush(32);
+          expect(f.element.scrollTop).toBeGreaterThan(100);
+          expect(f.element.scrollTop).toBeLessThan(300);
+        }
+        const stopped = f.element.scrollTop;
+        if (gesture === "wheel") f.event("wheel", { deltaY: -4 });
+        if (gesture === "touch") {
+          f.event("touchstart", { touches: [{ clientY: 100 }] });
+          f.event("touchmove", { touches: [{ clientY: 120 }] });
+        }
+        if (gesture === "key") f.event("keydown", { key: "PageUp" });
+        expect(f.frames.size).toBe(0);
+        expect(f.anchor.isPinned()).toBe(false);
+        f.grow(900); f.owner.request(true); f.flush(400);
+        expect(f.element.scrollTop).toBe(stopped);
+        expect(f.anchor.isPinned()).toBe(false);
+      }
+    }
+  });
+  test("a growing stream retargets without reversing and settles within 300ms of its last layout update", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    let previous = 300;
+    for (let timestamp = 16; timestamp <= 640; timestamp += 16) {
+      if (timestamp <= 320) { f.grow(600 + timestamp * 2); f.owner.request(true); }
+      const writesBefore = f.writes.length;
+      f.flush(timestamp);
+      expect(f.writes.length - writesBefore).toBeLessThanOrEqual(1);
+      expect(f.element.scrollTop).toBeGreaterThanOrEqual(previous);
+      if (timestamp === 320) {
+        expect(f.element.scrollTop).toBeGreaterThan(300);
+        expect(f.element.scrollTop).toBeLessThan(940);
+      }
+      if (timestamp === 608) expect(f.element.scrollTop).toBe(940);
+      previous = f.element.scrollTop;
+      f.event("scroll");
+      expect(f.anchor.isPinned()).toBe(true);
+    }
+  });
+  test("following a streamed append moves across frames and reaches bottom within 300ms", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    expect(f.element.scrollTop).toBe(300);
+
+    // A streamed layout adds 586px below the reader. Sample the actual scroll
+    // position, not animation state: following must not teleport to the end.
+    f.grow(1186); f.owner.request(true);
+    const positions: number[] = [];
+    for (const timestamp of [...Array.from({ length: 18 }, (_, index) => (index + 1) * 16), 300]) {
+      const writesBefore = f.writes.length;
+      f.flush(timestamp);
+      expect(f.writes.length - writesBefore).toBeLessThanOrEqual(1);
+      positions.push(f.element.scrollTop);
+      // Browsers report programmatic writes through the same public event seam.
+      f.event("scroll");
+    }
+
+    expect(positions[0]).toBeLessThan(886);
+    expect(new Set(positions.filter(top => top > 300 && top < 886)).size).toBeGreaterThanOrEqual(2);
+    for (let index = 1; index < positions.length; index++) {
+      expect(positions[index]).toBeGreaterThanOrEqual(positions[index - 1]!);
+    }
+    expect(f.element.scrollTop).toBe(886);
+  });
   for (const end of ["release", "cancel", "latest", "pause", "detach"] as const) test(`hold identity query after ${end}`, () => {
     const f = fixture();
     const field = f.document.createElement("input") as unknown as HTMLElement;
@@ -502,6 +1749,8 @@ describe("coordinated scrolling", () => {
     expect(f.element.scrollTop).toBe(296);
     expect(f.anchor.isPinned()).toBe(false);
     f.move(390); f.event("scroll");
+    expect(f.anchor.isPinned()).toBe(true);
+    f.move(400); f.event("scroll");
     expect(f.anchor.isPinned()).toBe(true);
     f.flush(); expect(f.element.scrollTop).toBe(400);
   });

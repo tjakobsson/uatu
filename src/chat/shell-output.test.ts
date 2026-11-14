@@ -11,7 +11,7 @@ let id = 0;
 let timestamp = 0;
 let restore: (() => void)[] = [];
 beforeEach(() => {
-  for (const [key, value] of Object.entries({ document: dom.document, requestAnimationFrame: (fn: FrameRequestCallback) => { frames.set(++id, fn); return id; }, cancelAnimationFrame: (id: number) => frames.delete(id) })) {
+  for (const [key, value] of Object.entries({ document: dom.document, matchMedia: () => ({ matches: true }), requestAnimationFrame: (fn: FrameRequestCallback) => { frames.set(++id, fn); return id; }, cancelAnimationFrame: (id: number) => frames.delete(id) })) {
     const old = Reflect.get(globalThis, key); Reflect.set(globalThis, key, value);
     restore.push(() => Reflect.set(globalThis, key, old));
   }
@@ -25,7 +25,60 @@ function view(): HTMLElement {
 }
 const metadata: ShellOutputMetadata = { command: "bun test", conversation: "Test conversation", status: "running" };
 
+test("rendered shell follows smoothly, settles within 300ms and responds to reduced motion", () => {
+  let reduced = false;
+  Reflect.set(globalThis, "matchMedia", () => ({ matches: reduced }));
+  const shell = new ShellOutputController("c1", "motion", metadata);
+  Object.assign(shell.viewport, { scrollTop: 0, scrollLeft: 0, scrollHeight: 2000, clientHeight: 240 });
+  shell.update("first", metadata); frame();
+  expect(shell.viewport.scrollTop).toBe(1760);
+  Object.assign(shell.viewport, { scrollHeight: 2500 });
+  shell.update("first\nsecond", metadata); frame(); frame();
+  expect(shell.viewport.scrollTop).toBeGreaterThan(1760);
+  expect(shell.viewport.scrollTop).toBeLessThan(2260);
+  for (let step = 0; step < 18; step++) frame();
+  expect(shell.viewport.scrollTop).toBe(2260);
+  Object.assign(shell.viewport, { scrollHeight: 3000 });
+  shell.update("first\nsecond\nthird", metadata); frame(); frame();
+  expect(shell.viewport.scrollTop).toBeLessThan(2760);
+  reduced = true;
+  frame();
+  expect(shell.viewport.scrollTop).toBe(2760);
+  shell.dispose();
+});
+
 describe("shell scroll owner", () => {
+  test("shell downward arrival keeps its independent approximately-bottom policy", () => {
+    const viewport = view(); const owner = new ShellScrollOwner(viewport);
+    try {
+      owner.latest(); frame(); owner.readerInput("up");
+      viewport.scrollTop = 1600; owner.observe();
+      for (const gap of [48, 20, 1]) {
+        viewport.scrollTop = 1760 - gap; owner.observe();
+        expect(owner.following).toBe(gap <= 1);
+      }
+    } finally { owner.dispose(); }
+  });
+  test("diagonal native progress during smooth catch-up retains the new horizontal offset", () => {
+    Reflect.set(globalThis, "matchMedia", () => ({ matches: false }));
+    const viewport = view(); const owner = new ShellScrollOwner(viewport);
+    try {
+      owner.updated(); frame();
+      viewport.scrollLeft = 70; owner.observe();
+      Object.assign(viewport, { scrollHeight: 2500 }); owner.updated(); frame(); frame();
+      expect(viewport.scrollTop).toBeGreaterThan(1760);
+      expect(viewport.scrollTop).toBeLessThan(2260);
+      viewport.scrollTop += 10; viewport.scrollLeft = 130; owner.observe();
+      frame();
+      expect(viewport.scrollLeft).toBe(130);
+      expect(owner.snapshot().left).toBe(130);
+      Object.assign(viewport, { scrollHeight: 2600 }); owner.updated();
+      for (let step = 0; step < 18; step++) frame();
+      expect(viewport.scrollTop).toBe(2360);
+      expect(viewport.scrollLeft).toBe(130);
+      expect(owner.following).toBe(true);
+    } finally { owner.dispose(); }
+  });
   test("one frame correction initializes completed output at bottom and coalesces appends", () => {
     const viewport = view(); const owner = new ShellScrollOwner(viewport);
     let writes = 0, top = 0;
@@ -101,9 +154,55 @@ describe("shell scroll owner", () => {
     });
   }
 
+  test("focusing an offscreen nested shell reveals it in the moving outer timeline without moving shell output", () => {
+    Reflect.set(globalThis, "matchMedia", () => ({ matches: false }));
+    const parent = view(), viewport = view(); parent.append(viewport);
+    viewport.className = "chat-shell-viewport";
+    viewport.tabIndex = 0;
+    parent.getBoundingClientRect = () => ({ top: 0, bottom: 240, height: 240 }) as DOMRect;
+    viewport.getBoundingClientRect = () => ({ top: 2800 - parent.scrollTop, bottom: 3040 - parent.scrollTop, height: 240 }) as DOMRect;
+    const parentAnchor = new TimelineAnchorController();
+    const outer = new CoordinatedScrollOwner(parent, {
+      anchor: parentAnchor,
+      followMotion: () => "smooth",
+      measure: includeItems => ({ scrollTop: parent.scrollTop, scrollHeight: parent.scrollHeight, clientHeight: parent.clientHeight,
+        items: includeItems ? [{ id: "shell-row", top: 2800 - parent.scrollTop, bottom: 3040 - parent.scrollTop }] : [] }),
+    });
+    const owner = new ShellScrollOwner(viewport);
+    const activeElement = Object.getOwnPropertyDescriptor(dom.document, "activeElement");
+    let active: Element | null = null;
+    Object.defineProperty(dom.document, "activeElement", { configurable: true, get: () => active });
+    const previous = dom.document.createElement("button"); dom.document.body.append(previous);
+    try {
+      outer.request(); owner.updated(); frame();
+      expect(viewport.scrollTop).toBe(1760);
+      Object.assign(parent, { scrollHeight: 4000 }); outer.request(true); frame(); frame();
+      expect(parent.scrollTop).toBeGreaterThan(1760);
+      expect(viewport.getBoundingClientRect().top).toBeGreaterThan(240);
+      previous.dispatchEvent(Object.assign(new dom.window.Event("keydown", { bubbles: true }), { key: "Tab" }));
+      active = viewport;
+      viewport.dispatchEvent(new dom.window.Event("focusin", { bubbles: true }));
+      // Native Tab reveals the focusable shell viewport by scrolling its
+      // ancestor; no line inside that shell has moved.
+      parent.scrollTop = 2800; parent.dispatchEvent(new dom.window.Event("scroll"));
+      expect(viewport.getBoundingClientRect().top).toBe(0);
+      for (let step = 0; step < 20; step++) frame();
+      const afterMotion = viewport.getBoundingClientRect().top;
+      Object.assign(parent, { scrollHeight: 4500 }); outer.request(true);
+      for (let step = 0; step < 20; step++) frame();
+      expect({ afterMotion, afterAppend: viewport.getBoundingClientRect().top, innerTop: viewport.scrollTop, innerFollowing: owner.following })
+        .toEqual({ afterMotion: 0, afterAppend: 0, innerTop: 1760, innerFollowing: true });
+    } finally {
+      previous.remove();
+      owner.dispose(); outer.dispose();
+      if (activeElement) Object.defineProperty(dom.document, "activeElement", activeElement);
+      else Reflect.deleteProperty(dom.document, "activeElement");
+    }
+  });
+
   test("one listener set and one writer handle replacement and delayed clamp echoes", () => {
     const viewport = view();
-    const types = ["scroll", "wheel", "touchstart", "touchmove", "keydown", "pointerdown"];
+    const types = ["scroll", "wheel", "touchstart", "touchmove", "keydown", "pointerdown", "focusin"];
     const counts = new Map<string, number>();
     const active = new Map<string, Set<EventListener>>();
     const add = viewport.addEventListener.bind(viewport);
@@ -119,7 +218,7 @@ describe("shell scroll owner", () => {
     }) as typeof viewport.removeEventListener;
     const expectListeners = (registrations: number, remaining: number) => {
       // The shared coordinator owns exactly one complete set, including its
-      // native scrollbar guard; the shell adapter adds no input listeners.
+      // native scrollbar guard and focus navigation; the shell adapter adds none.
       expect([...counts.keys()].sort()).toEqual([...types].sort());
       for (const type of types) {
         expect(counts.get(type)).toBe(registrations);

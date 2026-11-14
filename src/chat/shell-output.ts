@@ -1,6 +1,7 @@
 import { TerminalOutputBuffer, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 import { CoordinatedScrollOwner, type CoordinatedScrollAnchor } from "./coordinated-scroll";
 import type { AnchorGeometry } from "./anchor";
+import { scrollFollowMotion } from "./scroll-motion";
 import { shellOutputWindow, type ShellWindowGeometry } from "./shell-output-window";
 import type { ActivityStatus } from "./types";
 
@@ -102,6 +103,7 @@ export class ShellScrollOwner {
       measure: () => ({ scrollTop: viewport.scrollTop || 0, scrollHeight: viewport.scrollHeight || 0, clientHeight: viewport.clientHeight || 0, items: [] }),
       active: () => active() && typeof requestAnimationFrame === "function",
       onChange: changed,
+      followMotion: scrollFollowMotion,
     });
   }
 

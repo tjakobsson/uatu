@@ -1,7 +1,7 @@
 import { test as baseTest, expect } from "./fixtures";
 import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
-import { bootShell, frames as settleFrames, log, shell, position, drag } from "./chat-shell-helpers";
+import { bootShell, frames as settleFrames, settleScroll, log, shell, position, drag } from "./chat-shell-helpers";
 
 const test = withEngineBrowsers(baseTest);
 
@@ -39,6 +39,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
     const errors: string[] = [];
+    const interruptSteps: unknown[] = [];
     page.on("pageerror", error => errors.push(error.message));
     try {
       let instrumented = false;
@@ -51,9 +52,9 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
             const registry = globalThis.__coordinatedOwners ??= new Map(); const prior = registry.get(scroller);
             const entry = { id: prior?.id ?? registry.size + 1, anchor: this.options.anchor, registrations: (prior?.registrations ?? 0) + 1 };
             registry.set(scroller, entry);
-            const flush = this.flush; this.flush = function(timestamp) {
+            const flush = this.flush; this.flush = function(...args) {
               const previous = globalThis.__activeCorrectionOwner; globalThis.__activeCorrectionOwner = entry.id;
-              try { return flush.call(this, timestamp); } finally { globalThis.__activeCorrectionOwner = previous; }
+              try { return flush.apply(this, args); } finally { globalThis.__activeCorrectionOwner = previous; }
             };
             const coordinated = this;
             for (const method of ["pause", "observe"]) {
@@ -138,8 +139,34 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         expect(await following()).toBe(false);
       };
       const interrupt = async (pendingLatest = false) => {
+        const probe = async (step: string) => {
+          interruptSteps.push(await viewport.evaluate((el, args) => {
+            const outer = document.getElementById(args.outerId)!;
+            const geometry = (node: HTMLElement) => {
+              const rect = node.getBoundingClientRect();
+              return { top: node.scrollTop, extent: node.scrollHeight, height: node.clientHeight,
+                rectTop: rect.top, rectBottom: rect.bottom,
+                pinned: window.__coordinatedOwners.get(node)!.anchor.isPinned() };
+            };
+            return { step: args.step, pendingLatest: args.pendingLatest, time: performance.now(),
+              frame: window.__shellFrameTrace.frame, phase: window.__shellFrameTrace.phase,
+              outer: geometry(outer), inner: geometry(el as HTMLElement), focusTag: document.activeElement?.tagName ?? null };
+          }, { step, pendingLatest, outerId: child ? "chat-drilldown-timeline" : "chat-timeline" }));
+        };
+        if (!touch && !pendingLatest) {
+          await probe("before-hover");
+          // Hover may scroll an offscreen shell into view. Finish that deliberate
+          // test navigation before measuring independence of the nested wheel.
+          await viewport.hover();
+          await probe("after-hover-before-wheel");
+          await settleScroll(timeline);
+          await probe("after-navigation-settle");
+        }
         const outerBefore = await outerIntent();
-        if (!touch && !pendingLatest) { await viewport.hover(); await page.mouse.wheel(0, -4); }
+        if (!touch && !pendingLatest) {
+          await page.mouse.wheel(0, -4);
+          await probe("after-wheel");
+        }
         else await viewport.evaluate((el, pending) => {
           if (pending) el.closest(".chat-shell-output")!.querySelectorAll<HTMLButtonElement>("button").forEach(button => {
             if (button.textContent?.includes("Latest output")) button.click();
@@ -154,6 +181,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         }, pendingLatest);
         await expect.poll(following).toBe(false);
         await settleFrames(page);
+        await probe("after-settle");
         expect(await outerIntent()).toBe(outerBefore);
         return (await position(viewport)).top;
       };
@@ -194,7 +222,9 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         await phase("restore-size"); await floating.getByRole("button", { name: "Restore size" }).click();
         await settleFrames(page); await atBottom();
       }
-      await phase("return"); await floating.getByRole("button", { name: "Return to chat" }).click();
+      await phase("return");
+      await expect(floating.getByRole("button", { name: "Return to chat" })).toBeInViewport({ ratio: 1 });
+      await floating.getByRole("button", { name: "Return to chat" }).click();
       await expect(floating).toHaveCount(0); await settleFrames(page); await atBottom();
       await phase("returned-passive"); await update(count + 1, "completed"); await atBottom();
       await phase("paused-popout"); reading = await interrupt();
@@ -203,12 +233,29 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
       });
       await settleFrames(page);
       expect(await outerIntent()).toBe(false);
+      // Navigation to an offscreen control is intentional movement, not part
+      // of the reparenting transaction. Establish the handoff baseline only
+      // after that navigation, so locator.click() cannot silently move it.
+      const popout = outputView.getByRole("button", { name: "Pop out", exact: true });
+      await popout.scrollIntoViewIfNeeded();
+      await settleScroll(timeline);
+      await expect(popout).toBeInViewport({ ratio: 1 });
+      if (await outerIntent()) {
+        await timeline.evaluate(el => {
+          el.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -4 }));
+          window.__shellFrameTrace.reader = true;
+          try { el.scrollTop -= 4; } finally { window.__shellFrameTrace.reader = false; }
+        });
+        await settleScroll(timeline);
+      }
+      expect(await outerIntent()).toBe(false);
+      await expect(popout).toBeInViewport({ ratio: 1 });
       const outerTop = (await position(timeline)).top;
       const clampedReading = async () => {
         const expected = await viewport.evaluate((el, top) => Math.min(top, Math.max(0, el.scrollHeight - el.clientHeight)), reading);
         await stableReading(expected);
       };
-      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      await popout.click();
       await expect(floating).toBeVisible(); await settleFrames(page); await clampedReading();
       expect(await outerIntent()).toBe(false);
       if (!touch) {
@@ -217,7 +264,9 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
         await phase("paused-restore"); await floating.getByRole("button", { name: "Restore size" }).click();
         await settleFrames(page); await clampedReading();
       }
-      await phase("paused-return"); await floating.getByRole("button", { name: "Return to chat" }).click();
+      await phase("paused-return");
+      await expect(floating.getByRole("button", { name: "Return to chat" })).toBeInViewport({ ratio: 1 });
+      await floating.getByRole("button", { name: "Return to chat" }).click();
       await expect(floating).toHaveCount(0); await settleFrames(page); await stableReading(reading);
       expect(await outerIntent()).toBe(false);
       expect(Math.abs((await position(timeline)).top - outerTop)).toBeLessThan(2);
@@ -244,6 +293,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
       expect(errors).toEqual([]);
       console.log(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} shell trace ${JSON.stringify(summaries)}`);
     } finally {
+      await testInfo.attach("shell-interrupt-steps.json", { body: JSON.stringify({ engine: browser.version(), steps: interruptSteps }, null, 2), contentType: "application/json" });
       const trace = await page.evaluate(() => window.__shellFrameTrace).catch(() => undefined);
       if (trace) {
         const observations = await page.evaluate(() => window.__shellObservations);

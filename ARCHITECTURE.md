@@ -1080,6 +1080,10 @@ Touch work tracks share `#chat-work-dock`, bounded by `--chat-visual-height`
 independent Workers/Pending content scrollers separate from the transcript.
 Desktop queue height uses 40% of the measured panel height, not a fixed rem
 estimate of the viewport.
+Expanded fine-pointer desktop cards instead share the measured remaining space:
+the transcript prefers half, bounded to 200–420px. Measured work/action floors
+and short-window emergency behavior still take precedence. Comfortable/touch
+allocation is unchanged; cards retain independent scrolling and visible headers.
 Short visual bands compact the header/composer; keyboard/short-landscape mode
 keeps both cards available with compact chrome. The outer surface normally
 cannot scroll; only physically insufficient bands allow native scrolling to
@@ -1089,12 +1093,120 @@ Hardware-keyboard editing retains the bottom safe inset without doubling it
 under a software keyboard. Touch Stop parent with worker records confirms its
 scope; detached workers remain running. Expanded work tracks hide the prompt rail so
 it cannot cover Stop targets. Transcript anchoring remains with its coordinated
-scroll owner; sending a prompt deliberately requests latest, remote dock growth
-preserves the reading anchor.
+scroll owner; sending a prompt and remote dock growth preserve a paused reader's
+anchor rather than requesting latest. Deliberate downward arrival within 48 CSS
+pixels of the bottom (including the boundary), or the latest-content control,
+resumes timeline following. Upward input still pauses immediately; restoration,
+layout clamps and unchanged scroll echoes do not impersonate reader arrival.
+Shell output keeps its independent approximately-bottom resumption policy.
 Dock growth reserves its final bounded height and reveals the added area over
 160ms; reduced motion applies it immediately. Reserving layout avoids racing
 animated scroll clamps with prompt echo removal; the coordinated scroll owner
 preserves transcript position across the single geometry change.
+
+Chat scrolling is tested at three seams: the coordinated scroll owner's
+public interface (controlled frames and geometry), the rendered chat UI
+(submission and view-state wiring), and browser E2E (real layout and motion).
+Shared transcript geometry supplies a coarse item anchor plus an optional
+opaque markdown-content key and offset, so growth inside one long message does
+not move unchanged text being read. A fine key can identify a UTF-16 character
+within a block; current text nodes and Range geometry are resolved afresh so a
+paragraph can rewrap without losing the first visible text line. Browsers without
+usable caret/Range geometry fall back to the block anchor. Legacy item-only anchors
+remain valid; missing or ambiguous content keys fall back to the item rather than guessing
+at a repeated paragraph. An appended paragraph can retain its character anchor
+when exactly one current region matches the complete old-prefix fingerprint;
+rewrites and ambiguous matches still fall back without persisting raw text.
+Nested shell viewports keep their independent owners.
+Genuine reader movement captures a fresh reading point; correction echoes retain
+the previous point so repeated width changes cannot silently select another line.
+Native keyboard and accessibility focus navigation remains authoritative; a
+focused button alone does not establish a temporary handoff. A focus transition
+can place several ancestor scrollports; each retires smooth catch-up only for
+its own actual reveal, with range clamps excluded. The observation expires at
+the next correction frame or newer reader input.
+Request-pill jumps retain their logical target until queued rendering finishes,
+then resolve and focus the current card through the owner's centered reveal,
+without a second native scroll. Removal, departure and newer reader choices
+cancel that one-shot navigation instead of focusing a stale card.
+Render-owned loss of request focus may transfer to the replacement card; a
+subsequent focus choice invalidates that proof rather than being overwritten.
+Reading geometry excludes descendants hidden by closed disclosure groups, even
+when content-visibility supplies nonzero placeholder boxes. A closed row's own
+summary remains eligible; offscreen retained rows are not discarded merely
+because the browser skips their rendering work.
+Loaded ordinary assistant messages use normal layout, so already available text
+keeps real geometry as it enters the viewport. Activity rows/groups retain
+content-visibility skipping, and closed tool bodies remain deferred. There is no
+scripted nearby-row warmup or size cache. This trades some initial layout work
+for stable long-history text; browser regressions measure body readiness and
+same-word offsets, not physical-device pixel paint.
+For a freshly installed parent or child view without a saved reading anchor,
+the UI renders the transcript before letting its existing scroll owner perform
+initial instant placement on the following animation frame. This avoids the
+observed startup rollback after same-frame placement; it is one cancellable
+placement, not a retry. Reader input, hiding and navigation can preempt it.
+Snapshot replacement cancels stale callbacks while retaining the owner's
+unconsumed instant-placement intent; replacement geometry determines the target.
+Ordinary cancellation and reader pause still clear that intent.
+The owner stages navigation restoration until an actual transcript render.
+Its existing input classification makes newer reader choices, including Latest,
+supersede that restoration; layout-only callbacks cannot manufacture a choice.
+Durable capture prefers pending placement over incidental live geometry and
+preserves the original reading intent beneath a temporary answer hold. UI keeps
+per-view identity and storage, not a second pending-placement state machine.
+After answer blur, passive same-view snapshots preserve the live reading position
+and retain the separate durable anchor for later departure; cancelling snapshot
+work is not itself a request to return to that earlier anchor.
+Empty loading renders retain placement through hide/reopen, resize and departure
+before a read completes. Header Back and browser Back share the finishing capture
+path. Legacy stored anchors retain their shape; a finite-offset variant preserves
+unanchored pauses without confusing them with following.
+Saved reading-anchor restoration and ordinary updates keep their same-frame
+render/correction transaction; focused answer holds retain their existing owner.
+When browser hit testing is usable, geometry resolves the first viewport row,
+the retained row and any explicitly activated row directly instead of measuring
+all loaded history. Unavailable or unusable hit testing retains the full-scan
+fallback; Markdown and character anchors use the same geometry in either path.
+Following measures only scroll extents, not transcript items or markdown blocks.
+Native history scrolling classifies movement from extents before taking at most
+one semantic measurement for that event. Continuous upward touch movement captures
+pause intent once per owned gesture phase; actual native scroll events still
+refresh the reading point. New layout work, corrections, direction changes and
+renewed gestures invalidate that reuse, so it cannot suppress a new interruption.
+Following uses bounded, interruptible movement rather than repeatedly restarting
+native smooth scrolling. Reduced motion disables animation; initial presentation
+and saved-position restoration are direct. Each conversation/task view retains
+its own reading anchor and follow intent within the client session.
+Native bottom settling remains browser-owned: follow frames do not clamp an
+elastic excursion or round an idle subpixel arrival to the exact bottom.
+Rebound alone does not pause following; deliberate upward input still does.
+Initial placement, control reveals and requested instant placement remain direct.
+
+Run the focused unit/UI and browser checks with:
+
+```sh
+bun test src/chat/anchor.test.ts src/chat/coordinated-scroll.test.ts \
+  src/chat/ui.test.ts src/chat/shell-output.test.ts src/chat/shell-output-window.test.ts
+bun run test:e2e:perf -- tests/e2e/chat-scroll-contract.e2e.ts \
+  tests/e2e/chat-history-scroll.e2e.ts tests/e2e/chat-follow-stability.e2e.ts \
+  tests/e2e/chat-sync-scroll.e2e.ts tests/e2e/chat-text-preparation.e2e.ts
+```
+
+The contract suite measures actual intermediate positions,
+monotonic following, catch-up within 300ms after the last layout update in its
+controlled fixture, and reading-anchor drift within 2px. The existing stability
+suites additionally guard the single automatic position writer per frame and
+layout-work budgets. Tests tagged `@perf` run in the existing isolated CI perf
+project; frame traces and failure diagnostics are attached to the test report.
+Control-handoff tests make preparatory navigation explicit before recording the
+reading-position baseline, so revealing an offscreen control is not mistaken for
+movement caused by the handoff itself.
+Synthetic fixtures make regression checks repeatable without paid model calls;
+read-only real-session inspection is supplementary, not a deterministic CI
+guarantee or proof about every device's frame rate.
+History-work cases bound row measurements in real browser layout; synthetic touch
+and elastic-position tests do not reproduce physical iPhone Safari inertia.
 
 A Claude Code conversation's session lifetime (`src/chat/claude/provider.ts`) follows the work, not the first result: the SDK session is retired on a turn's result only when no accepted prompt is pending, no unprompted follow-up is in flight, and the background set (`background_tasks_changed`, ambient tasks excluded) is empty. While the set is non-empty the conversation reports `background`. When a backgrounded task settles the CLI starts a follow-up turn by itself (see the D9 spike in the change's design notes); the provider reports that turn as running and completed like any other. A set that empties with no follow-up returns the conversation to idle after a short grace window. Scheduled wakeups from `ScheduleWakeup`, `CronCreate`, and `/loop` hold the session the same way. The SDK sends no stream message for them, so the provider registers a `Stop` hook and level-sets the session's wakeups from its `session_crons`. The hook fires before the turn's `result`, so the set is current when retirement is decided. A result with wakeups pending and no background work reports `scheduled`. With both, `background` wins. A fired wakeup's turn reaches the host only as a `UserPromptSubmit` hook, with no `user` message on the stream, so the provider mints that turn's opening `user_message` itself, with `origin: "wakeup"`. It attributes the turn by the hook's `source`, or by the prompt matching a pending wakeup while no accepted prompt is outstanding. A cron missing from the next `Stop` fired if a turn was attributed to it. Otherwise the agent cancelled it. Resuming a session makes the CLI rebuild its `CronCreate` crons from the transcript, while a `ScheduleWakeup` never outlives its process. So when the stream ends or the workspace shuts down, a pending `ScheduleWakeup` is marked lost and a `CronCreate` cron paused. The provider tells them apart by the `CronCreate` result's `id` and the `ScheduleWakeup` call's prompt. The provider enforces a cancel itself, because the SDK has no call that deletes a cron. Cancelled ids live per conversation in its durable state, never hold a session, and have their fires answered with `decision: "block"` at the `UserPromptSubmit` hook. The `init`, `informational`, and `result` frames a blocked fire produces are swallowed. The per-wakeup cancel is `POST /api/chat/conversations/:id/wakeups/:wakeupId/cancel`. Release, `POST /api/chat/conversations/:id/release`, cancels every wakeup and retires the session. A conversation opened without a live session lists its paused crons, derived from the transcript by `transcriptCrons()` in `src/chat/claude/transcript.ts`: `CronCreate` results minus `CronDelete`d ids, fired or lapsed one-shots, and crons past the 7-day expiry. Nothing starts a session to keep a schedule running. Conversation titles follow the transcript's own entries: a user rename (`custom-title`) outranks Claude Code's generated title (`ai-title`), which outranks the first prompt.
 
