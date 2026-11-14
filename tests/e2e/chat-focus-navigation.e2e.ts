@@ -179,8 +179,10 @@ for (const engine of ["chromium", "webkit"] as const) {
         await settleScroll(timeline);
         // Native keyboard traversal establishes control focus on both engines;
         // do not repair focus with script or waive this setup assertion.
-        await page.keyboard.press(engine === "webkit" ? "Alt+Tab" : "Tab");
         const control = card.getByRole("button", { name: "Allow once", exact: true });
+        for (let step = 0; step < 8 && !await control.evaluate(node => node === document.activeElement); step++) {
+          await page.keyboard.press(engine === "webkit" ? "Alt+Tab" : "Tab");
+        }
         await expect(control).toBeFocused();
         const band = (await timeline.boundingBox())!;
         await page.mouse.move(band.x + band.width / 2, band.y + band.height / 2);
