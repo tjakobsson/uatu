@@ -753,6 +753,44 @@ describe("coordinated scrolling", () => {
     }
   });
 
+  for (const layout of ["content clamp", "viewport clamp", "viewport caret placement"] as const) test(`pending focus observation cannot turn ${layout} into a reader pause`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: f.element.clientHeight }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    const targetTop = layout === "viewport caret placement" ? 780 : 700;
+    stubRect(button, () => ({ top: targetTop - f.element.scrollTop, bottom: targetTop + 30 - f.element.scrollTop }));
+    f.grow(1100); f.owner.request(); f.flush(0);
+    expect(f.element.scrollTop).toBe(800);
+    f.eventAt(button, "focusin"); // focus({ preventScroll: true }); no placement.
+    expect(f.element.scrollTop).toBe(800);
+    if (layout === "content clamp") f.grow(900); // Native range clamp: 800 -> 600.
+    else if (layout === "viewport clamp") { f.resize(500); f.move(600); }
+    else {
+      // Same native viewport/caret offset behavior as the composer-resize
+      // regressions: 20px of layout movement, not scrolling to this button.
+      f.resize(280); f.move(780);
+    }
+    f.event("scroll");
+    const followingAfterLayoutEvent = f.anchor.isPinned();
+    f.flush(16);
+    const followingAfterFrame = f.anchor.isPinned();
+    f.grow(900 + f.element.clientHeight); f.owner.request(true); f.flush(32); f.flush(320);
+    expect({ followingAfterLayoutEvent, followingAfterFrame, afterAppend: f.element.scrollTop }).toEqual({
+      followingAfterLayoutEvent: true, followingAfterFrame: true, afterAppend: 900,
+    });
+    // A later, fresh focus transition still owns actual native movement in
+    // the settled viewport; retiring layout evidence is not a focus blanket.
+    const next = f.document.createElement("button"); f.element.append(next);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => next });
+    stubRect(next, () => ({ top: 1500 - f.element.scrollTop, bottom: 1530 - f.element.scrollTop }));
+    f.grow(2100); f.eventAt(next, "focusin");
+    f.move(1530 - f.element.clientHeight); f.event("scroll");
+    f.flush(352); f.grow(2400); f.owner.request(true); f.flush(384); f.flush(704);
+    expect(next.getBoundingClientRect().bottom).toBe(f.element.clientHeight);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
   test("native focus placement is adopted before a delayed scroll event", () => {
     const f = fixture(() => "smooth");
     stubRect(f.element, () => ({ top: 0, bottom: 300 }));

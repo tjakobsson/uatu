@@ -485,6 +485,8 @@ export function initChat(api = new ChatApiClient()): void {
     return true;
   });
   let rendering = false;
+  // Proof of focus loss caused by this renderer, not by a newer focus choice.
+  let renderedRequestFocusLoss = new WeakMap<Element, string>();
   let renderFrame: number | null = null;
   let renderDirty = false;
   let pendingNewContent = false;
@@ -1580,7 +1582,10 @@ export function initChat(api = new ChatApiClient()): void {
     const focus = document.activeElement;
     parentScroll.reveal(() => {
       if (!projection || projection.conversationId !== conversationId || selection !== selectionGeneration
-        || child || !chatSurfaceActive() || document.activeElement !== focus) return null;
+        || child || !chatSurfaceActive()) return null;
+      const retainedFocus = document.activeElement === focus || (focus && document.activeElement === document.body
+        && renderedRequestFocusLoss.get(focus) === id);
+      if (!retainedFocus) return null;
       const item = projection.items.find(item => item.id === id);
       if (!item || ((item.type === "permission" || item.type === "question")
         && (item.status !== "pending" || activeInteractionRequests(projection.items, projection.conversationId)[0]?.id !== id))) return null;
@@ -1904,7 +1909,15 @@ export function initChat(api = new ChatApiClient()): void {
     renderer.loginAction = contextLoginAction();
     const conversation = conversations.find(value => value.id === projection?.conversationId);
     renderer.conversationTitle = conversation ? displayConversationTitle(conversation) : chatHeading();
+    const focusedBeforeRender = document.activeElement;
+    const focusLossBeforeRender = renderedRequestFocusLoss;
+    const focusedRequestId = focusedBeforeRender && items.contains(focusedBeforeRender)
+      ? focusedBeforeRender.closest(".chat-request[data-chat-item-id]")?.getAttribute("data-chat-item-id") : null;
     const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
+    if (focusedBeforeRender && focusedRequestId && focusLossBeforeRender === renderedRequestFocusLoss
+      && !focusedBeforeRender.isConnected && document.activeElement === document.body) {
+      renderedRequestFocusLoss.set(focusedBeforeRender, focusedRequestId);
+    }
     // Reconcile the current snapshot before revealing a retained output window.
     renderer.setShellOutputsHidden(false);
     revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
@@ -4746,6 +4759,10 @@ export function initChat(api = new ChatApiClient()): void {
     if (heldAnswerField && !surface.contains(heldAnswerField)) syncEditingFocus();
   };
   surface.addEventListener("focusin", syncEditingFocus);
+  // A focus choice anywhere invalidates a prior renderer-owned body fallback.
+  // Detached-node focusout is not reliable across engines; capture the actual
+  // focused removal in renderNow instead of inferring it from blur events.
+  document.addEventListener("focusin", () => { renderedRequestFocusLoss = new WeakMap(); });
   surface.addEventListener("focusout", () => queueMicrotask(syncEditingFocus));
   send.addEventListener("mousedown", keepTouchComposerFocus);
   attachButton?.addEventListener("mousedown", keepTouchComposerFocus);

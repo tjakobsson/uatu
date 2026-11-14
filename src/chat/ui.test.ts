@@ -6240,9 +6240,13 @@ describe("chat outstanding-request pill", () => {
     }
   });
 
-  for (const state of ["paused", "following", "moving"] as const) for (const interruption of ["none", "removed", "departure", "focus", "wheel"] as const) test(interruption === "none"
-    ? `request pill retains the current permission through a queued replacement while ${state}`
-    : `request pill cancels queued permission navigation on ${interruption} while ${state}`, async () => {
+  for (const state of ["paused", "following", "moving"] as const) for (const interruption of ["none", "removed", "departure", "focus", "wheel", "blur"] as const) for (const retainedFocus of [false, true]) {
+    if (retainedFocus ? state === "moving" || !["none", "blur"].includes(interruption) : interruption === "blur") continue;
+    test(retainedFocus
+      ? interruption === "none" ? `request pill retains permission focus through render-induced detachment while ${state}`
+        : `request pill cancels retained permission focus after deliberate blur while ${state}`
+      : interruption === "none" ? `request pill retains the current permission through a queued replacement while ${state}`
+        : `request pill cancels queued permission navigation on ${interruption} while ${state}`, async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
@@ -6260,7 +6264,7 @@ describe("chat outstanding-request pill", () => {
     const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 640, width: 640 }) as DOMRect;
     timeline.getBoundingClientRect = () => rect(0, 400);
     const prototype = window.HTMLElement.prototype;
-    const originalBounds = prototype.getBoundingClientRect, originalFocus = prototype.focus;
+    const originalBounds = prototype.getBoundingClientRect, originalFocus = prototype.focus, originalBlur = prototype.blur;
     prototype.getBoundingClientRect = function () {
       const id = this.getAttribute("data-chat-item-id");
       if (id === "message:before-request") return rect(-timeline.scrollTop, beforeHeight());
@@ -6275,6 +6279,11 @@ describe("chat outstanding-request pill", () => {
       active = this;
       if (this.getAttribute("data-chat-item-id") === "permission:replacement") focusedPermissions.push(this);
       this.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+    };
+    prototype.blur = function () {
+      if (active !== this) return;
+      active = null;
+      this.dispatchEvent(new window.Event("focusout", { bubbles: true }));
     };
     const permission = { id: "permission:replacement", type: "permission" as const, createdAt: 2, requestId: "replacement",
       action: "bash", resources: ["git status --short"], status: "pending" as const };
@@ -6315,6 +6324,11 @@ describe("chat outstanding-request pill", () => {
         expect(timeline.scrollTop).toBeLessThan(2700);
       }
       const oldCard = card()!;
+      const oldControl = oldCard.querySelector<HTMLButtonElement>('[data-permission-outcome="approved-once"]')!;
+      if (retainedFocus) {
+        oldControl.focus({ preventScroll: true });
+        expect(document.activeElement).toBe(oldControl);
+      }
       // Both real updates queue the transcript's existing render before the
       // pill is clicked. Geometry changes only when that render changes DOM.
       if (state !== "moving") upsert({ ...before, markdown: "Expanded response before request" }, 1);
@@ -6325,6 +6339,12 @@ describe("chat outstanding-request pill", () => {
       const pill = document.querySelector<HTMLButtonElement>("#chat-requests-jump")!;
       expect(pill.dataset.requestTarget).toBe(permission.id);
       pill.dispatchEvent(new window.Event("click", { bubbles: true }));
+      // Safari can activate the pill without focusing it. The DOM focus getter
+      // above falls back to body only once the real renderer detaches this node.
+      if (retainedFocus) {
+        expect(oldControl.isConnected).toBe(true);
+        expect(document.activeElement).toBe(oldControl);
+      }
       if (interruption !== "none") {
         const otherFocus = document.querySelector<HTMLButtonElement>("#chat-new-conversation")!;
         if (interruption === "removed") stream!.event({ type: "item.remove", conversationId: "one", generation: "g", sequence: 3,
@@ -6335,6 +6355,11 @@ describe("chat outstanding-request pill", () => {
           await waitUntil(() => { drain(); return !!document.querySelector('[data-chat-item-id="message:other"]'); });
         }
         if (interruption === "focus") otherFocus.focus();
+        if (interruption === "blur") {
+          oldControl.blur();
+          expect(oldControl.isConnected).toBe(true);
+          expect(document.activeElement).toBe(document.body);
+        }
         if (interruption === "wheel") {
           timeline.dispatchEvent(Object.assign(new window.Event("wheel", { bubbles: true }), { deltaY: 4 }));
           if (state !== "following") { timeline.scrollTop += 4; timeline.dispatchEvent(new window.Event("scroll")); }
@@ -6361,9 +6386,11 @@ describe("chat outstanding-request pill", () => {
       globalThis.cancelAnimationFrame = cancelFrame;
       prototype.getBoundingClientRect = originalBounds;
       prototype.focus = originalFocus;
+      prototype.blur = originalBlur;
       document.documentElement.setAttribute("data-chat-panel", "collapsed");
     }
   });
+  }
 
   test("yields while its request is on screen and re-targets when the request changes", async () => {
     const { document, window } = parseHTML(html);

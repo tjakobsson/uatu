@@ -1129,6 +1129,8 @@ Request-pill jumps retain their logical target until queued rendering finishes,
 then resolve and focus the current card through the owner's centered reveal,
 without a second native scroll. Removal, departure and newer reader choices
 cancel that one-shot navigation instead of focusing a stale card.
+Render-owned loss of request focus may transfer to the replacement card; a
+subsequent focus choice invalidates that proof rather than being overwritten.
 Reading geometry excludes descendants hidden by closed disclosure groups, even
 when content-visibility supplies nonzero placeholder boxes. A closed row's own
 summary remains eligible; offscreen retained rows are not discarded merely

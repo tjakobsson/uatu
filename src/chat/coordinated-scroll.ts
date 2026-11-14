@@ -615,9 +615,16 @@ export class CoordinatedScrollOwner {
   };
   private adoptFocusNavigation(geometry: AnchorGeometry): boolean {
     const navigation = this.focusNavigation;
+    // Layout has already explained this placement. Retire the observation
+    // before advancing `previous`, or the next frame could adopt it as input.
+    if (navigation && (this.isExtentClamp(geometry)
+      || (geometry.clientHeight !== this.previous.clientHeight && this.options.anchor.isPinned()))) {
+      this.focusNavigation = null;
+      return false;
+    }
     if (!navigation || this.heldTarget || !this.scroller.contains(navigation.target)
       || this.scroller.ownerDocument.activeElement !== navigation.target
-      || this.isExtentClamp(geometry) || geometry.scrollTop < 0
+      || geometry.scrollTop < 0
       || geometry.scrollTop > Math.max(0, geometry.scrollHeight - geometry.clientHeight)
       || Math.abs(geometry.scrollTop - navigation.top) <= 1e-6
       || Math.abs(this.revealDelta(navigation.target, undefined, geometry.scrollTop)) > 0.5) return false;
