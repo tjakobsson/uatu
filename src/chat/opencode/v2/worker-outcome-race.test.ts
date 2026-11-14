@@ -1853,6 +1853,13 @@ test(`${surface} fences overlapping moves between staged child boundaries (${cha
 
 for (const change of ["load-overlap-hidden", "load-overlap-prefix", "load-overlap-unchanged", "load-overlap-other", "owned-overlap-newer-source", "owned-overlap-hidden", "owned-overlap-prefix", "owned-overlap-unchanged", "owned-overlap-other", "collecting-hidden", "collecting-prefix", "hidden", "unchanged", "other-child", "retained-prefix", "newer-source"] as const)
 test(`scheduler captured child outcome observes late staged native record (${change})`, async () => {
+  const nativeReadOwner = new AsyncLocalStorage<"child-history" | "overlapping-fresh">();
+  let releaseStartup!: () => void;
+  const startupHeld = new Promise<void>(resolve => { releaseStartup = resolve; });
+  let startupRecordEntered!: () => void;
+  const startupRecordPending = new Promise<void>(resolve => { startupRecordEntered = resolve; });
+  let childHistoryFinished!: () => void;
+  const childHistorySettled = new Promise<void>(resolve => { childHistoryFinished = resolve; });
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, other: string | undefined, removed = false, captured = false;
   let entered!: () => void, release!: () => void, folded!: () => void, finished!: () => void, olderEntered!: () => void, releaseOlder!: () => void;
@@ -1869,6 +1876,7 @@ test(`scheduler captured child outcome observes late staged native record (${cha
   const childPending = new Promise<void>(resolve => { childEntered = resolve; }), childHeld = new Promise<void>(resolve => { releaseChild = resolve; });
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
     const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (nativeReadOwner.getStore() === "overlapping-fresh" && route === "/api/session/active") releaseStartup();
     if (route.endsWith("/inbox")) return Response.json({ data: [] });
     if (route === "/api/permission/request" || route === "/api/form") { entered(); await held; }
     const response = await fetch(request);
@@ -1891,12 +1899,17 @@ test(`scheduler captured child outcome observes late staged native record (${cha
         olderEntered(); await olderHeld;
       }
       else if (holdOwn && route === `/api/session/${child}`) { holdOwn = false; ownEntered(); await ownHeld; }
+      if (change === "load-overlap-prefix" && nativeReadOwner.getStore() === "child-history" && route === `/api/session/${child}`) { startupRecordEntered(); await startupHeld; }
       return Response.json(body);
     }
     return response;
   }) as typeof globalThis.fetch;
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
   const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider), abort = new AbortController();
+  const nativeMessages = provider.listMessages.bind(provider);
+  provider.listMessages = (id, options) => id !== child ? nativeMessages(id, options) : nativeReadOwner.run("child-history", async () => {
+    try { return await nativeMessages(id, options); } finally { childHistoryFinished(); }
+  });
   const guards: import("../../provider").WorkerSourceGuard[] = [], newerGuards: import("../../provider").WorkerSourceGuard[] = [];
   provider.reconcileBackgroundTasks = async (id, options) => {
     const tasks = await nativeRecovery(id, { ...options, onSource: source => {
@@ -1936,6 +1949,17 @@ test(`scheduler captured child outcome observes late staged native record (${cha
     if (hidden || ["load-overlap-prefix", "owned-overlap-prefix", "collecting-prefix", "retained-prefix"].includes(change)) expectWithheld(row);
     else expect(row).toMatchObject({ status: "completed" });
     expect(guards.every(guard => guard.isCurrent())).toBe(true);
+    if (change === "load-overlap-prefix") {
+      // Admission releases the scheduler's lease, not startup's child history.
+      // Its final native record clears the staged suffix. Deliver it inside a
+      // fresh read first: that real facet change must withhold exactly this pass.
+      await startupRecordPending;
+      const overlapping = await nativeReadOwner.run("overlapping-fresh", () => nativeRecovery(parent!, { fresh: true, signal: abort.signal }));
+      expectWithheld(overlapping.find(item => item.taskId === worker.taskId));
+    }
+    // The quiet control starts only after the actual public child-history read
+    // settles, not merely after the earlier scheduler admission.
+    if (loadOverlap) await childHistorySettled;
     const fresh = (await nativeRecovery(parent, { fresh: true, signal: abort.signal })).find(item => item.taskId === worker.taskId);
     if (change === "retained-prefix") expectWithheld(fresh);
     else expect(fresh?.status).toBe(hidden ? "running" : "completed");
@@ -1955,7 +1979,7 @@ test(`scheduler captured child outcome observes late staged native record (${cha
       const quiet = await nativeRecovery(parent, { fresh: true, signal: abort.signal });
       expect(quiet.find(item => item.taskId === worker.taskId)?.status).toBe("completed");
     }
-  } finally { releaseOwn(); releaseChild(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
+  } finally { releaseStartup(); releaseOwn(); releaseChild(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["hidden", "prefix", "unchanged", "other-child", "newer-source"] as const)

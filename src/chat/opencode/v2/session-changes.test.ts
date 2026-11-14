@@ -5,6 +5,93 @@ import { startOpenCodeV2Fake } from "../../../../tests/e2e/opencode-v2-fake";
 import { workerDismissalEvidence } from "../../worker-dismissal-evidence";
 import type { BackgroundTaskItem } from "../../types";
 import type { WorkerSourceGuard } from "../../provider";
+import { workerCanStop } from "../../worker-state";
+
+for (const changed of [false, true])
+test(`first child-scoped inventory ${changed ? "change withholds inference" : "equal observation preserves completion"}`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, present = true, explicit = false, hold = false;
+  let entered!: () => void, release!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const routes: string[] = [];
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    routes.push(route);
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") {
+      if (hold) { entered(); await held; }
+      return Response.json({ data: present ? { [child!]: { status: "running" } } : {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" },
+    ], cursor: {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json();
+      for (const message of body.data) for (const tool of message.content ?? []) if (tool.type === "tool") {
+        message.time = { created: 10 }; tool.time = { created: 10, ran: 11, completed: 12 };
+      }
+      if (explicit) body.data.push({ id: "actual-report", type: "synthetic", time: { created: 45 },
+        text: "Actual result", metadata: { source: "subagent", childID: child, state: "completed" } });
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const owner = new AbortController();
+  const guards: WorkerSourceGuard[] = [];
+  let reading: Promise<BackgroundTaskItem[]> | undefined;
+  const read = () => provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: owner.signal,
+    onSource: source => guards.push(source.workerSource.retain(owner.signal)) });
+  try {
+    parent = (await provider.createSession("First inventory counter window")).id;
+    child = fake.launchRequestWorker(parent).childId;
+    const start = routes.length;
+    const primed = await read();
+    expect(primed).toHaveLength(1);
+    expect(primed[0]).toMatchObject({ status: "completed" });
+    expect(workerDismissalEvidence(primed[0])?.dismissible).toBe(true);
+    const baselineRoutes = routes.slice(start);
+    expect(baselineRoutes).toEqual([
+      `/api/session/${parent}`, `/api/session/${parent}/inbox`, `/api/session/${parent}/message`,
+      "/api/session/active", `/api/session/${child}`, `/api/session/${child}/message`,
+      `/api/session/${child}`, `/api/session/${parent}`,
+    ]);
+    guards.length = 0;
+    const before = routes.length;
+    hold = true; reading = read(); void reading.catch(() => undefined);
+    await pending;
+    // The parent launcher scope is known, but no child ownership/history IO has begun.
+    expect(routes.slice(before)).not.toContain(`/api/session/${child}`);
+    expect(routes.slice(before)).not.toContain(`/api/session/${child}/message`);
+    present = !changed; release();
+    const rows = await reading;
+    hold = false;
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.resultId).toBeUndefined();
+    expect(workerDismissalEvidence(row)?.dismissible).toBe(!changed);
+    expect(row).toMatchObject(changed
+      ? { status: "running", outcomeWithheld: true, stateUncertain: true, control: { available: false } }
+      : { status: "completed" });
+    expect(workerCanStop(row)).toBe(false);
+    expect(guards).toHaveLength(1);
+    expect(guards[0]!.isCurrent()).toBe(true); // Counter mismatch is not a stale association/activity source.
+    expect(routes.slice(before)).toEqual(baselineRoutes); // Same native requests/order, no retry.
+    const quiet = await read();
+    expect(quiet).toHaveLength(1);
+    expect(quiet[0]).toMatchObject({ status: "completed" });
+    expect(workerDismissalEvidence(quiet[0])?.dismissible).toBe(true);
+    // A different inventory observation cannot veto an explicit parent report.
+    explicit = true; present = !present;
+    const reported = await read();
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toMatchObject({ status: "completed", resultId: "actual-report", summary: "Actual result" });
+    expect(workerDismissalEvidence(reported[0])?.dismissible).toBe(true);
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { release(); owner.abort(); await reading?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
+});
 
 test("an expired worker source cannot acquire child pins after healthy parent IO completes", async () => {
   // Resource accounting only, not an oracle for recovered outcomes.

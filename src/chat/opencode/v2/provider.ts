@@ -1935,6 +1935,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       for (const fact of launches) {
         const child = counterproofChild(fact);
         if (fact.workerType !== "agent" || !child) continue;
+        // Reported children are outcome dependencies before the first inventory
+        // request, not only the later ownership/history enrichment. Requested
+        // identities remain veto hints and acquire no counter pin here.
+        if (fact.reportedChild) this.captureWorkerSourceCounter(source, fact.reportedChild);
         const facts = source.historyParentLaunches.get(child) ?? [];
         source.historyParentLaunches.set(child, [...facts, fact]);
       }
