@@ -346,7 +346,7 @@ Cached-child/overlapping-inbox checks: each exact scheduler probe reproduced one
 - [x] 6.9 Replace the independently rejected time-only report exclusion with the user-approved unique exact terminal-child-response correlation inside proven owned execution intervals. Cover delayed native delivery, missing/duplicate response matches and unknown/hidden competitors; preserve later report fields without guessing. Restore independent activity's request-order protection and verify the strict false-versus-absent withholding-marker publication regression before renewing the affected independent review and final gates. The 19-case actual-session fixture, activity-order controls and canonical marker regressions pass; the complete native review found no remaining production findings. Its one checker-only Unresolved finding was corrected separately; renewed property review/full CI are still required.
 - [x] 6.10 Correct all three independent property-review findings: attribute witnesses to consumed shared/cache history using the separately approved read-only observer; permit unrelated actors across event metadata awaits; and strictly verify the final minimized representative before labelling it a match. Preserve the earlier campaign receipts as historical, not final acceptance evidence, and renew the affected fresh independent review after correction. The simpler checker retains consumer-owned negative facts rather than replaying cached arrays into a reference provider. Explicit abstention validation rejects invented fields, lost warnings and false-marker shape errors even on Unresolved rows. Fresh native review of the complete change found one checker-only issue; its correction received a fresh whole-checker/contract review with no actionable findings. The final campaign/full-CI gates pass; reviewer inspection and executed checks remain separate evidence.
 
-### Final local implementation verification
+### Pre-integration local implementation verification
 
 The approved `evidence-safety-v3` checker compares final-native results, reports
 and activity, permits only extra conservative warnings, and independently checks
@@ -368,7 +368,48 @@ generated final campaign has zero evaluated safety/progress/harness failures.
 No universal seed-only or cross-process replay guarantee is claimed. Unnecessary
 conservative warnings are the user-approved precision tradeoff.
 
-The rewrite remains local and uncommitted. No PR update, external Codex request,
+At that verification point the rewrite remained local and uncommitted. No PR update, external Codex request,
 archive, native record/dismissal mutation or deployment was performed. Publication
 text/accepted-limit approval, external review and before-merge archival remain
 separate follow-ups; the historical stopped gate in 5.84 is not a pending code fix.
+
+### Upstream synchronization and publication preparation
+
+- [x] 6.11 Integrate approved upstream main, restore its locked dependencies, and renew the property/CI/review gates before publication. Close the reported-child first-IO counter gap without new ordering state, preserve quiet-read and overlap assertions, and keep compiled-helper lock tests meaningful across valid macOS signatures. Final corrected integrated snapshot: 10,000 seeds passed with A=0/B=0/errors=0; full CI passed 11,344 tests (17 skipped, zero failed), with no source drift. Complete full-target inspection plus fresh affected review have no remaining actionable findings. API validation/lint and strict OpenSpec validation pass; lint retains the existing `WorkspaceConflict.allOf` warning.
+
+The user approved upstream synchronization and locked restoration. Checkpoint
+`0b8c724d` preserves the verified implementation; merge `4afeeb0e` integrates
+upstream `74848617`, changing only `package.json` and `bun.lock`. The frozen restore
+completed with `@opencode/client` 2.3.0 and the other upstream versions; no runtime,
+authentication, service or signing-setting change was made.
+
+A complete fresh review of `74848617..4afeeb0e` reported one first-IO gap: inventory
+recovery observed child activity before capturing that child's counter. Reported
+children are now captured when the owning parent-history read installs their
+launcher scope, before inventory IO, using the existing live-lease helper. No
+fields, maps, native calls, ownership grants or retries were added. Public paired
+HTTP-barrier tests reproduce old dismissible completion and verify changed-inventory
+withholding, equal-inventory completion, later quiet recovery and explicit-report
+independence with the same request sequence.
+
+The widened window exposed a race-fixture barrier error: scheduler admission did
+not settle startup's public child-history consumer. A controlled late record
+cleared `revert: suffix` during fresh recovery, correctly withholding inference.
+Quiet assertions now await that actual consumer; a deterministic crossing-record
+control requires withholding, no Stop and no dismissal. All 583 cases and their
+original assertions remain, with additional safety assertions.
+
+Integrated CI initially passed 11,341 tests and failed one unconditional ad-hoc
+re-signing step before its compiled lock assertions. The helper already verified
+and executed correctly. Its fixture now repairs only an invalid signature, always
+verifies afterward, and executes the unchanged lock-contention assertions; all
+25 state-directory tests pass. The underlying macOS forced-signing error remains
+unclassified; no signing service/settings were changed.
+
+After correction: 583 race, 113 focused and 136 selected provider tests pass;
+typecheck and 10,000 seeds pass (A=0/B=0/errors=0, max logical attempts 2/4,
+physical reads 3). Fresh affected review reports no actionable findings. Final
+full CI passes 11,344 tests, 17 skipped, zero failed in 603.62 seconds at code
+commit `9a4bd3ab`; its whole-source manifest is unchanged. This completion record
+updates documentation only. Publication text/accepted-limit approval and external
+review remain outstanding; no push, PR-body update or deployment has occurred.
