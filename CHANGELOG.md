@@ -4,6 +4,35 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.9.0](https://github.com/tjakobsson/uatu/compare/v0.8.0...v0.9.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **files:** `.uatu.json` `ignore.include` is retired, and `build`/`dist` are no longer hidden by default. Use `ignore.exclude` to hide them again.
+* **files:** add recent browsing and persistent media playback ([#607](https://github.com/tjakobsson/uatu/issues/607))
+
+### Features
+
+* **chat:** add OpenCode v2 steering, worker controls and compact chat workflows ([5585b5b](https://github.com/tjakobsson/uatu/commit/5585b5b09c11b15aac464a29e52504835dfd06d6))
+* **chat:** display agent images and SVG inline ([#622](https://github.com/tjakobsson/uatu/issues/622)) ([8c0b36d](https://github.com/tjakobsson/uatu/commit/8c0b36da1be404e07a80bd9e9dc717074e35c45c)), closes [#544](https://github.com/tjakobsson/uatu/issues/544)
+* **files:** add recent browsing and persistent media playback ([#607](https://github.com/tjakobsson/uatu/issues/607)) ([3524aaf](https://github.com/tjakobsson/uatu/commit/3524aaf8baccd730da841a4f9ad9d6a031aabc82))
+* **files:** follow VS Code's rules for which files Uatu shows ([#623](https://github.com/tjakobsson/uatu/issues/623)) ([ab6f4c2](https://github.com/tjakobsson/uatu/commit/ab6f4c205225ea9145b195fbfcc76097eb021234))
+
+
+### Bug Fixes
+
+* **chat:** measure OpenCode context against the model's prompt limit ([#629](https://github.com/tjakobsson/uatu/issues/629)) ([52aca77](https://github.com/tjakobsson/uatu/commit/52aca77011ea4e50e096b77b95658c955b2b75c8))
+* **chat:** preserve permission approval queue order ([#596](https://github.com/tjakobsson/uatu/issues/596)) ([a01f774](https://github.com/tjakobsson/uatu/commit/a01f774175ef844ee83bdd9afaf9bbea2be7b468))
+* **chat:** prevent burst-induced chat interruptions ([5757cfb](https://github.com/tjakobsson/uatu/commit/5757cfb89595024344b64797ec09281c8843f336))
+* **chat:** readable token scales, named skill loads, and multi-question forms ([#533](https://github.com/tjakobsson/uatu/issues/533)) ([71e4700](https://github.com/tjakobsson/uatu/commit/71e4700752d6c16dc8a7e41787e6698d35aa5c1a))
+* **chat:** recover verified worker states across history and retries ([#559](https://github.com/tjakobsson/uatu/issues/559)) ([11bec5e](https://github.com/tjakobsson/uatu/commit/11bec5ea201d61d73c2c55f56f857752b76fec0e))
+* **deps:** patch body-parser 2.4.0 for GHSA-27r3-jxmh-p828 (denial of service via compressed request bodies) ([5585b5b](https://github.com/tjakobsson/uatu/commit/5585b5b09c11b15aac464a29e52504835dfd06d6))
+* **deps:** patch follow-redirects credential redirect advisory ([#573](https://github.com/tjakobsson/uatu/issues/573)) ([e7d6263](https://github.com/tjakobsson/uatu/commit/e7d62635c7d9cba86f3356ad6b0100dad4b2ffc9))
+* **hub:** remove workspaces whose files were deleted outside Uatu ([#515](https://github.com/tjakobsson/uatu/issues/515)) ([bef981e](https://github.com/tjakobsson/uatu/commit/bef981e6aa86dedc8dd69fe1980ef42c0fee0acb)), closes [#504](https://github.com/tjakobsson/uatu/issues/504)
+* **preview:** unload SVG images outside the visible preview ([#598](https://github.com/tjakobsson/uatu/issues/598)) ([0680aeb](https://github.com/tjakobsson/uatu/commit/0680aeb04289722ddfacea37909d7ed36db7ef5d))
+* **watch:** report changes made before a polled path's baseline stat ([#511](https://github.com/tjakobsson/uatu/issues/511)) ([e813edd](https://github.com/tjakobsson/uatu/commit/e813eddb977a2976c1ea183a47be6874dd33df43))
+
 ## [0.8.0](https://github.com/tjakobsson/uatu/compare/v0.7.0...v0.8.0) (2026-10-12)
 
 
