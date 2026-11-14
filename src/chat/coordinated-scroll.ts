@@ -48,8 +48,9 @@ const owners = new WeakMap<HTMLElement, CoordinatedScrollOwner>();
 export class CoordinatedScrollOwner {
   private frame: number | null = null;
   private newContent = false;
-  private revealTarget: HTMLElement | null = null;
+  private revealTarget: HTMLElement | (() => HTMLElement | null | undefined) | null = null;
   private revealOptions: RevealOptions | undefined;
+  private revealRevision = 0;
   private heldTarget: HTMLElement | null = null;
   private heldOptions: RevealOptions | undefined;
   private heldTop: number | null = null;
@@ -117,6 +118,7 @@ export class CoordinatedScrollOwner {
   }
 
   private readerChose(): void {
+    this.cancelNavigationReveal();
     this.heldPosition = undefined;
     if (!this.pendingPosition || !this.options.position) return;
     // Until the incoming transcript renders, its semantic items are unavailable.
@@ -165,6 +167,22 @@ export class CoordinatedScrollOwner {
     }
     if (this.pendingPosition) return;
     if (this.lastCorrectionFrame === timestamp) { this.request(); return; }
+    if (typeof this.revealTarget === "function") {
+      const resolve = this.revealTarget, placement = this.revealOptions, revision = this.revealRevision;
+      // Focus performed by the resolver is part of this reveal, not newer
+      // navigation. Reentrant cancellation or another reveal still wins.
+      this.revealTarget = null;
+      const target = resolve();
+      if (!this.active() || revision !== this.revealRevision) return;
+      this.revealTarget = target ?? null;
+      this.revealOptions = placement;
+      if (target === undefined) {
+        this.revealTarget = resolve;
+        this.request();
+        return;
+      }
+      this.focusNavigation = null;
+    }
     // Retire stale DOM ownership before the anchor chooses this frame's top.
     if (this.heldTarget && !this.scroller.contains(this.heldTarget)) this.release();
     if (this.frame !== null) this.cancelFrame(this.frame);
@@ -246,10 +264,13 @@ export class CoordinatedScrollOwner {
    * frame. Focus is the caller here — a request's answer field under the
    * software keyboard — and this owner is the only automatic position writer,
    * so the alternative would be a raw `scrollIntoView` on a scroller it
-   * manages, which the anchor would then correct straight back.
+   * manages, which the anchor would then correct straight back. A resolver
+   * selects the current DOM node immediately before measurement: undefined
+   * waits for rendering, null cancels. New reader input cancels a resolver.
    */
-  reveal(element: HTMLElement, options?: RevealOptions): void {
+  reveal(element: HTMLElement | (() => HTMLElement | null | undefined), options?: RevealOptions): void {
     if (!this.active()) return;
+    this.revealRevision++;
     this.revealTarget = element;
     this.revealOptions = options;
     this.request();
@@ -337,7 +358,7 @@ export class CoordinatedScrollOwner {
     const options = this.revealOptions;
     this.revealTarget = null;
     this.revealOptions = undefined;
-    if (!target || !this.scroller.contains(target)) return { top: proposedTop, moved: false };
+    if (!target || typeof target === "function" || !this.scroller.contains(target)) return { top: proposedTop, moved: false };
     const delta = this.revealDelta(target, options, proposedTop);
     if (Math.abs(delta) < 0.5) return { top: proposedTop, moved: false };
     const limit = Math.max(0, this.scroller.scrollHeight - this.scroller.clientHeight);
@@ -399,6 +420,7 @@ export class CoordinatedScrollOwner {
   /** Resume following. Initial views may opt out of motion for their first placement. */
   latest(options?: { motion?: "instant" }): void {
     if (!this.active()) return;
+    this.revealRevision++;
     this.clearHold();
     this.motion = null;
     this.positioned = true;
@@ -420,6 +442,7 @@ export class CoordinatedScrollOwner {
    * This neither schedules work nor creates a new follow choice.
    */
   cancel(options?: { forSnapshot?: boolean }): void {
+    this.revealRevision++;
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
     this.motion = null;
@@ -487,8 +510,7 @@ export class CoordinatedScrollOwner {
     // A shrinking extent can leave WebKit beyond its new bottom until native
     // rebound finishes. Keep existing follow intent; explicit upward input has
     // already paused the anchor before this event.
-    const clamped = changedExtent && bottom < previous.scrollTop - 0.5
-      && (Math.abs(geometry.scrollTop - bottom) <= 1 || (this.options.anchor.isPinned() && geometry.scrollTop > bottom));
+    const clamped = this.isExtentClamp(geometry);
     if (clamped) {
       // A pending upward gesture can have no native movement at a boundary.
       // It must not turn a later maximize/layout clamp into a new anchor.
@@ -560,14 +582,32 @@ export class CoordinatedScrollOwner {
       .includes((control.getAttribute("type") ?? "text").toLowerCase());
     return (control as HTMLElement).isContentEditable || ["", "true", "plaintext-only"].includes(control.getAttribute("contenteditable") ?? "false");
   }
+  private cancelNavigationReveal(): void {
+    if (typeof this.revealTarget !== "function") return;
+    this.revealRevision++;
+    this.revealTarget = null;
+    this.revealOptions = undefined;
+  }
+  private isExtentClamp(geometry: AnchorGeometry): boolean {
+    const previous = this.previous;
+    const changed = geometry.scrollHeight !== previous.scrollHeight || geometry.clientHeight !== previous.clientHeight;
+    const bottom = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
+    return changed && bottom < previous.scrollTop - 0.5
+      && (Math.abs(geometry.scrollTop - bottom) <= 1 || (this.options.anchor.isPinned() && geometry.scrollTop > bottom));
+  }
   private focusIn = (event: FocusEvent): void => {
-    if (!this.active() || !this.ownsInput(event) || this.heldTarget || this.inTextControl(event)) return;
+    this.cancelNavigationReveal();
+    if (!this.active() || this.heldTarget || this.inTextControl(event)) return;
     this.focusNavigation = null;
     const target = event.target as HTMLElement;
     const geometry = this.options.measure(false);
+    if (this.isExtentClamp(geometry) || this.previous.scrollTop < 0
+      || this.previous.scrollTop > Math.max(0, this.previous.scrollHeight - this.previous.clientHeight)) return;
     // Focusing can scroll before focusin, but scroll delivery is asynchronous.
-    // Compare with the last observed position when its layout still applies.
-    const top = geometry.scrollHeight === this.previous.scrollHeight && geometry.clientHeight === this.previous.clientHeight
+    // Growth can accompany that placement. Keep the pre-focus offset unless
+    // viewport layout or a native range clamp explains the change instead.
+    // Unlike gestures, focus may place several ancestor scrollports at once.
+    const top = geometry.clientHeight === this.previous.clientHeight
       ? this.previous.scrollTop : geometry.scrollTop;
     if (Math.abs(this.revealDelta(target, undefined, top)) <= 0.5) return;
     this.focusNavigation = { target, top };
@@ -577,6 +617,8 @@ export class CoordinatedScrollOwner {
     const navigation = this.focusNavigation;
     if (!navigation || this.heldTarget || !this.scroller.contains(navigation.target)
       || this.scroller.ownerDocument.activeElement !== navigation.target
+      || this.isExtentClamp(geometry) || geometry.scrollTop < 0
+      || geometry.scrollTop > Math.max(0, geometry.scrollHeight - geometry.clientHeight)
       || Math.abs(geometry.scrollTop - navigation.top) <= 1e-6
       || Math.abs(this.revealDelta(navigation.target, undefined, geometry.scrollTop)) > 0.5) return false;
     this.pause();
@@ -585,11 +627,13 @@ export class CoordinatedScrollOwner {
     return true;
   }
   private wheel = (event: WheelEvent): void => {
+    if (!event.defaultPrevented && event.deltaY !== 0) this.cancelNavigationReveal();
     if (!this.ownsInput(event)) return;
     this.focusNavigation = null;
     if (event.deltaY < 0) this.pause();
   };
   private pointerDown = (event: PointerEvent): void => {
+    if (!event.defaultPrevented) this.cancelNavigationReveal();
     if (this.ownsInput(event)) this.focusNavigation = null;
     if (event.pointerType !== "mouse" || event.target !== this.scroller || !this.ownsInput(event)
       || this.scroller.scrollHeight <= this.scroller.clientHeight) return;
@@ -601,6 +645,7 @@ export class CoordinatedScrollOwner {
     if ((event.clientX >= box.left && event.clientX < left) || (event.clientX >= right && event.clientX < box.right)) this.pause();
   };
   private touchStart = (event: TouchEvent): void => {
+    if (!event.defaultPrevented) this.cancelNavigationReveal();
     if (this.ownsInput(event)) this.focusNavigation = null;
     this.touchPaused = false;
     this.touchY = this.ownsInput(event) && !this.inTextControl(event) ? event.touches[0]?.clientY ?? null : null;
@@ -618,6 +663,7 @@ export class CoordinatedScrollOwner {
     this.touchY = y ?? null;
   };
   private keyDown = (event: KeyboardEvent): void => {
+    if (!event.defaultPrevented) this.cancelNavigationReveal();
     if (this.ownsInput(event)) this.focusNavigation = null;
     // Choice controls consume navigation keys too (e.g. radio ArrowUp).
     const target = event.target as Element | null;

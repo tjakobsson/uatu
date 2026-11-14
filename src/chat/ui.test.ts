@@ -6220,8 +6220,9 @@ describe("chat outstanding-request pill", () => {
       expect(pill.dataset.requestTarget).toBe("question:q1");
       pill.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(nativeReveals).toBe(0);
-      expect(focuses).toBe(1);
+      expect(focuses).toBe(0);
       step();
+      expect(focuses).toBe(1);
       expect(card.getBoundingClientRect().top).toBe(100);
       drain();
       expect(card.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
@@ -6235,6 +6236,131 @@ describe("chat outstanding-request pill", () => {
       globalThis.requestAnimationFrame = requestFrame;
       globalThis.cancelAnimationFrame = cancelFrame;
       prototype.getBoundingClientRect = originalBounds;
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
+  for (const state of ["paused", "following", "moving"] as const) for (const interruption of ["none", "removed", "departure", "focus", "wheel"] as const) test(interruption === "none"
+    ? `request pill retains the current permission through a queued replacement while ${state}`
+    : `request pill cancels queued permission navigation on ${interruption} while ${state}`, async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>("#chat-timeline")!;
+    const card = () => document.querySelector<HTMLElement>('[data-chat-item-id="permission:replacement"]');
+    const beforeHeight = () => document.querySelector('[data-chat-item-id="message:before-request"]')?.textContent?.includes("Expanded response") ? 2800 : 800;
+    const tailHeight = () => document.querySelector('[data-chat-item-id="message:after-request"]')?.textContent?.includes("Later output") ? 1400 : 1000;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: () => beforeHeight() + 200 + tailHeight() },
+    });
+    timeline.scrollTop = 0;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 640, width: 640 }) as DOMRect;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    const prototype = window.HTMLElement.prototype;
+    const originalBounds = prototype.getBoundingClientRect, originalFocus = prototype.focus;
+    prototype.getBoundingClientRect = function () {
+      const id = this.getAttribute("data-chat-item-id");
+      if (id === "message:before-request") return rect(-timeline.scrollTop, beforeHeight());
+      if (id === "permission:replacement") return rect(beforeHeight() - timeline.scrollTop, 200);
+      if (id === "message:after-request") return rect(beforeHeight() + 200 - timeline.scrollTop, tailHeight());
+      return originalBounds.call(this);
+    };
+    let active: HTMLElement | null = null;
+    const focusedPermissions: HTMLElement[] = [];
+    Object.defineProperty(document, "activeElement", { configurable: true, get: () => active && document.contains(active) ? active : document.body });
+    prototype.focus = function () {
+      active = this;
+      if (this.getAttribute("data-chat-item-id") === "permission:replacement") focusedPermissions.push(this);
+      this.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+    };
+    const permission = { id: "permission:replacement", type: "permission" as const, createdAt: 2, requestId: "replacement",
+      action: "bash", resources: ["git status --short"], status: "pending" as const };
+    const before = { id: "message:before-request", type: "assistant_message" as const, createdAt: 1, markdown: "Initial response" };
+    const after = { id: "message:after-request", type: "assistant_message" as const, createdAt: 3, markdown: "Initial output after request" };
+    const api = questionApi(document, { conversations: ["one", "two"], capabilities: ["permissions"], items: id => id === "one"
+      ? [before, permission, after] : [{ id: "message:other", type: "user_message", createdAt: 1, text: "Other conversation" }] });
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    api.stream = (_id, _cursor, handlers) => { stream = handlers; return { close() {} }; };
+    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0, timestamp = performance.now();
+    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const step = () => {
+      timestamp += 20;
+      for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
+    };
+    const drain = () => { for (let count = 0; count < 40 && frames.size; count++) step(); };
+    const upsert = (item: ConversationSnapshot["items"][number], sequence: number) => stream!.event({ type: "item.upsert",
+      conversationId: "one", generation: "g", sequence, item }, `permission-replacement-${sequence}`);
+    const reading = () => ({ top: card()!.getBoundingClientRect().top, bottom: card()!.getBoundingClientRect().bottom,
+      focused: document.activeElement === card() });
+    try {
+      const { initChat } = await import(`./ui.ts?queued-permission-navigation=${state}-${interruption}-${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => { drain(); return !!stream && !!card() && timeline.scrollTop === 1600; });
+      if (state === "paused") {
+        timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -1 }));
+        timeline.scrollTop = 200; timeline.dispatchEvent(new window.Event("scroll"));
+      }
+      drain();
+      expect(frames.size).toBe(0);
+      if (state === "moving") {
+        upsert({ ...before, markdown: "Expanded response before request" }, 1);
+        step(); step();
+        expect(timeline.scrollTop).toBeGreaterThan(1600);
+        expect(timeline.scrollTop).toBeLessThan(2700);
+      }
+      const oldCard = card()!;
+      // Both real updates queue the transcript's existing render before the
+      // pill is clicked. Geometry changes only when that render changes DOM.
+      if (state !== "moving") upsert({ ...before, markdown: "Expanded response before request" }, 1);
+      upsert({ ...permission, resources: ["git branch --show-current"] }, 2);
+      expect(frames.size).toBeGreaterThan(0);
+      expect(card()).toBe(oldCard);
+      expect(beforeHeight()).toBe(state === "moving" ? 2800 : 800);
+      const pill = document.querySelector<HTMLButtonElement>("#chat-requests-jump")!;
+      expect(pill.dataset.requestTarget).toBe(permission.id);
+      pill.dispatchEvent(new window.Event("click", { bubbles: true }));
+      if (interruption !== "none") {
+        const otherFocus = document.querySelector<HTMLButtonElement>("#chat-new-conversation")!;
+        if (interruption === "removed") stream!.event({ type: "item.remove", conversationId: "one", generation: "g", sequence: 3,
+          itemId: permission.id }, "removed-request");
+        if (interruption === "departure") {
+          const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+          select.value = "two"; select.dispatchEvent(new window.Event("change", { bubbles: true }));
+          await waitUntil(() => { drain(); return !!document.querySelector('[data-chat-item-id="message:other"]'); });
+        }
+        if (interruption === "focus") otherFocus.focus();
+        if (interruption === "wheel") {
+          timeline.dispatchEvent(Object.assign(new window.Event("wheel", { bubbles: true }), { deltaY: 4 }));
+          if (state !== "following") { timeline.scrollTop += 4; timeline.dispatchEvent(new window.Event("scroll")); }
+        }
+        drain();
+        expect(focusedPermissions).toEqual([]);
+        if (interruption === "removed" || interruption === "departure") expect(card()).toBeNull();
+        if (interruption === "focus") expect(document.activeElement).toBe(otherFocus);
+        return;
+      }
+      drain();
+      expect(card()).not.toBe(oldCard);
+      expect(card()!.textContent).toContain("git branch --show-current");
+      const afterReplacement = reading();
+      upsert({ ...after, markdown: "Later output after request" }, 3);
+      await waitUntil(() => { drain(); return timeline.textContent!.includes("Later output after request"); });
+      expect({ afterReplacement, afterLaterOutput: reading() }).toEqual({
+        afterReplacement: { top: 100, bottom: 300, focused: true },
+        afterLaterOutput: { top: 100, bottom: 300, focused: true },
+      });
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      globalThis.requestAnimationFrame = requestFrame;
+      globalThis.cancelAnimationFrame = cancelFrame;
+      prototype.getBoundingClientRect = originalBounds;
+      prototype.focus = originalFocus;
       document.documentElement.setAttribute("data-chat-panel", "collapsed");
     }
   });

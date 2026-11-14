@@ -1121,11 +1121,14 @@ Nested shell viewports keep their independent owners.
 Genuine reader movement captures a fresh reading point; correction echoes retain
 the previous point so repeated width changes cannot silently select another line.
 Native keyboard and accessibility focus navigation remains authoritative; a
-focused button alone does not establish a temporary handoff. An owned offscreen
-focus transition that actually reveals its control retires smooth catch-up;
-the observation expires at the next correction frame or newer reader input.
-Request-pill jumps use the same owner's centered reveal and focus without a
-second native scroll, rather than competing with the follow animation.
+focused button alone does not establish a temporary handoff. A focus transition
+can place several ancestor scrollports; each retires smooth catch-up only for
+its own actual reveal, with range clamps excluded. The observation expires at
+the next correction frame or newer reader input.
+Request-pill jumps retain their logical target until queued rendering finishes,
+then resolve and focus the current card through the owner's centered reveal,
+without a second native scroll. Removal, departure and newer reader choices
+cancel that one-shot navigation instead of focusing a stale card.
 Reading geometry excludes descendants hidden by closed disclosure groups, even
 when content-visibility supplies nonzero placeholder boxes. A closed row's own
 summary remains eligible; offscreen retained rows are not discarded merely

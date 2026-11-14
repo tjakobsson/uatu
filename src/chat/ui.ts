@@ -1576,15 +1576,28 @@ export function initChat(api = new ChatApiClient()): void {
   // close performs the parked jump instead, after its own scroll restore.
   let pendingRequestJump: string | null = null;
   const jumpToRequestCard = (id: string) => {
-    const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
-    if (!(card instanceof HTMLElement)) return;
-    for (let parent = card.parentElement; parent && parent !== items; parent = parent.parentElement) {
-      if (parent instanceof HTMLDetailsElement) parent.open = true;
-    }
-    if (card instanceof HTMLDetailsElement) card.open = true;
-    if (!card.hasAttribute("tabindex")) card.tabIndex = -1;
-    parentScroll.reveal(card, { align: "center" });
-    card.focus?.({ preventScroll: true });
+    const conversationId = projection?.conversationId, selection = selectionGeneration;
+    const focus = document.activeElement;
+    parentScroll.reveal(() => {
+      if (!projection || projection.conversationId !== conversationId || selection !== selectionGeneration
+        || child || !chatSurfaceActive() || document.activeElement !== focus) return null;
+      const item = projection.items.find(item => item.id === id);
+      if (!item || ((item.type === "permission" || item.type === "question")
+        && (item.status !== "pending" || activeInteractionRequests(projection.items, projection.conversationId)[0]?.id !== id))) return null;
+      // The owner can run before an already queued transcript render. Retain
+      // only the logical id until that render has reconciled request roots.
+      if (renderDirty) return undefined;
+      const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
+      if (!(card instanceof HTMLElement)) return null;
+      for (let parent = card.parentElement; parent && parent !== items; parent = parent.parentElement) {
+        if (parent instanceof HTMLDetailsElement) parent.open = true;
+      }
+      if (card instanceof HTMLDetailsElement) card.open = true;
+      if (!card.hasAttribute("tabindex")) card.tabIndex = -1;
+      card.focus?.({ preventScroll: true });
+      return projection?.conversationId === conversationId && selection === selectionGeneration
+        && items.contains(card) && document.activeElement === card ? card : null;
+    }, { align: "center" });
   };
   requestsJump?.addEventListener("click", () => {
     const id = requestsJump.dataset.requestTarget;

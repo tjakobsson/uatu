@@ -719,6 +719,40 @@ describe("coordinated scrolling", () => {
     expect(f.anchor.isPinned()).toBe(true);
   });
 
+  for (const transition of ["native reveal with growth", "growth without movement", "shrink clamp"] as const) test(`focus transition during changed extent: ${transition}`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    const controlTop = transition === "shrink clamp" ? 500 : 850;
+    stubRect(button, () => ({ top: controlTop - f.element.scrollTop, bottom: controlTop + 30 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    if (transition === "shrink clamp") {
+      // Layout clamps the offset, incidentally making an above-band control
+      // visible. Focus alone must not reinterpret that clamp as navigation.
+      f.grow(700);
+    } else {
+      // Realizing deferred activity below the control increases the extent
+      // during native focus placement, without changing the control's top.
+      f.grow(1486);
+      if (transition === "native reveal with growth") f.move(580);
+    }
+    f.eventAt(button, "focusin"); f.event("scroll");
+    if (transition === "native reveal with growth") expect(button.getBoundingClientRect().bottom).toBe(300);
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    const afterMotion = button.getBoundingClientRect().top;
+    f.grow(1786); f.owner.request(true); f.flush(400); f.flush(720);
+    if (transition === "native reveal with growth") {
+      expect({ afterMotion, afterAppend: button.getBoundingClientRect().top }).toEqual({ afterMotion: 270, afterAppend: 270 });
+      expect(f.anchor.isPinned()).toBe(false);
+    } else {
+      expect(f.anchor.isPinned()).toBe(true);
+      expect(f.element.scrollTop).toBe(1486);
+    }
+  });
+
   test("native focus placement is adopted before a delayed scroll event", () => {
     const f = fixture(() => "smooth");
     stubRect(f.element, () => ({ top: 0, bottom: 300 }));
@@ -747,6 +781,56 @@ describe("coordinated scrolling", () => {
     for (const time of [96, 160, 240, 368]) f.flush(time);
     expect(f.anchor.isPinned()).toBe(true);
     expect(f.element.scrollTop).toBe(886);
+  });
+
+  test("logical reveal waits for reconciliation without spending a premature correction", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const old = f.document.createElement("div"), current = f.document.createElement("div");
+    f.element.append(old);
+    stubRect(current, () => ({ top: 800 - f.element.scrollTop, bottom: 1000 - f.element.scrollTop }));
+    let reconciled = false, resolutions = 0;
+    f.owner.request(); f.flush(0);
+    f.grow(1600); f.owner.request(true); f.flush(16); f.flush(48);
+    f.owner.reveal(() => {
+      if (!reconciled) return undefined;
+      resolutions++;
+      return current as unknown as HTMLElement;
+    }, { align: "center" });
+    const writes = f.writes.length;
+    f.flush(64);
+    expect(f.writes.length).toBe(writes);
+    expect(resolutions).toBe(0);
+    old.replaceWith(current); reconciled = true;
+    f.owner.flush(80, { rendered: true });
+    expect(resolutions).toBe(1);
+    expect(current.getBoundingClientRect().top).toBe(50);
+    expect(f.writes.length - writes).toBe(1);
+    f.owner.request(); f.owner.flush(80); f.flush(96);
+    expect(f.writes.length - writes).toBe(1);
+    expect(resolutions).toBe(1);
+  });
+
+  for (const choice of ["wheel", "key", "touch", "pointer", "focus", "native scroll", "Latest", "pause", "restore", "cancel"] as const) test(`new ${choice} cancels an unresolved logical reveal`, () => {
+    const f = fixture(() => "smooth");
+    const card = f.document.createElement("div"), button = f.document.createElement("button");
+    f.element.append(card, button);
+    let resolutions = 0;
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; });
+    if (choice === "wheel") f.event("wheel", { deltaY: 4 });
+    if (choice === "key") f.event("keydown", { key: "ArrowDown" });
+    if (choice === "touch") f.event("touchstart", { touches: [{ clientY: 100 }] });
+    if (choice === "pointer") f.event("pointerdown", { pointerType: "mouse", clientX: 100 });
+    if (choice === "focus") f.eventAt(button, "focusin");
+    if (choice === "native scroll") { f.move(f.element.scrollTop + 4); f.event("scroll"); }
+    if (choice === "Latest") f.owner.latest();
+    if (choice === "pause") f.owner.pause();
+    if (choice === "restore") f.owner.restorePosition({ kind: "following" });
+    if (choice === "cancel") f.owner.cancel();
+    f.flush(64); f.owner.flush(80, { rendered: true }); f.flush(96);
+    expect(resolutions).toBe(0);
   });
 
   test("native focus placement preserves the actual-render restoration handshake", () => {
