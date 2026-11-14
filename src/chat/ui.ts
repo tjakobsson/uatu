@@ -1583,8 +1583,8 @@ export function initChat(api = new ChatApiClient()): void {
     }
     if (card instanceof HTMLDetailsElement) card.open = true;
     if (!card.hasAttribute("tabindex")) card.tabIndex = -1;
-    card.scrollIntoView({ block: "center" });
-    card.focus?.();
+    parentScroll.reveal(card, { align: "center" });
+    card.focus?.({ preventScroll: true });
   };
   requestsJump?.addEventListener("click", () => {
     const id = requestsJump.dataset.requestTarget;

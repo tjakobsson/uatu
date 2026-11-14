@@ -1121,7 +1121,11 @@ Nested shell viewports keep their independent owners.
 Genuine reader movement captures a fresh reading point; correction echoes retain
 the previous point so repeated width changes cannot silently select another line.
 Native keyboard and accessibility focus navigation remains authoritative; a
-focused button alone does not establish a temporary handoff.
+focused button alone does not establish a temporary handoff. An owned offscreen
+focus transition that actually reveals its control retires smooth catch-up;
+the observation expires at the next correction frame or newer reader input.
+Request-pill jumps use the same owner's centered reveal and focus without a
+second native scroll, rather than competing with the follow animation.
 Reading geometry excludes descendants hidden by closed disclosure groups, even
 when content-visibility supplies nonzero placeholder boxes. A closed row's own
 summary remains eligible; offscreen retained rows are not discarded merely

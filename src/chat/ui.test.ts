@@ -1989,7 +1989,8 @@ describe("chat reversible-history composer", () => {
     stubConversationSelect(document);
     let reduced = false;
     const previousMedia = Object.getOwnPropertyDescriptor(window, "matchMedia")!;
-    Object.defineProperty(window, "matchMedia", { configurable: true, value: () => ({ matches: reduced }) });
+    Object.defineProperty(window, "matchMedia", { configurable: true,
+      value: (media: string) => ({ ...previousMedia.value(media), matches: reduced }) });
     const timeline = document.querySelector<HTMLElement>(target === "parent" ? "#chat-timeline" : "#chat-drilldown-timeline")!;
     let height = 2000;
     Object.defineProperties(timeline, {
@@ -6149,6 +6150,95 @@ describe("chat answering state", () => {
 });
 
 describe("chat outstanding-request pill", () => {
+  test("request pill navigation survives active smooth follow and later content", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>("#chat-timeline")!;
+    let height = 2000;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: () => height },
+    });
+    timeline.scrollTop = 0;
+    const rect = (top: number, size: number) => ({ top, bottom: top + size, height: size, left: 0, right: 640, width: 640 }) as DOMRect;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    const prototype = window.HTMLElement.prototype, originalBounds = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function () {
+      const id = this.getAttribute("data-chat-item-id");
+      if (id === "message:initial") return rect(-timeline.scrollTop, 2000);
+      if (id === "message:append") return rect(2000 - timeline.scrollTop, 800);
+      if (id === "question:q1") return rect(2800 - timeline.scrollTop, 200);
+      if (id === "message:tail") return rect(3000 - timeline.scrollTop, 1000);
+      return originalBounds.call(this);
+    };
+    const api = questionApi(document, { items: () => [{ id: "message:initial", type: "user_message", createdAt: 1, text: "Initial transcript" }] });
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    api.stream = (_id, _cursor, handlers) => { stream = handlers; return { close() {} }; };
+    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0, timestamp = performance.now();
+    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const step = () => {
+      timestamp += 20;
+      for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
+    };
+    const drain = () => { for (let n = 0; n < 40 && frames.size; n++) step(); };
+    const upsert = (item: unknown, sequence: number) => stream!.event({ type: "item.upsert", conversationId: "one", generation: "g", sequence,
+      item: item as ConversationSnapshot["items"][number] }, `navigation-${sequence}`);
+    try {
+      const { initChat } = await import(`./ui.ts?request-follow-navigation=${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => { drain(); return !!stream && timeline.scrollTop === 1600; });
+      height = 4000;
+      upsert({ id: "message:append", type: "assistant_message", createdAt: 2, markdown: "Appended response before the request" }, 1);
+      upsert(pendingQuestion("q1", 3), 2);
+      upsert({ id: "message:tail", type: "assistant_message", createdAt: 4, markdown: "Output below the request" }, 3);
+      await waitUntil(() => { step(); return !!document.querySelector('[data-chat-item-id="question:q1"]') && timeline.scrollTop > 1600; });
+      const card = document.querySelector<HTMLElement>('[data-chat-item-id="question:q1"]')!;
+      expect(card.getBoundingClientRect().top).toBeGreaterThan(400);
+      expect(timeline.scrollTop).toBeLessThan(2700);
+      let nativeReveals = 0, focuses = 0;
+      // Only supply missing browser primitives: the real pill handler must
+      // choose the card, coordinate its reveal and focus it without a second
+      // native scroll writer.
+      Object.defineProperty(card, "scrollIntoView", { configurable: true, value: () => {
+        nativeReveals++;
+        timeline.scrollTop = 2800 - (400 - 200) / 2;
+        timeline.dispatchEvent(new window.Event("scroll"));
+      } });
+      Object.defineProperty(card, "focus", { configurable: true, value: (options?: FocusOptions) => {
+        focuses++;
+        expect(options?.preventScroll).toBe(true);
+        Object.defineProperty(document, "activeElement", { configurable: true, get: () => card });
+        card.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+      } });
+      const pill = document.querySelector<HTMLButtonElement>("#chat-requests-jump")!;
+      expect(pill.dataset.requestTarget).toBe("question:q1");
+      pill.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(nativeReveals).toBe(0);
+      expect(focuses).toBe(1);
+      step();
+      expect(card.getBoundingClientRect().top).toBe(100);
+      drain();
+      expect(card.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+      height = 4400;
+      upsert({ id: "message:tail", type: "assistant_message", createdAt: 4, markdown: "Later output below the request" }, 4);
+      await waitUntil(() => { drain(); return timeline.textContent!.includes("Later output below the request"); });
+      expect(card.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+      expect(card.getBoundingClientRect().bottom).toBeLessThanOrEqual(400);
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      globalThis.requestAnimationFrame = requestFrame;
+      globalThis.cancelAnimationFrame = cancelFrame;
+      prototype.getBoundingClientRect = originalBounds;
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
   test("yields while its request is on screen and re-targets when the request changes", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
@@ -7909,6 +7999,7 @@ function installDomGlobals(document: Document, window: Window): void {
     HTMLElement: browserGlobal.HTMLElement,
     HTMLButtonElement: browserGlobal.HTMLButtonElement,
     HTMLDialogElement: browserGlobal.HTMLDialogElement,
+    HTMLDetailsElement: browserGlobal.HTMLDetailsElement,
     HTMLInputElement: browserGlobal.HTMLInputElement,
     HTMLTemplateElement: browserGlobal.HTMLTemplateElement,
     HTMLTextAreaElement: browserGlobal.HTMLTextAreaElement,

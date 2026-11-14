@@ -674,6 +674,152 @@ describe("coordinated scrolling", () => {
     expect(button.getBoundingClientRect().bottom).toBeLessThanOrEqual(300);
   });
 
+  for (const origin of ["outside Tab", "textarea Tab", "accessibility"] as const) for (const order of ["before", "after"] as const) test(`active smooth follow yields to downward ${origin} control navigation with focusin ${order} native placement`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button");
+    const previous = f.document.createElement(origin === "textarea Tab" ? "textarea" : "button");
+    f.element.append(button);
+    if (origin === "textarea Tab") f.element.append(previous);
+    else f.document.body.append(previous);
+    let active = previous;
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => active });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    expect(button.getBoundingClientRect().top).toBeGreaterThan(300);
+    if (origin !== "accessibility") f.eventAt(previous, "keydown", { key: "Tab" });
+    active = button;
+    if (order === "before") f.eventAt(button, "focusin");
+    // LinkeDOM has no native focus reveal. Model the browser's minimal
+    // downward placement of this offscreen 850..880 control in a 300px band.
+    f.move(580);
+    if (order === "after") f.eventAt(button, "focusin");
+    f.event("scroll");
+    expect(button.getBoundingClientRect().bottom).toBe(300);
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    expect(button.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+    f.owner.beforeMutation(); f.grow(1486); f.owner.request(true);
+    for (const time of [400, 480, 720]) f.flush(time);
+    expect(button.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+    expect(button.getBoundingClientRect().bottom).toBeLessThanOrEqual(300);
+  });
+
+  test("ordinary focus without native scrolling does not interrupt active smooth follow", () => {
+    const f = fixture(() => "smooth");
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.eventAt(button, "focusin");
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    f.grow(1486); f.owner.request(true); f.flush(400); f.flush(720);
+    expect(f.element.scrollTop).toBe(1186);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+
+  test("native focus placement is adopted before a delayed scroll event", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.eventAt(button, "focusin"); f.move(580); f.flush(64);
+    f.event("scroll");
+    f.grow(1486); f.owner.request(true); f.flush(80); f.flush(400);
+    expect(f.element.scrollTop).toBe(580);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  test("offscreen focus without native scrolling expires before later forward progress", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    f.eventAt(button, "focusin"); f.flush(64); // focus({ preventScroll: true })
+    f.move(800); f.event("scroll");
+    for (const time of [96, 160, 240, 368]) f.flush(time);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.element.scrollTop).toBe(886);
+  });
+
+  test("native focus placement preserves the actual-render restoration handshake", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.grow(1186); f.owner.restorePosition({ kind: "following" });
+    f.eventAt(button, "focusin"); f.move(580);
+    f.owner.flush(64, { rendered: true });
+    f.owner.beforeMutation(); f.shift(50); f.grow(1486); f.owner.request(true); f.flush(80);
+    expect(f.element.scrollTop).toBe(630);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  for (const height of [200, 500]) test(`centered request reveal of a ${height}px card interrupts follow and stays visible`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const card = f.document.createElement("div"); f.element.append(card);
+    stubRect(card, () => ({ top: 800 - f.element.scrollTop, bottom: 800 + height - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1600); f.owner.request(true); f.flush(16); f.flush(48);
+    f.owner.reveal(card as unknown as HTMLElement, { align: "center" }); f.flush(64);
+    const expectedTop = height > 300 ? 0 : 50;
+    expect(card.getBoundingClientRect().top).toBe(expectedTop);
+    f.grow(2000); f.owner.request(true); f.flush(80); f.flush(400);
+    expect(card.getBoundingClientRect().top).toBe(expectedTop);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+
+  for (const moving of [false, true]) test(`downwheel with an offscreen focused button keeps ${moving ? "moving" : "pending"} follow`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 850 - f.element.scrollTop, bottom: 880 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true);
+    if (moving) { f.flush(16); f.flush(48); }
+    f.eventAt(button, "focusin");
+    f.eventAt(button, "wheel", { deltaY: 400 });
+    f.move(800); f.event("scroll");
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.element.scrollTop).toBe(886);
+  });
+
+  test("nested focus navigation pauses only its owner during active smooth follow", () => {
+    const parent = fixture(() => "smooth"), child = fixture(() => "smooth");
+    parent.element.append(child.element);
+    stubRect(child.element, () => ({ top: 0, bottom: 300 }));
+    const button = child.document.createElement("button"); child.element.append(button);
+    for (const document of [parent.document, child.document]) {
+      Object.defineProperty(document, "activeElement", { configurable: true, get: () => button });
+    }
+    stubRect(button, () => ({ top: 850 - child.element.scrollTop, bottom: 880 - child.element.scrollTop }));
+    for (const f of [parent, child]) {
+      f.owner.request(); f.flush(0);
+      f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    }
+    child.eventAt(button, "focusin");
+    child.move(580); child.event("scroll");
+    for (const f of [parent, child]) {
+      for (const time of [64, 128, 240, 368]) f.flush(time);
+      f.grow(1486); f.owner.request(true); f.flush(400); f.flush(720);
+    }
+    expect(child.anchor.isPinned()).toBe(false);
+    expect(button.getBoundingClientRect().bottom).toBe(300);
+    expect(parent.anchor.isPinned()).toBe(true);
+    expect(parent.element.scrollTop).toBe(1186);
+  });
+
   // The diagnosed pre-click reveal was navigation to an offscreen control,
   // not a shell mutation. Unrelated input cannot change later focus policy.
   for (const input of ["Tab", "Space", "cancelled wheel"] as const) test(`non-scrolling ${input} does not prevent later legitimate button focus navigation`, () => {
