@@ -604,21 +604,33 @@ export class CoordinatedScrollOwner {
     if (this.isExtentClamp(geometry) || this.previous.scrollTop < 0
       || this.previous.scrollTop > Math.max(0, this.previous.scrollHeight - this.previous.clientHeight)) return;
     // Focusing can scroll before focusin, but scroll delivery is asynchronous.
-    // Growth can accompany that placement. Keep the pre-focus offset unless
-    // viewport layout or a native range clamp explains the change instead.
+    // Growth or resize can accompany that placement. A downward reveal of a
+    // previously offscreen target still supplies a pre-focus resize baseline.
     // Unlike gestures, focus may place several ancestor scrollports at once.
-    const top = geometry.clientHeight === this.previous.clientHeight
+    const top = geometry.clientHeight === this.previous.clientHeight || this.isDownwardFocusPlacement(target, geometry)
       ? this.previous.scrollTop : geometry.scrollTop;
     if (Math.abs(this.revealDelta(target, undefined, top)) <= 0.5) return;
     this.focusNavigation = { target, top };
     this.request();
   };
+  private isDownwardFocusPlacement(target: HTMLElement, geometry: AnchorGeometry): boolean {
+    if (geometry.scrollTop <= this.previous.scrollTop + 1e-6) return false;
+    const box = this.scroller.getBoundingClientRect();
+    const rect = target.getBoundingClientRect();
+    // Translate the target back into the previous scrollport. A target extending
+    // below that box, even when partly visible, distinguishes this reveal from
+    // incidental viewport placement of a fully visible control.
+    const previousTargetBottom = rect.bottom + geometry.scrollTop - this.previous.scrollTop;
+    return previousTargetBottom > box.top + this.previous.clientHeight
+      && Math.abs(this.revealDelta(target, undefined, geometry.scrollTop)) <= 0.5;
+  }
   private adoptFocusNavigation(geometry: AnchorGeometry): boolean {
     const navigation = this.focusNavigation;
-    // Layout has already explained this placement. Retire the observation
-    // before advancing `previous`, or the next frame could adopt it as input.
+    // Retire layout-explained observations before advancing `previous`. A
+    // resize alone cannot explain a downward reveal from below the old box.
     if (navigation && (this.isExtentClamp(geometry)
-      || (geometry.clientHeight !== this.previous.clientHeight && this.options.anchor.isPinned()))) {
+      || (geometry.clientHeight !== this.previous.clientHeight && this.options.anchor.isPinned()
+        && !this.isDownwardFocusPlacement(navigation.target, geometry)))) {
       this.focusNavigation = null;
       return false;
     }

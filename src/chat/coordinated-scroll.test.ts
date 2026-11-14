@@ -706,6 +706,54 @@ describe("coordinated scrolling", () => {
     expect(button.getBoundingClientRect().bottom).toBeLessThanOrEqual(300);
   });
 
+  for (const visibility of ["offscreen", "partial"] as const) for (const order of ["before", "after"] as const) test(`downward native focus during viewport shrink survives focusin ${order} placement of a ${visibility} control`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: f.element.clientHeight }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    let active: Element | null = null;
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => active });
+    let controlTop = 850;
+    stubRect(button, () => ({ top: controlTop - f.element.scrollTop, bottom: controlTop + 30 - f.element.scrollTop }));
+    f.owner.request(); f.flush(0);
+    f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
+    expect(f.element.scrollTop).toBeGreaterThan(300);
+    if (visibility === "partial") controlTop = f.element.scrollTop + 290;
+    expect(button.getBoundingClientRect().bottom).toBeGreaterThan(300);
+    if (visibility === "offscreen") expect(button.getBoundingClientRect().top).toBeGreaterThan(300);
+    else expect(button.getBoundingClientRect().top).toBeLessThan(300);
+    active = button;
+    if (order === "before") f.eventAt(button, "focusin");
+    // The viewport loses 20px while the browser reveals this previously
+    // below-band control. Shrinking the viewport expands the native range;
+    // this downward placement is not a range clamp or upward caret offset.
+    f.resize(280); f.move(controlTop + 30 - 280);
+    if (order === "after") f.eventAt(button, "focusin");
+    f.event("scroll");
+    expect(button.getBoundingClientRect().bottom).toBe(280);
+    for (const time of [64, 128, 240, 368]) f.flush(time);
+    const afterMotion = button.getBoundingClientRect().top;
+    f.grow(1486); f.owner.request(true); f.flush(400); f.flush(720);
+    expect({ afterMotion, afterAppend: button.getBoundingClientRect().top, bottom: button.getBoundingClientRect().bottom })
+      .toEqual({ afterMotion: 250, afterAppend: 250, bottom: 280 });
+  });
+
+  for (const order of ["before", "after"] as const) test(`resize placement of an already-visible focused control keeps following with focusin ${order}`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: f.element.clientHeight }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 1000 - f.element.scrollTop, bottom: 1030 - f.element.scrollTop }));
+    f.grow(1100); f.owner.request(); f.flush(0);
+    expect(button.getBoundingClientRect().bottom).toBe(230);
+    if (order === "before") f.eventAt(button, "focusin");
+    f.resize(280); f.move(820);
+    if (order === "after") f.eventAt(button, "focusin");
+    f.event("scroll"); f.flush(16);
+    f.grow(1486); f.owner.request(true); f.flush(32); f.flush(320);
+    expect(f.element.scrollTop).toBe(1206);
+    expect(f.anchor.isPinned()).toBe(true);
+  });
+
   test("ordinary focus without native scrolling does not interrupt active smooth follow", () => {
     const f = fixture(() => "smooth");
     const button = f.document.createElement("button"); f.element.append(button);
