@@ -11,6 +11,21 @@ permissions:
   contents: read
 
 jobs:
+  skills:
+    # Always runs: generated skills/client links are otherwise documentation
+    # paths and must not bypass the required merge gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Check committed skills offline (no dependency restore)
+        run: bun --no-install run skills:check && bun --no-install test scripts/skills.test.ts scripts/skills-pr.test.ts scripts/pr-review.test.ts
+
   contract-fast:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -370,7 +385,7 @@ jobs:
   # only when every one of them passed, or all were skipped for a change
   # that touches no code.
   validate:
-    needs: [changes, unit, e2e]
+    needs: [changes, unit, e2e, skills]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -382,7 +397,12 @@ jobs:
           CODE: ${{ needs.changes.outputs.code }}
           UNIT: ${{ needs.unit.result }}
           E2E: ${{ needs.e2e.result }}
+          SKILLS: ${{ needs.skills.result }}
         run: |
+          if [ "$SKILLS" != "success" ]; then
+            echo "::error::Skills consistency finished '$SKILLS'."
+            exit 1
+          fi
           if [ "$CHANGES" != "success" ]; then
             echo "::error::Change classification finished '$CHANGES'."
             exit 1

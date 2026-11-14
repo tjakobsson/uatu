@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1160" viewBox="0 0 1000 1160" role="img" aria-labelledby="title desc">
+  <title id="title">Uatu contribution workflow</title>
+  <desc id="desc">Six delivery steps: approve intent, implement and evolve, validate and review locally, gather GitHub evidence, accept tradeoffs, sync and archive then merge. Hosted automation and native client verification remain pending.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#4b6475"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; fill: #18334a; }
+      .title { font-size: 34px; font-weight: 700; }
+      .heading { font-size: 23px; font-weight: 700; }
+      .body { font-size: 19px; }
+      .note { font-size: 17px; fill: #43596a; }
+      .box { fill: white; stroke: #b7c9d5; stroke-width: 2; }
+      .human { fill: #fff4dd; stroke: #ba822b; stroke-width: 2; }
+      .arrow { stroke: #4b6475; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1000" height="1160" fill="#f3f6f8"/>
+  <text x="60" y="60" class="title">From agreed intent to an evidence-backed PR</text>
+  <text x="60" y="96" class="body">CONTRIBUTING.md owns the workflow. Review findings are advisory.</text>
+  <rect x="60" y="130" width="880" height="112" rx="12" class="human"/>
+  <text x="84" y="165" class="heading">1  Agree intent and record the approved Git revision</text>
+  <text x="84" y="196" class="body">Approve OpenSpec before behavior or workflow implementation.</text>
+  <text x="84" y="224" class="body">Preserve that commit until acceptance. Mechanical edits skip planning.</text>
+  <path d="M500 244V267" class="arrow"/>
+  <rect x="60" y="278" width="880" height="112" rx="12" class="box"/>
+  <text x="84" y="313" class="heading">2  Implement and evolve within the original outcome</text>
+  <text x="84" y="344" class="body">Use OpenSpec CLI directly; keep code, tests, docs, and artifacts aligned.</text>
+  <text x="84" y="372" class="body">Pause for agreed advance-approval exceptions; safety rules still apply.</text>
+  <path d="M500 392V415" class="arrow"/>
+  <rect x="60" y="426" width="880" height="112" rx="12" class="box"/>
+  <text x="84" y="461" class="heading">3  Validate and review locally before marking ready</text>
+  <text x="84" y="492" class="body">Focused checks + independent Standards and Spec contexts.</text>
+  <text x="84" y="520" class="body">Use revised requirements; explicitly report when no spec applies.</text>
+  <path d="M500 540V563" class="arrow"/>
+  <rect x="60" y="574" width="880" height="112" rx="12" class="box"/>
+  <text x="84" y="609" class="heading">4  Gather GitHub evidence on the current revision</text>
+  <text x="84" y="640" class="body">Applicable CI + fresh independent Standards and Spec review.</text>
+  <text x="84" y="668" class="body">External review: maintainer-authorized, read-only; report hosted gaps.</text>
+  <path d="M500 688V711" class="arrow"/>
+  <rect x="60" y="722" width="880" height="112" rx="12" class="human"/>
+  <text x="84" y="757" class="heading">5  Request explicit human acceptance of material tradeoffs</text>
+  <text x="84" y="788" class="body">Explain departures from the approved revision, reasons, and consequences.</text>
+  <text x="84" y="816" class="body">Show successful checks, evidence, unresolved findings, and limitations.</text>
+  <path d="M500 836V859" class="arrow"/>
+  <rect x="60" y="870" width="880" height="112" rx="12" class="box"/>
+  <text x="84" y="905" class="heading">6  Sync specs, archive, renew affected checks, squash-merge</text>
+  <text x="84" y="936" class="body">Retain final artifacts and the short PR explanation, not duplicate snapshots.</text>
+  <text x="84" y="964" class="body">Preserve Conventional Commit and release-note override conventions.</text>
+  <text x="60" y="1026" class="note">At either review: fix valid findings or explain rejection; renew affected checks/review.</text>
+  <text x="60" y="1058" class="note">Integration limits: native discovery and hosted behavior need recorded verification.</text>
+  <text x="60" y="1090" class="note">Direct CLI is the autonomous default; generated apply/update remain interactive.</text>
+  <text x="60" y="1122" class="note">Occasional skill updates are separate: SKILL-MAINTENANCE.svg.</text>
+</svg>

@@ -9,6 +9,8 @@
     "uatu": "./src/cli.ts"
   },
   "scripts": {
+    "skills:check": "bun run scripts/skills.ts check",
+    "skills:update": "bun run scripts/skills.ts update",
     "dev": "bun run scripts/dev-hub.ts",
     "bench:render": "bun run scripts/bench-render.ts",
     "bench:chat": "bun run scripts/bench-chat.ts",
@@ -78,6 +80,7 @@
     "linkedom": "^0.18.13",
     "mitata": "^1.0.34",
     "openapi-diff": "^0.24.1",
+    "skills": "1.7.4",
     "typescript": "7.0.2"
   },
   "overrides": {

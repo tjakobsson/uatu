@@ -1,0 +1,51 @@
+name: Validate Renovate
+
+on:
+  pull_request:
+    paths:
+      - renovate.json
+      - skills-source.json
+      - scripts/renovate-check.*
+      - scripts/skills*.ts
+      - .github/workflows/validate-renovate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24.22.2
+          package-manager-cache: false
+      - name: Install isolated official Renovate (no lifecycle scripts)
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir renovate-tool renovate-input
+          cd renovate-tool
+          npm install --ignore-scripts --omit=optional --no-audit --no-fund --no-package-lock --userconfig=/dev/null renovate@44.199.2
+      - name: Copy only repository configuration and source data
+        run: cp renovate.json skills-source.json "$RUNNER_TEMP/renovate-input/"
+      - name: Validate repository configuration strictly
+        working-directory: ${{ runner.temp }}/renovate-input
+        run: '"$RUNNER_TEMP/renovate-tool/node_modules/.bin/renovate-config-validator" --strict --no-global renovate.json'
+      - name: Extract dependencies with the official local platform (no token)
+        working-directory: ${{ runner.temp }}/renovate-input
+        env:
+          LOG_FILE: ${{ runner.temp }}/renovate-extract.ndjson
+          LOG_FILE_LEVEL: trace
+        run: '"$RUNNER_TEMP/renovate-tool/node_modules/.bin/renovate" --platform=local --dry-run=extract'
+      - name: Assert and print the actual extracted skill dependency
+        run: node scripts/renovate-check.mjs skills-source.json "$RUNNER_TEMP/renovate-extract.ndjson"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Check extraction assertions and regex/digest-replacement fixtures
+        run: bun --no-install test scripts/renovate-check.test.ts scripts/skills-pr.test.ts
