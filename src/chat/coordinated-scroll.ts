@@ -42,15 +42,18 @@ export interface RevealOptions {
   align?: "nearest" | "end" | "center";
 }
 
+type RevealResolver = () => HTMLElement | null | undefined;
+
 const owners = new WeakMap<HTMLElement, CoordinatedScrollOwner>();
 
 /** The only automatic position writer for a managed scroller. */
 export class CoordinatedScrollOwner {
   private frame: number | null = null;
   private newContent = false;
-  private revealTarget: HTMLElement | (() => HTMLElement | null | undefined) | null = null;
+  private revealTarget: HTMLElement | RevealResolver | null = null;
   private revealOptions: RevealOptions | undefined;
   private revealRevision = 0;
+  private resolvingReveal: { resolve: RevealResolver; placement: RevealOptions | undefined; revision: number } | null = null;
   private heldTarget: HTMLElement | null = null;
   private heldOptions: RevealOptions | undefined;
   private heldTop: number | null = null;
@@ -172,8 +175,14 @@ export class CoordinatedScrollOwner {
       // Focus performed by the resolver is part of this reveal, not newer
       // navigation. Reentrant cancellation or another reveal still wins.
       this.revealTarget = null;
-      const target = resolve();
+      this.resolvingReveal = { resolve, placement, revision };
+      let target: ReturnType<RevealResolver>;
+      try { target = resolve(); }
+      finally { this.resolvingReveal = null; }
       if (!this.active() || revision !== this.revealRevision) return;
+      // A passive snapshot during resolution retained the intent, not the
+      // callback's pre-snapshot node. Resolve it again after reconciliation.
+      if (this.revealTarget === resolve) { this.request(); return; }
       this.revealTarget = target ?? null;
       this.revealOptions = placement;
       if (target === undefined) {
@@ -268,7 +277,7 @@ export class CoordinatedScrollOwner {
    * selects the current DOM node immediately before measurement: undefined
    * waits for rendering, null cancels. New reader input cancels a resolver.
    */
-  reveal(element: HTMLElement | (() => HTMLElement | null | undefined), options?: RevealOptions): void {
+  reveal(element: HTMLElement | RevealResolver, options?: RevealOptions): void {
     if (!this.active()) return;
     this.revealRevision++;
     this.revealTarget = element;
@@ -438,11 +447,15 @@ export class CoordinatedScrollOwner {
   /** Cancel work and transient input, retaining the anchor's follow choice.
    * A passive snapshot keeps unconsumed instant placement and, after answer
    * blur, both live reading and the separate durable position for departure.
+   * Logical resolvers survive passive replacement; raw DOM reveals do not.
    * Active holds restore their original intent so callers can renew them.
    * This neither schedules work nor creates a new follow choice.
    */
   cancel(options?: { forSnapshot?: boolean }): void {
-    this.revealRevision++;
+    const logical = options?.forSnapshot ? typeof this.revealTarget === "function"
+      ? { resolve: this.revealTarget, placement: this.revealOptions, revision: this.revealRevision }
+      : this.resolvingReveal?.revision === this.revealRevision ? this.resolvingReveal : null : null;
+    if (!logical) this.revealRevision++;
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
     this.motion = null;
@@ -463,6 +476,10 @@ export class CoordinatedScrollOwner {
     if (preserveReleasedPosition) this.heldPosition = held;
     else if (held) this.options.position!.restorePosition(held);
     else if (resume) this.options.anchor.jumpToLatest(this.options.measure(false));
+    if (logical) {
+      this.revealTarget = logical.resolve;
+      this.revealOptions = logical.placement;
+    }
     this.touchY = null;
   }
 
@@ -583,7 +600,7 @@ export class CoordinatedScrollOwner {
     return (control as HTMLElement).isContentEditable || ["", "true", "plaintext-only"].includes(control.getAttribute("contenteditable") ?? "false");
   }
   private cancelNavigationReveal(): void {
-    if (typeof this.revealTarget !== "function") return;
+    if (typeof this.revealTarget !== "function" && this.resolvingReveal?.revision !== this.revealRevision) return;
     this.revealRevision++;
     this.revealTarget = null;
     this.revealOptions = undefined;
@@ -596,7 +613,7 @@ export class CoordinatedScrollOwner {
       && (Math.abs(geometry.scrollTop - bottom) <= 1 || (this.options.anchor.isPinned() && geometry.scrollTop > bottom));
   }
   private focusIn = (event: FocusEvent): void => {
-    this.cancelNavigationReveal();
+    if (this.resolvingReveal?.revision !== this.revealRevision) this.cancelNavigationReveal();
     if (!this.active() || this.heldTarget || this.inTextControl(event)) return;
     this.focusNavigation = null;
     const target = event.target as HTMLElement;

@@ -1127,7 +1127,9 @@ its own actual reveal, with range clamps excluded. The observation expires at
 the next correction frame or newer reader input.
 Request-pill jumps retain their logical target until queued rendering finishes,
 then resolve and focus the current card through the owner's centered reveal,
-without a second native scroll. Removal, departure and newer reader choices
+without a second native scroll. Passive same-view snapshots retain that logical
+jump for revalidation against the refreshed transcript, not its old DOM target
+or animation. Removal, departure and newer reader choices
 cancel that one-shot navigation instead of focusing a stale card.
 Render-owned loss of request focus may transfer to the replacement card; a
 subsequent focus choice invalidates that proof rather than being overwritten.

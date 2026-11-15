@@ -897,6 +897,146 @@ describe("coordinated scrolling", () => {
     expect(resolutions).toBe(1);
   });
 
+  for (const following of [false, true]) test(`logical request reveal survives passive snapshot replacement while ${following ? "following" : "paused"}`, () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const old = f.document.createElement("div"), replacement = f.document.createElement("div");
+    f.element.append(old);
+    stubRect(replacement, () => ({ top: 800 - f.element.scrollTop, bottom: 1000 - f.element.scrollTop }));
+    f.grow(1600); f.owner.request(); f.flush(0);
+    if (!following) { f.move(300); f.owner.pause(); }
+    let current = old, resolutions = 0;
+    f.owner.reveal(() => { resolutions++; return current as unknown as HTMLElement; }, { align: "center" });
+    f.owner.cancel({ forSnapshot: true });
+    old.replaceWith(replacement); current = replacement;
+    f.owner.flush(16, { rendered: true });
+    const afterReplacement = replacement.getBoundingClientRect().top;
+    f.grow(2000); f.owner.request(true); f.flush(32); f.flush(320);
+    expect({ resolutions, afterReplacement, afterLaterOutput: replacement.getBoundingClientRect().top }).toEqual({
+      resolutions: 1, afterReplacement: 50, afterLaterOutput: 50,
+    });
+  });
+
+  test("logical request reveal remains one-shot across successive passive snapshots", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const card = f.document.createElement("div"); f.element.append(card);
+    stubRect(card, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    let resolutions = 0;
+    f.owner.request(); f.flush(0);
+    f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; }, { align: "center" });
+    f.owner.cancel({ forSnapshot: true }); f.owner.cancel({ forSnapshot: true });
+    expect(f.frames.size).toBe(0);
+    f.owner.flush(16, { rendered: true });
+    f.owner.cancel({ forSnapshot: true }); f.owner.request(); f.flush(32);
+    expect(resolutions).toBe(1);
+    expect(card.getBoundingClientRect().top).toBe(130);
+  });
+
+  test("passive snapshot retains a logical reveal through the staged initial-render handshake", () => {
+    const f = fixture(() => "smooth");
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const card = f.document.createElement("div"); f.element.append(card);
+    stubRect(card, () => ({ top: 800 - f.element.scrollTop, bottom: 1000 - f.element.scrollTop }));
+    f.grow(1600); f.owner.restorePosition({ kind: "following" });
+    let resolutions = 0;
+    f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; }, { align: "center" });
+    f.owner.cancel({ forSnapshot: true }); f.owner.flush(16, { rendered: true });
+    expect(resolutions).toBe(0);
+    expect(f.writes).toEqual([]);
+    f.flush(32);
+    expect(resolutions).toBe(1);
+    expect(f.writes).toEqual([750]);
+    expect(card.getBoundingClientRect().top).toBe(50);
+  });
+
+  test("passive snapshot clears raw DOM reveals even when their nodes survive", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const card = f.document.createElement("div"); f.element.append(card);
+    stubRect(card, () => ({ top: 450 - f.element.scrollTop, bottom: 470 - f.element.scrollTop }));
+    f.grow(900); f.owner.request(); f.flush(0);
+    f.move(100); f.owner.pause();
+    const writes = f.writes.length;
+    f.owner.reveal(card as unknown as HTMLElement, { align: "center" });
+    f.owner.cancel({ forSnapshot: true }); f.owner.flush(16, { rendered: true });
+    expect(f.element.scrollTop).toBe(100);
+    expect(f.writes.slice(writes)).toEqual([]);
+  });
+
+  test("passive snapshot inside a logical resolver retries current DOM without an obsolete write", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const old = f.document.createElement("div"), current = f.document.createElement("div"); f.element.append(old);
+    stubRect(current, () => ({ top: 800 - f.element.scrollTop, bottom: 1000 - f.element.scrollTop }));
+    f.grow(1600); f.owner.request(); f.flush(0);
+    f.move(300); f.owner.pause();
+    let resolutions = 0;
+    f.owner.reveal(() => {
+      if (++resolutions === 1) {
+        f.owner.cancel({ forSnapshot: true });
+        old.replaceWith(current);
+        return old as unknown as HTMLElement;
+      }
+      return current as unknown as HTMLElement;
+    }, { align: "center" });
+    const writes = f.writes.length;
+    f.flush(16);
+    expect(f.writes.slice(writes)).toEqual([]);
+    f.flush(32);
+    f.grow(2000); f.owner.request(true); f.flush(48);
+    expect(resolutions).toBe(2);
+    expect(f.writes.slice(writes)).toEqual([750]);
+    expect(current.getBoundingClientRect().top).toBe(50);
+  });
+
+  for (const choice of ["cancel", "wheel", "key", "Latest", "departure", "new reveal"] as const) test(`reentrant ${choice} supersedes a logical resolver across passive cancellation`, () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const old = f.document.createElement("div"), current = f.document.createElement("div"); f.element.append(old, current);
+    stubRect(old, () => ({ top: 800 - f.element.scrollTop, bottom: 1000 - f.element.scrollTop }));
+    stubRect(current, () => ({ top: 500 - f.element.scrollTop, bottom: 600 - f.element.scrollTop }));
+    f.grow(1600); f.owner.request(); f.flush(0);
+    f.move(300); f.owner.pause();
+    let obsolete = 0, replacement = 0;
+    f.owner.reveal(() => {
+      obsolete++;
+      if (choice === "cancel") f.owner.cancel();
+      if (choice === "wheel") f.event("wheel", { deltaY: 4 });
+      if (choice === "key") f.event("keydown", { key: "ArrowDown" });
+      if (choice === "Latest") f.owner.latest();
+      if (choice === "departure") f.owner.restorePosition({ kind: "following" });
+      if (choice === "new reveal") f.owner.reveal(() => { replacement++; return current as unknown as HTMLElement; }, { align: "center" });
+      f.owner.cancel({ forSnapshot: true });
+      return old as unknown as HTMLElement;
+    }, { align: "center" });
+    const writes = f.writes.length;
+    f.flush(16);
+    expect(f.writes.slice(writes)).toEqual([]);
+    f.owner.cancel({ forSnapshot: true }); f.owner.flush(32, { rendered: true }); f.flush(48);
+    expect(obsolete).toBe(1);
+    expect(replacement).toBe(choice === "new reveal" ? 1 : 0);
+    if (choice === "new reveal") expect(current.getBoundingClientRect().top).toBe(100);
+  });
+
+  for (const choice of ["wheel", "key", "focus", "Latest", "departure", "cancel"] as const) test(`new ${choice} after passive snapshot cancels a logical request reveal`, () => {
+    const f = fixture();
+    const card = f.document.createElement("div"), button = f.document.createElement("button"); f.element.append(card, button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    f.owner.request(); f.flush(0);
+    let resolutions = 0;
+    f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; });
+    f.owner.cancel({ forSnapshot: true });
+    if (choice === "wheel") f.event("wheel", { deltaY: 4 });
+    if (choice === "key") f.event("keydown", { key: "ArrowDown" });
+    if (choice === "focus") f.eventAt(button, "focusin");
+    if (choice === "Latest") f.owner.latest();
+    if (choice === "departure") f.owner.restorePosition({ kind: "following" });
+    if (choice === "cancel") f.owner.cancel();
+    f.owner.cancel({ forSnapshot: true }); f.owner.flush(16, { rendered: true }); f.flush(32);
+    expect(resolutions).toBe(0);
+  });
+
   for (const choice of ["wheel", "key", "touch", "pointer", "focus", "native scroll", "Latest", "pause", "restore", "cancel"] as const) test(`new ${choice} cancels an unresolved logical reveal`, () => {
     const f = fixture(() => "smooth");
     const card = f.document.createElement("div"), button = f.document.createElement("button");
