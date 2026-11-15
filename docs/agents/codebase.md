@@ -1,8 +1,8 @@
-# CLAUDE.md — agent guidance for uatu
+# Codebase reference
 
 uatu is a local Bun-served PWA that watches a docs tree and previews
 Markdown / AsciiDoc with an embedded terminal.
-See `ARCHITECTURE.md` for the deeper picture (runtime, request lifecycle,
+See [ARCHITECTURE.md](../../ARCHITECTURE.md) for the deeper picture (runtime, request lifecycle,
 state lifecycle, terminal subsystem, follow-mode rules, how-to-extend
 recipes).
 
@@ -212,30 +212,6 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   be coalesced in the Hub queue; dropping a document patch loses its predecessor.
   Browser preview and provenance work must check file revision and selection
   ownership before updating content or caches.
-
-## Release-note discipline
-
-- Public release notes describe the user-visible delta from the latest stable
-  `v*` tag. Git history may retain the feature work and subsequent corrections
-  that produced that final behavior.
-- Before preparing or merging a `fix` PR, determine whether the broken behavior
-  exists in the latest stable release. Stable regressions remain visible
-  `fix(...)` entries. A correction that only stabilizes functionality added
-  after the latest stable tag keeps its truthful `fix(...)` PR/commit title,
-  but the PR body must contain a Release Please override before squash merge:
-
-  ```text
-  BEGIN_COMMIT_OVERRIDE
-  chore(scope): stabilize the unreleased feature before release
-  END_COMMIT_OVERRIDE
-  ```
-
-- Routine dependency updates are `chore(deps)` and hidden. Only dependency
-  updates that remediate a known vulnerability use visible `fix(deps)` notes;
-  name the security reason rather than merely the version bump.
-- Curate generated notes through overrides on the source PR, not by editing the
-  Release Please PR. If an override is added after merge, rerun the Release
-  Please workflow so it rereads the merged PR body.
 
 ## Commands
 

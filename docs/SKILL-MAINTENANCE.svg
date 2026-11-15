@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700" role="img" aria-labelledby="title desc">
+  <title id="title">Occasional third-party skill maintenance</title>
+  <desc id="desc">Renovate owns one update PR. A trusted helper is intended to regenerate skills and lock in that PR, then validate on the regenerated head and request human review. Hosted helper and required-check behavior are unverified.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#4b6475"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; fill: #18334a; }
+      .heading { font-size: 23px; font-weight: 700; }
+      .body { font-size: 19px; }
+      .box { fill: white; stroke: #b7c9d5; stroke-width: 2; }
+      .arrow { stroke: #4b6475; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1000" height="700" fill="#f3f6f8"/>
+  <text x="60" y="60" font-size="34" font-weight="700">Skill maintenance: one Renovate-owned PR</text>
+  <text x="60" y="99" class="body">Hosted helper / CI association UNVERIFIED — authorized dry run required.</text>
+  <rect x="60" y="132" width="880" height="100" rx="12" class="box"/>
+  <text x="84" y="170" class="heading">1  Select an immutable upstream revision</text>
+  <text x="84" y="205" class="body">Renovate updates the allowlisted source declaration; CLI pinned at 1.7.4.</text>
+  <path d="M500 234V258" class="arrow"/>
+  <rect x="60" y="270" width="880" height="100" rx="12" class="box"/>
+  <text x="84" y="308" class="heading">2  Materialize generated outputs in the same PR</text>
+  <text x="84" y="343" class="body">Trusted helper: narrow outputs, isolated install, exact-head writeback.</text>
+  <path d="M500 372V396" class="arrow"/>
+  <rect x="60" y="408" width="880" height="100" rx="12" class="box"/>
+  <text x="84" y="446" class="heading">3  Validate content and required checks on the regenerated SHA</text>
+  <text x="84" y="481" class="body">Reject stale locks/content. Token pushes alone do not prove CI retriggering.</text>
+  <path d="M500 510V534" class="arrow"/>
+  <rect x="60" y="546" width="880" height="100" rx="12" fill="#fff4dd" stroke="#ba822b" stroke-width="2"/>
+  <text x="84" y="584" class="heading">4  Human review before merge — no instruction automerge</text>
+  <text x="84" y="619" class="body">Upstream bodies unchanged; repo integration separate; OpenSpec untouched.</text>
+  <text x="60" y="682" font-size="17">Policy and blockers: docs/agents/integration.md. Per-change delivery: DEVELOPMENT-PROCESS.svg.</text>
+</svg>

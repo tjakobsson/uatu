@@ -12,37 +12,11 @@ builds identify themselves as `<branch>@<sha>`; released binaries identify
 themselves as `v<version> · <sha>`.
 
 Release Please derives the next version from squash-merged Conventional
-Commits after the latest version tag:
-
-| Commit | Result |
-| --- | --- |
-| `fix` or `perf` | Patch release |
-| `feat` | Minor release |
-| `!` or `BREAKING CHANGE:` | Major release |
-| `chore`, `ci`, `test`, `build`, `refactor`, `docs` | No release by itself |
-
-Only Features, Bug Fixes, and Performance are visible in public release notes
-by default. The notes describe the user-visible delta from the latest stable
-tag, not every intermediate correction made while developing the next release.
-Routine dependency, CI, test, documentation, and repository maintenance remain
-in git history without clouding the user-facing changelog. Only dependency
-updates that remediate a known vulnerability are visible `fix(deps)` entries.
+Commits after the latest version tag. Shared version effects, public-note
+selection, dependency classifications, and unreleased-fix overrides are owned
+by [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests-and-commits).
 Use a `Release-As: X.Y.Z` commit footer only when intentionally overriding the
 derived version.
-
-When a squash-merged `fix` only repairs functionality added after the latest
-stable tag, preserve the truthful commit but add this to the source PR body:
-
-```text
-BEGIN_COMMIT_OVERRIDE
-chore(scope): stabilize the unreleased feature before release
-END_COMMIT_OVERRIDE
-```
-
-Release Please then treats the commit as hidden release metadata without
-rewriting Git history. Add the override before merge when possible. If it is
-added to an already-merged PR, rerun the Release Please workflow manually; an
-edited PR body does not itself push to `main`.
 
 ## Repository prerequisites
 

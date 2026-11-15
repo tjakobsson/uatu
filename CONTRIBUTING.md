@@ -6,12 +6,13 @@ developing, validating, and merging changes. Maintainers should also read
 
 ## Development setup
 
-uatu requires Bun 1.3.5 or newer. CI currently pins the exact project runtime
-shown in `.github/workflows/ci.yml`.
+Use the Bun version recorded in `package.json` (`packageManager`); CI pins its
+runtime in `.github/workflows/ci.yml`. Obtain any required installation or
+download approval before running setup commands.
 
 ```bash
-bun install
-bunx playwright install chromium
+bun install --frozen-lockfile
+bun run e2e:install
 bun run dev
 ```
 
@@ -21,27 +22,87 @@ bun run dev
 [ARCHITECTURE.md](./ARCHITECTURE.md) describes the runtime, state, request,
 terminal, and extension points.
 
+`e2e:install` installs Chromium **and WebKit**: the suite includes both engines.
+Linux may also need Playwright's system dependencies, as shown in CI.
+Committed PR/review skills need no separate installation after clone; see
+[agent integration](./docs/agents/integration.md) for discovery checks and limits.
+
 ## Changes and branches
 
-1. Start from an up-to-date `main` and create a focused branch.
-2. For behavior or workflow changes, create an OpenSpec change under
-   `openspec/changes/<name>/` before implementation.
-3. Keep implementation, tests, documentation, and the OpenSpec task list in
-   sync as work progresses.
-4. Open a pull request and address required CI and review findings.
-5. Squash-merge with a Conventional Commit title. A ruleset on `main`
-   enforces this flow: direct pushes are rejected, and merging requires
-   the CI `validate` check to pass.
-6. Sync changed capability specs and archive completed OpenSpec artifacts as
-   part of the change before its final merge.
+1. **Agree intent.** Start a focused branch from an up-to-date `main`. For
+   behavior or workflow changes, prepare an OpenSpec change under
+   `openspec/changes/<name>/` and obtain approval before implementation. Record
+   the Git commit containing the approved artifacts in the handoff or PR;
+   verify those artifacts with `git show <approved-sha>:<artifact-path>`. Keep
+   that commit available on the work branch until final explicit acceptance;
+   do not rebase it away. Recording an existing revision does not authorize a
+   commit or publication. Record any change-specific advance-approval
+   exceptions with the initial plan; that list may be empty.
+2. **Implement and evolve.** Keep code, tests, documentation, requirements, and
+   tasks aligned. Within the original outcome, agents may autonomously revise
+   approach and make requirement tradeoffs, recording their consequences in the
+   working artifacts. Only the explicitly agreed change-specific list of
+   advance-approval exceptions requires an earlier pause for these tradeoffs;
+   the list may be empty. Changing the original outcome still requires approval,
+   and existing safety, permission, installation, and publication rules remain
+   controlling. The approved default is [direct OpenSpec CLI use](./docs/agents/integration.md#direct-cli-for-autonomy)
+   for status, instructions, and validation, without invoking generated
+   apply/update wrappers. Those remain interactive alternatives with their own
+   confirmation rules, not the autonomous implementation path.
+3. **Validate and review locally.** Run focused checks for affected behavior.
+   Before marking any PR ready, run independent Standards and Spec reviews in
+   separate contexts, using the [review integration](./docs/agents/review.md).
+   Spec review checks revised requirements, not approval-baseline drift; report
+   no applicable spec when none exists. Autonomously triage findings, fix valid
+   ones or explain rejection, and renew affected checks and reviews after
+   material corrections.
+4. **Open the PR and verify GitHub evidence.** Use a Conventional Commit title
+   and the PR expectations below. Every PR also needs independent Standards and
+   Spec review on GitHub; AI findings are advisory, not merge approval. External
+   PRs require trusted-maintainer authorization of the current head for read-only
+   review. Do not execute candidate tests/scripts/hooks as part of automated
+   review. Run tests through applicable CI instead. Resolve findings as above;
+   local verdicts are not the GitHub reviewers' conclusions.
+5. **Request final acceptance.** Focused local checks and applicable CI must
+   succeed before the final acceptance handoff. Report unavailable checks as
+   blockers or limitations, never as passes. Explain material departures from
+   the approved revision in the PR: what changed, why, consequences, and the
+   tradeoffs requiring explicit human acceptance before merge. Passing checks
+   and advisory review do not supply that acceptance.
+6. **Finish and merge.** After acceptance, sync changed capability specs and
+   archive completed planning artifacts before merge; renew affected checks and
+   review after final edits. Retain final artifacts and the short PR explanation,
+   not a duplicate approved-plan snapshot platform. Squash-merge with a
+   Conventional Commit title and successful required checks (`validate` in the
+   current CI). Verify the actual target repository's protection settings;
+   workflow files alone do not prove a deployed ruleset.
 
-OpenSpec's normal lifecycle is:
+**Mechanical path:** spelling, formatting, or broken-link repairs that change
+neither behavior nor workflow need no invented OpenSpec requirements or approval
+baseline. Use a focused branch, relevant checks, both review axes locally and on
+GitHub (report no applicable spec), and the same PR/merge handoff.
+
+![Delivery workflow](./docs/DEVELOPMENT-PROCESS.svg)
+
+Use the installed project CLI, without a one-off download. For an existing
+approved change, the autonomous implementation loop reads:
 
 ```bash
-openspec new change <name>
-openspec status --change <name>
-openspec validate <name> --strict
+openspec_cli=./node_modules/@fission-ai/openspec/bin/openspec.js
+change=your-change-name
+bun run "$openspec_cli" status --change "$change" --json
+bun run "$openspec_cli" instructions apply --change "$change" --json
+# Implement approved work, keep artifacts aligned, then repeat status/instructions.
+bun run "$openspec_cli" validate "$change" --strict
 ```
+
+Replace `your-change-name` with the approved change. Read the returned context
+files and required project context; honor `blocked` states and missing-artifact
+instructions before implementing. This calls the CLI's `instructions apply`
+query, **not** a generated apply skill/command. The
+[integration reference](./docs/agents/integration.md#direct-cli-for-autonomy)
+explains dynamic instructions, advisory guidance, task tracking, and interactive
+alternatives. Planning still precedes implementation and requires approval.
 
 The proposal, design, delta specs, and tasks describe intent and acceptance
 criteria. Current behavior belongs in `openspec/specs/`; completed planning
@@ -70,7 +131,23 @@ an explicit custom workflow profile so machine-local settings cannot change
 the repository's workflow set. Inspect `openspec update --dry-run --json`
 before applying the refresh, then repeat it to confirm no changes remain.
 
+For example, a new terminal interaction follows all six steps, with approved
+delta specs, focused terminal tests, and UI evidence. A typo-only correction
+uses the mechanical path and link/whitespace checks; its Spec review reports
+no applicable requirement rather than creating one.
+
 ## Pull requests and commits
+
+Keep the PR readable for someone new to the change: purpose, main changes,
+concrete examples or screenshots where useful, checks and results, limitations,
+unresolved findings, and merge risk. Include relevant issue/spec links and the
+approved revision plus material tradeoff summary when applicable. Resolve issue
+references against the **actual target repository**, not an implicit fork.
+Link the applicable OpenSpec change/spec or issue. If none applies, state
+`No applicable spec: <reason>` so automated review can distinguish absent intent
+from missing input; it refuses ambiguous sources rather than guessing.
+Agents obtain approval for PR text and draft-versus-ready status before
+publication, subject to governing permissions.
 
 Pull requests are squash-merged, so the PR title becomes the commit seen by
 Release Please. Titles must follow Conventional Commits:
@@ -121,14 +198,20 @@ This override workflow depends on squash merging. A fix for behavior that does
 exist in the latest stable release remains a normal visible `fix(...)` with no
 override.
 
+Curate generated release notes through overrides on source PRs, not by editing
+the Release Please PR. If an override is added after merge, rerun Release Please
+so it rereads the merged PR body. This section owns shared release-note policy;
+the maintainer runbook owns publication and recovery.
+
 ## Validation
 
 Changes that add or change functionality must include tests — unit tests in
 the colocated `*.test.ts` files, plus an e2e test when the behavior is only
 observable through the UI.
 
-Run the checks relevant to your change. Before requesting final review, the
-same core checks as CI should pass:
+Run the checks relevant to your change locally; successful applicable CI supplies
+the full gate rather than routinely duplicating the entire suite locally. The
+available core checks are:
 
 ```bash
 bun run typecheck
@@ -138,8 +221,28 @@ bun run check:licenses
 bun run build
 bun run smoke
 bun run test:e2e
-bunx @fission-ai/openspec validate --all --strict
+./node_modules/.bin/openspec validate --all --strict
 ```
+
+Choose focused unit files with `bun test <path>` and focused UI checks with
+`bun run test:e2e <file>` while iterating. Include a build before `smoke` when
+validating the binary. Record exact commands, tool versions, and unrun checks.
+For OpenSpec changes validate the selected change strictly, then all artifacts
+when preparing the complete handoff; use the locked project CLI, not a fresh
+one-off download.
+
+- **API/contract changes:** follow [api/CONVENTIONS.md](./api/CONVENTIONS.md); run `bun run
+  api:validate`, relevant `bun run test:api` coverage, and the structural and
+  base-relative compatibility checks defined in `.github/workflows/ci.yml`.
+  Schema/client changes may also require `bun run api:swift` and site checks;
+  these have their own platform/tooling prerequisites.
+- **Desktop changes:** follow the path-filtered
+  `.github/workflows/desktop-ci.yml`. Its `xcodebuild` build uses the
+  `UatuCodeDesktop` project on macOS 26 with the matching SDK; no CLI binary build is required for this
+  connect-only client. Report unavailable macOS/Xcode checks explicitly.
+- **Managed skill changes:** run `bun run skills:check` and review upstream
+  instruction changes as code. See [maintenance](./docs/agents/integration.md#skill-maintenance)
+  for the same-PR update path and hosted verification limits.
 
 ### Agent SDK coverage
 
@@ -178,7 +281,7 @@ binary.
 
 ## Releases
 
-Do not manually bump `package.json`, edit generated future changelog sections,
-or push version tags. Release Please keeps a release PR current from the
+Release Please keeps a release PR current from the
 Conventional Commits on `main`. Maintainers merge that PR when ready; see
-[docs/RELEASING.md](./docs/RELEASING.md) for publication and recovery steps.
+[docs/RELEASING.md](./docs/RELEASING.md) for version/tag ownership, publication,
+and recovery steps.
