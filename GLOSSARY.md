@@ -9,3 +9,6 @@ A conversation's input workflow, encompassing its draft and attachments, message
 
 **Draft**:
 The editable text and attachments being prepared for a conversation, distinct from input already submitted for delivery.
+
+**Native history**:
+The conversation transcript stored by its owning agent, distinct from Uatu's displayed or reconstructed conversation.

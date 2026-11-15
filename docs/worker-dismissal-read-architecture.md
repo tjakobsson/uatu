@@ -44,10 +44,11 @@ never permission to read that child or Stop it.
 1. A source captures the parent's session-change counter before its first native
    parent request, and each child's counter before that child's first ownership
    or history request.
-2. Complete native history, session-record, inbox and active-membership
-   observations initialize their facet without advancing the counter. A later
-   differing observation advances it. Native stream deltas advance it when new
-   or changed; identical already-known observations do not.
+2. Ordinary first complete observations initialize their facet; later differing
+   observations advance it. A relevant first positive inbox report can deny an
+   already-consuming inference, and successful local revert acknowledgements
+   advance the session counter before follow-up reads or SSE. Stream deltas
+   advance it when new or changed; identical already-known observations do not.
 3. Observation order controls this counter, not request order. A differing reply
    from an older or ownerless request can advance it. This is a conservative
    denial, not permission for that reply to replace a newer cache entry.
@@ -98,13 +99,22 @@ inactive inventory or relevant execution/history/launcher counterproof can
 withdraw cold activity through publication without inventing an outcome or end
 timestamp. Independent live controls keep their separate authority.
 
-Native request ordering still matters for these activity guards and reusable
-history. Warm transcript entries retain bounded native visibility metadata from
-load registration through eviction. Entering a staged boundary filters complete
-raw history; leaving or changing it invalidates reuse because content may have
-been removed. Relevant native inbox reports can retire stale parent-history
-reuse before SSE. Pending entries cannot install over their replacements.
-Invalidation starts no IO and grants no ownership, result or Stop proof.
+Native request ordering still matters for independent activity guards. Raw
+history reuse has a separate OpenCode-v2-local native-history module, which owns
+complete transcript reads and inbox/record qualification before worker consumers
+exist. Relevant contradictory native replies can deny pending or installed reuse
+regardless of request start order, but cannot replace history as newer truth.
+Current waiters finish normally; retired entries cannot install over replacements.
+Only a later independent reader may reload. Qualification starts no IO and grants
+no ownership, result or Stop proof. The shared bounded storage helper and other
+providers remain unchanged.
+
+That independent reload can cross a changed counter and withhold an outcome
+even if its native reply is terminal. A further independently initiated quiet
+read may recover it; no automatic retry is introduced. Relevant positive inbox
+reports also deny an already-consuming inference per source even when the shared
+inbox digest is unchanged. Neither cache eligibility nor repeated native report
+observation grants report identity or dismissal authority.
 
 `outcomeWithheld: true` is also a dismissal barrier for Unavailable and Ended
 activity. Sparse updates cannot erase it. A fresh authoritative terminal result

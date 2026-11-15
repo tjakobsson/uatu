@@ -6,6 +6,12 @@ with the separately approved injectable adapter scheduler. After the actual-sess
 diagnosis, the user approved the combined attribution-regression and counter-safety
 direction with “Great lets implement this”. Final verification remains required.
 
+**Current architecture approval:** On 2026-11-15 the complete native-history
+replacement design was confirmed with “Implement + ADR”. Earlier
+unapproved/interface-under-discussion statements below record the interview's
+history, not a remaining implementation gate. The accepted scope and trade-off
+are recorded in `docs/adr/0001-native-history-reuse-qualification.md`.
+
 The completed 1,000-ordering campaign (seeds 0–999) recorded 21 publication
 failures, zero progress failures and zero harness errors. The shortest sampled
 representative, seed 428, and its reduced ordering each reproduced exactly in
@@ -144,10 +150,62 @@ unaffected.
 Pending raw-history reuse must not import contradicted evidence before a future
 worker consumer can capture counters. Record-stage or positive-inbox responses
 that finish while a warm load is pending can deny its installation even if their
-requests began before registration. Use existing pending-load frontiers; keep
-installed-cache and independent activity request ordering unchanged. Retiring a
+requests began before registration. The subsequent native-history replacement
+extends denial to installed entries while keeping independent activity request
+ordering unchanged. Retiring a
 contradicted cache entry does not cancel its current waiter, retry that read or
 grant outcome authority; a later independent read loads current native truth.
+
+During architecture exploration on 2026-11-15, denying further history reuse
+after contradictory native evidence was approved even when that observation's
+request began earlier. Existing waiters still finish normally; a later independent
+reader may reload. This permits scoped read-count expectation changes, not weaker
+outcome, activity, ownership or Stop assertions, automatic recovery retries, or
+positive authority for the contradictory reply.
+
+The confirmed module scope is one provider-local module owning
+the full raw-history reuse lifecycle, including pending/installed qualification,
+retirement and protection against late installation. Existing bounded storage
+mechanics can remain inside that module. Worker outcome attribution, activity,
+ownership, Stop and dismissal authority stay separate.
+
+The confirmed strategy is replacement rather than parallel policy paths: move scattered
+reuse qualification into the deepened module and remove superseded branches.
+Retention limits, shared-read cancellation and stream behavior remain the baseline;
+this is not approval to add a second cache or a compatibility path.
+
+The confirmed compatibility envelope is OpenCode-v2-local. Keep the shared
+HistoryReuse interface and other providers unchanged. Preserve retention limits,
+collective cancellation, stream-generation/reconnect behavior, current freshness
+invalidation scope and error behavior except for the approved contradictory-
+evidence reload policy.
+
+The selected direction is native-history access. Complete-history reads
+share one v2-local module with the native inbox and record observations needed
+to qualify reuse, so qualification runs at native completion before results return
+to callers. Keep the interface narrow rather than decorating the entire SDK or
+introducing a typed-operation protocol/private event clock. Existing outcome and
+activity ordering and authority remain outside. The implemented interface is
+`complete`, `inbox`, `records`, `invalidate` and `dispose`; it exposes no mutable
+qualification metadata or worker-source ownership.
+
+The confirmed test surface moves reuse-policy scenarios to the new
+module interface rather than duplicating their full matrix at provider level.
+Retain public worker outcome/authority checks and meaningful coalescing,
+cancellation, bounded-read and no-counterproof-I/O assertions. Change reuse-count
+expectations only where the approved denial policy requires an independent
+reload; investigate the disputed Failed-versus-Running fixture causally instead
+of weakening it. Keep the existing seed and GitHub CI/Codex acceptance gates.
+
+The isolated diagnostic confirmed the outcome timing conflict without changing
+native payloads: a delayed older Succeeded reply retires reuse and advances the
+child observation counter; the independent reload returns native Failed but
+changes that counter inside its capture window, so it must withhold. A later
+independently initiated quiet read returns Failed. The explicit approval covers
+asserting full nondismissible Unresolved on that reload and retaining final Failed
+on the separate quiet read, with identity/source-guard/Stop assertions preserved.
+Do not move captures, ignore differing older observations, fabricate new mock data
+or automatically retry to obtain immediate Failed.
 
 ## Actual-session Attribution Acceptance
 

@@ -12068,9 +12068,12 @@ describe("OpenCode 2.x provider: prompting and events", () => {
       const fresh = await provider.listMessages("ses", { limit: 50 });
       expect(fresh.completeItems?.map(item => item.id)).toEqual(["message:msg"]);
       releaseHistory(); await overlappingRead;
-      // Late completion cannot replace the new boundary's retained value.
-      expect((await provider.listMessages("ses", { limit: 50 })).completeItems).toEqual(fresh.completeItems);
+      // Late empty content cannot replace the new boundary's delivered value.
+      // Its contradiction denies further reuse; only this independent read
+      // reloads. A read already resolved before cancel has no late evidence.
       expect(reads).toBe(2);
+      expect((await provider.listMessages("ses", { limit: 50 })).completeItems).toEqual(fresh.completeItems);
+      expect(reads).toBe(overlap === "during-resolved" ? 2 : 3);
     } finally {
       releaseCancel(); releaseHistory();
       stream.close(); await events.next(); await provider.dispose();

@@ -14,8 +14,11 @@ const gate = () => {
 
 for (const kind of ["record", "inbox"] as const)
 for (const mode of ["overlap", "unchanged", "disjoint", "before-load"] as const)
-for (const seam of ["provider", "adapter"] as const)
-test(`pre-registration ${kind} response fences pending raw history (${mode}/${seam})`, async () => {
+for (const phase of kind === "record" && mode === "overlap" ? ["pending", "installed"] as const : ["pending"] as const)
+// Pure qualification controls moved to the native-history interface. Keep the
+// adapter's canonical outcome/evidence assertions and both failure seams.
+for (const seam of mode === "overlap" ? ["provider", "adapter"] as const : ["adapter"] as const)
+test(`pre-registration ${kind} response fences ${phase} raw history (${mode}/${seam})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   const oldEntered = gate(), oldRelease = gate(), rawEntered = gate(), rawRelease = gate();
   const oldContext = new AsyncLocalStorage<boolean>();
@@ -73,6 +76,7 @@ test(`pre-registration ${kind} response fences pending raw history (${mode}/${se
     void old.catch(() => undefined); await oldEntered.promise;
     const warmSubject = kind === "record" ? child : parent;
     if (mode !== "before-load") { warm = provider.getReversibleHistoryState!(warmSubject); void warm.catch(() => undefined); await rawEntered.promise; }
+    if (phase === "installed") { rawRelease.release(); await warm; }
     oldRelease.release(); await old;
     changed = mode === "overlap" || mode === "before-load";
     if (kind === "record") await provider.getSession(subject!);

@@ -2435,7 +2435,10 @@ test(`native parent-result counterproof is scoped and compact (${mode})`, async 
     else if (mode === "many-reports") expect(stale.completeItems).toContainEqual(expect.objectContaining({ status: "completed", resultId: "native-report" }));
     else expect(staleRow).toMatchObject({ status: "completed", resultId: "native-report" });
     expect(foreignLookups).toBe(0);
-    await provider.getReversibleHistoryState!(parent); expect(reads).toBe(mode === "late-ownerless" ? 3 : 2);
+    // Different retired native content denies reuse; only this independent
+    // request reloads. Identical reports remain reusable.
+    await provider.getReversibleHistoryState!(parent);
+    expect(reads).toBe(mode === "late-ownerless" ? 4 : ["same-report", "large-same-report", "many-reports"].includes(mode) ? 2 : 3);
     repaired = true;
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh.find(task => task.taskId === worker.taskId)).toMatchObject({ status: hasInitialReport && mode !== "report-change-without-part-clocks" ? "completed" : "failed", resultId: "native-report" });
@@ -2483,7 +2486,7 @@ test(`older ownerless parent results cannot revoke later consumed results (${arr
     expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "failed", resultId: "parent-result" }));
     release(); await older;
     expect(page.workerSource?.isCurrent()).toBe(true);
-    await provider.getReversibleHistoryState!(parent); expect(reads).toBe(2);
+    await provider.getReversibleHistoryState!(parent); expect(reads).toBe(3);
     expect(page.workerSource?.isCurrent()).toBe(true);
   } finally { release(); releaseNewer(); abort.abort(); await older?.catch(() => undefined); await read?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
@@ -2856,7 +2859,7 @@ test(`pending warm child history observes native visibility before installation 
     if (change === "stale-overlap") expectWithheld(row);
     else expect(row?.status).toBe(removed || staged ? "running" : "completed");
     if (removed) expect(workerDismissalEvidence(row)?.dismissible).toBe(false);
-    expect(childReads).toBe(removed ? 2 : 1);
+    expect(childReads).toBe(change === "staged-cleared" ? 3 : change === "stale-overlap" ? 2 : removed ? 2 : 1);
     if (removed) {
       const evidence = await adapter.workerEvidence(parent);
       expect(evidence.entries.find(entry => entry.executionId === row?.activity?.executionId)?.dismissible).toBe(false);
@@ -2962,11 +2965,11 @@ test(`warm child transcript observes native visibility before parent recovery ($
     const page = await provider.listMessages(parent, { limit: 100, signal: abort.signal });
     expect(page.workerSource?.isCurrent()).toBe(true);
     expect(page.items).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: removed || change === "staged-only" ? "running" : "completed" }));
-    expect(childReads).toBe(removed ? 2 : 1);
+    expect(childReads).toBe(change === "stale-overlap" ? 3 : removed ? 2 : 1);
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: removed || change === "staged-only" ? "running" : "completed", ...(removed ? { activity: expect.objectContaining({ kind: "working" }) } : {}) });
     // Explicit fresh inventory intentionally invalidates all history reuse.
-    expect(childReads).toBe(removed ? 3 : 2);
+    expect(childReads).toBe(change === "stale-overlap" ? 4 : removed ? 3 : 2);
   } finally { release(); abort.abort(); await older?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
@@ -3239,8 +3242,7 @@ test(`ownerless parent inventory covers its first pending response (${change})`,
     const staleRow = stale.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
     if (change === "unchanged") expect(staleRow).toMatchObject({ status: "completed" });
     else expectWithheld(staleRow);
-    await provider.getReversibleHistoryState!(parent);
-    expect(reads).toBe(nativeReads);
+    expect(reads).toBe(nativeReads); // Counterproof itself never starts IO.
     expect(unknownLookups).toBe(0); // Provisional native facts never grant child IO.
     recovered = true;
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
@@ -3252,6 +3254,12 @@ test(`ownerless parent inventory covers its first pending response (${change})`,
     } else expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(contradicted && !bounded ? "running" : "completed");
     if (contradicted && !bounded) expect(fresh.every(task => task.status === "running")).toBe(true);
     expect(unknownLookups).toBe(0);
+    // Probe reuse after outcome assertions: doing native IO before that capture
+    // would initialize its counter facet and erase this test's crossing window.
+    const afterRecovery = reads;
+    expect(afterRecovery).toBe(nativeReads + (change === "append" || change === "other-child" ? 2 : 1));
+    await provider.getReversibleHistoryState!(parent);
+    expect(reads).toBe(afterRecovery);
   } finally { release(); releaseSecond(); abort.abort(); await older?.catch(() => undefined); await delayed?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
@@ -3299,7 +3307,8 @@ test(`an older ownerless parent response cannot poison newer owned inventory (${
     expect(page.items.filter(item => item.type === "background_task").every(task => task.status === (arrival === "shared-transport" ? "completed" : "running"))).toBe(true);
     release(); await older;
     expect(page.workerSource?.isCurrent()).toBe(true);
-    await provider.getReversibleHistoryState!(parent); expect(reads).toBe(arrival === "shared-transport" ? 1 : 2);
+    await provider.getReversibleHistoryState!(parent);
+    expect(reads).toBe(arrival === "shared-transport" ? 1 : 3);
     expect(page.workerSource?.isCurrent()).toBe(true);
   } finally { release(); releaseNewer(); abort.abort(); await older?.catch(() => undefined); await current?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
@@ -3371,9 +3380,7 @@ test(`ownerless reversible history covers the first pending child response (${ch
     const staleRow = stale.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
     if (change === "unchanged") expect(staleRow).toMatchObject({ status: "completed" });
     else expectWithheld(staleRow);
-    // Reuse must still contain the newer transcript, not the late old response.
-    expect((await provider.getReversibleHistoryState!(child)).canUndo).toBe(!reverted);
-    expect(reads).toBe(change === "late-ownerless" ? 3 : 2);
+    expect(reads).toBe(change === "late-ownerless" ? 3 : 2); // No counterproof IO.
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh).toHaveLength(1);
     if (change === "append") {
@@ -3381,11 +3388,17 @@ test(`ownerless reversible history covers the first pending child response (${ch
       const quiet = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
       expect(quiet[0]?.status).toBe("completed");
     } else expect(fresh[0]?.status).toBe(reverted ? "running" : "completed");
+    // Keep the first new native observation inside the worker capture above.
+    // This later probe must see current truth, never the retired old response.
+    const afterRecovery = reads;
+    expect(afterRecovery).toBe((change === "late-ownerless" ? 3 : 2) + (change === "append" ? 2 : 1));
+    expect((await provider.getReversibleHistoryState!(child)).canUndo).toBe(!reverted);
+    expect(reads).toBe(afterRecovery);
   } finally { release(); releaseSecond(); abort.abort(); await older?.catch(() => undefined); await delayed?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const arrival of ["after-owned", "while-owned-pending"] as const)
-test(`a stale ownerless reversible response cannot revoke later owned child evidence or its reuse (${arrival})`, async () => {
+test(`a stale ownerless reversible response preserves owned association but denies contradictory reuse (${arrival})`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, reads = 0;
   let entered!: () => void, release!: () => void, newerEntered!: () => void, releaseNewer!: () => void;
@@ -3432,7 +3445,22 @@ test(`a stale ownerless reversible response cannot revoke later owned child evid
     release(); await older;
     expect(guards.every(guard => guard.isCurrent())).toBe(true);
     const reused = await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal });
-    expect(reused[0]?.status).toBe("failed"); expect(reads).toBe(2);
+    if (arrival === "after-owned") {
+      // Native Failed reloads after the old Succeeded observation, changing
+      // the child facet inside this capture window. No automatic quiet retry.
+      expectWithheld(reused[0]);
+      expect(reused[0]?.activity?.executionId).toBe(current[0]?.activity?.executionId);
+      expect(reads).toBe(3);
+      expect(guards.every(guard => guard.isCurrent())).toBe(true);
+      const quiet = await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal });
+      expect(quiet[0]?.status).toBe("failed");
+      expect(quiet[0]?.stateUncertain).not.toBe(true);
+      expect(quiet[0]?.outcomeWithheld).not.toBe(true);
+      expect(quiet[0]?.activity?.executionId).toBe(current[0]?.activity?.executionId);
+      expect(workerCanStop(quiet[0]!)).toBe(false);
+      expect(workerDismissalEvidence(quiet[0])?.dismissible).toBe(true);
+      expect(reads).toBe(3);
+    } else { expect(reused[0]?.status).toBe("failed"); expect(reads).toBe(3); }
     expect(guards.every(guard => guard.isCurrent())).toBe(true);
   } finally { release(); releaseNewer(); abort.abort(); await older?.catch(() => undefined); await recovery?.catch(() => undefined); await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
@@ -3631,7 +3659,7 @@ test("an overlapping stale child read and transport reuse preserve newer owned w
     expect(guards.every(guard => guard.isCurrent())).toBe(true);
     const reused = await provider.reconcileBackgroundTasks!(parent, { signal: abort.signal });
     expect(reused).toContainEqual(expect.objectContaining({ taskId: worker.taskId, activity: expect.objectContaining({ kind: "working", generation: 2 }) }));
-    expect(reads).toBe(2);
+    expect(reads).toBe(3); // Denial does not revoke independently owned activity.
     expect(guards.every(guard => guard.isCurrent())).toBe(true);
   } finally { release(); firstAbort.abort(); abort.abort(); await firstPump; await pump; await stale?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);

@@ -1269,43 +1269,45 @@ it creates no result, running clock or Stop authority. Sparse updates cannot
 erase the withheld-outcome barrier. A fresh authoritative terminal result can
 replace or clear it, including when the previous activity was Unavailable or Ended.
 
-**History reuse remains request-ordered.** Relevant native inbox reports can
-invalidate reusable parent history without starting IO or supplying report
-authority. Cache retirement is separate from outcome projection.
-An already warmed parent entry also owns a native inbox request cutoff before
-any worker source consumes it. Later relevant report signatures absent from its
-actual stored transcript retire only that entry, without IO or report authority.
-Prelaunch/unrelated reports and exact reports already in the transcript do not
-retire it; requests begun before a newer load cannot claim that load. Overflow
-abstains conservatively within the existing native fact budget.
-While the first parent load is pending, launcher scope is unknown. A positive
-native report requested after that entry registered retires only its installation
-slot, preserving existing waiters and newer replacement loads. No report facts
-or payload are retained beyond the bounded native observation; the subsequent
-requested read obtains actual storage. Prelaunch positives can conservatively
-retire such an unknown load, but cannot create a failure outcome.
+**Native-history reuse has one qualification owner.** The OpenCode-v2-local
+`opencode/v2/native-history.ts` module owns complete native transcript reads and
+the inbox/record observations that qualify their pending and installed reuse.
+Its interface hides mutable qualification metadata. The unchanged shared
+`HistoryReuse` helper supplies bounded storage, coalescing and cancellation;
+other providers retain their existing helper contract. Worker attribution,
+observation counters, activity, ownership, Stop and dismissal authority remain
+outside the module.
+
+Relevant contradictory native observations can deny reuse even when their
+requests began earlier. They cannot replace raw history as newer truth, grant
+report authority or start IO. An installed parent entry compares inbox reports
+against its actual native launcher/report scope: unrelated, prelaunch and
+already-covered reports remain quiet. Pending entries lack that scope, so a
+positive parent-scoped response or overflow can conservatively retire their
+installation slot without creating a worker outcome. Existing healthy waiters
+still finish; a later independent reader may load current native history.
 Exact terminal replay identities, like starts, remain in the same serialized,
 aggregate-budgeted execution ledger across negative-only retirement. Up to 128
 distinct terminal identities per child are recognized; overflow sets sticky
 recovery-only uncertainty. Replaying an earlier observed terminal after a later
 one cannot revoke a current lease or bind that proof to a new occurrence.
 
-Before any dependent parent read exists, transcript cache entries own a
-constant-size native visibility observation from load registration, before a
-value exists. The metadata transfers to retained values and retires with the
-entry. Native request-start order keeps the newest visibility baseline. A late
-intermediate stage can deny reuse of a load registered before it when a newer
-cleared reply arrived first; it never replaces that newer baseline or affects
-a replacement load registered after the stage/clear pair. A staged→cleared
-change retires a pending entry before its obsolete
-response can install or overwrite a replacement. No session keys are added.
-Entering a staged boundary retains the complete raw transcript and
-refreshes native cost/visibility filtering on each fold. Leaving or changing an
-existing boundary can commit removed content and therefore invalidates reuse.
-Unchanged or unrelated observations preserve reuse, and overlapping older
-records cannot replace a newer baseline. Cache-owned metadata adds no retained
-session keys, global visibility map, ownership or read phase. Eviction,
-generation invalidation and disposal release the cache entry as before.
+Qualification belongs to the cache entry before any worker consumer exists.
+Record visibility and native transcript contradictions affect pending as well
+as installed eligibility; retired native replies are still observations, not
+permission to install over a replacement. Entering staging can retain complete
+raw history, while changed/cleared staging may represent removed content and
+deny reuse. Older contradictory replies remain deny-only and never replace a
+newer visibility baseline. Equal and disjoint observations preserve reuse.
+Metadata follows entry lifetime rather than a separate session ledger; eviction,
+generation invalidation and disposal retain their existing storage behavior.
+
+A reload can itself change an observation counter. For example, an old Succeeded
+reply may deny a cached Failed transcript; the independent Failed reload crosses
+the captured counter window and therefore withholds. A separately initiated
+quiet read can then recover Failed. Cache qualification does not move captures,
+invent native payloads or automatically retry to obtain that result. See
+`docs/adr/0001-native-history-reuse-qualification.md` for the accepted trade-off.
 
 Stream retirement strips the existing worker ledger down to negative execution
 continuity instead of discarding it. Scoped end boundaries, start-clock vetoes,
@@ -1405,8 +1407,9 @@ prefix can settle work. A staged suffix is not positive evidence; clearing it
 restores eligibility, while committing removes it. Complete stored boundaries
 still supply conservative admission/control vetoes. Unavailable ownership or
 visibility withholds inference. The counter projection governs inferred-outcome
-publication; native request ordering still governs reusable history and the
-separate activity guards. Existing ownership, stream-generation and Stop fences
+publication; native request ordering still protects the separate activity guards,
+while relevant contradictory observations can deny raw-history reuse regardless
+of request start order. Existing ownership, stream-generation and Stop fences
 remain required. See [Worker dismissal reads](docs/worker-dismissal-read-architecture.md)
 for the bounded counter contract and Hub/browser persistence boundary.
 When a returned result still relies on history-only activity, its source also
