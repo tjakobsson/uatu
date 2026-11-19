@@ -758,9 +758,13 @@ export class BackgroundWorkers {
      * Boundary order is irrelevant: consumers scan predicates, not positions. */
     executionHistory?: ReadonlyMap<string, readonly number[]>;
     /** Per-read exact canonical response proof, checked against ALL parent
-     * invocations before either visible or complete history starts folding. */
-    reportInterval?: (child: string, summary: string) => { after?: number; end: number; responseAt: number } | undefined;
+     * invocations before either visible or complete history starts folding.
+     * `at` is the report's delivery clock: deny-only, never a selector.
+     * `contradicted` denies correlation inside an otherwise exact interval. */
+    reportInterval?: (child: string, summary: string, at?: number) => { after?: number; end: number; responseAt: number } | { contradicted: true } | undefined;
     reportLaunches?: readonly LauncherEvidence[];
+    /** Scoped retained native ends for a history fold; undefined means unknown. */
+    observedEnds?: (child: string) => readonly number[] | undefined;
   } = {}) {}
   private readonly parents = new Map<string, string>();
   private readonly births = new Map<string, { parent?: string; proof?: NativeProof; shellCommand?: string; shellIdentity?: ShellBirthIdentity; shellEnd?: NativeProof; contradicted?: true }>();
@@ -937,9 +941,16 @@ export class BackgroundWorkers {
     return previous;
   }
 
+  /** Undated starts or a saturated start set leave start clocks unknown. */
+  startClocksUnknown(child: string): boolean {
+    const boundary = this.terminalProofs.get(child);
+    return boundary?.startCounterproof === null || boundary?.startClocks === null;
+  }
+
   private distinctStartContradicted(child: string, window: { start: number; end: number }, at: number, previous?: number): boolean {
     const boundary = this.terminalProofs.get(child), start = boundary?.startCounterproof;
-    if (start === null || boundary?.startClocks === null) return true;
+    // `start === null` is already unknown; restated so the compiler narrows it.
+    if (this.startClocksUnknown(child) || start === null) return true;
     const clocks = (boundary?.startClocks ?? []).filter(clock => (previous === undefined || clock > previous) && clock <= at);
     // Admission is a window, not proof of one execution inside it. Multiple
     // distinct starts in this candidate interval veto uniqueness even before
@@ -967,11 +978,19 @@ export class BackgroundWorkers {
     if (candidate.kind !== "agent") return false;
     const ends = this.observedExecutionEnds(candidate.worker);
     if (!ends) return true;
-    const previous = this.historyIntervalStart(candidate, transcriptEnds);
     return candidate.launches.some(launch => {
       const window = this.admissionWindow(launch);
-      return !window || ends.some(end => end >= window.start && end < at)
-        || this.distinctStartContradicted(candidate.worker, window, at, previous);
+      return !window || ends.some(end => end >= window.start && end < at);
+    }) || this.intervalStartsContradicted(candidate.worker, candidate.launches, at, this.historyIntervalStart(candidate, transcriptEnds));
+  }
+
+  /** Deny-only: distinct retained starts after `previous` and by `at` mean
+   * these admissions' outcome may belong to another execution. Shared by
+   * report-free inference and exact-response report correlation. */
+  intervalStartsContradicted(child: string, launches: readonly LauncherEvidence[], at: number, previous?: number): boolean {
+    return launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || this.distinctStartContradicted(child, window, at, previous);
     });
   }
 
@@ -1396,7 +1415,7 @@ export class BackgroundWorkers {
       // to an earlier execution. Their native clock cannot invalidate a launch
       // that had not yet begun. Live observation keeps its existing fences.
       && !(this.budget.executionHistory && terminalReportedAt != null && task.item.createdAt > terminalReportedAt)
-      && !(prepared.source === "subagent" && this.historicalReportSeparated(task.worker, task.evidence.launches, prepared.summary))) this.uncertain(task, false);
+      && !(prepared.source === "subagent" && this.historicalReportSeparated(task.worker, task.evidence.launches, prepared.summary, terminalReportedAt ?? undefined))) this.uncertain(task, false);
     this.bound();
   }
 
@@ -1535,9 +1554,18 @@ export class BackgroundWorkers {
     return ends !== undefined && window && !ends.some(end => end >= window.start && end <= window.end) ? window : undefined;
   }
 
+  /** Scoped retained native ends in this fold; undefined while unknown. */
+  private retainedEnds(child: string): readonly number[] | undefined {
+    return this.budget.observedEnds ? this.budget.observedEnds(child) : [];
+  }
+
   private sameHistoricalInterval(child: string, previous: LauncherEvidence, next: LauncherEvidence): boolean {
     if (!this.budget.executionHistory) return true;
-    const ends = this.budget.executionHistory.get(child), left = this.historicalAdmission(child, previous), right = this.historicalAdmission(child, next);
+    // A revert can remove an idle, not its observed native end: known retained
+    // ends separate admissions too. Unknown ones keep transcript aliasing (Stop
+    // recovery after saturation relies on it); settlement fails closed below.
+    const transcript = this.budget.executionHistory.get(child), left = this.historicalAdmission(child, previous), right = this.historicalAdmission(child, next);
+    const ends = transcript && [...transcript, ...this.retainedEnds(child) ?? []];
     return ends !== undefined && left !== undefined && right !== undefined && left.start !== right.start
       && !ends.some(end => end >= Math.min(left.start, right.start) && end <= Math.max(left.end, right.end));
   }
@@ -1551,10 +1579,36 @@ export class BackgroundWorkers {
       || right !== undefined && leftStart !== undefined && end > right.end && end < leftStart);
   }
 
+  /** Exact-response proof for this fold. An earlier admission on the child
+   * without a settled outcome of its own may be the report's source (a revert
+   * can remove its equal response), so it denies the interval. Deny-only. */
+  private exactReportInterval(child: string, summary: string, at?: number): ReturnType<NonNullable<typeof this.budget.reportInterval>> {
+    const interval = this.budget.reportInterval?.(child, summary, at);
+    if (!interval || "contradicted" in interval || interval.after === undefined) return interval;
+    const after = interval.after;
+    return [...this.tasks.values()].some(task => task.worker === child && task.item.taskType === "agent" && task.item.status === "running"
+      && task.evidence.launches.some(launch => {
+        const anchor = launch.ran ?? launch.created ?? launch.completed ?? launch.reportedCompletion;
+        return anchor !== undefined && anchor <= after;
+      }) && !this.ownHistoryOutcome(child, task.evidence.launches)) ? { contradicted: true } : interval;
+  }
+
+  /** Each admission's first execution end is a transcript idle, which can
+   * supply its own outcome. A retained-only (reverted) or unknown end cannot. */
+  private ownHistoryOutcome(child: string, launches: readonly LauncherEvidence[]): boolean {
+    const transcript = this.budget.executionHistory?.get(child), retained = this.retainedEnds(child);
+    const ends = transcript && retained && [...transcript, ...retained];
+    return !!transcript && !!ends && launches.every(launch => {
+      const window = this.admissionWindow(launch);
+      const first = window && ends.filter(end => end >= window.start).sort((a, b) => a - b)[0];
+      return !!window && first !== undefined && first > window.end && transcript.includes(first);
+    });
+  }
+
   private historicalReportCompatible(child: string, launches: readonly LauncherEvidence[], at?: number, summary = ""): boolean {
     if (!this.budget.executionHistory) return true;
-    const interval = this.budget.reportInterval?.(child, summary);
-    if (interval) return launches.every(launch => this.launchInReportInterval(child, launch, interval));
+    const interval = this.exactReportInterval(child, summary, at);
+    if (interval) return !("contradicted" in interval) && launches.every(launch => this.launchInReportInterval(child, launch, interval));
     // Complete native competitors prevent an early/terminal/hidden occurrence
     // from disappearing merely because it has not been folded yet.
     const possible = this.budget.reportLaunches?.filter(launch => launch.background === true && launch.reportedChild === child
@@ -1567,8 +1621,10 @@ export class BackgroundWorkers {
         && task.evidence.launches.some(own => own.call === launch.call && own.message === launch.message)
         && launches.every(target => (target.ran ?? target.created) !== undefined
           && task.item.terminalReportedAt! < (target.ran ?? target.created)!)));
-    if (possible && possible.length > 1 && !possible.every(launch => launch === possible[0]
-      || this.sameHistoricalInterval(child, possible[0]!, launch))) return false;
+    // Several possible admissions are one interval only while every retained
+    // end that could separate them is known.
+    if (possible && possible.length > 1 && (!this.retainedEnds(child) || !possible.every(launch => launch === possible[0]
+      || this.sameHistoricalInterval(child, possible[0]!, launch)))) return false;
     return at !== undefined && launches.every(launch => {
       // A unique explicit report can settle a legacy clock-sparse launch, but
       // cannot contradict a known acceptance bound or an ambiguous window.
@@ -1588,9 +1644,9 @@ export class BackgroundWorkers {
 
   /** Delivery time is not execution evidence. Exclusion requires a unique
    * exact terminal response in a verified interval, never two elapsed idles. */
-  private historicalReportSeparated(child: string, launches: readonly LauncherEvidence[], summary: string): boolean {
-    const interval = this.budget.reportInterval?.(child, summary);
-    return !!interval && launches.length > 0 && launches.every(launch => {
+  private historicalReportSeparated(child: string, launches: readonly LauncherEvidence[], summary: string, at?: number): boolean {
+    const interval = this.exactReportInterval(child, summary, at);
+    return !!interval && !("contradicted" in interval) && launches.length > 0 && launches.every(launch => {
       const window = this.historicalAdmission(child, launch);
       return !launch.conflicted && !!window && (window.start > interval.end
         || interval.after !== undefined && window.end < interval.after);
@@ -1747,7 +1803,7 @@ export class BackgroundWorkers {
     const occurrences = [...this.tasks.values()].filter(task => task.parent === parent && task.worker === child && task.item.taskType === (shell ? "shell" : "agent"));
     const undatedReuse = shell && reportClock.terminalReportedAt === undefined && occurrences.length > 1;
     const candidates = occurrences.filter(task => task.item.status === "running" && (undatedReuse || task.item.createdAt <= at)
-      && (shell || !this.historicalReportSeparated(child, task.evidence.launches, summary)));
+      && (shell || !this.historicalReportSeparated(child, task.evidence.launches, summary, reportClock.terminalReportedAt)));
     const ambiguousAdmission = !shell && candidates.some(task => !this.historicalReportCompatible(child, task.evidence.launches, reportClock.terminalReportedAt, summary));
     if (candidates.length !== 1 || undatedReuse || ambiguousAdmission) {
       const taskId = notificationTaskId;

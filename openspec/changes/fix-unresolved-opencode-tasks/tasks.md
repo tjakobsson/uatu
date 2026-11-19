@@ -725,3 +725,27 @@ Checks with Bun 1.4.4: `src/chat/opencode/v2/` 4566 pass, 1 skip; adapter,
 withheld-marker and dismissal-identity 960 pass; focused compact-work,
 workers-view, worker-dismissal, worker-state and Hub worker-dismissals 327 pass;
 typecheck, `git diff --check` and strict OpenSpec validation are clean.
+
+## 11. Exact-response report correlation (Codex review of 27e360a4)
+
+Two Codex findings on 27e360a4 and a focused cross-family review of their fixes
+covered exact-response report correlation. Both Codex cases also reproduced on
+08fc6473. Each item below failed its regression test before the fix, on both
+public provider reads (`listMessages` and `reconcileBackgroundTasks`), and
+passes after it. Tests: `worker-outcome-race.test.ts` "keeps|denies
+exact-response report correlation with …".
+
+- [x] 11.1 Check distinct retained starts before granting exact-response aliases (Codex 4636228900). `intervalStartsContradicted` reuses the report-free distinct-start veto, and a contradiction also denies the report-clock fallback. Unknown start clocks leave the proof to the existing fallback, as on main.
+- [x] 11.2 Deny correlation when a report was delivered before its matched response completed (Codex 4636228911). The report clock only denies; it never chooses an execution, and an undated report skips the check.
+- [x] 11.3 Deny exact-response correlation while an earlier admission on the same child has no settled outcome of its own, so a delayed equal report from a reverted run stays standalone as on main.
+- [x] 11.4 Treat a known retained native end as a separator in history aliasing, so a later run is never merged into an earlier run's row and hidden. Unknown retained ends keep transcript aliasing, which Stop recovery after saturation relies on, but cannot settle a merged row.
+
+Remaining review policy for this PR (owner decision, 2026-11-19): fix findings
+that can hide live work, wrongly enable Dismiss or Stop, misattribute a report
+or outcome to the wrong worker, or are worse than main. Record others as
+follow-up work instead of extending this PR.
+
+Checks with Bun 1.4.4: `src/chat/opencode/v2/` 4588 pass, 1 skip; adapter,
+withheld-marker and dismissal-identity 960 pass; focused compact-work,
+workers-view, worker-dismissal, worker-state and Hub worker-dismissals 327 pass;
+typecheck, `git diff --check` and strict OpenSpec validation are clean.

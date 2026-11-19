@@ -5166,3 +5166,134 @@ test(`${read} bounds exact-response report intervals with retained execution end
     expect(fake.state().unhandled).toEqual([]);
   } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
 }, 10_000);
+
+// An exact response proves an interval, not which execution inside it wrote
+// the report. Distinct retained starts inside the interval, a matched response
+// still running when the report was delivered, an earlier admission without
+// its own outcome, or a retained end between admissions deny the correlation.
+// Controls: one retained start, an undated start, a report after its
+// response, and earlier runs settled by their own outcomes still correlate.
+type ReportCounterproofCase = {
+  name: string; launches: readonly (readonly [index: number, ran: number, completed: number])[];
+  child: readonly { id: string; type: string; text?: string; created: number; completed?: number }[];
+  /** Native starts, then native ends removed from the transcript by a committed revert. */
+  starts?: readonly (number | undefined)[]; ends?: readonly (number | undefined)[];
+  reports: readonly { id: string; text: string; created: number }[];
+  /** The task that must (settled) or must not (standalone) take `report`. */
+  task: number; report: string; settled: boolean;
+  /** Tasks that stay visible and running; `separate` also forbids aliasing them. */
+  running?: readonly number[]; separate?: boolean;
+};
+const reusedChild = [{ id: "input-1", type: "user", created: 1 }, { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 },
+  { id: "input-3", type: "user", created: 43 }, { id: "response-3", type: "assistant", text: "Third result", created: 50, completed: 55 },
+  { id: "idle-3", type: "idle", created: 60 }] as const;
+// The older run's equal response was reverted; only the later run's remains.
+const revertedChild = (response: number) => [{ id: "input-1", type: "user", created: 1 }, { id: "idle-1", type: "idle", created: 10 },
+  { id: "input-2", type: "user", created: 21 }, { id: "response-2", type: "assistant", text: "Same result", created: response, completed: 55 },
+  { id: "idle-2", type: "idle", created: 60 }] as const;
+// Run 1 ended at 8; a revert removed its "Done" and idle, then a direct rerun idled at 18.
+const rerunChild = [{ id: "input-1", type: "user", created: 1 }, { id: "input-rerun", type: "user", created: 11 },
+  { id: "response-rerun", type: "assistant", text: "Other", created: 13, completed: 15 }, { id: "idle-rerun", type: "idle", created: 18 },
+  { id: "input-2", type: "user", created: 21 }, { id: "response-2", type: "assistant", text: "Done", created: 50, completed: 55 },
+  { id: "idle-2", type: "idle", created: 60 }] as const;
+// Run 2's idle at 40 was reverted out of the transcript; run 3 is still active.
+const activeChild = [{ id: "input-1", type: "user", created: 1 }, { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 },
+  { id: "response-2", type: "assistant", text: "Second result", created: 30, completed: 35 }, { id: "input-3", type: "user", created: 43 }] as const;
+const reportCounterproofCases: readonly ReportCounterproofCase[] = [
+  ...([["distinct retained starts", [23, 46], 61, false], ["a single retained start", [46], 61, true],
+    ["a report before its response completed across distinct starts", [23, 46], 48, false]] as const).map(([name, starts, created, settled]): ReportCounterproofCase => ({
+    name, launches: [[2, 21, 22], [3, 43, 45]], starts, task: 2, settled, report: "report-3",
+    reports: [{ id: "report-3", text: "Third result", created }], child: reusedChild })),
+  ...([["a response after the report", 50, 25, false], ["a response completed after the report", 24, 25, false],
+    ["a report after its response", 50, 61, true]] as const).map(([name, response, created, settled]): ReportCounterproofCase => ({
+    name, launches: [[1, 1, 2], [2, 21, 22]], task: 2, settled, report: "report-1",
+    reports: [{ id: "report-1", text: "Same result", created }], child: revertedChild(response) })),
+  { name: "a delayed equal report from a reverted run", launches: [[1, 1, 2], [2, 21, 22]], ends: [8], task: 2, settled: false, report: "report-1",
+    reports: [{ id: "report-1", text: "Done", created: 61 }], child: rerunChild },
+  { name: "an earlier reverted run settled by its own report", launches: [[1, 1, 2], [2, 21, 22]], ends: [8], task: 2, settled: true, report: "report-2",
+    reports: [{ id: "report-1", text: "First", created: 9 }, { id: "report-2", text: "Done", created: 61 }], child: rerunChild },
+  // A known retained end separates the admissions. An unknown one keeps the
+  // transcript alias, but cannot settle the merged row with either report.
+  ...([["a retained end between admissions", [40], [2, 3]], ["an unknown retained end between admissions", [undefined], [2]]] as const).map(([name, ends, running]): ReportCounterproofCase => ({
+    name, launches: [[2, 21, 22], [3, 43, 45]], ends, task: 2, settled: false, report: "report-2", running, separate: running.length > 1,
+    reports: [{ id: "report-2", text: "Second result", created: 48 }], child: activeChild })),
+  { name: "an undated start", launches: [[1, 1, 3]], starts: [undefined], task: 1, settled: true, report: "report-1",
+    reports: [{ id: "report-1", text: "First result", created: 11 }],
+    child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "First result", created: 5, completed: 8 },
+      { id: "idle-1", type: "idle", created: 10 }] },
+];
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+for (const scenario of reportCounterproofCases)
+test(`${read} ${scenario.settled ? "keeps" : "denies"} exact-response report correlation with ${scenario.name}`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, sequence = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const barriers = new Map<string, () => void>();
+  const frame = (type: string, data: unknown, created: number | undefined) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}:${sequence++}`, type, data, created, location: { directory } })}\n\n`));
+  const barrier = (name: string) => new Promise<void>(resolve => { barriers.set(name, resolve); frame(name, {}, 70); });
+  const launch = (index: number, ran: number, completed: number) => ({
+    id: `launch-${index}`, type: "assistant", time: { created: ran - 1 },
+    content: [{ type: "tool", id: `call-${index}`, name: "subagent", time: { created: ran - 1, ran, completed },
+      state: { status: "completed", input: { agent: "explore", description: "Check", prompt: "Check", background: true },
+        metadata: { sessionID: child, status: "running" },
+        content: [{ type: "text", text: "The subagent is working in the background. You will be notified automatically." }] } }],
+  });
+  const report = (entry: ReportCounterproofCase["reports"][number]) => ({ id: entry.id, type: "synthetic", time: { created: entry.created }, description: "Check",
+    text: `<subagent sessionID="${child}" state="completed">\n${entry.text}\n</subagent>`,
+    metadata: { source: "subagent", childID: child, state: "completed", agent: "explore" } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: {} });
+    if (route === `/api/session/${parent}/message`) return Response.json({ data: [
+      ...scenario.launches.map(([index, ran, completed]) => launch(index, ran, completed)), ...scenario.reports.map(report),
+    ].sort((a, b) => a.time.created - b.time.created), cursor: {} });
+    if (route === `/api/session/${child}/message`) return Response.json({ data: scenario.child.map(message => message.type === "idle"
+      ? { id: message.id, type: "idle", time: { created: message.created }, outcome: "succeeded" }
+      : message.type === "user" ? { id: message.id, type: "user", text: "Check", time: { created: message.created } }
+      : { id: message.id, type: "assistant", finish: "stop", time: { created: message.created, completed: message.completed }, content: [{ type: "text", text: message.text }] }), cursor: {} });
+    return fetch(request);
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const firstAbort = new AbortController(), abort = new AbortController();
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Exact-response report counterproof")).id;
+    child = fake.launchRequestWorker(parent).childId;
+    pump = (async () => { for await (const event of provider.events(abort.signal)) { barriers.get(event.eventType)?.(); barriers.delete(event.eventType); } })();
+    await provider.waitForEventStream!(abort.signal);
+    frame("session.created", { sessionID: child, parentID: parent, location: { directory } }, 1);
+    for (const start of scenario.starts ?? []) frame("session.execution.started", { sessionID: child }, start);
+    if (scenario.ends?.length) {
+      for (const end of scenario.ends) frame("session.execution.succeeded", { sessionID: child }, end);
+      frame("session.revert.committed", { sessionID: child, to: "removed-idle" }, Math.max(0, ...scenario.ends.filter(end => end !== undefined)) + 1);
+    }
+    await barrier("diagnostic.report-counterproof-observed");
+    const taskId = (index: number) => `v2:${parent}:call-${index}`;
+    const readRows = async () => read === "listMessages"
+      ? (await provider.listMessages(parent!, { limit: 100, signal: abort.signal })).items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task")
+      : await provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal });
+    await readRows();
+    const rows = await readRows();
+    const row = rows.find(row => row.taskId === taskId(scenario.task)), text = scenario.reports.find(report => report.id === scenario.report)!.text;
+    if (scenario.settled) {
+      expect(row).toMatchObject({ status: "completed", resultId: scenario.report, summary: text });
+    } else {
+      // The report stays its own uncorrelated row; the candidate takes no result from it.
+      expect(row?.resultId).toBeUndefined(); expect(row?.summary).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();
+      expect(workerCanStop(row!)).toBe(false);
+      expect(rows.filter(row => row.resultId === scenario.report).map(row => row.taskId)).toEqual([`v2:${parent}:notification:${scenario.report}`]);
+    }
+    for (const index of scenario.running ?? []) {
+      expect(rows.find(row => row.taskId === taskId(index))).toMatchObject({ status: "running" });
+      // Separated admissions keep their own rows; neither is aliased into the other.
+      if (scenario.separate) expect(rows.find(row => row.taskId === taskId(index))?.toolUseIds ?? [`call-${index}`]).toEqual([`call-${index}`]);
+    }
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);

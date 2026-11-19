@@ -533,10 +533,16 @@ export class OpenCodeV2Provider implements ChatProvider {
     const prepared = visible.map(prepareStoredMessage);
     const competitionLaunches = (competitionHistory === visible ? prepared : competitionHistory.map(prepareStoredMessage))
       .flatMap(message => [...message.tools.values()].map(tool => tool.fact));
-    const reportInterval = (child: string, summary: string) => {
+    // Unknown retained ends (undated end, saturated memory) prove nothing.
+    const observedEnds = (child: string) => this.executionWorkers ? this.executionWorkers.observedExecutionEnds(child) : [];
+    const reportInterval = (child: string, summary: string, at?: number) => {
       const matches = responses.get(child)?.filter(response => response.text === summary);
       if (matches?.length !== 1 || !matches[0]!.visible || !matches[0]!.canonical) return;
       const response = matches[0]!, ends = executionHistory.get(child);
+      // A report cannot come from a response still running at its delivery;
+      // its equal text names some other execution. The report clock only
+      // denies correlation; it never chooses an execution. Undated: no check.
+      if (at !== undefined && response.completed > at) return { contradicted: true as const };
       if (!ends?.length) return;
       const end = ends.filter(at => at > response.completed).sort((a, b) => a - b)[0];
       if (end === undefined || ends.filter(at => at === end).length !== 1) return;
@@ -545,8 +551,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       // A revert can remove a transcript idle whose native end was observed.
       // That retained end still bounds the interval: launches before it are
       // excluded, and one after an admission or response start vetoes below.
-      // Unknown retained ends (undated end, saturated memory) prove nothing.
-      const observed = this.executionWorkers ? this.executionWorkers.observedExecutionEnds(child) : [];
+      const observed = observedEnds(child);
       if (!observed) return;
       const after = [...observed, ...transcriptAfter === undefined ? [] : [transcriptAfter]]
         .filter(at => at < end).sort((a, b) => b - a)[0];
@@ -565,9 +570,15 @@ export class OpenCodeV2Provider implements ChatProvider {
       // including when the visible fold cannot see one of them.
       if (new Set(intervalLaunches.map(fact => fact.ran ?? fact.created)).size !== intervalLaunches.length
         || new Set(intervalLaunches.map(fact => fact.call)).size !== intervalLaunches.length) return;
+      // The response proves its own execution, not an older admission's.
+      // Distinct retained starts inside the interval deny correlation outright,
+      // including the report-clock fallback; this never grants an interval.
+      // Unknown start clocks prove no interval and leave the fallback.
+      if (this.executionWorkers?.startClocksUnknown(child)) return;
+      if (this.executionWorkers?.intervalStartsContradicted(child, intervalLaunches, end, after)) return { contradicted: true as const };
       return { after, end, responseAt: response.created };
     };
-    const historyBudget = { entries: Infinity, bytes: Infinity, executionHistory, reportInterval, reportLaunches: competitionLaunches };
+    const historyBudget = { entries: Infinity, bytes: Infinity, executionHistory, reportInterval, reportLaunches: competitionLaunches, observedEnds };
     const workers = new BackgroundWorkers(historyBudget);
     const children = new Set(prepared.flatMap(message => message.notificationChild ? [message.notificationChild] : [...message.tools.values()].flatMap(tool => {
         const child = tool.fact.reportedChild;
@@ -707,7 +718,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
     for (const update of workers.finishHistory(executionOutcomes, competitors, counterInvocations, {
       contradicted: (candidate, at) => this.executionWorkers?.historyOutcomeContradicted(candidate, at, executionHistory.get(candidate.worker)) ?? false,
-      ends: child => this.executionWorkers ? this.executionWorkers.observedExecutionEnds(child) : [],
+      ends: observedEnds,
     })) if (update.kind === "upsert") {
       const entry = normalized.get(update.item.id);
       if (entry) {
