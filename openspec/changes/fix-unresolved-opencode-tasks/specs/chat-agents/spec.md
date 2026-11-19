@@ -8,7 +8,7 @@ For OpenCode outcomes without a parent report, recovery SHALL record each parent
 - **WHEN** an outcome without a parent report is ready to publish and a recorded parent or child counter has changed
 - **THEN** only that outcome SHALL be omitted and its worker row SHALL remain Unresolved
 - **AND** the change SHALL neither retry the outcome nor fail or restart the parent history read
-- **AND** the fallback SHALL NOT inherit dismissal permission from the discarded inference
+- **AND** the fallback SHALL NOT inherit permission to save a dismissal from the discarded inference
 - **AND** its public worker row SHALL retain `outcomeWithheld: true` as deny-only evidence until fresh authoritative terminal evidence replaces it
 
 #### Scenario: Child terminal outcome is reverted during parent recovery
@@ -43,6 +43,25 @@ For OpenCode outcomes without a parent report, recovery SHALL record each parent
 - **AND** genuinely newer activity counterproof SHALL retain its existing authority
 
 ## ADDED Requirements
+
+### Requirement: Workers list dismissal does not depend on proving an unresolved execution
+
+The Workers list SHALL keep verified Working and Needs your answer rows visible and SHALL keep Checking visible during its bounded status check. An ended-without-result or unresolved worker or shell row SHALL offer one Dismiss action; rows with a known final result SHALL be dismissed through the existing Dismiss finished action. Stop eligibility and fresh Stop authorization SHALL remain independent of list visibility and dismissal.
+
+#### Scenario: No safe saved dismissal can be established
+- **WHEN** the user dismisses an ended or unresolved row that lacks verified execution identity or has evidence barring a saved dismissal
+- **THEN** the client SHALL clear that row from the current view without creating a saved mark or issuing a persisted dismissal write
+- **AND** that clear SHALL NOT survive refresh or hide a different execution
+
+#### Scenario: An exact eligible execution can be saved
+- **WHEN** the user dismisses a row with an exact execution identity that qualifies for saved dismissal
+- **THEN** the existing saved dismissal path SHALL retain its verification, scope, and failure behavior
+- **AND** a failed save SHALL NOT be reported as synced or silently replaced with a view-only clear
+
+#### Scenario: Activity is verified after dismissal
+- **WHEN** new evidence shows that dismissed work is Working or Needs your answer
+- **THEN** the row SHALL be visible regardless of previous saved marks or view-only clears
+- **AND** dismissal SHALL NOT change the underlying worker or shell, its result, or its Stop authority
 
 ### Requirement: Recovery verification preserves observed negative execution evidence
 

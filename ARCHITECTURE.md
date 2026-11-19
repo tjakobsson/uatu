@@ -1317,6 +1317,10 @@ requests, outcomes and occurrence/pending bindings do not survive. Replay proof
 identity is deny-only and cannot supply activity, execution timestamps or Stop
 witnesses for a new generation. Current history/inventory can still establish
 unrelated or compatible new-admission cold activity without borrowing live proof.
+Retained starts are explicitly retired and excluded from positive unbound-start
+admission when a launcher is restated on a later subscription. Exact old-start
+replay stays negative; a distinct current-subscription start remains eligible for
+ordinary activity binding, without restoring Stop across the observation gap.
 The same entry/byte accounting includes the retained control ledger; no second
 counterproof cache is created. Saturation remains fail-closed across reconnect,
 not reset into an assertion that lost negative facts never concerned this child.

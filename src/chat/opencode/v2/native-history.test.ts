@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { OpenCode } from "@opencode/client";
 import { readFileSync } from "node:fs";
 import { V2NativeHistory } from "./native-history";
+import { SessionChanges } from "./session-changes";
 
 const gate = () => {
   let release!: () => void;
@@ -19,6 +20,7 @@ test("a retired native reply denies replacement reuse without replacing truth or
     return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: read === 1 ? "succeeded" : "failed" }], cursor: {} });
   }) as unknown as typeof fetch });
   const history = new V2NativeHistory({ client, directory: process.cwd(), version: () => "1",
+    snapshotRecord: () => undefined,
     historyOrder: { current: () => historyClock, next: () => ++historyClock },
     recordOrder: { current: () => recordClock, next: () => ++recordClock },
     readSignal: signal => signal, observeHistory: (_id, messages) => { observed.push(messages); }, observeRecord: () => {},
@@ -45,17 +47,61 @@ const fixture = JSON.parse(readFileSync(new URL("../../../../tests/fixtures/open
 const signal = () => new AbortController().signal;
 function nativeHarness(handler: (request: Request) => Response | Promise<Response>) {
   let historyClock = 0, recordClock = 0, version: string | undefined = "1";
+  const changes = new SessionChanges(1);
   const observations: Array<{ session: string; messages: unknown[] }> = [], records: unknown[] = [];
   const client = OpenCode.make({ baseUrl: "http://native.test", fetch: (async (input: Request | string | URL, init?: RequestInit) => handler(new Request(input, init))) as typeof fetch });
   const history = new V2NativeHistory({ client, directory: process.cwd(), version: () => version,
+    snapshotRecord: session => changes.snapshotRecord(session),
     historyOrder: { current: () => historyClock, next: () => ++historyClock },
     recordOrder: { current: () => recordClock, next: () => ++recordClock }, readSignal: signal => signal,
     observeHistory: (session, messages) => { observations.push({ session, messages }); },
-    observeRecord: value => { records.push(value); },
+    observeRecord: (value, requestedId) => {
+      records.push(value);
+      const id = requestedId ?? (value as { id?: string }).id;
+      if (id) changes.observe(id, "record", value);
+    },
   });
-  return { history, client, observations, records, generation(value: string | undefined) { version = value; history.invalidate(); } };
+  return { history, client, changes, observations, records, generation(value: string | undefined) { version = value; history.invalidate(); } };
 }
 const raw = (data: unknown[], next?: string) => Response.json({ data, cursor: { next } });
+
+for (const phase of ["pending", "installed"] as const)
+for (const change of ["record", "identical", "aba", "disjoint", "history", "inbox", "active", "unknown", "evicted", "recreated", "clear-before"] as const)
+test(`existing record snapshot qualifies only its entry lifetime (${phase}/${change})`, async () => {
+  const entered = gate(), release = gate(); let reads = 0;
+  const h = nativeHarness(async () => { if (++reads === 1) { entered.release(); await release.promise; } return raw([]); });
+  const record = (title: string) => ({ id: "child", location: { directory: process.cwd() }, title });
+  const observe = (title: string) => h.history.records(async () => record(title), value => [{ value }]);
+  let warm: ReturnType<V2NativeHistory["complete"]> | undefined;
+  try {
+    if (change !== "unknown") await observe("A");
+    if (change === "clear-before") await observe("B");
+    warm = h.history.complete("child", signal()); await entered.promise;
+    if (phase === "installed") { release.release(); await warm; }
+    if (change === "record" || change === "aba") await observe("B");
+    if (change === "aba" || change === "identical" || change === "unknown") await observe("A");
+    if (change === "history" || change === "inbox" || change === "active") h.changes.observe("child", change, ["changed"], true);
+    if (change === "disjoint") {
+      // Pin the existing session only in this control, so a distinct record is
+      // not conflated with the separately tested capacity-one eviction case.
+      const pin = h.changes.capture("child");
+      await h.history.records(async () => ({ ...record("Other"), id: "other" }), value => [{ value }]);
+      pin.release();
+    }
+    if (change === "evicted" || change === "recreated") {
+      h.changes.observe("other", "record", {});
+      if (change === "recreated") await observe("A");
+    }
+    expect(reads).toBe(1); // No record observation or token check starts IO.
+    release.release(); expect((await warm).messages).toEqual([]);
+    expect(reads).toBe(1); // Healthy waiter finishes without retrying.
+    const denied = ["record", "aba", "evicted", "recreated"].includes(change);
+    expect((await h.history.complete("child", signal())).messages).toEqual([]);
+    expect(reads).toBe(denied ? 2 : 1);
+    await h.history.complete("child", signal());
+    expect(reads).toBe(denied ? 2 : 1); // A separate quiet read reuses the replacement.
+  } finally { release.release(); await warm?.catch(() => {}); h.history.dispose(); }
+});
 
 // Native qualification scenarios live at complete/inbox/records. Public worker
 // suites separately retain outcome, identity, activity and dismissal assertions.
@@ -172,7 +218,7 @@ test(`earlier record request qualifies warm history at completion (${phase}/${tr
     expect(reads).toBe(1);
     const next = await h.history.complete("child", signal());
     expect(next.messages).toHaveLength(removed ? 0 : 1);
-    expect(reads).toBe(removed ? 2 : 1);
+    expect(reads).toBe(removed || transition === "before-registration" ? 2 : 1);
   } finally { recordRelease.release(); rawRelease.release(); await older?.catch(() => {}); await warm?.catch(() => {}); h.history.dispose(); }
 });
 

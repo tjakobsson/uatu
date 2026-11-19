@@ -191,6 +191,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       readSignal: signal => this.readSignal(signal),
       observeHistory: (session, messages) => { this.sessionChanges.observe(session, "history", messages); },
       observeRecord: (value, requestedId) => { this.observeSessionRecord(value, requestedId); },
+      snapshotRecord: session => this.sessionChanges.snapshotRecord(session),
     });
   }
 

@@ -12,6 +12,40 @@ unapproved/interface-under-discussion statements below record the interview's
 history, not a remaining implementation gate. The accepted scope and trade-off
 are recorded in `docs/adr/0001-native-history-reuse-qualification.md`.
 
+### Recovery contract clarification — 2026-11-17
+
+The continuation planning discussion confirmed the following scope and acceptance
+rules. At that planning checkpoint this checkout did not include the archived
+uncommitted candidate; its restoration and verification remained outstanding.
+That agreement authorized planning-document updates, not restoration, source/test
+changes or publication. Subsequent recovery authorization and results are tracked
+separately in tasks.md.
+
+- Complete the existing v2-local native-history module using bounded, deny-only
+  knowledge from the existing same-session record store. Keep retired-start
+  corrections local to execution evidence; do not add a second ledger/cache,
+  chronology engine, automatic retry or broader provider extraction.
+- Cache denial supplies no authority. An independent current read may earn
+  existing Stop eligibility only through its own qualified launcher, ownership,
+  active-execution and history evidence. Preserve revocation/reconnect safeguards;
+  retired starts and replays cannot restore revoked eligibility. Stop authorization
+  still requires its separate fresh revalidation.
+- Withhold inferred outcomes across changing observation windows, not according
+  to a numbered call. Another consumer may observe the change first; a later
+  independent genuinely quiet read may recover completion. Preserve initial
+  nondismissibility, exact execution identity, no invented reports and the
+  scenario's no-Stop safeguard. Do not suppress consumers or alter native fixture
+  facts to force an expected sequence.
+- Verify current causal provenance before changing the disputed assertions.
+  Reproduce introduced review defects against the exact reviewed baseline and
+  retain their orderings in regression coverage. Explain duplicates or findings
+  whose invariants already hold without automatically patching production.
+  Pause for genuine contract conflicts or repeated failure to localize the cause.
+  Preserve fresh 10,000-seed coverage and exact-head GitHub CI/Codex gates; neither
+  silently waive defects nor promise clean review after an arbitrary round count.
+
+### Historical verification evidence
+
 The completed 1,000-ordering campaign (seeds 0–999) recorded 21 publication
 failures, zero progress failures and zero harness errors. The shortest sampled
 representative, seed 428, and its reduced ordering each reproduced exactly in
@@ -136,8 +170,13 @@ unaffected.
    verified evidence.
    The user separately approved optional `outcomeWithheld` on the closed public
    worker row, workspace API revision 38 and strict-client migration guidance.
-    True denies dismissal; actual fresh terminal evidence can clear it. This does
+     True denies saved dismissal; actual fresh terminal evidence can clear it. This does
     not change Hub authentication, saved-dismissal format or Stop authority.
+    The adapter remembers every proven alias of a vetoed execution, up to the
+    2,048-alias dismissal limit, so a partial restatement keeps the veto. Past that
+    limit it fails closed: every same-scope restatement counts as the vetoed
+    execution, so a disjoint one may stay non-save-dismissible and uses the
+    view-only row Dismiss instead.
     Apply the inference projection before computing latest-page live membership,
     so an off-page launcher whose outcome is withheld remains visible as Unresolved.
     Older cursor pages retain their existing membership rule.
@@ -206,6 +245,52 @@ asserting full nondismissible Unresolved on that reload and retaining final Fail
 on the separate quiet read, with identity/source-guard/Stop assertions preserved.
 Do not move captures, ignore differing older observations, fabricate new mock data
 or automatically retry to obtain immediate Failed.
+
+The subsequent current-head Codex finding exposed a stage completed before any
+warm entry exists, followed by clear/commit during the raw load. An exact-base
+runtime comparison established introduced unsafe terminal publication: the base
+remains Running/nondismissible while this PR publishes Completed/dismissible.
+The approved amendment captures an already-known same-session record snapshot
+from the existing observation store into entry-local qualification, with no
+second ledger, new clock, pin leak, positive authority or automatic IO. Changed
+records may conservatively deny reuse; missing/recreated observation state must
+not silently appear unchanged. The indistinguishable crossing-clear quiet case
+may require an independent reload, while no-crossing/identical observations
+retain reuse. Identity, outcome, source-guard and Stop assertions remain strict.
+
+## Workers list: one Dismiss action
+
+The Workers list distinguishes the state of the work from whether its row is
+shown. Verified Working and Needs your answer stay visible, even with a matching
+saved dismissal or a previous view-only clear. Checking stays visible during the
+existing bounded check; unavailable evidence does not count as completion.
+A window that expires without a result restores each row's pre-check evidence,
+so Checking and its deadline never make a row save-eligible.
+Known limit (pre-existing, deferred): any read that omits a Session active row
+and completes outside its Checking window, whether a later retry in the same
+recovery cycle or a late first read that finishes after the window has restored
+the row, still unverifies it to Status unavailable, which the existing evidence
+policy treats as save-eligible.
+The provider still owns the existing eligibility and fresh revalidation for Stop.
+Clicking Stop does not itself mark work Stopped.
+
+Session active with the task unverified, Status unavailable, and Ended with
+the result unavailable offer a row Dismiss. Known final results (Finished,
+Failed, Stopped) keep compact rows without one. Use existing
+saved dismissal handling when an exact eligible execution can be submitted for
+authoritative verification. A withheld outcome, indeterminate eligibility, or
+missing execution identity cannot create a saved mark. For those rows, Dismiss
+clears only the currently displayed row in memory, without a dismissal write.
+A failed or rejected saved dismissal remains a failure, not a fallback success.
+The existing bulk **Dismiss finished** action stays limited to finished rows
+and remains their only dismissal.
+
+The temporary clear belongs to the current conversation view, not a durable
+execution identity. Refresh, a new view, disappearance or replacement of the
+row can show it again. A new observation of verified activity always shows the
+row and ends the temporary clear. Dismiss does not alter task state, native
+history, or Stop. Alias retention in authoritative dismissal evidence is a
+separate fix (task 8.5); the view-only action does not replace it.
 
 ## Actual-session Attribution Acceptance
 

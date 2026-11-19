@@ -27,7 +27,7 @@ import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, Timelin
 import { backgroundTasksByTool, runningBackgroundTasks } from "./background-tasks";
 import { pausedStatusLabel, pausedWakeups, pendingWakeups, scheduledStatusLabel, wakeupFireTime } from "./scheduled-wakeups";
 import { CompactDisclosure, compactWorkers, workerSummary, type CompactWorker } from "./compact-work";
-import { WorkerDismissalClient, visibleWorkers, workerDismissible, workerExecutionIds } from "./worker-dismissal-client";
+import { WorkerDismissalClient, WorkerViewDismissals, visibleWorkers, workerDismissible, workerExecutionIds, workerFinishedDismissible } from "./worker-dismissal-client";
 import { CheckingPresentation } from "./worker-dismissal-client-checking";
 import { revealWorkerRequest } from "./worker-dismissal-client-request";
 import { CompactWorkersView } from "./compact-workers-view";
@@ -75,7 +75,7 @@ type Presentation = {
   expanded: string[];
   anchors: Record<string, TimelineAnchor>;
   workingSince: Record<string, number>;
-  // Dismissed finished-subagent entry ids, per conversation — dismissal is a
+  // Standalone saved worker entry IDs, per conversation — dismissal is a
   // user statement that must survive reload.
   dismissedSubagents: Record<string, string[]>;
   // The agent the user last conversed with; the default for the next
@@ -1079,6 +1079,8 @@ export function initChat(api = new ChatApiClient()): void {
   const compactWorkersItems = document.querySelector<HTMLElement>("#chat-compact-workers-items");
   const hubDismissals = isHubPage();
   const checkingPresentation = new CheckingPresentation(() => { syncCompactWork(); syncTaskInspection(); });
+  const viewDismissals = new WorkerViewDismissals();
+  const resetWorkerView = () => viewDismissals.reset();
   const dismissalNotice = document.createElement("p");
   dismissalNotice.className = "chat-worker-dismissal-notice";
   dismissalNotice.setAttribute("role", "status");
@@ -1088,7 +1090,7 @@ export function initChat(api = new ChatApiClient()): void {
   // sibling would consume unallocated space between Workers and Pending.
   document.querySelector("#chat-composer-notices")?.append(dismissalNotice);
   const personalDismissals = hubDismissals ? new WorkerDismissalClient({ channel: liveChannel(), changed: () => syncCompactWork() }) : null;
-  registerLiveTeardown(() => { personalDismissals?.dispose(); checkingPresentation.dispose(); });
+  registerLiveTeardown(() => { personalDismissals?.dispose(); checkingPresentation.dispose(); resetWorkerView(); });
   const compactWorkerState = new CompactDisclosure();
   const compactPendingState = new CompactDisclosure();
   const pendingScrollPositions = new Map<string, number>();
@@ -1102,37 +1104,36 @@ export function initChat(api = new ChatApiClient()): void {
     syncDesktopWorkLayout();
   });
   let dismissalBatchFeedback: { conversationId: string; skipped: number } | null = null;
-  const dismissWorkers = async (workers: readonly CompactWorker[], bulk = false) => {
-    if (!projection) return;
-    const conversationId = projection.conversationId;
-    if (personalDismissals) {
-      const eligible = workers.filter(worker => workerDismissible(checkingPresentation.worker(worker)));
-      dismissalBatchFeedback = { conversationId, skipped: eligible.filter(worker => !workerExecutionIds(worker).length).length };
-      syncCompactWork();
-      // One explicit conditional group, one durable outcome. Active observations
-      // and selection epochs stay owned by the dismissal client while it saves.
-      const groups = eligible.map(workerExecutionIds).filter(ids => ids.length);
-      if (bulk) await personalDismissals.dismissMany(groups);
-      else if (groups[0]) await personalDismissals.dismiss(groups[0][0], groups[0]);
-      return;
-    }
-    const dismissed = new Set(presentation.dismissedSubagents[projection.conversationId] ?? []);
-    for (const worker of workers) {
-      if (workerDismissible(checkingPresentation.worker(worker))) dismissed.add(worker.activity?.executionId ?? worker.id);
-    }
-    presentation.dismissedSubagents[projection.conversationId] = [...dismissed];
+  const saveLocalWorkerDismissals = (conversationId: string, workers: readonly CompactWorker[]) => {
+    if (!workers.length) return;
+    const dismissed = new Set(presentation.dismissedSubagents[conversationId] ?? []);
+    for (const worker of workers) dismissed.add(worker.activity?.executionId ?? worker.id);
+    presentation.dismissedSubagents[conversationId] = [...dismissed];
     save(); syncCompactWork();
   };
   const compactView = compactWorkersItems ? new CompactWorkersView(compactWorkersItems, () => {
-    void dismissWorkers(compactWorkers(projection?.items ?? []).filter(worker => worker.state !== "working" && worker.state !== "unknown"), true);
+    if (!projection) return;
+    const conversationId = projection.conversationId;
+    const eligible = compactWorkers(projection.items).filter(workerFinishedDismissible);
+    if (personalDismissals) {
+      const groups = eligible.map(workerExecutionIds).filter(ids => ids.length);
+      dismissalBatchFeedback = { conversationId, skipped: eligible.length - groups.length };
+      syncCompactWork();
+      void personalDismissals.dismissMany(groups);
+    } else {
+      // Local marks keep their existing finished-only scope, legacy ids included.
+      saveLocalWorkerDismissals(conversationId, eligible);
+    }
   }) : null;
   const syncCompactWork = () => {
     if (!compactWorkersList || !compactWorkersItems || !compactWorkersLabel) return;
-    const allWorkers = checkingPresentation.paint(projection?.conversationId ?? null, compactWorkers(projection?.items ?? []))
-      .filter(worker => worker.kind === "agent" && declares("subagents") || Boolean(worker.taskId) && declares("background-tasks"))
+    const items = projection?.items ?? [];
+    const sourceWorkers = compactWorkers(items)
+      .filter(worker => worker.kind === "agent" && declares("subagents") || Boolean(worker.taskId) && declares("background-tasks"));
+    const allWorkers = checkingPresentation.paint(projection?.conversationId ?? null, sourceWorkers)
       .map(worker => declares("context") ? worker : { ...worker, tokens: undefined });
     personalDismissals?.select(projection?.conversationId ?? null);
-    personalDismissals?.observe(allWorkers);
+    personalDismissals?.observe(sourceWorkers);
     const dismissed = new Set(projection ? presentation.dismissedSubagents[projection.conversationId] ?? [] : []);
     if (!personalDismissals && projection) {
       const oldSize = dismissed.size;
@@ -1145,8 +1146,10 @@ export function initChat(api = new ChatApiClient()): void {
     }
     // Legacy browser aliases are never authority in a Hub account. Local mode
     // keeps its old terminal marks, but new marks prefer exact execution ids.
-    const workers = personalDismissals ? visibleWorkers(allWorkers, personalDismissals.dismissed) : allWorkers.filter(worker =>
+    const visible = personalDismissals ? visibleWorkers(sourceWorkers, personalDismissals.dismissed) : sourceWorkers.filter(worker =>
       !workerDismissible(worker) || !(worker.activity?.executionId ? workerExecutionIds(worker).some(id => dismissed.has(id)) : dismissed.has(worker.id) || worker.references.some(id => dismissed.has(id))));
+    const visibleIds = new Set(visible.map(worker => worker.id));
+    const workers = viewDismissals.filter(items, allWorkers).filter(worker => visibleIds.has(worker.id));
     if (dismissalBatchFeedback?.conversationId !== projection?.conversationId) dismissalBatchFeedback = null;
     const skipped = dismissalBatchFeedback?.skipped ?? 0;
     const dismissalText = personalDismissals ? [...new Set([
@@ -1167,6 +1170,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (compactWorkersList.open !== open) compactWorkersList.open = open;
     compactWorkersList.querySelector("summary")?.setAttribute("aria-expanded", String(compactWorkersList.open));
     compactView?.paint(projection?.conversationId ?? null, workers, stoppingTasks, declares("background-tasks"));
+    viewDismissals.paint(items);
     syncQueueOverflow();
   };
   compactWorkersItems?.addEventListener("mousedown", event => keepTouchComposerFocus(event));
@@ -1185,8 +1189,17 @@ export function initChat(api = new ChatApiClient()): void {
   compactWorkersItems?.addEventListener("click", event => {
     const dismiss = (event.target as Element).closest<HTMLElement>("[data-dismiss-worker]");
     if (dismiss) {
-      const worker = compactWorkers(projection?.items ?? []).find(worker => worker.id === dismiss.dataset.dismissWorker);
-      if (worker) void dismissWorkers([worker]);
+      if (!projection) return;
+      const id = dismiss.dataset.dismissWorker;
+      const { items, conversationId } = projection;
+      const worker = compactWorkers(items).find(worker => worker.id === id);
+      if (!worker) return;
+      const cleared = viewDismissals.dismiss(items, worker, checkingPresentation.worker(worker), ids => {
+        dismissalBatchFeedback = null;
+        if (personalDismissals) void personalDismissals.dismiss(ids[0], ids);
+        else saveLocalWorkerDismissals(conversationId, [worker]);
+      }, personalDismissals?.canSave() ?? true);
+      if (cleared) syncCompactWork();
       return;
     }
     const stop = (event.target as Element).closest<HTMLButtonElement>("[data-stop-task]");
@@ -2934,6 +2947,7 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number, readingAnchor: TimelineAnchor | null = presentation.anchors[snapshot.conversation.id] ?? null) => {
+    resetWorkerView();
     projection = composer.acceptSnapshot(snapshot, acceptedDrafts);
     const carried = removedRows.get(snapshot.conversation.id);
     if (carried) projection = { ...projection, removedIds: carried };
@@ -3156,6 +3170,7 @@ export function initChat(api = new ChatApiClient()): void {
       if (state === "idle" || state === "starting") refreshIdleAgentContext();
     }
     save();
+    resetWorkerView();
     projection = null;
     scheduleRender(false, false);
     // Not a clear: the incoming conversation may hold a refusal that landed

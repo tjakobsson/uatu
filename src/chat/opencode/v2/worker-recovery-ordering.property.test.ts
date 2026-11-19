@@ -159,7 +159,7 @@ function admitCompletedRead(read: Pick<PublicReadContext, "method" | "sessionId"
 function stopRevoked(reads: PublicReadContext[], events: OracleWitness[], at: number) {
   return reads.some(read => read.finished !== undefined && read.finished <= at && admitCompletedRead(read))
     || events.some(event => event.kind === "native-event" && event.order <= at && event.frame.data?.sessionID === CHILD
-      && /^session\.execution\.(succeeded|failed|cancelled|stopped)$/.test(event.frame.type));
+      && /^session\.execution\.(succeeded|failed|interrupted|cancelled|stopped)$/.test(event.frame.type));
 }
 type Result = { seed: number; control: boolean; trace: string[]; schedule: string[]; physicalHistoryReads: number; logicalAttempts: number; frames: number; bReason?: string;
   metadataInterleavings?: Array<{ action: string; waiting: string[] }>; metadataHold?: string;
@@ -892,6 +892,22 @@ test("native execution-end observations revoke only the scoped execution, includ
   expect(stopRevoked([read], [event], 6)).toBe(true);
   read.status = "failed"; read.finished = 7;
   expect(stopRevoked([read], [event], 8)).toBe(true);
+});
+
+test("evidence-safety-v3 rejects Stop after native interrupted even without a final-history end", async () => {
+  const final = initial(0); delete final.boundary; final.child = final.child.slice(0, 1);
+  const cold = await oracle(final), row = cold[0]!;
+  const event: NativeEventWitness = { kind: "native-event", order: 5, at: 11,
+    frame: { id: "evt_interrupted", type: "session.execution.interrupted", created: 60,
+      durable: { aggregateID: CHILD, seq: 1, version: 1 }, location: { directory: DIRECTORY },
+      data: { sessionID: CHILD, reason: "user" } } };
+  expect(row.activity?.kind).toBe("working");
+  expect(workerCanStop(row)).toBe(true);
+  expect(mismatch(row, cold, stopRevoked([], [], 6)).bad).toBe(false);
+  expect(mismatch(row, cold, stopRevoked([], [event], 4)).bad).toBe(false);
+  const unrelated = { ...event, frame: { ...event.frame, data: { sessionID: "unrelated", reason: "user" } } };
+  expect(mismatch(row, cold, stopRevoked([], [unrelated], 6)).bad).toBe(false);
+  expect(mismatch(row, cold, stopRevoked([], [event], 5)).bad).toBe(true);
 });
 
 test("evidence-safety-v3 rejects resurrected Stop after consumed idle but permits no-witness Working", async () => {

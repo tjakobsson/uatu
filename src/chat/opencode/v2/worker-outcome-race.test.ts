@@ -698,7 +698,8 @@ test(`explicit inventory reports remain independent of retained transcript infer
   const owner = new AbortController(), inventory = new AbortController();
   const guards: import("../../provider").WorkerSourceGuard[] = [];
   try {
-    parent = (await provider.createSession("Qualified explicit outcome transfer")).id; child = fake.launchRequestWorker(parent).childId; other = fake.launchRequestWorker(parent).childId;
+    parent = (await provider.createSession("Qualified explicit outcome transfer")).id; child = fake.launchRequestWorker(parent).childId;
+    const secondWorker = fake.launchRequestWorker(parent); other = secondWorker.childId;
     await provider.listPendingInbox!(parent, { signal: owner.signal });
     if (mode === "transfer-budget") { cohort.push(child, other); while (cohort.length < 80) cohort.push(fake.launchRequestWorker(parent).childId); }
     const page = await provider.listMessages(parent, { limit: 100, signal: owner.signal });
@@ -721,8 +722,21 @@ test(`explicit inventory reports remain independent of retained transcript infer
       if (mode === "ownership") { foreign = true; await provider.getSession(child); expect(page.workerSource?.isCurrent()).toBe(false); }
       if (mode === "revert") { reverted = true; await provider.getSession(child); expectWithheld(page.workerSource!.projectInferredOutcome!(page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.childConversationId === child)!)); }
       if (mode === "independent-outcome") {
-        secondReport = true; await provider.listPendingInbox!(parent, { signal: inventory.signal });
-        expect(projected).toContainEqual(expect.objectContaining({ status: "running", outcomeWithheld: true }));
+        const original = page.items.find((item): item is import("../../types").BackgroundTaskItem =>
+          item.type === "background_task" && item.taskId === secondWorker.taskId);
+        expect(original).toMatchObject({ childConversationId: other, status: "completed" });
+        expect(original?.activity?.executionId).toBeDefined();
+        const identity = { id: original!.id, taskId: secondWorker.taskId, childConversationId: other,
+          activity: { executionId: original!.activity!.executionId } };
+        // The first report already fenced the retained page's inference.
+        const before = page.workerSource!.projectInferredOutcome!(original!);
+        expect(before).toMatchObject(identity);
+        expectWithheld(before);
+        secondReport = true;
+        await provider.listPendingInbox!(parent, { signal: inventory.signal });
+        const after = page.workerSource!.projectInferredOutcome!(original!);
+        expect(after).toMatchObject(identity);
+        expectWithheld(after);
       }
       if (mode === "inventory-change") {
         reportText = "Newer explicit content"; await provider.listPendingInbox!(parent, { signal: inventory.signal });
@@ -2804,7 +2818,9 @@ test(`late staged native reply fences only pre-transition warm history (${change
     const history = await adapter.history(parent);
     const row = history.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
     expect(row?.status).toBe(removed || staged ? "running" : "completed");
-    expect(childReads).toBe(removed ? 2 : 1);
+    // A differing late record also retires a replacement whose clear baseline
+    // was known before its load; only this independent consumer reloads it.
+    expect(childReads).toBe(change === "new-load" ? 3 : removed ? 2 : 1);
     if (removed) {
       const evidence = await adapter.workerEvidence(parent);
       expect(evidence.entries.find(entry => entry.executionId === row?.activity?.executionId)?.dismissible).toBe(false);
@@ -2974,17 +2990,19 @@ test(`warm child transcript observes native visibility before parent recovery ($
 }, 10_000);
 
 for (const read of ["provider", "adapter"] as const)
-for (const scenario of ["initial-owned-clear", "initial-fresh", "initial-commit", "initial-prefix", "initial-stage-only", "initial-other", "reverse-during-lookup", "reverse-during-lookup-late-consumer", "reverse", "reverse-prefix", "reverse-unchanged", "reverse-other", "staged-cleared", "unchanged", "append", "other-child"] as const)
-if (read === "adapter" || scenario !== "reverse-during-lookup-late-consumer")
+for (const scenario of ["initial-owned-clear", "initial-fresh", "initial-commit", "initial-prefix", "initial-prefix-explicit-first", "initial-stage-only", "initial-other", "reverse-during-lookup", "reverse-during-lookup-late-consumer", "reverse", "reverse-prefix", "reverse-unchanged", "reverse-other", "staged-cleared", "unchanged", "append", "other-child"] as const)
+if (read === "adapter" || (scenario !== "reverse-during-lookup-late-consumer" && scenario !== "initial-prefix-explicit-first"))
 test(`${read} retains boundary transitions during the first child transcript (${scenario})`, async () => {
   const lateConsumer = scenario === "reverse-during-lookup-late-consumer";
+  const explicitFirst = scenario === "initial-prefix-explicit-first";
+  const change = lateConsumer ? "reverse-during-lookup" : explicitFirst ? "initial-prefix" : scenario;
+  const adapterPrefix = read === "adapter" && change === "initial-prefix";
   const controlledAppend = read === "adapter" && scenario === "append";
   const freshReader = new AsyncLocalStorage<boolean>();
   let freshEntered!: () => void, releaseFresh!: () => void, reportHandled!: () => void;
   const freshPending = new Promise<void>(resolve => { freshEntered = resolve; });
   const freshHeld = new Promise<void>(resolve => { releaseFresh = resolve; });
   let reportPending = new Promise<void>(resolve => { reportHandled = resolve; });
-  const change = lateConsumer ? "reverse-during-lookup" : scenario;
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   let parent: string | undefined, child: string | undefined, staged = change.startsWith("initial-") && change !== "initial-other", removed = false, heldOnce = false, childReads = 0;
   const olderRead = new AsyncLocalStorage<boolean>();
@@ -3026,7 +3044,52 @@ test(`${read} retains boundary transitions during the first child transcript (${
     }
     return response;
   }) as typeof globalThis.fetch;
-  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  type PrefixConsumer = { kind: "adapter" | "explicit" | "quiet"; rows?: import("../../types").BackgroundTaskItem[] };
+  const prefixConsumer = new AsyncLocalStorage<PrefixConsumer>();
+  const changedConsumers: Array<PrefixConsumer | undefined> = [];
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport,
+    observeHistoryConsumption: adapterPrefix ? (id, messages) => {
+      if (id !== child) return;
+      const native = messages as readonly { id: string; type: string; outcome?: string }[];
+      // Attribute consumption even if the native array was reused from another request.
+      if (native.some(message => message.id === "removed-idle" && message.type === "idle" && message.outcome === "succeeded")
+        && !native.some(message => message.id === "retained-suffix")) {
+        changedConsumers.push(prefixConsumer.getStore());
+      }
+    } : undefined,
+  });
+  let coveredPageSignal: AbortSignal | undefined, heldConsumer: PrefixConsumer | undefined, taskId: string | undefined;
+  let openingExecutionId: string | undefined;
+  const atCoveredRecovery = Promise.withResolvers<void>(), releaseCoveredRecovery = Promise.withResolvers<void>();
+  const nativeMessages = provider.listMessages.bind(provider);
+  if (adapterPrefix) {
+    if (explicitFirst) provider.listMessages = async (...args) => {
+      const page = await nativeMessages(...args);
+      if (args[0] === parent && !coveredPageSignal) {
+        const openingRow = page.items.find((item): item is import("../../types").BackgroundTaskItem =>
+          item.type === "background_task" && item.taskId === taskId);
+        expectWithheld(openingRow);
+        openingExecutionId = openingRow?.activity?.executionId;
+        expect(openingExecutionId).toBeDefined();
+        coveredPageSignal = args[1].signal;
+      }
+      return page;
+    };
+    const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+    provider.reconcileBackgroundTasks = async (id, options) => {
+      if (id !== parent) return nativeRecovery(id, options);
+      const consumer = prefixConsumer.getStore() ?? { kind: "adapter" };
+      // Hold just the adapter's covered recovery, before it enters the provider.
+      if (explicitFirst && !heldConsumer && coveredPageSignal && options?.signal === coveredPageSignal && !options.fresh) {
+        heldConsumer = consumer;
+        atCoveredRecovery.resolve();
+        await releaseCoveredRecovery.promise;
+      }
+      const rows = await prefixConsumer.run(consumer, () => nativeRecovery(id, options));
+      consumer.rows = rows;
+      return rows;
+    };
+  }
   if (controlledAppend) {
     const nativeEvents = provider.events.bind(provider);
     provider.events = async function* (signal) {
@@ -3036,7 +3099,6 @@ test(`${read} retains boundary transitions during the first child transcript (${
       }
     };
   }
-  const nativeMessages = provider.listMessages.bind(provider);
   if (lateConsumer) provider.listMessages = async (...args) => {
     if (args[0] === parent) await parentHeld;
     const page = await historyReader.run(true, () => nativeMessages(...args));
@@ -3045,10 +3107,12 @@ test(`${read} retains boundary transitions during the first child transcript (${
   };
   const adapter = read === "adapter" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }) : undefined;
   const abort = new AbortController();
+  const recoverPrefix = (consumer: PrefixConsumer) => prefixConsumer.run(consumer,
+    () => provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal }));
   let reading: Promise<import("../../provider").ProviderHistoryPage | import("../../types").ConversationSnapshot> | undefined;
   let older: ReturnType<typeof provider.getSession> | undefined;
   try {
-    parent = (await provider.createSession("First child transcript boundary window")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    parent = (await provider.createSession("First child transcript boundary window")).id; const worker = fake.launchRequestWorker(parent); child = worker.childId; taskId = worker.taskId;
     const other = (await provider.createSession("Unrelated boundary owner")).id;
     if (change === "initial-fresh") { await provider.getSession(child); staged = false; removed = true; }
     reading = adapter ? adapter.history(parent) : provider.listMessages(parent, { limit: 100, signal: abort.signal }); void reading.catch(() => undefined); await pending;
@@ -3072,12 +3136,38 @@ test(`${read} retains boundary transitions during the first child transcript (${
       staged = false; removed = change === "staged-cleared"; await provider.getSession(change === "other-child" ? other : child);
     }
     if (change === "append") fake.workerReport(child, "Independent model", "high", 0.001);
-    release(); const result = await reading;
+    release();
+    const explicit: PrefixConsumer = { kind: "explicit" };
+    if (explicitFirst) {
+      await Promise.race([atCoveredRecovery.promise, reading.then(() => { throw new Error("Covered adapter recovery did not reach the barrier"); })]);
+      expect(changedConsumers).toHaveLength(0);
+      const rows = await recoverPrefix(explicit);
+      expect(changedConsumers[0]).toBe(explicit);
+      expectWithheld(rows.find(item => item.taskId === worker.taskId));
+      releaseCoveredRecovery.resolve();
+    }
+    const result = await reading;
     const hidden = removed || change === "initial-stage-only";
     if (!adapter && change.startsWith("initial-")) expect(childReads).toBe(1); // No inferred-outcome retry.
     const row = result.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
     if (["initial-prefix", "reverse-prefix", "append"].includes(change)) expectWithheld(row);
     else expect(row).toMatchObject({ status: hidden ? "running" : "completed" });
+    if (adapterPrefix) {
+      const first = changedConsumers[0];
+      expect(first?.kind).toBe(explicitFirst ? "explicit" : "adapter");
+      if (explicitFirst) {
+        expect(heldConsumer?.rows).toBeDefined();
+        expect(changedConsumers.slice(1)).toContain(heldConsumer);
+        expect(heldConsumer?.rows?.find(item => item.taskId === worker.taskId)?.activity?.executionId).toBe(openingExecutionId);
+        expect(row?.activity?.executionId).toBe(openingExecutionId);
+      }
+      const changingRow = first?.rows?.find(item => item.taskId === worker.taskId);
+      expectWithheld(changingRow);
+      expect(row).toMatchObject({ taskId: worker.taskId, childConversationId: child });
+      expect(changingRow).toMatchObject({ taskId: worker.taskId, childConversationId: child });
+      expect(row?.activity?.executionId).toBeDefined();
+      expect(changingRow?.activity?.executionId).toBe(explicitFirst ? openingExecutionId : row?.activity?.executionId);
+    }
     if (!adapter) expect((result as import("../../provider").ProviderHistoryPage).workerSource?.isCurrent()).toBe(true);
     if (adapter && removed) {
       const row = result.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
@@ -3094,7 +3184,9 @@ test(`${read} retains boundary transitions during the first child transcript (${
       });
       expect(settled.find(item => item.taskId === worker.taskId)?.outcomeWithheld).toBeUndefined();
     }
-    const freshRead = freshReader.run(controlledAppend, () => provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal }));
+    const freshRead = explicitFirst ? Promise.resolve(explicit.rows!)
+      : adapterPrefix ? recoverPrefix(explicit)
+      : freshReader.run(controlledAppend, () => provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal }));
     if (controlledAppend) {
       // Pin a distinct native fact inside this independent source's child request
       // window, instead of relying on startup enrichment being late.
@@ -3106,18 +3198,34 @@ test(`${read} retains boundary transitions during the first child transcript (${
       releaseFresh();
     }
     const fresh = await freshRead;
-    if (change === "initial-prefix" || adapter && change === "append") expectWithheld(fresh.find(item => item.taskId === worker.taskId));
+    if ((change === "initial-prefix" && (!adapter || explicitFirst)) || (adapter && change === "append")) expectWithheld(fresh.find(item => item.taskId === worker.taskId));
     else expect(fresh.find(item => item.taskId === worker.taskId)).toMatchObject({ status: hidden ? "running" : "completed",
       ...(removed ? { activity: expect.objectContaining({ kind: "working" }) } : {}) });
-    const quiet = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
+    const expectQuietPrefix = (item: import("../../types").BackgroundTaskItem | undefined) => {
+      expect(item).toMatchObject({ taskId: worker.taskId, childConversationId: child, status: "completed", stateUncertain: false, control: { available: false } });
+      expect(item?.activity?.executionId).toBe(explicitFirst ? openingExecutionId : row?.activity?.executionId);
+      expect(item?.outcomeWithheld).toBeUndefined();
+      expect(item?.resultId).toBeUndefined();
+      expect(item?.summary).toBeUndefined();
+      expect(item?.terminalReportedAt).toBeUndefined();
+      expect(workerCanStop(item!)).toBe(false);
+    };
+    if (adapterPrefix && !explicitFirst) {
+      expect(changedConsumers.slice(1)).toContain(explicit);
+      expectQuietPrefix(fresh.find(item => item.taskId === worker.taskId));
+    }
+    const quietConsumer: PrefixConsumer = { kind: "quiet" };
+    const quiet = await (adapterPrefix ? recoverPrefix(quietConsumer) : provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal }));
+    if (adapterPrefix) expect(changedConsumers.slice(1)).toContain(quietConsumer);
     expect(quiet.find(item => item.taskId === worker.taskId)?.status).toBe(hidden ? "running" : "completed");
+    if (change === "initial-prefix") expectQuietPrefix(quiet.find(item => item.taskId === worker.taskId));
     if (controlledAppend) {
       expect(quiet.find(item => item.taskId === worker.taskId)).toMatchObject({
         taskId: worker.taskId, childConversationId: child, status: "completed", stateUncertain: false,
       });
       expect(quiet.find(item => item.taskId === worker.taskId)?.outcomeWithheld).toBeUndefined();
     }
-  } finally { releaseFresh(); releaseParent(); releaseOutcome(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
+  } finally { releaseCoveredRecovery.resolve(); releaseFresh(); releaseParent(); releaseOutcome(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["stale-cleared", "stale-staged", "unchanged", "newer-change"] as const)
@@ -4322,7 +4430,8 @@ test(`${read} fences ${change} in the consumed parent launch inventory (cached t
   } };
   const abort = new AbortController();
   const adapter = read === "adapter-history" ? new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }) : undefined;
-  let pump: Promise<void> | undefined, recovery: Promise<any> | undefined;
+  let pump: Promise<void> | undefined;
+  let recovery: Promise<import("../../provider").ProviderHistoryPage | import("../../types").ConversationSnapshot | import("../../types").BackgroundTaskItem[]> | undefined;
   try {
     parent = (await provider.createSession("Parent competition publication race")).id;
     const worker = fake.launchRequestWorker(parent); child = worker.childId;
@@ -4349,24 +4458,24 @@ test(`${read} fences ${change} in the consumed parent launch inventory (cached t
       messageID: change === "ordinary-output" ? "ordinary-assistant" : changed ? competitor.id : first.id,
       content: change === "ordinary-output" ? [{ type: "text", text: "Parent output continues" }] : changed ? competitor.content : first.content });
     frame("diagnostic.parent-change-applied", {}); await processed; release();
-    const result = await recovery.then(value => ({ value }), error => ({ error }));
-    if ("value" in result) {
-      const tasks = Array.isArray(result.value) ? result.value : result.value.items.filter((item: any) => item.type === "background_task");
-      if (read === "listMessages") expect(result.value.workerSource.isCurrent()).toBe(true);
-      if (adapter && changed && !cachedTerminal) {
-        // The adapter's separate inventory already sees both competing launches:
-        // there is no attributable inference to discard in this fold.
-        const row = tasks.find((task: any) => task.taskId === worker.taskId);
-        expect(row).toMatchObject({ status: "running", stateUncertain: true, activity: { kind: "unavailable" }, control: { available: false } });
-        expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true);
-        expect(workerCanStop(row)).toBe(false);
-      } else if (!parentReport) expectWithheld(tasks.find((task: any) => task.taskId === worker.taskId));
-      else expect(tasks.find((task: any) => task.taskId === worker.taskId)?.status).toBe("completed");
-      if (parentReport) expect(tasks.find((task: any) => task.taskId === worker.taskId)).toMatchObject({ resultId: "parent-result", summary: "Explicit parent report" });
-    } else { expect(change).toBe("competing-launch"); expect(result.error).toBeInstanceOf(Error); }
+    const result = await recovery;
+    const tasks = Array.isArray(result) ? result : result.items.filter(item => item.type === "background_task");
+    if (read === "listMessages") expect((result as import("../../provider").ProviderHistoryPage).workerSource?.isCurrent()).toBe(true);
+    const row = tasks.find(task => task.taskId === worker.taskId);
+    if (adapter && changed && !cachedTerminal) {
+      // The adapter's separate inventory already sees both competing launches:
+      // there is no attributable inference to discard in this fold.
+      expect(row).toMatchObject({ status: "running", stateUncertain: true, activity: { kind: "unavailable" }, control: { available: false } });
+      expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true);
+      expect(workerCanStop(row!)).toBe(false);
+    } else if (!parentReport) expectWithheld(row);
+    else expect(row).toMatchObject({ status: "completed", resultId: "parent-result", summary: "Explicit parent report", terminalReportedAt: 13 });
+    const competingTask = { taskId: `v2:${parent}:competing-call`, childConversationId: child, status: "running" };
+    if (adapter && changed) expect(tasks).toContainEqual(expect.objectContaining(competingTask));
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
     expect(fresh).toHaveLength(changed ? 2 : 1);
     expect(fresh.find(task => task.taskId === worker.taskId)?.status).toBe(changed && !parentReport ? "running" : "completed");
+    if (changed) expect(fresh).toContainEqual(expect.objectContaining(competingTask));
   } finally { release(); abort.abort(); await pump; await recovery?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
@@ -4668,16 +4777,13 @@ test("an observed child staged revert between inventory and parent visibility ca
     parent = (await provider.createSession("Observed child visibility race")).id;
     const worker = fake.launchRequestWorker(parent); child = worker.childId;
     fake.settleWorker(child, "completed", "No parent report");
-    const raced = await provider.reconcileBackgroundTasks!(parent, { fresh: true, onSource: () => { staged = true; } })
-      .then(tasks => ({ tasks }), error => ({ error }));
     // No SSE event is sent: the fresh native lookup itself observes the change.
-    if ("tasks" in raced) {
-      expect(raced.tasks).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "running", stateUncertain: true }));
-      expect(raced.tasks[0]?.control?.available).not.toBe(true);
-    } else expect(raced.error).toBeInstanceOf(Error);
+    const raced = await provider.reconcileBackgroundTasks!(parent, { fresh: true, onSource: () => { staged = true; } });
+    expectWithheld(raced.find(task => task.taskId === worker.taskId));
     const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true });
-    expect(fresh).toContainEqual(expect.objectContaining({ taskId: worker.taskId, status: "running", stateUncertain: true }));
-    expect(fresh[0]?.control?.available).not.toBe(true);
+    const row = fresh.find(task => task.taskId === worker.taskId);
+    expect(row).toMatchObject({ status: "running", stateUncertain: true });
+    expect(row?.control?.available).not.toBe(true);
   } finally { await provider.dispose!(); await fake.stop(); }
 });
 

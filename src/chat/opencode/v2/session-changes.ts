@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
-type State = { revision: number; owners: number; facets: Map<string, string> };
+type State = { revision: number; owners: number; facets: Map<string, { digest: string }> };
+export type RecordSnapshot = Readonly<{ unchanged(): boolean }>;
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)])) : value;
 
@@ -33,17 +34,26 @@ export class SessionChanges {
   /** A successful local mutation fences every earlier capture, even on replay. */
   advance(session: string): void { this.state(session).revision++; }
 
+  /** Deny-only, non-owning view of an already observed record. Looking up a
+   * snapshot neither creates state nor refreshes LRU/pins. Object identity detects
+   * ABA; missing or recreated session state cannot revive an evicted snapshot. */
+  snapshotRecord(session: string): RecordSnapshot | undefined {
+    const state = this.sessions.get(session), facet = state?.facets.get("record");
+    if (!state || !facet) return;
+    return { unchanged: () => this.sessions.get(session) === state && state.facets.get("record") === facet };
+  }
+
   observe(session: string, facet: string, value: unknown, initialChange = false): void {
     const state = this.state(session);
     const key = facet.startsWith("event:") ? `event:${createHash("sha256").update(facet).digest("hex")}` : facet;
     const digest = createHash("sha256").update(JSON.stringify(canonical(value)) ?? "undefined").digest("hex");
     const previous = state.facets.get(key);
-    if (previous === digest) return;
+    if (previous?.digest === digest) return;
     // Unknown complete facets initialize state. Native deltas and relevant
     // positive counterproof can explicitly deny an earlier capture even when new.
     if (previous !== undefined || initialChange) state.revision++;
     state.facets.delete(key);
-    state.facets.set(key, digest);
+    state.facets.set(key, { digest });
     // Complete native facets must not lose their baseline to streaming traffic.
     // Evicted delta identities conservatively bump when observed again.
     const deltas = [...state.facets.keys()].filter(key => key.startsWith("event:"));

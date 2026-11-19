@@ -3,7 +3,7 @@ import { workerIsActive, workerStateLabel } from "./worker-state";
 import { formatTaskElapsed } from "./task-inspection";
 import { formatTokens } from "./usage";
 import { formatWorkerCost } from "./worker-session";
-import { workerDismissible } from "./worker-dismissal-client";
+import { workerCanDismissRow } from "./worker-dismissal-client";
 
 const glyphs = { working: "●", unknown: "◌", completed: "✓", failed: "×", stopped: "■" };
 
@@ -158,7 +158,7 @@ export class CompactWorkersView {
         stop.title = worker.controlAvailable === false ? worker.controlReason ?? "Stop unavailable: execution proof is unverified" : `Stop worker: ${worker.name}`;
       } else stop?.remove();
       let dismiss = row.querySelector<HTMLButtonElement>("[data-dismiss-worker]");
-      if (workerDismissible(worker) && worker.state === "unknown") {
+      if (workerCanDismissRow(worker)) {
         if (!dismiss) {
           dismiss = document.createElement("button");
           dismiss.type = "button";

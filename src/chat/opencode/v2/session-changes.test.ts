@@ -7,6 +7,76 @@ import type { BackgroundTaskItem } from "../../types";
 import type { WorkerSourceGuard } from "../../provider";
 import { workerCanStop } from "../../worker-state";
 
+test("record snapshots neither initialize missing facets nor advance observation counters", () => {
+  const changes = new SessionChanges(1);
+  changes.observe("known", "record", { title: "A" });
+  expect(changes.snapshotRecord("unknown")).toBeUndefined();
+  expect(changes.snapshotRecord("known")?.unchanged()).toBe(true); // Unknown lookup did not evict known.
+  const counter = changes.capture("known"), snapshot = changes.snapshotRecord("known")!;
+  expect(snapshot.unchanged()).toBe(true);
+  expect(counter.unchanged()).toBe(true);
+  changes.observe("known", "record", { title: "A" });
+  expect(snapshot.unchanged()).toBe(true);
+  expect(counter.unchanged()).toBe(true);
+  counter.release();
+  changes.observe("other", "history", []);
+  expect(changes.snapshotRecord("other")).toBeUndefined();
+  changes.observe("other", "record", { title: "First" });
+  expect(changes.snapshotRecord("other")?.unchanged()).toBe(true);
+});
+
+test("record snapshots detect differing observations and ABA without changing the counter rule", () => {
+  const changes = new SessionChanges();
+  changes.observe("child", "record", { revert: { messageID: "idle" } });
+  const snapshot = changes.snapshotRecord("child")!, counter = changes.capture("child");
+  changes.observe("child", "record", {});
+  expect(snapshot.unchanged()).toBe(false);
+  expect(counter.unchanged()).toBe(false);
+  changes.observe("child", "record", { revert: { messageID: "idle" } });
+  expect(snapshot.unchanged()).toBe(false);
+  expect(counter.unchanged()).toBe(false);
+  expect(changes.snapshotRecord("child")?.unchanged()).toBe(true);
+  counter.release();
+});
+
+test("record snapshots ignore history, inbox, inventory, deltas and unrelated records", () => {
+  const changes = new SessionChanges();
+  changes.observe("child", "record", { title: "A" });
+  const snapshot = changes.snapshotRecord("child")!, counter = changes.capture("child");
+  for (const facet of ["history", "inbox", "active", "event:delta"]) {
+    changes.observe("child", facet, "first", true);
+    changes.observe("child", facet, "changed");
+    expect(snapshot.unchanged()).toBe(true);
+  }
+  changes.observe("other", "record", { title: "B" });
+  expect(snapshot.unchanged()).toBe(true);
+  expect(counter.unchanged()).toBe(false); // Record snapshots do not replace aggregate outcome captures.
+  counter.release();
+});
+
+test("record snapshots do not pin evicted sessions and fail closed after identical recreation", () => {
+  const changes = new SessionChanges(1);
+  changes.observe("child", "record", { title: "A" });
+  const snapshot = changes.snapshotRecord("child")!;
+  changes.observe("other", "record", {});
+  expect(snapshot.unchanged()).toBe(false);
+  expect(changes.snapshotRecord("child")).toBeUndefined();
+  changes.observe("child", "record", { title: "A" });
+  expect(snapshot.unchanged()).toBe(false);
+  expect(changes.snapshotRecord("child")?.unchanged()).toBe(true);
+});
+
+test("record snapshot lookup does not refresh the observation store LRU", () => {
+  const changes = new SessionChanges(2);
+  changes.observe("old", "record", "A");
+  changes.observe("new", "record", "B");
+  const oldest = changes.snapshotRecord("old")!;
+  changes.observe("third", "record", "C");
+  expect(oldest.unchanged()).toBe(false);
+  expect(changes.snapshotRecord("old")).toBeUndefined();
+  expect(changes.snapshotRecord("new")?.unchanged()).toBe(true);
+});
+
 for (const changed of [false, true])
 test(`first child-scoped inventory ${changed ? "change withholds inference" : "equal observation preserves completion"}`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

@@ -1,7 +1,7 @@
 import { appUrl } from "../shared/app-url";
 import type { LiveChannel, LiveSubscriptionHandle } from "../shell/live-channel";
 import type { CompactWorker } from "./compact-work";
-import { workerIsActive } from "./worker-state";
+import type { ConversationItem } from "./types";
 
 type Entry = { executionId: string; revision: number; dismissed: boolean };
 type IdentityFence = { generation: number; ids: Set<string>; resolvedAt?: number };
@@ -19,9 +19,81 @@ export function workerExecutionIds(worker: CompactWorker): string[] {
 }
 
 export function workerDismissible(worker: CompactWorker): boolean {
-  if (worker.activity?.kind === "working" || worker.activity?.kind === "needs-answer") return false;
-  return !workerIsActive(worker.state) || worker.activity?.kind === "unavailable" || worker.activity?.kind === "ended"
-    || worker.state === "unknown" && worker.activity === undefined;
+  if (worker.outcomeWithheld === true) return false;
+  switch (worker.activity?.kind) {
+    case "working": case "needs-answer": return false;
+    // As in the source predicate, these protect only a non-terminal row. A
+    // terminal report can keep stale activity that the presented state ignores.
+    case "checking": case "session-active": return worker.state !== "working" && worker.state !== "unknown";
+    case "unavailable": case "ended": return true;
+    // Keep compatibility for existing standalone marks on legacy rows.
+    default: return worker.state !== "working";
+  }
+}
+
+/** Row affordance for unresolved and ended-without-result rows, not permission
+ * to save a mark. Known final results use "Dismiss finished". Uses the
+ * presented state.
+ */
+export function workerCanDismissRow(worker: CompactWorker): boolean {
+  switch (worker.activity?.kind) {
+    case "working": case "needs-answer": case "checking": return false;
+    default: return worker.state === "unknown";
+  }
+}
+
+/** The scope of "Dismiss finished": a known terminal result that may be saved. */
+export function workerFinishedDismissible(worker: CompactWorker): boolean {
+  return worker.state !== "working" && worker.state !== "unknown" && workerDismissible(worker);
+}
+
+/** Current-view clears are bound to the underlying item object, not to the
+ * worker ID or any aliases. Recompacting an unchanged item preserves its clear.
+ */
+export class WorkerViewDismissals {
+  private readonly cleared = new Map<string, ConversationItem>();
+  private painted: readonly ConversationItem[] = [];
+
+  /** Records the items behind the rows now on screen. */
+  paint(items: readonly ConversationItem[]): void { this.painted = items; }
+
+  /** Saves an exact eligible run, or clears only that row from the view.
+   * Either way it acts only on the one source item that was painted: the live
+   * projection can replace a reusable row key before its next paint, and a
+   * stale or duplicated source does nothing until that paint.
+   * `canSave` false means the store refuses before submitting anything, so
+   * eligibility is indeterminate and the row clears from the view instead.
+   * Returns whether the current view changed.
+   */
+  dismiss(items: readonly ConversationItem[], current: CompactWorker, presented: CompactWorker, save: (ids: readonly string[]) => void, canSave = true): boolean {
+    if (!workerCanDismissRow(presented)) return false;
+    const sources = items.filter(item => item.id === current.id);
+    const source = sources.length === 1 ? sources[0]! : undefined;
+    if (!source || !this.painted.includes(source)) return false;
+    // Use the source evidence for saving. An expired presentation timer does
+    // not make Checking into verified, save-eligible Unavailable evidence.
+    // The row gate leaves only unresolved rows, which save only with activity.
+    const ids = current.activity && workerDismissible(current) ? workerExecutionIds(current) : [];
+    if (ids.length && canSave) {
+      save(ids);
+      return false; // The saved path alone decides visibility, even on failure.
+    }
+    this.cleared.set(source.id, source);
+    return true;
+  }
+
+  filter(items: readonly ConversationItem[], workers: readonly CompactWorker[]): readonly CompactWorker[] {
+    if (!this.cleared.size) return workers;
+    const current = new Map<string, ConversationItem | null>();
+    for (const item of items) if (this.cleared.has(item.id)) current.set(item.id, current.has(item.id) ? null : item);
+    const clearable = new Set(workers.filter(workerCanDismissRow).map(worker => worker.id));
+    for (const [id, source] of this.cleared) {
+      if (current.get(id) !== source || !clearable.has(id)) this.cleared.delete(id);
+    }
+    return workers.filter(worker => !this.cleared.has(worker.id));
+  }
+
+  reset(): void { this.cleared.clear(); this.painted = []; }
 }
 
 export function visibleWorkers(workers: readonly CompactWorker[], dismissed: ReadonlySet<string>): CompactWorker[] {
@@ -122,6 +194,9 @@ export class WorkerDismissalClient {
         if (this.queued) this.refresh();
       });
   }
+
+  /** False while a conversation-wide fence refuses every save before any POST. */
+  canSave(): boolean { return !this.identityUnavailable && !this.capacityExceeded; }
 
   /** Whether this explicit action saved; retained feedback may belong to another execution. */
   async dismiss(executionId?: string, aliases: readonly string[] = []): Promise<boolean> {

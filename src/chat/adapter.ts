@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { compactWorkerEvidence, validatedWorkerDismissalSource, workerDismissalSourceStrength, workerSourceIsProtected, WORKER_EVIDENCE_LIMIT, WorkerEvidenceError, type WorkerEvidenceSnapshot } from "./worker-dismissal-evidence";
+import { WORKER_DISMISSAL_ALIAS_LIMIT, workerDismissalIdentities } from "./worker-dismissal-identity";
 import { AgentNotificationTracker, type AgentNotificationEvent } from "./notifications";
 
 import { boundedSet } from "../shared/bounded-map";
@@ -18,7 +19,7 @@ import { activeInteractionRequests, PermissionQueueOrder } from "./interaction-o
 import { parsePromptSlashCommand, sideQuestionOperation } from "./slash-commands";
 import { isLiveConversationStatus } from "./types";
 import { OPENCODE_ALIAS_LIVE, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_STEP_LIVE, OPENCODE_TEXT_START_FALLBACK, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeStepStatus, type OpenCodeTextStart } from "./opencode/normalization-types";
-import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback } from "./types";
+import type { ChatActionContext, AutomaticBackgroundOutcome, AutomaticBackgroundFeedback, WorkerActivity } from "./types";
 import { hasVerifiedBlockingWork } from "./blocking-work";
 import { workerSessionReport, type WorkerMessageModel } from "./worker-session";
 import { unverifyWorkerTask, workerExecutionClockRuns, workerState } from "./worker-state";
@@ -92,7 +93,8 @@ type BackgroundRecovery = {
   sourceStartedAt?: number;
   timer?: ReturnType<typeof setTimeout>;
   checkingStarted?: true;
-  checking?: { finish: () => void };
+  // `precheck` answers only for a row still showing this window's Checking.
+  checking?: { finish: () => void; precheck: (item: BackgroundTaskItem) => { activity?: WorkerActivity } | undefined };
   readLifetime?: AbortController;
 };
 
@@ -116,6 +118,11 @@ function mergeWorkerRecoveryProgress(previous: WorkerRecoveryProgress | undefine
   return { startedAt, reportedAt, terminal };
 }
 
+function sameWorkerExecutionAliases(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  const ids = new Set(left ?? []);
+  return ids.size === new Set(right ?? []).size && (right ?? []).every(id => ids.has(id));
+}
+
 function workerRecoveryAliases(item: BackgroundTaskItem): string[] {
   return [...(item.toolUseIds ?? []), ...(item.toolUseId ? [item.toolUseId] : [])].map(id => `call:${id}`)
     .concat(item.resultId ? [`result:${item.resultId}`] : []);
@@ -136,22 +143,193 @@ function indexRecoveredBackgroundTasks(tasks: readonly BackgroundTaskItem[]) {
   };
 }
 
+type WorkerExecutionScope = Pick<BackgroundTaskItem, "id" | "taskId" | "taskType" | "childConversationId">;
+
+function sameWorkerExecutionScope(current: WorkerExecutionScope, source: WorkerExecutionScope): boolean {
+  return source.id === current.id && source.taskId === current.taskId && source.taskType === current.taskType
+    && source.childConversationId === current.childConversationId;
+}
+
+function workerExecutionIds(item: BackgroundTaskItem): string[] {
+  return [
+    ...(item.activity?.executionAliases ?? []), ...(item.activity?.executionId ? [item.activity.executionId] : []),
+  ];
+}
+
+function sameWorkerExecution(current: BackgroundTaskItem, source: BackgroundTaskItem): boolean {
+  return sameWorkerExecutionScope(current, source)
+    && workerExecutionIds(source).some(id => workerExecutionIds(current).includes(id));
+}
+
+function restatesWorkerOutcome(item: BackgroundTaskItem): boolean {
+  return item.status === "running" || item.stateUncertain === true && item.outcomeWithheld !== false;
+}
+
+// Keep the original scope on the worker row through spreads and replay
+// preparation, but off the wire. It can only deny dismissal; it never supplies
+// activity, a public identity, or Stop proof.
+const workerOutcomeVeto = Symbol("workerOutcomeVeto");
+type WorkerOutcomeVeto = WorkerExecutionScope & {
+  executionIds: readonly string[];
+  launch: { ref?: string; generation?: number; conflict?: true };
+  dormant?: true;
+  // Set when a proven alias no longer fits. Unrecorded aliases mean no
+  // same-scope restatement can be proven disjoint, so every one matches.
+  saturated?: true;
+};
+type WorkerWithOutcomeVeto = BackgroundTaskItem & { [workerOutcomeVeto]?: WorkerOutcomeVeto };
+
+// Only buffered worker rows need their original veto inputs at publication.
+// The linked inputs live and retire with the coalescer's folded item.
+const workerVetoBatch = Symbol("workerVetoBatch");
+type WorkerVetoBatch = { item: ConversationItem; prior?: WorkerVetoBatch };
+type BufferedWorker = WorkerWithOutcomeVeto & { [workerVetoBatch]?: WorkerVetoBatch };
+
+const nativeWorkerLaunchRef = /^v1:launch:(0|[1-9]\d*):[a-f0-9]{64}$/;
+
+function workerVetoLaunch(activity: BackgroundTaskItem["activity"]): WorkerOutcomeVeto["launch"] {
+  const { launchRef, generation } = activity ?? {};
+  // V2 Running history can omit the separate generation. Its native launch
+  // reference already scopes the retained invocation and birth to a stream.
+  const ref = launchRef || undefined;
+  const encoded = ref && nativeWorkerLaunchRef.exec(ref);
+  if (encoded) {
+    const streamGeneration = Number(encoded[1]);
+    if (!Number.isSafeInteger(streamGeneration) || generation !== undefined && generation !== streamGeneration) return { ref, generation, conflict: true };
+    return { ref, generation: streamGeneration };
+  }
+  if (ref?.startsWith("v1:launch:") || generation !== undefined && (!Number.isSafeInteger(generation) || generation < 0)) {
+    return { ref, generation, conflict: true };
+  }
+  return { ref, generation };
+}
+
+function contradictsWorkerVetoLaunch(known: WorkerOutcomeVeto["launch"], next: WorkerOutcomeVeto["launch"]): boolean {
+  return next.conflict === true || known.ref !== undefined && next.ref !== undefined && known.ref !== next.ref
+    || known.generation !== undefined && next.generation !== undefined && known.generation !== next.generation;
+}
+
+function workerVetoStreamGap(known: WorkerOutcomeVeto["launch"], next: WorkerOutcomeVeto["launch"]): boolean {
+  // A stream change cannot qualify a new launch or disprove an old one.
+  // Preserve the existing older replay rule, but not conflicting claims.
+  return !known.conflict && !next.conflict && known.generation !== undefined && next.generation !== undefined
+    && (next.generation < known.generation || next.generation > known.generation && (!next.ref || nativeWorkerLaunchRef.test(next.ref)));
+}
+
+function withWorkerOutcomeVeto(current: ConversationItem | undefined, incoming: WorkerWithOutcomeVeto,
+  target: WorkerWithOutcomeVeto = incoming, coveredLaunch?: BackgroundTaskItem): BackgroundTaskItem {
+  const worker: WorkerWithOutcomeVeto | undefined = current?.type === "background_task" ? current : undefined;
+  const priorBinding = worker?.[workerOutcomeVeto];
+  if (!priorBinding && worker?.outcomeWithheld !== true
+    && target.outcomeWithheld === incoming.outcomeWithheld && incoming.outcomeWithheld !== false) return target;
+  const binding = (item: BackgroundTaskItem, executionIds = workerExecutionIds(item), launch = workerVetoLaunch(item.activity)): WorkerOutcomeVeto => {
+    const { id, taskId, taskType, childConversationId } = item;
+    return { id, taskId, taskType, childConversationId, executionIds, launch };
+  };
+  const ids = workerExecutionIds(incoming);
+  const launch = workerVetoLaunch(incoming.activity);
+  const previouslyBound = worker?.outcomeWithheld === true && !priorBinding?.dormant;
+  const matches = (veto: WorkerOutcomeVeto) => sameWorkerExecutionScope(veto, incoming) && (veto.saturated
+    || (ids.length ? ids.some(id => veto.executionIds.includes(id)) : !contradictsWorkerVetoLaunch(veto.launch, launch)));
+  const previous = priorBinding ?? (worker?.outcomeWithheld === true ? binding(worker) : undefined);
+  const generationGap = previous && !ids.length && sameWorkerExecutionScope(previous, incoming)
+    && workerVetoStreamGap(previous.launch, launch);
+  const restatement = restatesWorkerOutcome(incoming);
+  let retained = previous && matches(previous) && (previouslyBound
+    || ids.length && (previous.saturated || workerDismissalIdentities(incoming).some(id => previous.executionIds.includes(id))))
+    ? previous : undefined;
+  // A qualified overlap proves the same execution. The provider may omit
+  // aliases whose launcher evidence is incomplete, so remember every proven
+  // alias: a later row exposing only an earlier one still restates this
+  // execution. Past the bound, stop learning and fail closed (`saturated`).
+  let provenOverlap = false;
+  if (retained && ids.length) {
+    const qualified = workerDismissalIdentities(incoming);
+    const known = new Set(retained.executionIds);
+    if (qualified.some(id => known.has(id))) {
+      provenOverlap = true;
+      const added = retained.saturated ? [] : qualified.filter(id => !known.has(id));
+      const saturated = known.size + added.length > WORKER_DISMISSAL_ALIAS_LIMIT;
+      // Exact native IDs survive reconnects. Only a qualified overlap can
+      // refine the private comparison used by subsequent ID-less updates.
+      const betterLaunch = !launch.conflict && launch.generation !== undefined
+        && Number.isSafeInteger(launch.generation) && launch.generation >= 0
+        && (retained.launch.generation === undefined || launch.generation > retained.launch.generation
+          || launch.generation === retained.launch.generation && retained.launch.ref === undefined && launch.ref !== undefined);
+      if (added.length || betterLaunch) retained = { ...retained, launch: betterLaunch ? launch : retained.launch,
+        ...(saturated ? { saturated: true as const } : { executionIds: [...retained.executionIds, ...added] }) };
+    }
+  }
+  // A replaced page may witness continuity only for a matching execution and
+  // only when the selected row does not contradict it. Never copy its fields.
+  let launchGap = false;
+  if (previous && !previous.executionIds.length && ids.length && sameWorkerExecutionScope(previous, incoming)
+    && !previous.launch.conflict) {
+    const pageLaunch = !launch.ref && coveredLaunch && sameWorkerExecutionScope(coveredLaunch, incoming)
+      ? workerVetoLaunch(coveredLaunch.activity) : undefined;
+    const overlapsPage = coveredLaunch && sameWorkerExecution(coveredLaunch, incoming);
+    const witness = overlapsPage && pageLaunch && !contradictsWorkerVetoLaunch(pageLaunch, launch) ? pageLaunch : launch;
+    const disjointPage = previous.launch.ref && coveredLaunch && pageLaunch && !pageLaunch.conflict && !overlapsPage && workerExecutionIds(coveredLaunch).length
+      && pageLaunch.ref === previous.launch.ref && pageLaunch.generation === previous.launch.generation;
+    launchGap = !disjointPage && (workerVetoStreamGap(previous.launch, witness)
+      || (!previous.launch.ref || !witness.ref) && !contradictsWorkerVetoLaunch(previous.launch, witness));
+    if (!witness.conflict && previous.launch.ref && previous.launch.generation !== undefined
+      && witness.ref === previous.launch.ref && witness.generation === previous.launch.generation) {
+      const qualified = workerDismissalIdentities(incoming);
+      if (qualified.length) retained = binding(incoming, qualified, witness);
+    }
+  }
+  const carried = incoming[workerOutcomeVeto];
+  // An incoming source's own denial can supply its own launch witness;
+  // inherited markers and unmarked sparse updates cannot learn one.
+  const ownLaunch = launch.ref && launch.generation !== undefined && !launch.conflict;
+  const keepsOwnDenial = !ids.length && (!ownLaunch
+    || retained?.executionIds.length && retained.launch.ref === launch.ref && retained.launch.generation === launch.generation);
+  // Reapplying the covered row must not invalidate its own denial just
+  // because its launch hints conflict. The hints still qualify no identity.
+  const sameConflictingDenial = carried && !carried.executionIds.length && !ids.length
+    && carried.launch.conflict && launch.conflict && sameWorkerExecutionScope(carried, incoming)
+    && carried.launch.ref === launch.ref && carried.launch.generation === launch.generation;
+  // A fresh denial of a proven-overlapping execution keeps the remembered union.
+  // A saturated veto cannot prove disjointness, so a same-scope one stays.
+  const veto = incoming.outcomeWithheld === true && (!carried || !carried.dormant && (matches(carried) || sameConflictingDenial))
+    ? carried ?? (keepsOwnDenial || provenOverlap || retained?.saturated ? retained : undefined) ?? binding(incoming, ids, launch)
+    : restatement ? retained : undefined;
+  // Protect the public row during an unresolved gap, including from local
+  // row/launcher marks. The private binding still requires qualified proof.
+  const dormant = restatement && (launchGap || !ids.length && (generationGap
+    || !previouslyBound && previous && matches(previous))) ? previous : undefined;
+  let retainedBinding = veto ?? dormant;
+  if (veto?.dormant) {
+    const { dormant: _gap, ...bound } = veto;
+    retainedBinding = bound;
+  } else if (!veto && dormant && !dormant.dormant) {
+    retainedBinding = { ...dormant, dormant: true };
+  }
+  const withheld = retainedBinding !== undefined;
+  if (target.outcomeWithheld === (withheld ? true : undefined) && target[workerOutcomeVeto] === retainedBinding) return target;
+  const item = { ...target };
+  if (withheld) {
+    item.outcomeWithheld = true;
+  } else {
+    delete item.outcomeWithheld;
+  }
+  if (retainedBinding) item[workerOutcomeVeto] = retainedBinding;
+  else delete item[workerOutcomeVeto];
+  return item;
+}
+
 /** Covered native evidence may withdraw an inference, never an explicit report. */
 function replacesHistoryOnlyOutcome(current: ConversationItem | undefined, source: ConversationItem | undefined): boolean {
-  const executionIds = (item: ConversationItem | undefined) => item?.type === "background_task"
-    ? [...(item.activity?.executionAliases ?? []), ...(item.activity?.executionId ? [item.activity.executionId] : [])] : [];
-  const knownExecutions = new Set(executionIds(current));
   // Covered activity is independent of outcome/Stop proof. A retained native
   // end can survive removal of the idle that formerly justified an outcome.
   return current?.type === "background_task" && current.status !== "running" && !current.resultId
     && current.summary === undefined && current.terminalReportedAt === undefined
     && source?.type === "background_task" && source.status === "running"
-    && source.id === current.id && source.taskId === current.taskId && source.taskType === current.taskType
-    && source.childConversationId !== undefined && source.childConversationId === current.childConversationId
+    && source.childConversationId !== undefined && sameWorkerExecution(current, source)
     && (source.activity?.kind === "unavailable" && source.stateUncertain === true
       || source.activity?.kind === "working" || source.activity?.kind === "needs-answer" || source.activity?.kind === "session-active"
-      || source.activity?.kind === "ended" && !source.resultId && source.summary === undefined && source.terminalReportedAt === undefined)
-    && executionIds(source).some(id => knownExecutions.has(id));
+      || source.activity?.kind === "ended" && !source.resultId && source.summary === undefined && source.terminalReportedAt === undefined);
 }
 
 type MessageModel = WorkerMessageModel;
@@ -1378,6 +1556,7 @@ export class ChatAdapter {
     // An omitted worker or failed read must never manufacture cancellation.
     const nativeLiveTasks = new Set<string>();
     const recoveredWorkerIds = new Set<string>();
+    const recoveryLaunchWitnesses = new Map<string, BackgroundTaskItem>();
     if (this.provider.reconcileBackgroundTasks) {
       let recovered: BackgroundTaskItem[];
       let recoverySources: WorkerRecoverySource[] = [];
@@ -1437,8 +1616,15 @@ export class ChatAdapter {
         // the current complete source's positive or nondismissible evidence.
         byId.set(known.id, known.status === "running" && !currentIds?.has(known.id) ? unverifyWorkerTask(known) : known);
       }
+      const coveredWorkerRows = coverage && page.workerSource && page.completeItems
+        ? new Map(page.completeItems.flatMap(item => item.type === "background_task" && item.status === "running" ? [[item.id, item] as const] : []))
+        : undefined;
       for (const task of byId.values()) {
         const index = items.findIndex(item => item.id === task.id);
+        const witness = recoveredWorkerIds.has(task.id) ? coveredWorkerRows?.get(task.id) : undefined;
+        // Inventory already selects this row, even when the display slice
+        // doesn't contain its covered launcher. Keep only the private witness.
+        if (witness?.activity?.launchRef) recoveryLaunchWitnesses.set(task.id, witness);
         if (index < 0) items.push(task); else items[index] = task;
       }
       for (const source of recoverySources) for (const relation of source.workerResultFallbacks) {
@@ -1990,11 +2176,23 @@ export class ChatAdapter {
       }
       // No await follows this per-outcome admission. Whole-source ownership
       // guards still validate independently in the atomic publication below.
+      const coveredLaunchFor = (itemId: string) => {
+        const witness = recoveryLaunchWitnesses.get(itemId);
+        return witness && !coverage?.changed(itemId) && !historyRemovals.has(itemId)
+          && !visibility?.excludedItemIds.includes(itemId)
+          && !(witness.childConversationId && revokedChildren.has(witness.childConversationId)) ? witness : undefined;
+      };
       for (let index = 0; index < items.length; index++) {
         const item = items[index]!;
         const projected = coverage ? coverage.workerSources.project(item)
           : item.type === "background_task" ? page.workerSource?.projectInferredOutcome?.(item) ?? item : item;
         if (projected !== item) { items[index] = projected; revokedRows.add(item.id); }
+        if (coverage && projected.type === "background_task") {
+          // Covered history and compact evidence take the cursor of this
+          // publication. Carry only the dismissal veto, not the rest of the
+          // sparse projection merge, even when replacing the snapshot.
+          items[index] = withWorkerOutcomeVeto(projection.get(projected.id), projected, projected, coveredLaunchFor(projected.id));
+        }
       }
       const replace = coverage?.replacement && (reversibleHistory && !sameReversibleHistory(previousReversibleHistory, reversibleHistory)
         || !sameConversationItems(projection.items(), items));
@@ -2049,6 +2247,10 @@ export class ChatAdapter {
       } else {
         // Recovery is also for clients already listening when V2 reconnects.
         // Publish recovered values, not just a silent seed of the next snapshot.
+        // A publicly equal row whose only news is the private dismissal veto
+        // must not fence concurrent reads: the veto denies dismissal and never
+        // supplies activity, so it must not restore stale activity there.
+        const vetoOnlyRows = new Set<string>();
         for (const item of items) {
           const current = projection.get(item.id);
           // Equal JSON can carry newer native execution evidence. Stage that
@@ -2060,7 +2262,12 @@ export class ChatAdapter {
           const turn = (item as ConversationItem & ClaudeTextIdentity)[CLAUDE_TURN];
           const turnChanged = turn !== undefined
             && turn.completed !== (current as (ConversationItem & ClaudeTextIdentity) | undefined)?.[CLAUDE_TURN]?.completed;
-          if (!current || !sameConversationItems([current], [item]) || executionChanged || turnChanged || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
+          const veto = item.type === "background_task" ? (item as WorkerWithOutcomeVeto)[workerOutcomeVeto] : undefined;
+          const vetoChanged = veto !== undefined && current?.type === "background_task"
+            && JSON.stringify(veto) !== JSON.stringify((current as WorkerWithOutcomeVeto)[workerOutcomeVeto]);
+          const publiclyEqual = !!current && sameConversationItems([current], [item]);
+          if (vetoChanged && publiclyEqual && !executionChanged && !turnChanged && !revokedRows.has(item.id) && !resetReports.has(item.id)) vetoOnlyRows.add(item.id);
+          if (!publiclyEqual || executionChanged || turnChanged || vetoChanged || revokedRows.has(item.id) || resetReports.has(item.id)) recoveryUpdates.push({ kind: "upsert", item });
           else if (current.type === "tool" && item.type === "tool" && coverage?.projection === projection && !coverage.changed(item.id)) {
             this.refreshEquivalentDescendantBindings(projection, current, item);
           }
@@ -2068,7 +2275,7 @@ export class ChatAdapter {
         if (!projection.recover(recoveryUpdates, () => {
           coverage?.assertCurrent(); coverage?.workerSources.assertCurrent();
           return !this.disposed && this.projections.get(id) === projection && (questionTrackingCurrent?.() ?? true);
-        }, removed || !!visibilityChanged)) throw new HistoryReadChangedError();
+        }, removed || !!visibilityChanged, coveredLaunchFor, vetoOnlyRows)) throw new HistoryReadChangedError();
       }
       // Publication and eligibility share the covering read's final fence.
       // Session lookups and child usage/model frames never clear this marker.
@@ -5459,7 +5666,12 @@ export class ChatAdapter {
         if (nextRewrite) return previousRewrite !== undefined ? incoming : current;
         if (previousRewrite === false) return incoming;
         if (previousRewrite) current = previousRewrite.original;
-        const merged = mergeInteraction(current, incoming);
+        let merged = mergeInteraction(current, incoming);
+        if (merged.type === "background_task") {
+          const prior = (current as BufferedWorker)[workerVetoBatch] ?? { item: current };
+          const buffered: BufferedWorker = { ...merged, [workerVetoBatch]: { item: incoming, prior } };
+          merged = buffered;
+        }
         this.carryLauncherAccounting(merged, current, incoming);
         const origins = new Map([...(sourceOrigins.get(current) ?? []), ...(sourceOrigins.get(incoming) ?? [])]
           .map(origin => [origin.toolUseId ? `call:${origin.toolUseId}` : `result:${origin.messageId}`, origin]));
@@ -5958,8 +6170,8 @@ export class ChatAdapter {
           if (item.type !== "background_task" || item.status !== "running"
             || item.activity && item.activity.kind !== "unavailable" && item.activity.kind !== "session-active"
             || !item.activity && !item.stateUncertain) return [];
-          const next = readProjection.workerCheckingPresentation(item, "checking");
-          return next ? [next] : [];
+          const next = readProjection.workerCheckingPresentation(item, { ...item.activity, kind: "checking" });
+          return next ? [{ next, before: item.activity }] : [];
         });
         if (checking.length) {
           this.trackBackgroundActivity(id, readProjection, readProjection.status);
@@ -5968,11 +6180,16 @@ export class ChatAdapter {
             clearTimeout(timer);
             if (recovery.checking?.finish !== finish) return;
             delete recovery.checking;
-            for (const item of checking) readProjection.workerCheckingPresentation(item, "unavailable");
+            // Restore the pre-check evidence: an expired window is not a result.
+            for (const { next, before } of checking) readProjection.workerCheckingPresentation(next, before && { ...before });
           };
           const timer = setTimeout(finish, 10_000);
           timer.unref?.();
-          recovery.checking = { finish };
+          const precheck = (item: BackgroundTaskItem) => {
+            const window = checking.find(({ next }) => next.id === item.id && next.activity === item.activity);
+            return window && { activity: window.before };
+          };
+          recovery.checking = { finish, precheck };
         }
       }
       const checking = recovery.checking;
@@ -6013,6 +6230,11 @@ export class ChatAdapter {
         const progressAliases = this.backgroundProgressAliases(recovery, projection);
         const { byId, supersedes } = indexRecoveredBackgroundTasks(safeTasks);
         const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
+        // Uncertain, Stop-withdrawn, on the pre-check evidence (possibly none).
+        const restorePrecheck = (item: BackgroundTaskItem, precheck: { activity?: WorkerActivity }): BackgroundTaskItem => {
+          const { activity: _unverified, ...bare } = unverifyWorkerTask(item);
+          return precheck.activity ? { ...bare, activity: { ...precheck.activity } } : bare;
+        };
         for (const known of projection.items()) {
           if (fence.changed(known.id)) continue;
           if (known.type === "background_task" && supersedes(known)) {
@@ -6023,9 +6245,24 @@ export class ChatAdapter {
             recoveryUpdates.push({ kind: "remove", itemId: known.id });
             continue;
           }
-          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) recoveryUpdates.push({ kind: "upsert", item: unverifyWorkerTask(known) });
+          if (known.type === "background_task" && known.status === "running" && !byId.has(known.id)) {
+            // An omitting read is inconclusive: it ends Checking on the row's
+            // pre-check evidence, never on save-eligible Unavailable.
+            const precheck = checking?.precheck(known);
+            recoveryUpdates.push({ kind: "upsert", item: precheck ? restorePrecheck(known, precheck) : unverifyWorkerTask(known) });
+          }
         }
-        for (const item of safeTasks) recoveryUpdates.push({ kind: "upsert", item });
+        for (const item of safeTasks) {
+          // A returned row that is only the unverified form of the same
+          // execution is the same inconclusive result as an omission.
+          // Positive activity, an end, or another execution stays as read.
+          const known = projection.get(item.id), precheck = known?.type === "background_task" ? checking?.precheck(known) : undefined;
+          const unverifiedOnly = precheck && item.status === "running" && item.stateUncertain === true
+            && (!item.activity || item.activity.kind === "unavailable" && !item.activity.request)
+            && item.activity?.executionId === precheck.activity?.executionId
+            && sameWorkerExecutionAliases(item.activity?.executionAliases, precheck.activity?.executionAliases);
+          recoveryUpdates.push({ kind: "upsert", item: unverifiedOnly ? restorePrecheck(item, precheck) : item });
+        }
         if (!projection.recover(recoveryUpdates, () => !this.disposed && this.backgroundRecoveries.get(id) === recovery
           && generation === this.backgroundStreamGeneration && this.projections.get(id) === projection && fence.current()
           && workerSources.isCurrent() && !this.reversibleMutations.has(id) && !this.revertReconciliations.has(id))) {
@@ -7021,13 +7258,16 @@ export class ConversationProjection {
   /** Adapter-owned presentation only: no native progress or history invalidation.
    * Activity object matching prevents a deadline from overwriting newer evidence,
    * while allowing unrelated attribution updates to preserve the same window.
+   * `activity` is the Checking presentation, or the pre-check evidence (possibly
+   * none) that an ended window restores.
    */
-  workerCheckingPresentation(expected: BackgroundTaskItem, kind: "checking" | "unavailable"): BackgroundTaskItem | undefined {
+  workerCheckingPresentation(expected: BackgroundTaskItem, activity: WorkerActivity | undefined): BackgroundTaskItem | undefined {
     const current = this.timeline.get(expected.id);
     if (current?.type !== "background_task" || current.activity !== expected.activity || current.status !== "running"
       || current.activity && !["checking", "unavailable", "session-active"].includes(current.activity.kind)
       || !current.activity && !current.stateUncertain) return undefined;
-    const item: BackgroundTaskItem = { ...current, activity: { ...current.activity, kind } };
+    const { activity: _previous, ...rest } = current;
+    const item: BackgroundTaskItem = activity ? { ...rest, activity } : rest;
     this.mutationRevision++;
     this.timeline.set(item.id, item);
     this.replay.publish({ type: "item.upsert", item });
@@ -7074,7 +7314,8 @@ export class ConversationProjection {
    * the candidate. Only then swap the complete map and publish its bounded
    * effective change set. Interaction notifications observe the complete new
    * view and an already committed replay boundary, never a row-by-row prefix. */
-  recover(updates: readonly Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>[], admit: () => boolean = () => true, invalidate = false): boolean {
+  recover(updates: readonly Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>[], admit: () => boolean = () => true, invalidate = false,
+    coveredLaunchFor?: (itemId: string) => BackgroundTaskItem | undefined, vetoOnlyRows?: ReadonlySet<string>): boolean {
     if (!admit()) return false;
     const revision = this.mutationRevision, cursor = this.replay.latestCursor();
     const prior = this.timeline, staged = new Map(prior);
@@ -7087,7 +7328,7 @@ export class ConversationProjection {
         continue;
       }
       const incoming = preserveClaudeTurn(prior.get(update.item.id), snapshotClaudeItem(update.item)), current = staged.get(incoming.id);
-      const interaction = mergeInteraction(current, incoming);
+      const interaction = mergeInteraction(current, incoming, coveredLaunchFor?.(incoming.id));
       const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
       if ((merged.type === "permission" || merged.type === "question") && merged.status !== "pending") settled.add(merged.id);
       if (merged.type === "question" && !merged.questions.length
@@ -7121,7 +7362,10 @@ export class ConversationProjection {
     this.timeline = staged;
     for (const id of touched) {
       const before = prior.get(id), item = staged.get(id);
-      this.touchWorker(before); this.touchWorker(item); this.historyChanged(id);
+      // A veto-only restatement still stores its private binding, but it
+      // neither changed public evidence nor fences concurrent history reads.
+      if (vetoOnlyRows?.has(id) && before && item && !firstRemoval.has(id) && sameConversationItems([before], [item])) this.mutationRevision++;
+      else { this.touchWorker(before); this.touchWorker(item); this.historyChanged(id); }
       if (item) {
         this.pruneWorkerFallback(item);
         if (item.type === "assistant_message") this.text.seed(item.id.replace(/^part:/, ""), item.markdown);
@@ -7247,7 +7491,30 @@ export class ConversationProjection {
   upsert(item: ConversationItem): ChatEvent | undefined {
     item = snapshotClaudeItem(item);
     const current = this.timeline.get(item.id);
-    const interaction = mergeInteraction(current, item);
+    let interaction: ConversationItem;
+    const worker = item.type === "background_task" ? item as BufferedWorker : undefined;
+    const batch = worker?.[workerVetoBatch];
+    if (worker && batch) {
+      const { [workerVetoBatch]: _batch, ...incoming } = worker;
+      item = incoming;
+      const folded = mergeInteraction(current, incoming) as WorkerWithOutcomeVeto;
+      // Decide only the veto in delivery order against the row actually
+      // being replaced. Keep the ordinary folded presentation unchanged.
+      const inputs: ConversationItem[] = [];
+      for (let node: WorkerVetoBatch | undefined = batch; node; node = node.prior) inputs.push(node.item);
+      let decided = current;
+      for (let index = inputs.length - 1; index >= 0; index--) decided = mergeInteraction(decided, inputs[index]!);
+      delete folded.outcomeWithheld;
+      delete folded[workerOutcomeVeto];
+      if (decided?.type === "background_task") {
+        if (decided.outcomeWithheld === true) folded.outcomeWithheld = true;
+        const veto = (decided as WorkerWithOutcomeVeto)[workerOutcomeVeto];
+        if (veto) folded[workerOutcomeVeto] = veto;
+      }
+      interaction = folded;
+    } else {
+      interaction = mergeInteraction(current, item);
+    }
     const merged = interaction.type === "permission" ? this.interactions?.permission?.(interaction) ?? interaction : interaction;
     this.pruneWorkerFallback(merged);
     this.touchWorker(current);
@@ -7689,7 +7956,7 @@ function preserveClaudeTurn(current: ConversationItem | undefined, incoming: Con
   return incoming;
 }
 
-function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
+function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem, coveredLaunch?: BackgroundTaskItem): ConversationItem {
   if (!current || current.type !== incoming.type) return incoming;
   if (current.type === "user_message" && incoming.type === "user_message") {
     // Same rule as text below: an update that omits attachments is sparse —
@@ -7750,15 +8017,9 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
       status: keepTerminal && incoming.status === "running" ? current.status : incoming.status,
       ...(incoming.summary ?? current.summary ? { summary: incoming.summary ?? current.summary } : {}),
     };
-    // Fresh authoritative terminal evidence discharges the deny-only marker.
-    // Canonical unwithheld rows OMIT it; false is not a second wire state.
-    // Sparse running/activity updates retain an existing true marker.
-    if (incoming.status === "running" && current.outcomeWithheld) merged.outcomeWithheld = true;
-    if (incoming.status !== "running" && !incoming.stateUncertain && !incoming.outcomeWithheld
-      || merged.outcomeWithheld === false) delete merged.outcomeWithheld;
     // A progress note belongs to a running task only.
     if (merged.status !== "running") delete merged.progress;
-    return merged;
+    return withWorkerOutcomeVeto(current, incoming, merged, coveredLaunch);
   }
   if (current.type === "tool" && incoming.type === "tool") {
     const keepTerminal = current.status === "completed" || current.status === "failed" || current.status === "cancelled";

@@ -767,7 +767,7 @@ export class BackgroundWorkers {
   private readonly tasks = new Map<string, WorkerTask>();
   private readonly notices = new Map<string, { proof?: NativeProof; occurrence?: string; discarded?: { parent: string; worker: string; at?: number } }>();
   private readonly invocations = new Map<string, { fact: LauncherEvidence; occurrence?: string }>();
-  private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests;
+  private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string; retired?: true }; prelaunch?: PrelaunchRequests;
     /** Greatest known distinct-start clock; null means its clock is unknown.
      * Negative evidence only, never a positive execution start/end timestamp. */
     startCounterproof?: number | null; startClocks?: readonly number[] | null; startKeys?: readonly string[]; terminalKeys?: readonly string[]; undatedEnd?: true }>();
@@ -1263,7 +1263,7 @@ export class BackgroundWorkers {
       }
       this.set(this.terminalProofs, child, { occurrences: [],
         ...(boundary.proof ? { proof: boundary.proof } : {}),
-        ...(boundary.started ? { started: { proof: boundary.started.proof } } : {}),
+        ...(boundary.started ? { started: { proof: boundary.started.proof, retired: true as const } } : {}),
         ...(boundary.startCounterproof === undefined ? {} : { startCounterproof: boundary.startCounterproof }),
         ...(boundary.startClocks === undefined ? {} : { startClocks: boundary.startClocks }),
         ...(boundary.startKeys === undefined ? {} : { startKeys: boundary.startKeys }),
@@ -1672,7 +1672,10 @@ export class BackgroundWorkers {
       this.uncertain(previous);
       superseded.push({ kind: "upsert", item: previous.item });
     }
-    const started = !shell ? this.terminalProofs.get(child)?.started : undefined;
+    // Retained starts recognize replay/counterproof but cannot bind positive
+    // activity to a launcher observed on a later subscription.
+    const boundaryStart = !shell ? this.terminalProofs.get(child)?.started : undefined;
+    const started = boundaryStart?.retired ? undefined : boundaryStart;
     const evidence: WorkerOccurrenceEvidence = Object.freeze({ key: digest(JSON.stringify([parent, child, taskId, fact.workerType, fact.message, fact.created, fact.ran, fact.completed, fact.reportedCompletion])), parent, worker: child, kind: fact.workerType, taskId, launches: Object.freeze([fact]),
       ...(started && !started.occurrence ? { executionStart: started.proof } : {}), ...(item.stateUncertain ? { uncertain: true } : {}) });
     if (started && !started.occurrence) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child)!, started: { ...started, occurrence: evidence.key } });

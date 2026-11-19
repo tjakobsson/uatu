@@ -66,3 +66,19 @@ Complete owned child history with an explicit native idle outcome SHALL recover 
 - **THEN** delivery time and the count of preceding idle boundaries SHALL NOT exclude the earlier run or assign its report to a later run
 - **AND** exact terminal-response correlation SHALL require a unique match and an unambiguous owned execution interval
 - **AND** missing or duplicate response matches SHALL remain uncorrelated rather than guessed
+
+### Requirement: Worker status checks are bounded and recover automatically
+
+Worker recovery SHALL be read-only and automatic, preserving existing probe budgets and backoff. Checking status… SHALL count under Unresolved and end within a finite deadline even when reads fail or hang. A Checking window that ends without a read result SHALL return each row to the evidence it had before the check, and neither Checking status… nor its deadline SHALL grant saved-dismissal eligibility. An unobservable task SHALL show Status unavailable with a truthful last-seen time when known, no live execution animation and no growing execution timer. No worker Check again control SHALL be introduced.
+
+#### Scenario: Verification fails or exhausts its cycle
+- **WHEN** current verification fails, exceeds its deadline or finishes inconclusively within the bounded recovery cycle
+- **THEN** Checking status… ends and a row whose read failed shows Status unavailable · last seen followed by the last verified observation time, or explicitly states that last-seen time is unavailable
+- **AND** a Checking window that expires or ends inconclusively returns each row to its pre-check evidence: an unverified row of an active session keeps Session active · task unverified, and an unobservable task shows Status unavailable · last seen as before
+- **AND** neither Checking status… nor its deadline makes a row eligible for saved dismissal
+- **AND** neither elapsed waiting time nor a stale launch timestamp is presented as ongoing execution
+
+#### Scenario: Authoritative evidence later returns
+- **WHEN** new worker evidence or normal reconnect/navigation recovery verifies current activity after status became unavailable
+- **THEN** the row and count recover automatically without a manual status action, restart or native mutation
+- **AND** unrelated events do not create unbounded probing or permanent Checking status…

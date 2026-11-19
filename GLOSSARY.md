@@ -12,3 +12,9 @@ The editable text and attachments being prepared for a conversation, distinct fr
 
 **Native history**:
 The conversation transcript stored by its owning agent, distinct from Uatu's displayed or reconstructed conversation.
+
+**Stop eligibility**:
+The ability to offer Stop for a worker based on current execution and ownership evidence. Eligibility is not authorization to perform the action without fresh revalidation.
+
+**Stop authorization**:
+The fresh confirmation that a particular worker may be stopped when the action is performed, distinct from its previously displayed Stop eligibility.

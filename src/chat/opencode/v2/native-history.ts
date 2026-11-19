@@ -5,6 +5,7 @@ import { measureChatWork } from "../../performance";
 import { number as numberField } from "../normalization";
 import { prepareStoredMessage } from "./normalization";
 import type { LauncherEvidence } from "./background";
+import type { RecordSnapshot } from "./session-changes";
 
 type StoredMessage = Record<string, unknown>;
 type NativeReadOrder = Readonly<{ started: number; completed: number }>;
@@ -17,6 +18,7 @@ export const parentCounterproofMaxBytes = 65_536;
 type CompleteHistory = { messages: StoredMessage[]; nativeReadOrder: NativeReadOrder };
 type Qualification = {
   recordsAfter: number; pendingAfter: number;
+  recordSnapshot?: RecordSnapshot;
   rawSignature?: string;
   visibility?: NativeReadOrder & { boundary: string | null };
 };
@@ -38,6 +40,7 @@ export class V2NativeHistory {
     readSignal(signal: AbortSignal): AbortSignal;
     observeHistory(session: string, messages: StoredMessage[]): void;
     observeRecord(value: unknown, requestedId: string | undefined): void;
+    snapshotRecord(session: string): RecordSnapshot | undefined;
   }) {
     this.workspace = path.resolve(options.directory);
     this.reuse = new HistoryReuse(undefined, undefined, () => ({
@@ -46,10 +49,18 @@ export class V2NativeHistory {
   }
 
   async complete(session: string, signal: AbortSignal): Promise<CompleteHistory> {
-    const messages = await this.reuse.readShared(session, this.options.version(), owner => {
+    signal.throwIfAborted();
+    this.qualifyRecordSnapshot(session);
+    const snapshot = this.options.snapshotRecord(session);
+    const reading = this.reuse.readShared(session, this.options.version(), owner => {
       const sharedSignal = this.options.readSignal(owner);
       return this.coveredRead(sharedSignal, () => this.readComplete(session, sharedSignal));
     }, signal);
+    // readShared registers synchronously and defers its loader. Seed only this
+    // entry, before native IO, without replacing a shared/installed baseline.
+    const entry = this.reuse.peekObservation(session, this.options.version());
+    if (entry && !("recordSnapshot" in entry)) entry.recordSnapshot = snapshot;
+    const messages = await reading;
     signal.throwIfAborted();
     return { messages, nativeReadOrder: this.readOrders.get(messages)! };
   }
@@ -87,6 +98,8 @@ export class V2NativeHistory {
       const completed = this.options.recordOrder.next();
       this.qualifyRecord(value, requestedId, { started, completed });
       this.options.observeRecord(value, requestedId);
+      const subject = recordSubject(value, requestedId);
+      if (subject) this.qualifyRecordSnapshot(subject);
     }
     return reply;
   }
@@ -114,6 +127,7 @@ export class V2NativeHistory {
       // A pending replacement keeps one digest of native returns during its
       // lifetime. Differing replies deny its installation regardless of arrival
       // order; neither reply becomes newer truth or starts replacement IO.
+      this.qualifyRecordSnapshot(session);
       const entry = this.reuse.peekObservation(session, this.options.version());
       if (entry) {
         const signature = historyVersion(messages);
@@ -162,7 +176,7 @@ export class V2NativeHistory {
 
   private qualifyRecord(value: unknown, requestedId: string | undefined, order: NativeReadOrder): void {
     const info = record(value), id = text(info.id), directory = text(record(info.location).directory);
-    const subject = requestedId ?? (id !== undefined && id.length <= 512 && !/[\u0000-\u001f\u007f]/.test(id) ? id : undefined);
+    const subject = recordSubject(value, requestedId);
     if (!subject || id !== subject || directory === undefined || path.resolve(directory) !== this.workspace) return;
     const version = this.options.version(), entry = this.reuse.peekObservation(subject, version);
     if (!entry || order.completed <= entry.recordsAfter) return;
@@ -172,6 +186,11 @@ export class V2NativeHistory {
       if (previous && previous.boundary !== null && previous.boundary !== boundary) this.reuse.invalidate(subject);
       else entry.visibility = { boundary, ...order };
     }
+  }
+
+  private qualifyRecordSnapshot(session: string): void {
+    const snapshot = this.reuse.peekObservation(session, this.options.version())?.recordSnapshot;
+    if (snapshot && !snapshot.unchanged()) this.reuse.invalidate(session);
   }
 }
 
@@ -190,6 +209,10 @@ export function pendingOutcomeSignature(read: PendingOutcomeRead, child: string,
 }
 
 function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function recordSubject(value: unknown, requestedId: string | undefined): string | undefined {
+  const id = text(record(value).id);
+  return requestedId ?? (id !== undefined && id.length <= 512 && !/[\u0000-\u001f\u007f]/.test(id) ? id : undefined);
+}
 function text(value: unknown): string | undefined { return typeof value === "string" && value ? value : undefined; }
 function identity(value: unknown): string { return text(record(value).id) ?? ""; }
 function createdAt(value: unknown): number { const at = record(record(value).time).created; return typeof at === "number" && Number.isFinite(at) ? at : 0; }

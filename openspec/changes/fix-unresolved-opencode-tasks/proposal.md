@@ -20,6 +20,7 @@ This change records the already implemented fixes retrospectively following revi
 - Recover explicit native child idle outcomes only for a uniquely attributable execution, without inventing a parent report or summary.
 - Prevent the diagnosed missing-report/reused-child chain from accumulating unresolved launch rows and separate duplicate report rows when native execution boundaries uniquely identify the runs.
 - Clear stale inventory observation clocks after disconnect. Withhold only inferred outcomes when recorded session counters change, without retrying or failing the parent history read; explicit parent reports and activity recovery stay independent.
+- Keep verified active workers and shells visible. Offer one row Dismiss action for unresolved and ended-without-result rows, keeping Dismiss finished for known final results: save it only for an eligible exact execution, or clear just the current view when a safe saved dismissal cannot be established.
 - Allow 30 seconds for Hub evidence fetching instead of 10 seconds, accommodating the child's 25-second covered-history budget without bypassing evidence validation.
 - Add public-provider and browser regressions, document dismissal ownership and limits, and consolidate duplicated test stream cleanup.
 
@@ -37,7 +38,7 @@ None.
 
 ## Impact
 
-Changes cover OpenCode V2 recovery, the separately split Hub deadline, tests and documentation. The user approved optional deny-only `outcomeWithheld` worker rows and workspace API revision 38, with strict-client schema migration guidance. Dependencies, authentication settings and persistent-store formats remain unchanged. The Hub remains the dismissal authority; the browser remains an in-memory projection.
+Changes cover OpenCode V2 recovery, the separately split Hub deadline, worker-list presentation, tests and documentation. The user approved optional deny-only `outcomeWithheld` worker rows and workspace API revision 38, with strict-client schema migration guidance. Dependencies, authentication settings and persistent-store formats remain unchanged. The Hub remains the authority for synced dismissals; the browser can also clear a row from the current view without saving a mark.
 
 ## Non-goals
 

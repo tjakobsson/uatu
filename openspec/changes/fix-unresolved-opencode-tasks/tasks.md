@@ -452,6 +452,30 @@ hashes did not drift during verification. API lint retains its pre-existing
 WorkspaceConflict.allOf warning. GitHub current-head CI and Codex review remain
 pending; no live-session repair, PR text change, merge or deployment is claimed.
 
+### Historical archived-candidate checkpoint
+
+The following restored receipt describes the source-side checkpoint, not new
+destination execution or current GitHub state.
+
+Commit `a9731f54` subsequently passed all 11 executed GitHub checks, including
+unit, both browser legs, performance, contracts, specs and CodeQL. An automatic
+Codex review already exists for that exact head (`5911626346`), so no duplicate
+review request was posted. Its two findings remain pending, not a clean verdict.
+
+- [ ] 6.27 Reproduce and check introduction of a staged record completed before warm-history registration, followed by clear/commit while that raw load is pending. Establish a correction compatible with the approved module/state limits, escalating any required policy change before implementation.
+- [x] 6.28 Reproduce and check introduction of retired native start proofs becoming positive execution bindings after reconnect and parent-content restatement. Preserve their replay/counterproof role without restoring unsupported activity or Stop authority.
+- [ ] 6.29 Verify and push any accepted corrections, require current-head GitHub CI, and resume GitHub Codex review without duplicating an existing current-head request or review.
+
+The retired-start public reproduction failed twice before correction. Retained
+start records now explicitly deny positive rebinding after retirement without
+discarding proof/replay/counterproof data. Three public controls pass: restatement
+and exact old-start replay remain Unavailable; a distinct current-subscription
+start remains Working. All keep Stop unavailable. Additional checks pass: 397
+background/normalization/recovery cases, 506 selected provider cases and typecheck.
+Combined verification and publication remain under 6.29. The record-snapshot
+amendment under 6.27 was explicitly approved after an exact-base runtime check
+and the indistinguishable crossing-clear control conflict were explained.
+
 The user requested these fixes and a push, leaving full CI and review to GitHub.
 No local runtime upgrade, full local CI, merge, deployment or native-session
 mutation is included. The existing published-head CI failed the history
@@ -477,3 +501,203 @@ and leaves activity request ordering and explicit parent report authority intact
 Pre-consumption observations are not retroactively applied merely because launcher
 scope becomes known later. Full local CI was not rerun; GitHub remains the full
 integration gate requested for these corrections.
+
+## 7. Destination recovery and current acceptance
+
+The 2026-11-17 planning clarification in design.md records the current behavior
+agreement. A subsequent continuation authorized bounded candidate restoration and
+targeted verification, then separately approved task-local Bun 1.4.4, frozen
+dependency installation and one complementary native Sol `codex-review`.
+GitHub full CI/current-head Codex remain required; the native check does not
+replace them or authorize an automatic review/fix loop. Publication, merge,
+deployment and live Stop/dismissal actions are not authorized by this continuation.
+
+- [x] 7.1 Restore the 13 selected archived files after archive/member hashes, exact base blobs and collision checks; merge rather than overwrite the current glossary/ADR/design decisions and verify source/test byte identity before further edits.
+- [x] 7.2 Reproduce the restored candidate's disputed Stop-eligibility and quiet-read assertions with native fixture facts unchanged; establish current provenance before making only the specifically approved contract clarifications.
+- [ ] 7.3 Verify affected module, recovery, replay and authority regressions, typechecking and a fresh 10,000-seed campaign on frozen source; complete the one authorized fresh native review and record exact limits before requesting separate publication authorization.
+
+Setup completed with Bun 1.4.4 and OpenSpec 1.17.0; frozen dependencies installed
+with lifecycle scripts skipped. Package/lock/configuration hashes were preserved.
+This setup is not a test result. Full local CI/browser/build checks remain omitted
+in favor of the agreed GitHub gate. Source recovery and candidate execution results
+must be reported separately from the historical receipts above.
+
+Destination restoration verified the archive checksum, every selected-file hash
+and every existing-file base blob. All nine source/test files and ARCHITECTURE.md
+matched archived bytes before any assertion clarification; all archived ADR,
+design and task additions were retained alongside the current planning decisions.
+Unchanged-candidate checks: native-history 84 pass, session-changes 23 pass,
+retired-start-binding 3 pass; pre-registration-record 6 pass/2 fail at the blanket
+no-Stop assertion in both commit-during-load seams. Source hashes did not change
+during those runs. These failures remain evidence, not a completed acceptance
+gate; current eligibility provenance and the separate quiet-read case are pending.
+
+Current provenance subsequently reproduced both cases twice without worktree
+edits. Stop eligibility precedes the later fresh call; saved rows remain unchanged.
+The adapter first admits its control basis in the transcript fold, then observes
+active inventory before public Working publication. No retired/replayed start or
+old control record supplies that admission. In initial-prefix, the adapter's
+existing consumer observes revision 2→3 and withholds; the later independent read
+observes 3→3 and completes without reports or Stop eligibility.
+
+Only the two approved test contracts were then clarified. Public observations
+retain the first-changing-consumer veto, initial nondismissibility, stable
+execution identity, no report invention and independent Stop safeguards. Native
+fixture facts, holds, capture positions, timeouts and all production logic remain
+unchanged. Final file checks pass: pre-registration 8/8 and race 584/584.
+
+Further current checks pass: 541 affected regressions across 11 other files and
+typechecking. Fresh seeds 0–9,999 report A=0/B=0/harnessErrors=0, maximum logical
+attempts 2/4 and physical reads 3, with sensitivity and quiet-completion controls
+passing. The production/checker/dependency manifest stayed unchanged; that manifest
+explicitly excludes the two separately edited contract-test files. One broad
+selected-provider command reached its 110-second cap without a verdict and is
+incomplete, not passing. Narrow authority controls and the authorized independent
+native review remain pending. Full GitHub CI/current-head Codex, publication and
+before-merge archival remain separate gates.
+
+The narrower existing provider controls then passed: 18 bootstrap/gap controls
+and 352 Stop identity, ownership-contradiction and fresh-revalidation cases.
+The broad timeout remains recorded; these focused passes do not certify that
+uncompleted selection or full CI.
+
+The first complementary native review was incomplete: parts of the race tests
+and this task ledger were not fully inspected. It identified a checker gap, not
+a reproduced production defect: a native interruption alone did not count as
+Stop revocation. A new sensitivity test reproduced the gap before the checker
+was corrected; production code was unchanged. All 34 checker tests passed with
+fresh seeds 0–9,999: zero safety, progress or harness failures, at most 2 of 4
+logical attempts and 3 physical reads. Typechecking and diff checks passed.
+The seed generator does not emit interruption frames; the sensitivity test
+checks the oracle directly, not end-to-end delivery. One renewed full-scope
+native review was approved separately and remains pending.
+
+## 8. Preserve withheld-outcome dismissal protection
+
+Read-only fixtures reproduced two gaps on the frozen local candidate. Browser
+compaction dropped the withholding marker, allowing a matching saved mark to
+hide a row that server evidence treated as nondismissible. A covered adapter
+read also omitted the marker on a restatement of the same running execution,
+even though the live projection retained it. Compact evidence from that read
+incorrectly allowed dismissal. No live dismissal or persistence was exercised.
+
+- [x] 8.1 Carry the deny-only marker through browser worker compaction and honor it in dismissal eligibility and visibility. Preserve ordinary controls and execution identity.
+- [x] 8.2 Keep the same-execution veto in covered history and compact dismissal evidence until fresh terminal evidence replaces it. Do not transfer it across executions or change Stop authority.
+- [x] 8.3 Verify both corrections with focused regressions and fresh independent review of the affected changes. Keep the two documentation findings and three test-coverage findings separate from this pass. Publication and exact-head GitHub checks remain separate.
+- [x] 8.4 Keep a publicly-equal, veto-only restatement from fencing concurrent history reads so the private veto never restores stale activity. The 8.2 veto upsert fenced a concurrent independent read, whose covered merge then replaced fresh Working with the stale Unavailable row. Such a restatement still stores its private binding but neither touches worker aliases nor marks history changed; execution, turn, revocation and reset upserts still fence. `worker-outcome-race` `owned-overlap-hidden` failed before the fix and passes after it (585/585 in its file). The v2 directory has 4529 passing, 1 skipped and 0 failing tests. The adapter and withheld-marker files have 939 passing tests; the only failure is the known 8.3 `aliases-return` case.
+- [x] 8.5 Preserve proven aliases of a vetoed execution across partial restatements, bounded and fail-closed at saturation. The adapter replaced the remembered alias set with each overlapping cohort, so a later row that exposed only an earlier alias lost the veto. It now keeps the union up to the 2,048-alias dismissal limit (`WORKER_DISMISSAL_ALIAS_LIMIT`); past it, every same-scope restatement stays vetoed until fresh terminal evidence. `aliases-return` failed before the fix and passes after it. A new saturation regression passes 2/2 (it fails at saturation when the fail-closed match is removed). The adapter and withheld-marker files pass 942/942. The v2 directory has 4529 passing, 1 skipped and 0 failing tests. The focused worker files pass 319/319. Typecheck, `git diff --check` and strict OpenSpec validation pass.
+
+## 9. Workers list state flow
+
+- [x] 9.1 Implement one row-level Dismiss action: preserve saved dismissal for eligible exact runs and otherwise clear only the current view. Keep Checking visible during the bounded check, protect verified activity, and preserve independent Stop and the finished-only bulk action.
+- [x] 9.2 Verify the state flow through focused presentation tests and fresh independent review. Cover unresolved and ended workers and shells, a failed save, replacement and refresh, and later verified activity overriding both kinds of dismissal. Report any browser coverage limits.
+- [x] 9.3 Restore pre-check evidence when a server Checking window expires so a timer never makes a session-active or unresolved row save-eligible. A parameterised adapter regression (Session active, and no activity) failed 0/2 without the adapter change and passes 2/2 with it. The focused compact-work, workers-view, worker-dismissal, worker-state and Hub worker-dismissals files pass 319/319. Typecheck and strict OpenSpec validation pass.
+- [x] 9.4 Address cross-family review findings: fresh-denial alias union, Hub preflight view-only fallback, and inconclusive Checking reads.
+- [x] 9.5 Address round-two review findings: saturated veto under fresh denial, and terminal rows with stale activity.
+- [x] 9.6 Restore pre-check evidence when an inconclusive read in the Checking window returns an unverified row.
+
+9.6 note: When OpenCode's active-inventory request fails but history loads, the
+2.x provider returns the row as `unavailable` and uncertain, without omitting it
+(`readBackgroundTasks`: `confirmed` is false). The adapter counts that read as
+inconclusive (`needsInconclusiveWorkerRecovery`), but it used to publish the row
+over Checking. A Session active row with exact ids then became save-eligible
+within the window. Now a returned running row that still shows the cycle's
+Checking, is uncertain, and is only `unavailable` (or has no activity) for the
+same execution ids goes back to its pre-check activity, as an omitted row does.
+It stays uncertain and its Stop control stays withdrawn. Working, Needs your
+answer, Ended, terminal rows and rows for another execution are kept as read.
+The adapter-level regression uses a fixture shaped like the provider's output,
+not the real 2.x provider. Its same-execution case failed before the change and
+passes after it; the new-execution and Working controls pass in both. Checks
+with Bun 1.4.4: `adapter.test.ts`, withheld-marker and dismissal-identity 960
+pass; focused compact-work, workers-view, worker-dismissal, worker-state and Hub
+worker-dismissals 327 pass; `src/chat/opencode/v2/` 4529 pass, 1 skip;
+`tsc --noEmit`, `git diff --check` and strict OpenSpec validation are clean.
+
+9.4 note: (1) A fresh denial that overlaps the remembered execution through a
+qualified alias now keeps the remembered union, including saturation, instead of
+rebinding to the incoming aliases (`withWorkerOutcomeVeto`). Disjoint and
+different-scope denials still never adopt it. The regression failed 0/2 before
+the change and passes 2/2. (2) `WorkerDismissalClient.canSave()` reports the
+conversation-wide identity and capacity fences. When a fence would refuse before
+any POST, row Dismiss clears the painted source from the view, and the health
+notice stays. A failed real POST still keeps the row. Without the change, the
+row took the save path; with it, both fences pass 2/2. (3) A completed read
+that omits a row counts as inconclusive (`needsInconclusiveWorkerRecovery`).
+While that row still shows the cycle's Checking, the read now restores its
+pre-check activity; Stop control is withdrawn as before. The Session active case
+failed before the change, and both cases now pass 2/2. Accepted known limit, deferred to a follow-up change: any
+omitting read that completes outside the Checking window passes the same row
+through `unverifyWorkerTask`. That covers the cycle's next retry read (about 1 s
+later, no Checking window) and a late first read that finishes after the 10 s
+window has restored the row, which `precheck()` no longer recognizes. A Session
+active row with exact ids then becomes save-eligible Unavailable. A temporary probe confirmed this. Checks with Bun
+1.4.4: `adapter.test.ts`, withheld-marker and dismissal-identity 956 pass;
+focused compact-work, workers-view, worker-dismissal, worker-state and Hub
+worker-dismissals 321 pass; `src/chat/opencode/v2/` 4529 pass, 1 skip;
+`tsc --noEmit`, `git diff --check` and strict OpenSpec validation are clean.
+
+9.5 note: (1) A fresh same-scope denial now keeps a saturated veto even when it
+exposes only an alias that never fit into the remembered set
+(`withWorkerOutcomeVeto`), so a later Unavailable restatement exposing an
+original alias stays withheld. A different-scope denial still builds its own
+binding. The regression failed before the change and passes after it. (2)
+`workerDismissible` refuses Checking and Session active only while the row is
+not terminal, matching `workerSourceIsProtected`. A Finished, Failed or Stopped
+row that kept stale activity from a terminal report without an `activity` key
+is again in "Dismiss finished" and hidden by a saved mark; it still has no row
+Dismiss, and a withheld row still refuses. Working and Needs your answer still
+refuse, as in the source predicate. The six regressions failed before the
+change and pass after it. Checks with Bun 1.4.4: `adapter.test.ts`,
+withheld-marker and dismissal-identity 957 pass; focused compact-work,
+workers-view, worker-dismissal, worker-state and Hub worker-dismissals 327
+pass; `src/chat/opencode/v2/` 4529 pass, 1 skip; `chat-workers-list.e2e.ts`
+Chromium 7 pass; `tsc --noEmit`, `git diff --check` and strict OpenSpec
+validation are clean.
+
+9.1 note: Session active, Status unavailable, legacy unknown and Ended with
+the result unavailable rows show one row Dismiss; Working, Needs your answer,
+Checking and known final results (Finished, Failed, Stopped) show none, so
+finished rows stay compact and use only "Dismiss finished"
+(`workerCanDismissRow`). Stop rendering is unchanged. Row Dismiss saves through
+the existing path only when fresh source evidence is save-eligible with exact
+execution ids (`WorkerDismissalClient.dismiss` in the Hub,
+`dismissedSubagents` locally); a failed save keeps the row and its error.
+Otherwise `WorkerViewDismissals` clears only the painted source item in memory,
+dropped on item replacement or disappearance, verified activity, snapshot
+install, conversation switch and live teardown. Withheld outcomes cannot save.
+"Dismiss finished" keeps its previous scope through `workerFinishedDismissible`,
+including local worker-id marks. Checks with Bun 1.4.4: 15 focused
+dismissal/worker files 263 pass; `adapter.test.ts` + withheld-marker 937 pass,
+1 fail (the 8.3 alias regression); `provider.test.ts -t dismiss` 16 pass;
+`tsc --noEmit` clean; `git diff --check` clean; `openspec validate --strict`
+valid; `tests/e2e/chat-workers-list.e2e.ts --project=e2e` Chromium 7 pass.
+WebKit could not launch on this host (missing system libraries).
+
+The separate high-review alias regression remains open under 8.3. The view-only
+option does not make uncertain identity authoritative for saved dismissal.
+
+### Section 8.3 and 9.2 review record
+
+Three fresh cross-family review rounds (a Claude Opus reviewer and OpenCode's
+reviewer on GPT-6.2 Sol, both using `codex-review` from one neutral brief)
+covered the full uncommitted change against `a9731f54`. Each confirmed finding
+was reproduced before its fix: 9.4 after round one, 9.5 after round two and 9.6
+after round three. Findings that share the cause of the deferred
+outside-window Checking limit were documented rather than changed. An earlier
+single-reviewer pass on the Workers-list change found that a row replaced after
+paint could save an unseen run; saves and view-only clears now both require the
+painted source.
+
+Final checks with Bun 1.4.4: adapter, withheld-marker and dismissal-identity 960
+pass; focused compact-work, workers-view, worker-dismissal, worker-state and Hub
+worker-dismissals 327 pass; `src/chat/opencode/v2/` 4529 pass, 1 skip; Chromium
+`chat-workers-list.e2e.ts` 7 pass; typecheck, `git diff --check` and strict
+OpenSpec validation are clean.
+
+Browser coverage limits: WebKit could not launch on the local host. No E2E test
+clicks a row Dismiss on Session active, Unavailable or Ended rows, checks that a
+view-only clear returns on replacement, covers Checking expiry in the browser,
+or exercises a Hub save failure, a shell row save or a local-mode row save end
+to end. Unit tests cover these paths. The broader GitHub CI run remains the
+integration gate.
