@@ -1120,14 +1120,19 @@ rewrites and ambiguous matches still fall back without persisting raw text.
 Nested shell viewports keep their independent owners.
 Genuine reader movement captures a fresh reading point; correction echoes retain
 the previous point so repeated width changes cannot silently select another line.
+When a reader is paused and no answer hold or navigation restore is active,
+activating a disclosure summary selects its row before layout changes, even
+if a passive correction is already queued. A renderer-generated toggle
+cannot take that priority.
 Native keyboard and accessibility focus navigation remains authoritative; a
 focused button alone does not establish a temporary handoff. A focus transition
 can place several ancestor scrollports; each retires smooth catch-up only for
 its own actual reveal, with range clamps excluded. The observation expires at
 the next correction frame or newer reader input.
 Request-pill jumps retain their logical target until queued rendering finishes,
-then resolve and focus the current card through the owner's centered reveal,
-without a second native scroll. Passive same-view snapshots retain that logical
+then center the current card through the owner without a second native scroll.
+Disclosures focus their summary so Tab can reach the request's controls.
+Passive same-view snapshots retain that logical
 jump for revalidation against the refreshed transcript, not its old DOM target
 or animation. Removal, departure and newer reader choices
 cancel that one-shot navigation instead of focusing a stale card.
@@ -1147,10 +1152,9 @@ For a freshly installed parent or child view without a saved reading anchor,
 the UI renders the transcript before letting its existing scroll owner perform
 initial instant placement on the following animation frame. This avoids the
 observed startup rollback after same-frame placement; it is one cancellable
-placement, not a retry. Reader input, hiding and navigation can preempt it.
-Snapshot replacement cancels stale callbacks while retaining the owner's
-unconsumed instant-placement intent; replacement geometry determines the target.
-Ordinary cancellation and reader pause still clear that intent.
+placement, not a retry. Hiding cancels queued work without discarding the
+same view's unconsumed instant placement. Reopening or replacing its snapshot
+uses current geometry. Departure and newer reader input clear that intent.
 The owner stages navigation restoration until an actual transcript render.
 Its existing input classification makes newer reader choices, including Latest,
 supersede that restoration; layout-only callbacks cannot manufacture a choice.

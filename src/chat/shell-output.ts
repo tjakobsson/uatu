@@ -95,7 +95,6 @@ export class ShellScrollOwner {
         if (movement === "up") { this.following = false; this.inspected(); }
         else if (movement === "down" && maximum(geometry) - geometry.scrollTop <= 1) { this.following = true; this.unseen = false; }
         if (movement !== "none") this.top = geometry.scrollTop;
-        this.captureHorizontal();
       },
     };
     this.owner = new CoordinatedScrollOwner(viewport, {
@@ -103,6 +102,7 @@ export class ShellScrollOwner {
       measure: () => ({ scrollTop: viewport.scrollTop || 0, scrollHeight: viewport.scrollHeight || 0, clientHeight: viewport.clientHeight || 0, items: [] }),
       active: () => active() && typeof requestAnimationFrame === "function",
       onChange: changed,
+      observeHorizontal: () => this.captureHorizontal(),
       followMotion: scrollFollowMotion,
     });
   }

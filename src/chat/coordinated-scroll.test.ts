@@ -51,6 +51,19 @@ function stubRect(element: object, rect: () => { top: number; bottom: number }):
   Object.defineProperty(element, "getBoundingClientRect", { configurable: true, value: rect });
 }
 
+function toggleFixture() {
+  const f = fixture();
+  f.grow(900); f.move(100); f.owner.pause();
+  const measure = f.options.measure;
+  let controlTop = 340;
+  f.options.measure = (includeItems, preserveAnchor) => {
+    const geometry = measure(includeItems, preserveAnchor);
+    if (includeItems) geometry.items.push({ id: "control", top: controlTop - geometry.scrollTop, bottom: controlTop + 30 - geometry.scrollTop });
+    return geometry;
+  };
+  return { ...f, growAboveControl: () => { controlTop += 90; }, controlOffset: () => controlTop - f.element.scrollTop };
+}
+
 /** The band the platform leaves above the software keyboard. While a request
  *  is answered the scroller keeps its full height and the keyboard covers its
  *  lower part, so this is the only thing that says where the reader can see. */
@@ -278,8 +291,8 @@ describe("coordinated scrolling", () => {
     expect(f.element.scrollTop).toBe(140);
     f.owner.release(); f.flush(40);
     const writes = [...f.writes];
-    f.owner.cancel({ forSnapshot: true });
-    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel("snapshot");
+    f.owner.cancel("snapshot");
     expect(f.writes).toEqual(writes);
     if (saved) expect(f.owner.capturePosition()).toEqual(saved);
     f.shift(50); f.grow(900); f.owner.request(true); f.flush(60);
@@ -305,7 +318,7 @@ describe("coordinated scrolling", () => {
     f.move(200); f.event("wheel", { deltaY: -1 }); f.event("scroll");
     f.owner.hold(field as unknown as HTMLElement); f.flush(20);
     f.owner.release();
-    if (snapshot) f.owner.cancel({ forSnapshot: true });
+    if (snapshot) f.owner.cancel("snapshot");
     if (choice === "native focus scroll") { f.move(100); f.event("scroll"); }
     else if (choice === "reveal") { f.owner.reveal(button as unknown as HTMLElement, { align: "end" }); f.flush(40); }
     else if (choice === "activity selection") f.owner.beforeMutation("line");
@@ -536,6 +549,116 @@ describe("coordinated scrolling", () => {
     };
     f.owner.beforeMutation("control");
     expect(f.anchor.currentAnchor()).toEqual({ itemId: "control", offset: 120 });
+  });
+  test("an activated row takes priority over a queued passive correction", () => {
+    const f = toggleFixture();
+    f.owner.beforeMutation(); f.owner.request();
+    f.owner.beforeMutation("control");
+    f.growAboveControl();
+    f.event("scroll"); // An earlier correction's delayed echo has no new reader movement.
+    f.owner.beforeMutation(); f.owner.request();
+    f.flush();
+    expect(f.element.scrollTop).toBe(190);
+    expect(f.controlOffset()).toBe(240);
+    expect(f.writes).toEqual([190]);
+  });
+  test("an activated row survives a no-write frame before a passive render", () => {
+    const f = toggleFixture();
+    f.owner.beforeMutation("control"); f.owner.request(); f.flush(16);
+    expect(f.writes).toEqual([]);
+    f.owner.beforeMutation();
+    f.growAboveControl();
+    f.owner.request(true); f.flush(32);
+    expect(f.writes).toEqual([190]);
+    expect(f.controlOffset()).toBe(240);
+  });
+  test("a correction echo cannot discard the activated row before a deferred render correction", () => {
+    const f = toggleFixture();
+    f.owner.beforeMutation("control"); f.owner.request();
+    f.growAboveControl(); f.flush(16);
+    expect(f.writes).toEqual([190]);
+    f.owner.beforeMutation();
+    f.growAboveControl();
+    f.owner.flush(16, { rendered: true });
+    f.event("scroll");
+    f.flush(32);
+    expect(f.writes).toEqual([190, 280]);
+    expect(f.controlOffset()).toBe(240);
+  });
+  test("a later correction write renews protection against its scroll echo", () => {
+    const f = toggleFixture();
+    f.owner.beforeMutation("control"); f.owner.request(); f.flush(16);
+    expect(f.writes).toEqual([]);
+    f.growAboveControl(); f.flush(32);
+    expect(f.writes).toEqual([190]);
+    f.owner.beforeMutation();
+    f.growAboveControl();
+    f.owner.flush(32, { rendered: true });
+    f.event("scroll");
+    f.flush(48);
+    expect(f.writes).toEqual([190, 280]);
+    expect(f.controlOffset()).toBe(240);
+  });
+  test("a queued transcript frame owns the activated row's first-paint correction", () => {
+    const f = toggleFixture();
+    let pending: "frame" | undefined = "frame";
+    Object.assign(f.options, { pendingRender: () => pending });
+    f.owner.beforeMutation("control"); f.owner.request();
+    f.growAboveControl(); f.flush(16);
+    expect(f.writes).toEqual([]);
+    pending = undefined;
+    f.owner.beforeMutation();
+    f.growAboveControl();
+    f.owner.flush(16, { rendered: true });
+    expect(f.writes).toEqual([280]);
+    expect(f.controlOffset()).toBe(240);
+  });
+  test("an activation supersedes an older incomplete native focus observation", () => {
+    const f = toggleFixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const button = f.document.createElement("button"); f.element.append(button);
+    Object.defineProperty(f.document, "activeElement", { configurable: true, get: () => button });
+    stubRect(button, () => ({ top: 320 - f.element.scrollTop, bottom: 350 - f.element.scrollTop }));
+    f.move(0); f.event("scroll");
+    f.eventAt(button, "focusin"); f.move(100);
+    f.owner.beforeMutation("control"); f.owner.request();
+    f.growAboveControl();
+    f.flush(16);
+    expect(f.writes).toEqual([190]);
+    expect(f.controlOffset()).toBe(240);
+  });
+  test("a settled activation no longer takes priority over later reading growth", () => {
+    const f = toggleFixture();
+    f.owner.beforeMutation("control"); f.owner.request();
+    f.flush(16); f.flush(32);
+    expect(f.frames.size).toBe(0);
+    f.growAboveControl();
+    f.owner.request(true); f.flush(48);
+    expect(f.element.scrollTop).toBe(100);
+    expect(f.writes).toEqual([]);
+  });
+  test("a quiet frame cannot expire the chosen row ahead of already queued transcript work", () => {
+    const f = toggleFixture();
+    let pending: "timer" | undefined = "timer";
+    Object.assign(f.options, { pendingRender: () => pending });
+    f.owner.beforeMutation("control"); f.owner.request();
+    f.flush(16); f.flush(32);
+    expect(f.writes).toEqual([]);
+    pending = undefined;
+    f.owner.beforeMutation();
+    f.growAboveControl(); f.owner.request(true); f.flush(48);
+    expect(f.writes).toEqual([190]);
+    expect(f.controlOffset()).toBe(240);
+  });
+  test("a passive snapshot replacement preserves the explicitly selected row until it paints", () => {
+    const f = toggleFixture();
+    f.owner.beforeMutation("control"); f.owner.request();
+    f.owner.cancel("snapshot");
+    expect(f.frames.size).toBe(0);
+    f.owner.beforeMutation();
+    f.growAboveControl(); f.owner.request(true); f.flush(16);
+    expect(f.writes).toEqual([190]);
+    expect(f.controlOffset()).toBe(240);
   });
   test("renewed upward touch interrupts latest and holds and recaptures after bottom arrival or a new direction", () => {
     for (const renewal of ["queued latest", "moving latest", "hold", "bottom", "direction", "new touch"] as const) {
@@ -907,7 +1030,7 @@ describe("coordinated scrolling", () => {
     if (!following) { f.move(300); f.owner.pause(); }
     let current = old, resolutions = 0;
     f.owner.reveal(() => { resolutions++; return current as unknown as HTMLElement; }, { align: "center" });
-    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel("snapshot");
     old.replaceWith(replacement); current = replacement;
     f.owner.flush(16, { rendered: true });
     const afterReplacement = replacement.getBoundingClientRect().top;
@@ -925,10 +1048,10 @@ describe("coordinated scrolling", () => {
     let resolutions = 0;
     f.owner.request(); f.flush(0);
     f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; }, { align: "center" });
-    f.owner.cancel({ forSnapshot: true }); f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel("snapshot"); f.owner.cancel("snapshot");
     expect(f.frames.size).toBe(0);
     f.owner.flush(16, { rendered: true });
-    f.owner.cancel({ forSnapshot: true }); f.owner.request(); f.flush(32);
+    f.owner.cancel("snapshot"); f.owner.request(); f.flush(32);
     expect(resolutions).toBe(1);
     expect(card.getBoundingClientRect().top).toBe(130);
   });
@@ -941,7 +1064,7 @@ describe("coordinated scrolling", () => {
     f.grow(1600); f.owner.restorePosition({ kind: "following" });
     let resolutions = 0;
     f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; }, { align: "center" });
-    f.owner.cancel({ forSnapshot: true }); f.owner.flush(16, { rendered: true });
+    f.owner.cancel("snapshot"); f.owner.flush(16, { rendered: true });
     expect(resolutions).toBe(0);
     expect(f.writes).toEqual([]);
     f.flush(32);
@@ -959,7 +1082,7 @@ describe("coordinated scrolling", () => {
     f.move(100); f.owner.pause();
     const writes = f.writes.length;
     f.owner.reveal(card as unknown as HTMLElement, { align: "center" });
-    f.owner.cancel({ forSnapshot: true }); f.owner.flush(16, { rendered: true });
+    f.owner.cancel("snapshot"); f.owner.flush(16, { rendered: true });
     expect(f.element.scrollTop).toBe(100);
     expect(f.writes.slice(writes)).toEqual([]);
   });
@@ -974,7 +1097,7 @@ describe("coordinated scrolling", () => {
     let resolutions = 0;
     f.owner.reveal(() => {
       if (++resolutions === 1) {
-        f.owner.cancel({ forSnapshot: true });
+        f.owner.cancel("snapshot");
         old.replaceWith(current);
         return old as unknown as HTMLElement;
       }
@@ -1007,13 +1130,13 @@ describe("coordinated scrolling", () => {
       if (choice === "Latest") f.owner.latest();
       if (choice === "departure") f.owner.restorePosition({ kind: "following" });
       if (choice === "new reveal") f.owner.reveal(() => { replacement++; return current as unknown as HTMLElement; }, { align: "center" });
-      f.owner.cancel({ forSnapshot: true });
+      f.owner.cancel("snapshot");
       return old as unknown as HTMLElement;
     }, { align: "center" });
     const writes = f.writes.length;
     f.flush(16);
     expect(f.writes.slice(writes)).toEqual([]);
-    f.owner.cancel({ forSnapshot: true }); f.owner.flush(32, { rendered: true }); f.flush(48);
+    f.owner.cancel("snapshot"); f.owner.flush(32, { rendered: true }); f.flush(48);
     expect(obsolete).toBe(1);
     expect(replacement).toBe(choice === "new reveal" ? 1 : 0);
     if (choice === "new reveal") expect(current.getBoundingClientRect().top).toBe(100);
@@ -1026,14 +1149,14 @@ describe("coordinated scrolling", () => {
     f.owner.request(); f.flush(0);
     let resolutions = 0;
     f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; });
-    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel("snapshot");
     if (choice === "wheel") f.event("wheel", { deltaY: 4 });
     if (choice === "key") f.event("keydown", { key: "ArrowDown" });
     if (choice === "focus") f.eventAt(button, "focusin");
     if (choice === "Latest") f.owner.latest();
     if (choice === "departure") f.owner.restorePosition({ kind: "following" });
     if (choice === "cancel") f.owner.cancel();
-    f.owner.cancel({ forSnapshot: true }); f.owner.flush(16, { rendered: true }); f.flush(32);
+    f.owner.cancel("snapshot"); f.owner.flush(16, { rendered: true }); f.flush(32);
     expect(resolutions).toBe(0);
   });
 
@@ -1281,7 +1404,8 @@ describe("coordinated scrolling", () => {
   });
   test("initial latest and restored reading positions are immediate without disabling later smooth following", () => {
     const f = fixture(() => "smooth");
-    f.move(100); f.owner.latest({ motion: "instant" }); f.flush(0);
+    f.move(100); f.owner.restorePosition({ kind: "following" });
+    f.owner.flush(-16, { rendered: true }); f.flush(0);
     expect(f.element.scrollTop).toBe(300);
     expect(f.frames.size).toBe(0);
     f.grow(1186); f.owner.request(true); f.flush(16); f.flush(48);
@@ -1295,9 +1419,10 @@ describe("coordinated scrolling", () => {
   });
   test("snapshot cancellation retains only an unconsumed instant placement across replacements", () => {
     const f = fixture(() => "smooth");
-    f.move(0); f.owner.latest({ motion: "instant" });
-    f.owner.cancel({ forSnapshot: true });
-    f.owner.cancel({ forSnapshot: true });
+    f.move(0); f.owner.restorePosition({ kind: "following" });
+    f.owner.flush(-16, { rendered: true });
+    f.owner.cancel("snapshot");
+    f.owner.cancel("snapshot");
     expect(f.frames.size).toBe(0);
     expect(f.writes).toEqual([]);
     f.grow(900); f.owner.request(); f.flush(0);
@@ -1305,23 +1430,44 @@ describe("coordinated scrolling", () => {
     expect(f.writes).toEqual([600]);
     // Once consumed, replacement cancellation must not invent another instant
     // placement: ordinary subsequent output still follows smoothly.
-    f.grow(1200); f.owner.cancel({ forSnapshot: true });
+    f.grow(1200); f.owner.cancel("snapshot");
     f.owner.request(true); f.flush(16); f.flush(48);
     expect(f.element.scrollTop).toBeGreaterThan(600);
     expect(f.element.scrollTop).toBeLessThan(900);
   });
   test("ordinary cancellation clears an unconsumed instant placement", () => {
     const f = fixture(() => "smooth");
-    f.move(0); f.owner.latest({ motion: "instant" }); f.owner.cancel();
-    f.owner.cancel({ forSnapshot: true });
+    f.owner.request(); f.flush(-32);
+    f.move(0); f.owner.restorePosition({ kind: "following" });
+    f.owner.flush(-16, { rendered: true }); f.owner.cancel();
+    f.owner.cancel("snapshot");
     f.owner.request(); f.flush(0); f.flush(32);
     expect(f.element.scrollTop).toBeGreaterThan(0);
     expect(f.element.scrollTop).toBeLessThan(300);
   });
+  test("hiding retires the first placement frame but reopening still places directly", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0); // A reused scrollport has already followed a previous view.
+    f.owner.restorePosition({ kind: "following" });
+    f.grow(900);
+    f.owner.flush(16, { rendered: true });
+    expect(f.frames.size).toBe(1);
+    f.hide();
+    f.owner.cancel("hidden");
+    expect(f.frames.size).toBe(0);
+    f.flush(32);
+    expect(f.element.scrollTop).toBe(300);
+    expect(f.writes).toEqual([]);
+    f.show();
+    f.owner.flush(48, { rendered: true });
+    expect(f.element.scrollTop).toBe(600);
+    expect(f.writes).toEqual([600]);
+  });
   test("reader pause cancels initial placement and snapshot cancellation cannot repin it", () => {
     const f = fixture(() => "smooth");
-    f.move(100); f.owner.latest({ motion: "instant" }); f.owner.pause();
-    f.owner.cancel({ forSnapshot: true });
+    f.move(100); f.owner.restorePosition({ kind: "following" });
+    f.owner.flush(-16, { rendered: true }); f.owner.pause();
+    f.owner.cancel("snapshot");
     f.grow(900); f.owner.request(true); f.flush(0); f.flush(32);
     expect(f.anchor.isPinned()).toBe(false);
     expect(f.element.scrollTop).toBe(100);
@@ -1331,8 +1477,8 @@ describe("coordinated scrolling", () => {
     const f = fixture(() => "smooth");
     f.owner.request(); f.flush(0);
     f.grow(900);
-    f.owner.cancel({ forSnapshot: true });
-    f.owner.cancel({ forSnapshot: true });
+    f.owner.cancel("snapshot");
+    f.owner.cancel("snapshot");
     f.owner.request(true); f.flush(16); f.flush(48);
     expect(f.element.scrollTop).toBeGreaterThan(300);
     expect(f.element.scrollTop).toBeLessThan(600);

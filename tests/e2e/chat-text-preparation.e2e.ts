@@ -2,8 +2,7 @@ import { test as baseTest, expect } from "./fixtures";
 import { withEngineBrowsers } from "./page-diagnostics";
 import { control, frames, settleScroll } from "./chat-shell-helpers";
 import { openChatPanel, openChatWorkers } from "./chat-helpers";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { saveEvidence } from "./evidence";
 
 const test = withEngineBrowsers(baseTest);
 const rowCount = 240;
@@ -272,11 +271,7 @@ for (const engine of ["webkit", "chromium"] as const) for (const child of [false
     armed = false;
     try { await (trace as any)?.evaluate((state: any) => state.stop()); } catch { /* preserve original failure */ }
     try {
-      const body = JSON.stringify(evidence, null, 2);
-      const path = testInfo.outputPath("text-preparation-numeric-evidence.json");
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, body);
-      await testInfo.attach("text-preparation-numeric-evidence", { body, contentType: "application/json" });
+      await saveEvidence(testInfo, `${engine}-phone-${child ? "child" : "parent"}-text-preparation-numeric-evidence.json`, JSON.stringify(evidence, null, 2));
     } catch { /* evidence must not replace the original failure */ }
     await trace?.dispose().catch(() => {});
     await browser.close();

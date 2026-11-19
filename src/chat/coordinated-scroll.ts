@@ -13,6 +13,10 @@ export interface CoordinatedScrollOptions {
   measure: (includeItems: boolean, preserveAnchor?: boolean, preferredItemId?: string) => AnchorGeometry;
   active?: () => boolean;
   onChange?: () => void;
+  /** A queued frame will correct in-frame; a throttled paint only prolongs the anchor. */
+  pendingRender?: () => "frame" | "timer" | undefined;
+  /** Read shell horizontal intent even when vertical movement is a layout clamp. */
+  observeHorizontal?: () => void;
   /** Defaults to instant. Read each frame so reduced-motion changes finish an in-flight follow. */
   followMotion?: () => "smooth" | "instant";
   requestFrame?: (callback: FrameRequestCallback) => number;
@@ -75,6 +79,9 @@ export class CoordinatedScrollOwner {
   private lastCorrectionFrame = -Infinity;
   private positioned = false;
   private instantNext = false;
+  // A no-write frame or a scroll echo must not release the chosen row before
+  // an overlapping passive render changes geometry.
+  private explicitAnchorPending: { checkedAt?: number } | null = null;
   private motion: { from: number; target: number; started: number; sampled: number; deadline: number } | null = null;
   private readonly requestFrame: (callback: FrameRequestCallback) => number;
   private readonly cancelFrame: (id: number) => void;
@@ -147,7 +154,7 @@ export class CoordinatedScrollOwner {
    * All callers in the same browser frame share a single correction budget.
    */
   flush(timestamp: number, options?: { rendered?: boolean }): void {
-    if (!this.active()) { this.cancel(); return; }
+    if (!this.active()) { this.cancel(this.disposed ? undefined : "hidden"); return; }
     if (this.focusNavigation) this.adoptFocusNavigation(this.options.measure(false));
     this.focusNavigation = null;
     this.touchPaused = false;
@@ -170,6 +177,10 @@ export class CoordinatedScrollOwner {
     }
     if (this.pendingPosition) return;
     if (this.lastCorrectionFrame === timestamp) { this.request(); return; }
+    if (this.explicitAnchorPending && !options?.rendered && this.options.pendingRender?.() === "frame") {
+      this.request(); // Fallback if the queued paint is retired before it runs.
+      return;
+    }
     if (typeof this.revealTarget === "function") {
       const resolve = this.revealTarget, placement = this.revealOptions, revision = this.revealRevision;
       // Focus performed by the resolver is part of this reveal, not newer
@@ -247,16 +258,30 @@ export class CoordinatedScrollOwner {
     // the two sources share one correction, rather than visibly fighting.
     const reveal = this.resolveReveal(top);
     top = reveal.top;
-    if (Math.abs(this.scroller.scrollTop - top) > 0.5
-      || (exactPlacement && !this.motion && this.options.anchor.isPinned() && this.scroller.scrollTop !== top)) {
+    const activation = this.explicitAnchorPending;
+    const needsWrite = Math.abs(this.scroller.scrollTop - top) > 0.5
+      || (exactPlacement && !this.motion && this.options.anchor.isPinned() && this.scroller.scrollTop !== top);
+    if (needsWrite) {
       this.lastCorrectionFrame = timestamp;
       this.scroller.scrollTop = top;
     }
     this.previous = { ...geometry, scrollTop: this.scroller.scrollTop };
     if (reveal.moved) {
+      this.explicitAnchorPending = null;
       this.options.anchor.pause(this.options.measure(true, false));
       if (!this.heldTarget) this.readerChose();
       this.motion = null;
+    } else if (activation) {
+      // Keep the chosen row until a quiet frame after the last correction and
+      // any queued transcript paint. That paint already owes us a callback.
+      if (needsWrite || activation.checkedAt === undefined) activation.checkedAt = timestamp;
+      if (!this.options.pendingRender?.()) {
+        if (activation.checkedAt === timestamp) this.request();
+        else {
+          this.explicitAnchorPending = null;
+          if (!this.heldTarget) this.options.anchor.beforeMutation(this.options.measure(true, false));
+        }
+      }
     }
     // Any later scroll echo belongs to this correction, not an earlier
     // wheel/key gesture whose native movement never arrived.
@@ -420,20 +445,29 @@ export class CoordinatedScrollOwner {
     if (this.pendingPosition) return;
     if (this.active() && !this.options.anchor.isPinned()) {
       this.touchPaused = false;
-      // Do not overwrite the pre-mutation anchor while a correction is waiting.
-      if (this.frame === null) this.options.anchor.beforeMutation(this.measure(preferredItemId), preferredItemId);
-      if (preferredItemId && !this.heldTarget) this.readerChose();
+      // Keep the pre-mutation anchor across passive updates, but a newer
+      // explicit expansion/collapse chooses which row stays in place.
+      const preferred = preferredItemId && !this.heldTarget ? preferredItemId : undefined;
+      if ((this.frame === null && !this.explicitAnchorPending) || preferred) {
+        this.options.anchor.beforeMutation(this.measure(preferred), preferred);
+      }
+      if (preferred) {
+        this.focusNavigation = null;
+        this.explicitAnchorPending = {};
+        this.readerChose();
+      }
     }
   }
 
-  /** Resume following. Initial views may opt out of motion for their first placement. */
-  latest(options?: { motion?: "instant" }): void {
+  /** Resume following on explicit reader input. */
+  latest(): void {
     if (!this.active()) return;
     this.revealRevision++;
     this.clearHold();
     this.motion = null;
     this.positioned = true;
-    this.instantNext = options?.motion === "instant";
+    this.instantNext = false;
+    this.explicitAnchorPending = null;
     this.upwardPending = false;
     // An explicit jump to the end outranks a reveal still waiting for a frame.
     this.revealTarget = null;
@@ -448,18 +482,20 @@ export class CoordinatedScrollOwner {
    * A passive snapshot keeps unconsumed instant placement and, after answer
    * blur, both live reading and the separate durable position for departure.
    * Logical resolvers survive passive replacement; raw DOM reveals do not.
+   * Hiding stops work but retains an owed first placement for the same view.
    * Active holds restore their original intent so callers can renew them.
    * This neither schedules work nor creates a new follow choice.
    */
-  cancel(options?: { forSnapshot?: boolean }): void {
-    const logical = options?.forSnapshot ? typeof this.revealTarget === "function"
+  cancel(reason?: "snapshot" | "hidden"): void {
+    const logical = reason === "snapshot" ? typeof this.revealTarget === "function"
       ? { resolve: this.revealTarget, placement: this.revealOptions, revision: this.revealRevision }
       : this.resolvingReveal?.revision === this.revealRevision ? this.resolvingReveal : null : null;
     if (!logical) this.revealRevision++;
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
     this.motion = null;
-    if (!options?.forSnapshot) this.instantNext = false;
+    if (reason === undefined) this.instantNext = false;
+    if (reason !== "snapshot") this.explicitAnchorPending = null;
     this.newContent = false;
     this.upwardPending = false;
     this.focusNavigation = null;
@@ -471,7 +507,7 @@ export class CoordinatedScrollOwner {
     // nothing. pause() immediately replaces that choice with explicit intent.
     const resume = this.resumeFollowing;
     const held = this.heldPosition;
-    const preserveReleasedPosition = options?.forSnapshot && !this.heldTarget;
+    const preserveReleasedPosition = reason === "snapshot" && !this.heldTarget;
     this.clearHold();
     if (preserveReleasedPosition) this.heldPosition = held;
     else if (held) this.options.position!.restorePosition(held);
@@ -496,6 +532,7 @@ export class CoordinatedScrollOwner {
 
   private observe = (): void => {
     if (!this.active()) return;
+    this.options.observeHorizontal?.();
     // Classify native movement using extents only. Semantic geometry is read
     // once below, after deciding whether to retain or replace the reading anchor.
     const geometry = this.options.measure(false);
@@ -547,9 +584,7 @@ export class CoordinatedScrollOwner {
       // changes alone still take the ordinary movement path below.
       this.request();
     } else if (movement === "down" && this.options.anchor.isPinned()) {
-      // Preserve follow intent during catch-up, but let adapters observe other
-      // axes (shell horizontal scrolling) before the next correction restores them.
-      this.options.anchor.observe(geometry, "none");
+      // Preserve follow intent during catch-up.
       if (!changedExtent) this.readerChose();
       // Catch-up leaves room for a reader to move toward latest themselves.
       // Only upward intent pauses following; rebase from their new position
@@ -570,7 +605,8 @@ export class CoordinatedScrollOwner {
       // normalized progress from an unchanged elastic offset does not.
       this.request();
     } else {
-      if (!this.pendingPosition || movement !== "none") {
+      if (movement !== "none") this.explicitAnchorPending = null;
+      if ((!this.pendingPosition && !this.explicitAnchorPending) || movement !== "none") {
         this.options.anchor.observe(this.pendingPosition ? geometry
           : movement !== "none" ? this.options.measure(true, false) : this.measure(), movement);
         if (movement !== "none") this.readerChose();

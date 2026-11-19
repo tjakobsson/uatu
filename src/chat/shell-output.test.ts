@@ -36,7 +36,8 @@ test("rendered shell follows smoothly, settles within 300ms and responds to redu
   shell.update("first\nsecond", metadata); frame(); frame();
   expect(shell.viewport.scrollTop).toBeGreaterThan(1760);
   expect(shell.viewport.scrollTop).toBeLessThan(2260);
-  for (let step = 0; step < 18; step++) frame();
+  // Two frames above plus sixteen here put this assertion 288ms after growth.
+  for (let step = 0; step < 16; step++) frame();
   expect(shell.viewport.scrollTop).toBe(2260);
   Object.assign(shell.viewport, { scrollHeight: 3000 });
   shell.update("first\nsecond\nthird", metadata); frame(); frame();
@@ -59,7 +60,7 @@ describe("shell scroll owner", () => {
       }
     } finally { owner.dispose(); }
   });
-  test("diagonal native progress during smooth catch-up retains the new horizontal offset", () => {
+  for (const resize of [false, true]) test(`diagonal progress during catch-up retains horizontal offset${resize ? " through a height change" : ""}`, () => {
     Reflect.set(globalThis, "matchMedia", () => ({ matches: false }));
     const viewport = view(); const owner = new ShellScrollOwner(viewport);
     try {
@@ -68,13 +69,14 @@ describe("shell scroll owner", () => {
       Object.assign(viewport, { scrollHeight: 2500 }); owner.updated(); frame(); frame();
       expect(viewport.scrollTop).toBeGreaterThan(1760);
       expect(viewport.scrollTop).toBeLessThan(2260);
+      if (resize) Object.assign(viewport, { clientHeight: 220 });
       viewport.scrollTop += 10; viewport.scrollLeft = 130; owner.observe();
       frame();
       expect(viewport.scrollLeft).toBe(130);
       expect(owner.snapshot().left).toBe(130);
       Object.assign(viewport, { scrollHeight: 2600 }); owner.updated();
       for (let step = 0; step < 18; step++) frame();
-      expect(viewport.scrollTop).toBe(2360);
+      expect(viewport.scrollTop).toBe(resize ? 2380 : 2360);
       expect(viewport.scrollLeft).toBe(130);
       expect(owner.following).toBe(true);
     } finally { owner.dispose(); }

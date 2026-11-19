@@ -1,18 +1,9 @@
 import type { AnchorGeometry, TimelineAnchor } from "./anchor";
+import { markdownBlockKey, markdownTextKey, parseMarkdownAnchorKey } from "./markdown-anchor-key";
 import { measureChatWork } from "./performance";
 
-/** Opaque, versioned fingerprints: presentation storage must not copy chat text. */
-function blockKey(block: HTMLElement, text = block.textContent ?? "", context = block.localName): string {
-  let first = 2166136261;
-  let second = 5381;
-  for (let index = 0; index < text.length; index++) {
-    const code = text.charCodeAt(index);
-    first = Math.imul(first ^ code, 16777619);
-    second = Math.imul(second, 33) ^ code;
-  }
-  // The Markdown block type is structural context; an identical code block
-  // and paragraph are not interchangeable reading locations.
-  return `markdown-v1:${context}:${text.length}:${(first >>> 0).toString(36)}:${(second >>> 0).toString(36)}`;
+function blockKey(block: HTMLElement): string {
+  return markdownBlockKey(block.localName, block.textContent ?? "");
 }
 
 type ContentGeometry = NonNullable<AnchorGeometry["items"][number]["content"]>[number];
@@ -43,7 +34,7 @@ function characterGeometry(block: HTMLElement, key: string, offset: number, view
     range.setEnd(node, remaining + 1);
     const rect = range.getBoundingClientRect();
     return rect.bottom > rect.top
-      ? { key: `${key}:text:${offset}`, top: rect.top - viewportTop, bottom: rect.bottom - viewportTop } : null;
+      ? { key: markdownTextKey(key, offset), top: rect.top - viewportTop, bottom: rect.bottom - viewportTop } : null;
   }
   return null;
 }
@@ -128,7 +119,7 @@ function markdownGeometry(element: HTMLElement, viewport: DOMRect, height: numbe
   const regions = [
     ...leaves.map(block => ({ block, nodes: undefined as Text[] | undefined, key: blockKey(block), wrapper: false })),
     ...candidates.filter(block => block.localName === "li" && containers.has(block)).flatMap(block =>
-      ownTextRuns(block).map(nodes => ({ block, nodes, key: blockKey(block, nodes.map(node => node.data).join(""), "li-own"), wrapper: false }))),
+      ownTextRuns(block).map(nodes => ({ block, nodes, key: markdownBlockKey("li-own", nodes.map(node => node.data).join("")), wrapper: false }))),
     ...wrappers.map(block => ({ block, nodes: undefined as Text[] | undefined, key: blockKey(block), wrapper: true })),
   ];
   const counts = new Map<string, number>();
@@ -143,23 +134,23 @@ function markdownGeometry(element: HTMLElement, viewport: DOMRect, height: numbe
   }).sort((a, b) => Number(a.wrapper) - Number(b.wrapper) || a.rect.top - b.rect.top);
   const visible = measured.find(({ rect }) => rect.bottom > viewport.top && rect.top < viewport.top + height);
   const fresh = visible && visibleCharacter(visible.block, visible.key, visible.rect, viewport, visible.nodes);
-  const retained = retainedKey?.match(/^(.*):text:(\d+)$/);
-  const prefix = retained?.[1]?.match(/^markdown-v1:([^:]+):(\d+):[^:]+:[^:]+$/);
+  const retained = retainedKey === undefined ? null : parseMarkdownAnchorKey(retainedKey);
+  const textOffset = retained?.textOffset;
   // An append changes the whole-block fingerprint, but not its old prefix or
   // character offsets. Match that entire opaque prefix, never a repeated word
   // or occurrence index. Multiple matching regions remain deliberately unsafe.
-  const compatible = retained ? regions.filter(region => {
-    if (region.key === retained[1]) return true;
-    if (!prefix) return false;
-    const length = Number(prefix[2]);
+  const compatible = retained && textOffset !== undefined ? regions.filter(region => {
+    if (region.key === retained.blockKey) return true;
+    const { length } = retained;
     const context = region.nodes ? "li-own" : region.block.localName;
-    if (context !== prefix[1] || !Number.isSafeInteger(length) || length <= Number(retained[2])) return false;
+    if (context !== retained.context || !Number.isSafeInteger(length) || length <= textOffset) return false;
     const text = region.nodes ? region.nodes.map(node => node.data).join("") : region.block.textContent ?? "";
-    return text.length > length && blockKey(region.block, text.slice(0, length), context) === retained[1];
+    return text.length > length && markdownBlockKey(context, text.slice(0, length)) === retained.blockKey;
   }) : [];
   const retainedBlock = compatible.length === 1 && measured.find(region => region.block === compatible[0]!.block
     && region.key === compatible[0]!.key && region.nodes === compatible[0]!.nodes);
-  const previous = retainedBlock && characterGeometry(retainedBlock.block, retained![1]!, Number(retained![2]), viewport.top, retainedBlock.nodes);
+  const previous = retainedBlock && retained && textOffset !== undefined
+    && characterGeometry(retainedBlock.block, retained.blockKey, textOffset, viewport.top, retainedBlock.nodes);
   // A correction's scroll echo must retain the same visible character, not
   // recapture a new line-start character after every width step. Once it is
   // offscreen, captureAnchor naturally chooses the fresh visible entry.

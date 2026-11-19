@@ -6305,6 +6305,22 @@ describe("chat answering state", () => {
   });
 });
 
+function controlAnimationFrames() {
+  const request = globalThis.requestAnimationFrame, cancel = globalThis.cancelAnimationFrame;
+  const frames = new Map<number, FrameRequestCallback>();
+  let id = 0, timestamp = performance.now();
+  globalThis.requestAnimationFrame = callback => { frames.set(++id, callback); return id; };
+  globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+  const step = () => {
+    timestamp += 20;
+    for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
+  };
+  return { frames, step, drain: () => { for (let n = 0; n < 40 && frames.size; n++) step(); }, restore: () => {
+    globalThis.requestAnimationFrame = request;
+    globalThis.cancelAnimationFrame = cancel;
+  } };
+}
+
 describe("chat outstanding-request pill", () => {
   test("request pill navigation survives active smooth follow and later content", async () => {
     const { document, window } = parseHTML(html);
@@ -6333,16 +6349,7 @@ describe("chat outstanding-request pill", () => {
     const api = questionApi(document, { items: () => [{ id: "message:initial", type: "user_message", createdAt: 1, text: "Initial transcript" }] });
     let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
     api.stream = (_id, _cursor, handlers) => { stream = handlers; return { close() {} }; };
-    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
-    const frames = new Map<number, FrameRequestCallback>();
-    let frameId = 0, timestamp = performance.now();
-    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
-    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
-    const step = () => {
-      timestamp += 20;
-      for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
-    };
-    const drain = () => { for (let n = 0; n < 40 && frames.size; n++) step(); };
+    const { step, drain, restore } = controlAnimationFrames();
     const upsert = (item: unknown, sequence: number) => stream!.event({ type: "item.upsert", conversationId: "one", generation: "g", sequence,
       item: item as ConversationSnapshot["items"][number] }, `navigation-${sequence}`);
     try {
@@ -6366,11 +6373,12 @@ describe("chat outstanding-request pill", () => {
         timeline.scrollTop = 2800 - (400 - 200) / 2;
         timeline.dispatchEvent(new window.Event("scroll"));
       } });
-      Object.defineProperty(card, "focus", { configurable: true, value: (options?: FocusOptions) => {
+      const summary = card.querySelector("summary")!;
+      Object.defineProperty(summary, "focus", { configurable: true, value: (options?: FocusOptions) => {
         focuses++;
         expect(options?.preventScroll).toBe(true);
-        Object.defineProperty(document, "activeElement", { configurable: true, get: () => card });
-        card.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+        Object.defineProperty(document, "activeElement", { configurable: true, get: () => summary });
+        summary.dispatchEvent(new window.Event("focusin", { bubbles: true }));
       } });
       const pill = document.querySelector<HTMLButtonElement>("#chat-requests-jump")!;
       expect(pill.dataset.requestTarget).toBe("question:q1");
@@ -6389,8 +6397,7 @@ describe("chat outstanding-request pill", () => {
       expect(card.getBoundingClientRect().bottom).toBeLessThanOrEqual(400);
     } finally {
       window.dispatchEvent(new window.Event("pagehide"));
-      globalThis.requestAnimationFrame = requestFrame;
-      globalThis.cancelAnimationFrame = cancelFrame;
+      restore();
       prototype.getBoundingClientRect = originalBounds;
       document.documentElement.setAttribute("data-chat-panel", "collapsed");
     }
@@ -6432,7 +6439,7 @@ describe("chat outstanding-request pill", () => {
     Object.defineProperty(document, "activeElement", { configurable: true, get: () => active && document.contains(active) ? active : document.body });
     prototype.focus = function () {
       active = this;
-      if (this.getAttribute("data-chat-item-id")?.startsWith("permission:")) focusedRequests.push(this);
+      if (this.closest('[data-chat-item-id^="permission:"]')) focusedRequests.push(this);
       this.dispatchEvent(new window.Event("focusin", { bubbles: true }));
     };
     const permission = { id: "permission:passive", type: "permission" as const, createdAt: 2, requestId: "passive",
@@ -6454,19 +6461,9 @@ describe("chat outstanding-request pill", () => {
     api.snapshot = async id => id === "two" ? { ...snapshot(id), items: [{ id: "message:other", type: "user_message", createdAt: 1, text: "Other conversation" }] }
       : ++reads === 1 ? { ...snapshot(id), items: [before, permission, after] } : refresh.promise;
     api.stream = (id, _cursor, handlers) => { if (id === "one") { stream = handlers; oneStreams++; } else otherStreams++; return { close() {} }; };
-    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
-    const frames = new Map<number, FrameRequestCallback>();
-    let frameId = 0, timestamp = performance.now();
-    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
-    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
-    const drain = () => {
-      for (let count = 0; count < 40 && frames.size; count++) {
-        timestamp += 20;
-        for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
-      }
-    };
+    const { frames, drain, restore } = controlAnimationFrames();
     const reading = () => ({ top: card()!.getBoundingClientRect().top, bottom: card()!.getBoundingClientRect().bottom,
-      focused: document.activeElement === card() });
+      focused: document.activeElement === card()!.querySelector("summary") });
     try {
       const { initChat } = await import(`./ui.ts?passive-request-navigation=${scenario}-${Date.now()}`);
       initChat(api);
@@ -6556,8 +6553,7 @@ describe("chat outstanding-request pill", () => {
     } finally {
       refresh.resolve({ ...snapshot("one"), cursor: cursorAt(1), items: refreshedItems });
       window.dispatchEvent(new window.Event("pagehide"));
-      globalThis.requestAnimationFrame = requestFrame;
-      globalThis.cancelAnimationFrame = cancelFrame;
+      restore();
       prototype.getBoundingClientRect = originalBounds;
       prototype.focus = originalFocus;
       document.documentElement.setAttribute("data-chat-panel", "collapsed");
@@ -6601,7 +6597,7 @@ describe("chat outstanding-request pill", () => {
     Object.defineProperty(document, "activeElement", { configurable: true, get: () => active && document.contains(active) ? active : document.body });
     prototype.focus = function () {
       active = this;
-      if (this.getAttribute("data-chat-item-id") === "permission:replacement") focusedPermissions.push(this);
+      if (this.matches('[data-chat-item-id="permission:replacement"], [data-chat-item-id="permission:replacement"] > summary')) focusedPermissions.push(this);
       this.dispatchEvent(new window.Event("focusin", { bubbles: true }));
     };
     prototype.blur = function () {
@@ -6617,20 +6613,11 @@ describe("chat outstanding-request pill", () => {
       ? [before, permission, after] : [{ id: "message:other", type: "user_message", createdAt: 1, text: "Other conversation" }] });
     let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
     api.stream = (_id, _cursor, handlers) => { stream = handlers; return { close() {} }; };
-    const requestFrame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
-    const frames = new Map<number, FrameRequestCallback>();
-    let frameId = 0, timestamp = performance.now();
-    globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
-    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
-    const step = () => {
-      timestamp += 20;
-      for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(timestamp);
-    };
-    const drain = () => { for (let count = 0; count < 40 && frames.size; count++) step(); };
+    const { frames, step, drain, restore } = controlAnimationFrames();
     const upsert = (item: ConversationSnapshot["items"][number], sequence: number) => stream!.event({ type: "item.upsert",
       conversationId: "one", generation: "g", sequence, item }, `permission-replacement-${sequence}`);
     const reading = () => ({ top: card()!.getBoundingClientRect().top, bottom: card()!.getBoundingClientRect().bottom,
-      focused: document.activeElement === card() });
+      focused: document.activeElement === card()!.querySelector("summary") });
     try {
       const { initChat } = await import(`./ui.ts?queued-permission-navigation=${state}-${interruption}-${Date.now()}`);
       initChat(api);
@@ -6663,6 +6650,13 @@ describe("chat outstanding-request pill", () => {
       const pill = document.querySelector<HTMLButtonElement>("#chat-requests-jump")!;
       expect(pill.dataset.requestTarget).toBe(permission.id);
       pill.dispatchEvent(new window.Event("click", { bubbles: true }));
+      if (state === "paused" && !retainedFocus && interruption === "none") {
+        // An open request can emit a native toggle after rendering. It was
+        // not a summary activation and must not cancel the queued pill jump.
+        oldCard.setAttribute("open", "");
+        Object.defineProperty(oldCard, "open", { value: true });
+        oldCard.dispatchEvent(new window.Event("toggle", { bubbles: true }));
+      }
       // Safari can activate the pill without focusing it. The DOM focus getter
       // above falls back to body only once the real renderer detaches this node.
       if (retainedFocus) {
@@ -6706,8 +6700,7 @@ describe("chat outstanding-request pill", () => {
       });
     } finally {
       window.dispatchEvent(new window.Event("pagehide"));
-      globalThis.requestAnimationFrame = requestFrame;
-      globalThis.cancelAnimationFrame = cancelFrame;
+      restore();
       prototype.getBoundingClientRect = originalBounds;
       prototype.focus = originalFocus;
       prototype.blur = originalBlur;

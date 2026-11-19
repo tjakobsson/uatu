@@ -2,8 +2,7 @@ import { test as baseTest, expect } from "./fixtures";
 import { withEngineBrowsers } from "./page-diagnostics";
 import { openChatPanel, openChatWorkers } from "./chat-helpers";
 import { control, frames, settleScroll } from "./chat-shell-helpers";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { saveEvidence } from "./evidence";
 
 const test = withEngineBrowsers(baseTest);
 const rowCount = 500;
@@ -14,6 +13,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
     test.slow();
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1100, height: 844 } });
+    const evidencePrefix = `${engine}-desktop-${child ? "child" : "parent"}-history`;
     const persist = async () => {
       try {
         const data = await page.evaluate(() => {
@@ -22,9 +22,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
             maxDrift: trace.maxDrift, sameText: trace.sameText, dropped: trace.dropped } : null;
         });
         const body = JSON.stringify({ engine, child, rowCount, data }, null, 2);
-        const path = testInfo.outputPath("history-word-evidence.json");
-        await mkdir(dirname(path), { recursive: true }); await writeFile(path, body);
-        await testInfo.attach("history-word-evidence", { body, contentType: "application/json" });
+        await saveEvidence(testInfo, `${evidencePrefix}-word-evidence.json`, body);
       } catch { /* Diagnostic collection must preserve the original failure. */ }
     };
     try {
@@ -207,7 +205,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const child of [false
       await expect(latest).toBeVisible();
       await latest.click();
       await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
-      await testInfo.attach("history-work-counts.json", { contentType: "application/json", body: JSON.stringify({ rowCount, samples, touch, stopped }) });
+      await saveEvidence(testInfo, `${evidencePrefix}-work-counts.json`, JSON.stringify({ rowCount, samples, touch, stopped }));
     } finally {
       try { await page.evaluate(() => { const trace = Reflect.get(window, "__historyWork"); if (trace) trace.wordActive = false; }); } catch { /* preserve original failure */ }
       await persist(); await browser.close();

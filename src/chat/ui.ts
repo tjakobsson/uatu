@@ -14,6 +14,7 @@ import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, typ
 import { CoordinatedScrollOwner, type RevealOptions } from "./coordinated-scroll";
 import { reducedMotion, scrollFollowMotion } from "./scroll-motion";
 import { timelineGeometry } from "./scroll-geometry";
+import { parseMarkdownAnchorKey } from "./markdown-anchor-key";
 import { ChatViewportController } from "./viewport";
 import { notificationAwaiting, notificationConversation } from "./notification-navigation";
 import { setActiveTab } from "../shell/tab-bar";
@@ -884,6 +885,7 @@ export function initChat(api = new ChatApiClient()): void {
     ({ scrollTop: scroller.scrollTop, clientHeight: scroller.clientHeight, scrollHeight: scroller.scrollHeight, items: [] });
   const parentScroll = new CoordinatedScrollOwner(timeline, {
     anchor, position: anchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? geometry(preserveAnchor, preferredItemId) : extentsOf(timeline), active: chatSurfaceActive,
+    pendingRender: () => renderFrame !== null ? "frame" : incrementalTimer !== null ? "timer" : undefined,
     followMotion: scrollFollowMotion,
     onChange: () => {
       const id = projection?.conversationId ?? (hasSelectedConversation ? presentation.selectedId : undefined);
@@ -912,6 +914,7 @@ export function initChat(api = new ChatApiClient()): void {
   const childScroll = drilldownTimeline ? new CoordinatedScrollOwner(drilldownTimeline, {
     anchor: childAnchor, position: childAnchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? childGeometry(preserveAnchor, preferredItemId) : extentsOf(drilldownTimeline),
     active: () => chatSurfaceActive() && !!child,
+    pendingRender: () => childRenderFrame !== null ? "frame" : childIncrementalTimer !== null ? "timer" : undefined,
     followMotion: scrollFollowMotion,
     onChange: () => {
       if (childLatest) childLatest.hidden = !childAnchor.hasUnseen();
@@ -1597,11 +1600,15 @@ export function initChat(api = new ChatApiClient()): void {
       for (let parent = card.parentElement; parent && parent !== items; parent = parent.parentElement) {
         if (parent instanceof HTMLDetailsElement) parent.open = true;
       }
-      if (card instanceof HTMLDetailsElement) card.open = true;
-      if (!card.hasAttribute("tabindex")) card.tabIndex = -1;
-      card.focus?.({ preventScroll: true });
+      const disclosure = card.localName === "details";
+      if (disclosure) card.setAttribute("open", "");
+      // WebKit skips the descendants of a programmatically focused <details>
+      // on Tab. Start at its native summary while positioning the whole card.
+      const focusTarget = (disclosure ? card.querySelector<HTMLElement>(":scope > summary") : null) ?? card;
+      if (focusTarget === card && !card.hasAttribute("tabindex")) card.tabIndex = -1;
+      focusTarget.focus?.({ preventScroll: true });
       return projection?.conversationId === conversationId && selection === selectionGeneration
-        && items.contains(card) && document.activeElement === card ? card : null;
+        && items.contains(focusTarget) && document.activeElement === focusTarget ? card : null;
     }, { align: "center" });
   };
   requestsJump?.addEventListener("click", () => {
@@ -3855,6 +3862,18 @@ export function initChat(api = new ChatApiClient()): void {
     container: HTMLElement,
     scroll: CoordinatedScrollOwner,
   ) => {
+    // A native summary activation (pointer or keyboard) chooses the row
+    // before layout changes. An open node can emit toggle when the renderer
+    // creates or reveals it, so toggle alone is not proof of reader intent.
+    container.addEventListener("click", event => {
+      if (event.defaultPrevented || !(event.target instanceof Element)) return;
+      const summary = event.target.closest("summary");
+      if (!summary || event.target.closest("a, button, input, select, textarea, label")) return;
+      const details = summary.parentElement;
+      if (!details?.matches("details[data-chat-item-id]") || details.firstElementChild !== summary) return;
+      scroll.beforeMutation(details.dataset.chatItemId);
+      scroll.request();
+    });
     container.addEventListener("toggle", event => {
       const details = event.target as HTMLDetailsElement;
       if (!details.matches("details[data-chat-item-id]")) return;
@@ -3867,7 +3886,6 @@ export function initChat(api = new ChatApiClient()): void {
       // The reader can only ever close an already-open row (open=false, which
       // passes) or open an unmarked one, so no real interaction is lost.
       if (details.open && details.hasAttribute("data-auto-open")) return;
-      scroll.beforeMutation(details.dataset.chatItemId);
       // The reader has spoken, so the row is theirs from here. Clearing the
       // stream's auto-open marker stops the next render from undoing an
       // expansion they made on a row that had opened itself; recording a close
@@ -4734,7 +4752,7 @@ export function initChat(api = new ChatApiClient()): void {
     // An active replacement hold inherits its original intent, not a reveal's
     // pause. After blur, snapshot cancellation leaves live reading in place
     // while retaining the separate durable position used on actual departure.
-    owner.cancel({ forSnapshot: true });
+    owner.cancel("snapshot");
     if (restore && field.isConnected && document.activeElement === field && chatSurfaceActive()) {
       holdInOwningTimeline(field);
     }
@@ -5769,8 +5787,8 @@ export function initChat(api = new ChatApiClient()): void {
     if (!active) {
       renderer.setShellOutputsHidden(true);
       childRenderer.setShellOutputsHidden(true);
-      parentScroll.cancel();
-      childScroll?.cancel();
+      parentScroll.cancel("hidden");
+      childScroll?.cancel("hidden");
       heldAnswerField = null;
       readSignal.cancel();
       childReadSignal?.cancel();
@@ -5901,7 +5919,7 @@ function parseStoredPositions(value: unknown): Presentation["anchors"] {
     // Only the existing opaque fingerprint format may enter presentation state.
     // Unknown/invalid fine anchors still retain their valid coarse item anchor.
     if (content && typeof content === "object" && typeof content.key === "string"
-      && /^markdown-v1:[a-z0-9-]+:\d+:[a-z0-9]+:[a-z0-9]+(?::text:\d+)?$/.test(content.key)
+      && parseMarkdownAnchorKey(content.key) !== null
       && typeof content.offset === "number" && Number.isFinite(content.offset)) {
       anchor.content = { key: content.key, offset: content.offset };
     }

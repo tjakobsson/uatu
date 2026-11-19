@@ -184,7 +184,7 @@ for (const engine of ["chromium", "webkit"] as const) {
             expect((await evidence()).requestFocusEvents).toBe(0);
             expect(await readingDrift()).toBeLessThanOrEqual(2);
           } else {
-            await expect(card).toBeFocused();
+            await expect(card.locator(":scope > summary")).toBeFocused();
             await expect.poll(async () => (await placement()).top).toBeGreaterThanOrEqual(-1);
             await expect.poll(async () => (await placement()).bottom).toBeLessThanOrEqual(1);
           }

@@ -1,8 +1,10 @@
-import type { APIRequestContext, Locator, Page } from "@playwright/test";
+import type { APIRequestContext, Locator, Page, TestInfo } from "@playwright/test";
 import { test as baseTest, expect } from "./fixtures";
 import { openChatPanel, openChatWorkers } from "./chat-helpers";
 import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { bootShell, control, log, shell } from "./chat-shell-helpers";
+import { saveEvidence } from "./evidence";
+import { LIVE_ENVELOPE_EVENT, type LiveEnvelope } from "../../src/shared/live-protocol";
 
 const test = withEngineBrowsers(baseTest);
 attachPageDiagnosticsOnFailure(test);
@@ -16,6 +18,13 @@ async function frames(page: Page, count = 3) {
 
 type FollowSample = { time: number; top: number; extent: number; height: number };
 
+const evidenceName = (engine: "chromium" | "webkit", touch: boolean, child: boolean, scenario: string) =>
+  `${engine}-${touch ? "touch" : "desktop"}-${child ? "child" : "parent"}-${scenario}.json`;
+
+// coordinated-scroll.test.ts enforces the 300ms contract on a controlled
+// frame clock. Live rAF samples include renderer scheduling jitter.
+const liveCatchUpGuardMs = 1000;
+
 const recordFollowing = (viewport: Locator) => viewport.evaluateHandle(el => {
   const state = { active: true, samples: [] as FollowSample[] };
   const sample = (time: number) => {
@@ -25,6 +34,42 @@ const recordFollowing = (viewport: Locator) => viewport.evaluateHandle(el => {
   requestAnimationFrame(sample);
   return state;
 });
+
+function catchUpMs(samples: FollowSample[]): number | null {
+  const lastChange = samples.reduce((index, sample, i) => i > 0 && sample.extent !== samples[i - 1]!.extent ? i : index, -1);
+  if (lastChange < 0) return null;
+  const settled = samples.slice(lastChange).find(sample => sample.extent - sample.height - sample.top <= 2);
+  return settled ? settled.time - samples[lastChange]!.time : null;
+}
+
+// Run all cleanup steps, but let the test failure (or first cleanup error) win.
+async function cleanup(failed: boolean, ...actions: (() => Promise<unknown>)[]) {
+  const errors: unknown[] = [];
+  for (const action of actions) {
+    try {
+      await action();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (!failed && errors.length) throw errors[0];
+}
+
+async function finishFollowingTrace(trace: Awaited<ReturnType<typeof recordFollowing>>, testInfo: TestInfo,
+  engine: "chromium" | "webkit", touch: boolean, child: boolean, scenario: string, failed: boolean) {
+  await cleanup(failed, async () => {
+    const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
+    await saveEvidence(testInfo, evidenceName(engine, touch, child, scenario), JSON.stringify({ engine, touch, child, catchUpMs: catchUpMs(samples), samples }));
+  }, () => trace.dispose());
+}
+
+async function observeCatchUp(page: Page, trace: Awaited<ReturnType<typeof recordFollowing>>) {
+  await frames(page, 24);
+  await expect.poll(() => trace.evaluate(state => {
+    const sample = state.samples.at(-1);
+    return sample ? sample.extent - sample.height - sample.top : Infinity;
+  }), { timeout: liveCatchUpGuardMs, message: "sampled geometry must return to latest" }).toBeLessThanOrEqual(2);
+}
 
 function expectSmoothFollowing(samples: FollowSample[], surface: string) {
   const growth = samples.findIndex((sample, i) => i > 0 && sample.extent > samples[i - 1]!.extent + 2);
@@ -38,10 +83,9 @@ function expectSmoothFollowing(samples: FollowSample[], surface: string) {
     return sample.extent >= prior.extent && sample.height === prior.height && sample.top < prior.top - 1;
   });
   expect(backwards, `passive append-only ${surface} following must never bounce upward`).toEqual([]);
-  const lastGrowth = samples.reduce((index, sample, i) => i > 0 && sample.extent !== samples[i - 1]!.extent ? i : index, growth);
-  const settled = samples.slice(lastGrowth).find(sample => sample.extent - sample.height - sample.top <= 2);
-  expect(settled, `${surface} following must reach latest after output settles`).toBeDefined();
-  expect(settled!.time - samples[lastGrowth]!.time, `${surface} catch-up after the final layout update`).toBeLessThanOrEqual(300);
+  const elapsed = catchUpMs(samples);
+  expect(elapsed, `${surface} following must reach latest after output settles`).not.toBeNull();
+  expect(elapsed!, `${surface} live catch-up after the final layout update`).toBeLessThanOrEqual(liveCatchUpGuardMs);
 }
 
 /** Arm in the page before triggering motion; send input as soon as it is live,
@@ -62,6 +106,7 @@ async function inputDuringMotion(timeline: Locator, from: number, message: strin
     });
     return state;
   }, from);
+  let failed = true;
   try {
     await Promise.all([
       observer.evaluate(state => state.result).then(async intermediate => {
@@ -70,9 +115,9 @@ async function inputDuringMotion(timeline: Locator, from: number, message: strin
       }),
       trigger(),
     ]);
+    failed = false;
   } finally {
-    await observer.evaluate(state => { state.active = false; });
-    await observer.dispose();
+    await cleanup(failed, () => observer.evaluate(state => { state.active = false; }), () => observer.dispose());
   }
 }
 
@@ -87,7 +132,7 @@ async function seed(request: APIRequestContext, title = "Scroll contract", child
   return snapshot;
 }
 
-async function open(page: Page, request: APIRequestContext, touch: boolean, child = false) {
+async function open(page: Page, request: APIRequestContext, engine: "chromium" | "webkit", touch: boolean, child: boolean, scenario: string) {
   // Opt-in because even passive geometry sampling adds work to a perf fixture.
   // Record no transcript text, item identifiers, URLs, or token-bearing data.
   const diagnostics = process.env.UATU_E2E_SCROLL_OPEN_DIAGNOSTICS === "1";
@@ -153,7 +198,7 @@ async function open(page: Page, request: APIRequestContext, touch: boolean, chil
           Reflect.deleteProperty(window, key);
           return { counts: state.counts, samples: state.samples };
         }, diagnosticKey);
-        if (failed) await test.info().attach("initial-scroll-chronology.json", { body: JSON.stringify(evidence), contentType: "application/json" });
+        if (failed) await saveEvidence(test.info(), evidenceName(engine, touch, child, `${scenario}-initial-scroll-chronology`), JSON.stringify(evidence));
       } catch {
         // A closed/crashed page or failed attachment must not replace the
         // original navigation/assertion error with an optional diagnostic error.
@@ -183,6 +228,245 @@ async function pause(page: Page, timeline: Locator, touch: boolean) {
   await frames(page);
 }
 
+for (const engine of ["chromium", "webkit"] as const) {
+  test(`${engine} keeps the native activity summary in place over a queued passive correction`, async ({ launchBrowser, request, baseURL }, testInfo) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
+    const scenario = "native-summary-over-passive";
+    try {
+      await request.post("/__e2e/reset");
+      const { conversation } = await seed(request);
+      const append = (item: object) => control(request, { action: "item", conversationId: conversation.id, item });
+      await append({ id: "contract:before-summary", type: "assistant_message", createdAt: 89, markdown: "Content immediately before activity." });
+      for (let i = 0; i < 3; i++) await append({ id: `contract:summary-tool:${i}`, type: "tool", createdAt: 90 + i,
+        name: "read", status: "completed", input: JSON.stringify({ filePath: `context-${i}.ts` }), output: "Completed activity." });
+      await append({ id: "contract:after-summary", type: "assistant_message", createdAt: 100,
+        markdown: Array.from({ length: 50 }, (_, i) => `Trailing context ${i}.`).join("\n\n") });
+      const timeline = await open(page, request, engine, false, false, scenario);
+      const group = timeline.locator('details[data-chat-item-id="group:contract:summary-tool:0"]');
+      const summary = group.locator(":scope > summary");
+      await expect(timeline).toContainText("Trailing context 49.");
+      await expect(group).not.toHaveAttribute("open");
+      await pause(page, timeline, false);
+      await summary.evaluate(node => {
+        const scroller = node.closest<HTMLElement>(".chat-timeline")!;
+        scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 345;
+        (node as HTMLElement).focus({ preventScroll: true });
+      });
+      await frames(page, 6);
+      await expect(summary).toBeFocused();
+
+      for (const opening of [true, false]) {
+        const activation = await summary.evaluateHandle((node, opening) => {
+          const details = node.parentElement as HTMLDetailsElement;
+          const viewport = node.closest<HTMLElement>(".chat-timeline")!;
+          const above = viewport.querySelector<HTMLElement>('[data-chat-item-id="contract:before-summary"]')!;
+          const earlier = viewport.querySelector('[data-chat-item-id="contract:Scroll contract:39"] p:last-child')!;
+          const sample = () => {
+            const bounds = viewport.getBoundingClientRect();
+            const rect = node.getBoundingClientRect();
+            return { offset: rect.top - bounds.top, bottom: rect.bottom - bounds.top, height: viewport.clientHeight,
+              top: viewport.scrollTop, remaining: viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+              earlierBottom: earlier.getBoundingClientRect().bottom - bounds.top, aboveTop: above.getBoundingClientRect().top - bounds.top,
+              open: details.open, groupHeight: details.getBoundingClientRect().height };
+          };
+          const state = { before: null as ReturnType<typeof sample> | null, shifted: null as ReturnType<typeof sample> | null,
+            trusted: false, detail: -1, sample };
+          const listeners = new AbortController();
+          let activationEvent: MouseEvent | undefined;
+          document.addEventListener("click", event => {
+            if (event.target !== node) return;
+            activationEvent = event;
+            state.before = sample();
+            // This public event captures and queues a passive correction before
+            // the timeline handles this very same native activation.
+            document.dispatchEvent(new Event("uatu:before-surface-change"));
+          }, { capture: true, signal: listeners.signal });
+          document.addEventListener("click", event => {
+            if (event !== activationEvent) return;
+            listeners.abort();
+            state.trusted = event.isTrusted;
+            state.detail = event.detail;
+            // Reflow a real row between the passive reading line and the
+            // selected summary, after the timeline's click handler but before
+            // the browser toggles <details>. No scroll writes during activation.
+            above.style.paddingBottom = opening ? "120px" : "";
+            state.shifted = sample();
+          }, { signal: listeners.signal });
+          return state;
+        }, opening);
+        try {
+          await page.keyboard.press("Enter");
+          await frames(page, 6);
+          const { before, shifted, settled, trusted, detail } = await activation.evaluate(state =>
+            ({ before: state.before, shifted: state.shifted, settled: state.sample(), trusted: state.trusted, detail: state.detail }));
+          await saveEvidence(testInfo, evidenceName(engine, false, false, `${scenario}-${opening ? "open" : "close"}`),
+            JSON.stringify({ before, shifted, settled, trusted, detail }));
+          expect({ trusted, detail }, "Enter must deliver a trusted keyboard activation click").toEqual({ trusted: true, detail: 0 });
+          if (!before || !shifted) throw new Error("Missing geometry from the activation click");
+          expect(before.open, "summary activation must begin before native toggle").toBe(!opening);
+          expect(shifted.open, "preceding layout must change before native toggle").toBe(!opening);
+          expect(settled.open, "native activation must actually toggle the disclosure").toBe(opening);
+          expect((settled.groupHeight - before.groupHeight) * (opening ? 1 : -1)).toBeGreaterThan(20);
+          expect(before.earlierBottom, "reading text before the changed row must intersect the viewport").toBeGreaterThan(0);
+          expect(before.aboveTop).toBeGreaterThan(before.earlierBottom);
+          expect(before.offset).toBeGreaterThan(before.aboveTop);
+          expect(before.bottom).toBeLessThan(before.height);
+          expect(shifted.earlierBottom, "the same layout change must leave the earlier reading text in place").toBe(before.earlierBottom);
+          const displacement = shifted.offset - before.offset;
+          expect(displacement * (opening ? 1 : -1), "the preceding layout change must displace the summary").toBeGreaterThan(100);
+          expect(Math.min(before.top, before.remaining, settled.top, settled.remaining), "there must be room to compensate without clamping")
+            .toBeGreaterThan(Math.abs(displacement));
+          expect(Math.abs(settled.offset - before.offset), "the chosen summary must retain its viewport-relative offset").toBeLessThanOrEqual(2);
+        } finally {
+          await activation.dispose();
+        }
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
+type StreamActivationProbe = {
+  key: string;
+  itemId: string;
+  delta: string;
+  pending?: () => void;
+};
+
+for (const engine of ["chromium", "webkit"] as const) for (const child of [false, true]) {
+  test(`${engine} ${child ? "child" : "parent"} keeps the native activity summary in place over queued transcript growth`, async ({ launchBrowser, request, baseURL }, testInfo) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
+    const scenario = "native-summary-over-stream";
+    const itemId = "contract:stream-before-summary";
+    const marker = "Growth from the live transcript.";
+    const delta = Array.from({ length: 8 }, () => `\n\n${marker}`).join("");
+    try {
+      await page.addInitScript(eventName => {
+        const add = EventSource.prototype.addEventListener;
+        EventSource.prototype.addEventListener = function (this: EventSource, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+          if (type !== eventName || typeof listener !== "function") return add.call(this, type, listener, options);
+          return add.call(this, type, function (this: EventSource, event: Event) {
+            const probe = Reflect.get(window, "__e2eStreamActivation") as StreamActivationProbe | undefined;
+            if (probe && !probe.pending) {
+              const envelope = JSON.parse((event as MessageEvent).data) as LiveEnvelope;
+              const data = envelope.event.kind === "data" ? envelope.event.data as { type: string; itemId?: string; delta?: string } : undefined;
+              if (envelope.topic === "conversation" && envelope.key === probe.key && data?.type === "item.text_delta"
+                && data.itemId === probe.itemId && data.delta === probe.delta) {
+                // Rendezvous at the browser boundary: deliver this real SSE
+                // envelope in the trusted click's capture phase. Leave all
+                // application scheduling, rendering and scroll writes in place.
+                probe.pending = () => listener.call(this, event);
+                return;
+              }
+            }
+            listener.call(this, event);
+          }, options);
+        } as typeof EventSource.prototype.addEventListener;
+      }, LIVE_ENVELOPE_EVENT);
+      await request.post("/__e2e/reset");
+      const { conversation } = await seed(request, "Scroll contract", child);
+      const append = (item: object) => control(request, { action: "item", conversationId: conversation.id, item });
+      await append({ id: itemId, type: "assistant_message", createdAt: 89, markdown: "Content immediately before activity." });
+      for (let i = 0; i < 3; i++) await append({ id: `contract:stream-tool:${i}`, type: "tool", createdAt: 90 + i,
+        name: "read", status: "completed", input: JSON.stringify({ filePath: `context-${i}.ts` }), output: "Completed activity." });
+      await append({ id: "contract:stream-tail", type: "assistant_message", createdAt: 100,
+        markdown: Array.from({ length: 50 }, (_, i) => `Trailing context ${i}.`).join("\n\n") });
+      const timeline = await open(page, request, engine, false, child, scenario);
+      await expect(timeline).toContainText("Trailing context 49.");
+      const group = timeline.locator('details[data-chat-item-id="group:contract:stream-tool:0"]');
+      const summary = group.locator(":scope > summary");
+      await expect(group).not.toHaveAttribute("open");
+      await pause(page, timeline, false);
+      await summary.evaluate(node => {
+        const scroller = node.closest<HTMLElement>(".chat-timeline")!;
+        scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 345;
+        (node as HTMLElement).focus({ preventScroll: true });
+      });
+      await frames(page, 6);
+      await expect(summary).toBeFocused();
+
+      const activation = await summary.evaluateHandle((node, { key, itemId, delta, marker }) => {
+        const viewport = node.closest<HTMLElement>(".chat-timeline")!;
+        const groupId = node.parentElement!.dataset.chatItemId!;
+        const growthRow = () => viewport.querySelector(`[data-chat-item-id="${itemId}"]`)!;
+        const isPainted = () => growthRow()?.textContent?.includes(marker) ?? false;
+        const sample = () => {
+          const details = viewport.querySelector<HTMLDetailsElement>(`[data-chat-item-id="${groupId}"]`)!;
+          const above = growthRow();
+          const earlier = viewport.querySelector('[data-chat-item-id="contract:Scroll contract:39"] p:last-child')!;
+          const bounds = viewport.getBoundingClientRect();
+          const rect = details.querySelector(":scope > summary")!.getBoundingClientRect();
+          return { offset: rect.top - bounds.top, bottom: rect.bottom - bounds.top, height: viewport.clientHeight,
+            top: viewport.scrollTop, remaining: viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+            earlierBottom: earlier.getBoundingClientRect().bottom - bounds.top, aboveTop: above.getBoundingClientRect().top - bounds.top,
+            aboveHeight: above.getBoundingClientRect().height, groupHeight: details.getBoundingClientRect().height,
+            open: details.open, painted: isPainted() };
+        };
+        const probe: StreamActivationProbe = { key, itemId, delta };
+        Reflect.set(window, "__e2eStreamActivation", probe);
+        const state = { probe, sample, keyTrusted: false, click: null as { trusted: boolean; detail: number } | null,
+          before: null as ReturnType<typeof sample> | null, queued: null as ReturnType<typeof sample> | null,
+          firstPaint: null as ReturnType<typeof sample> | null };
+        document.addEventListener("keydown", event => {
+          if (event.target === node && event.key === "Enter") state.keyTrusted = event.isTrusted;
+        }, { capture: true });
+        const observer = new MutationObserver(() => {
+          if (!isPainted()) return;
+          state.firstPaint = sample();
+          observer.disconnect();
+        });
+        observer.observe(viewport, { childList: true, subtree: true, characterData: true });
+        document.addEventListener("click", event => {
+          if (event.target !== node || !event.isTrusted || event.detail !== 0) return;
+          state.click = { trusted: event.isTrusted, detail: event.detail };
+          state.before = sample();
+          probe.pending?.();
+          state.queued = sample();
+        }, { capture: true });
+        return state;
+      }, { key: conversation.id, itemId, delta, marker });
+      try {
+        await control(request, { action: "delta", conversationId: conversation.id, itemId, delta });
+        await expect.poll(() => activation.evaluate(state => !!state.probe.pending), {
+          message: "the matching SSE envelope must arrive before pressing Enter",
+        }).toBe(true);
+        await page.keyboard.press("Enter");
+        await expect(timeline.locator(`[data-chat-item-id="${itemId}"]`)).toContainText(marker);
+        await frames(page, 6);
+        const evidence = await activation.evaluate(state =>
+          ({ before: state.before, queued: state.queued, firstPaint: state.firstPaint, settled: state.sample(),
+            keyTrusted: state.keyTrusted, click: state.click }));
+        await saveEvidence(testInfo, evidenceName(engine, false, child, scenario), JSON.stringify(evidence));
+        const { before, queued, firstPaint, settled, keyTrusted, click } = evidence;
+        expect(keyTrusted, "the summary must receive trusted Enter").toBe(true);
+        expect(click, "Enter must deliver a trusted keyboard activation click").toEqual({ trusted: true, detail: 0 });
+        if (!before || !queued || !firstPaint) throw new Error("Missing geometry from activation, queued delivery, or transcript paint");
+        expect(queued, "SSE delivery must queue growth without changing layout during the click").toEqual(before);
+        expect(queued).toMatchObject({ open: false, painted: false });
+        expect(firstPaint, "the real transcript growth must paint after the native disclosure opens").toMatchObject({ open: true, painted: true });
+        expect(settled).toMatchObject({ open: true, painted: true });
+        expect(before.earlierBottom, "reading text before the changed row must intersect the viewport").toBeGreaterThan(0);
+        expect(before.aboveTop).toBeGreaterThan(before.earlierBottom);
+        expect(before.offset).toBeGreaterThan(before.aboveTop);
+        expect(before.bottom).toBeLessThan(before.height);
+        const growth = firstPaint.aboveHeight - before.aboveHeight;
+        expect(growth, "the row above the summary must grow from rendered delta text").toBeGreaterThan(100);
+        expect(settled.groupHeight - before.groupHeight, "the disclosure must expand").toBeGreaterThan(20);
+        expect(Math.min(before.top, before.remaining, settled.top, settled.remaining), "there must be room to compensate without clamping").toBeGreaterThan(growth);
+        expect(Math.abs(firstPaint.offset - before.offset), "the chosen summary must stay in place at the first rendered growth").toBeLessThanOrEqual(2);
+        expect(Math.abs(settled.offset - before.offset), "the chosen summary must retain its viewport-relative offset").toBeLessThanOrEqual(2);
+      } finally {
+        await activation.dispose();
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
 for (const engine of ["chromium", "webkit"] as const) for (const touch of [false, true]) {
   for (const child of [false, true]) {
   test(`${engine} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} preserves visible text when its own message grows above it`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
@@ -192,7 +476,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     try {
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request, "Scroll contract", child);
-      const timeline = await open(page, request, touch, child);
+      const timeline = await open(page, request, engine, touch, child, "interior-reading-anchor");
       const markdown = Array.from({ length: 35 }, (_, i) => `Interior paragraph ${i}. ${"Reading context. ".repeat(12)}`).join("\n\n");
       const update = (markdown: string) => control(request, { action: "item", conversationId: conversation.id,
         item: { id: "contract:interior", type: "assistant_message", createdAt: 100, markdown } });
@@ -213,27 +497,29 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       await expect(timeline).toContainText("Earlier text grows within the same message.");
       await frames(page, 24);
       const final = await offset();
-      await testInfo.attach("interior-reading-anchor.json", { body: JSON.stringify({ initial, final, drift: final - initial }), contentType: "application/json" });
+      await saveEvidence(testInfo, evidenceName(engine, touch, child, "interior-reading-anchor"), JSON.stringify({ initial, final, drift: final - initial }));
       expect(Math.abs(final - initial), "anchoring the message box alone must not let visible text jump").toBeLessThanOrEqual(2);
     } finally {
       await browser.close();
     }
   });
 
-  test(`${engine} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} streams smoothly, settles within 300ms, and yields to upward input`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
+  test(`${engine} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} streams smoothly to latest and yields to upward input`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
+    let failed = true;
     try {
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request, "Scroll contract", child);
-      const timeline = await open(page, request, touch, child);
+      const timeline = await open(page, request, engine, touch, child, "smooth-stream");
       await control(request, { action: "item", conversationId: conversation.id,
         item: { id: "contract:stream", type: "assistant_message", createdAt: 100, markdown: "Streaming reply" } });
       await expect(timeline).toContainText("Streaming reply");
       await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
       await frames(page);
       const trace = await recordFollowing(timeline);
+      let traceBodyFailed = true;
       try {
         await frames(page);
         if (!touch) await timeline.hover();
@@ -254,7 +540,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
             else await page.mouse.wheel(0, 4);
           });
         await expect(timeline).toContainText("Streamed paragraph 17");
-        await frames(page, 24);
+        await observeCatchUp(page, trace);
         const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
         expectSmoothFollowing(samples, "timeline");
 
@@ -288,14 +574,13 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         await frames(page, 24);
         expect(Math.abs(await timeline.evaluate(el => el.scrollTop) - interrupted), "new output must not restart interrupted animation").toBeLessThanOrEqual(2);
         await expect(latest).toBeVisible();
+        traceBodyFailed = false;
       } finally {
-        try {
-          const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
-          await testInfo.attach("smooth-stream-frames.json", { body: JSON.stringify(samples), contentType: "application/json" });
-        } finally { await trace.dispose(); }
+        await finishFollowingTrace(trace, testInfo, engine, touch, child, "smooth-stream-frames", traceBodyFailed);
       }
+      failed = false;
     } finally {
-      await browser.close();
+      await cleanup(failed, () => browser.close());
     }
   });
 
@@ -303,6 +588,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
+    let failed = true;
     try {
       const shape = child ? "bash" : "command";
       const fixture = await bootShell(page, request, { child, touch, shape, output: log(100),
@@ -321,22 +607,22 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       await frames(page);
       const outerTop = await fixture.timeline.evaluate(el => el.scrollTop);
       const trace = await recordFollowing(viewport);
+      let traceBodyFailed = true;
       try {
         await frames(page);
         await fixture.update(shell(shape, log(140)));
         await expect(viewport.locator(".chat-shell-lines > span")).toHaveCount(140);
-        await frames(page, 24);
+        await observeCatchUp(page, trace);
         const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
         expectSmoothFollowing(samples, "shell");
         expect(Math.abs(await fixture.timeline.evaluate(el => el.scrollTop) - outerTop), "inner output growth must not move the outer reading position").toBeLessThanOrEqual(2);
+        traceBodyFailed = false;
       } finally {
-        try {
-          const samples = await trace.evaluate(state => { state.active = false; return state.samples; });
-          await testInfo.attach("smooth-shell-frames.json", { body: JSON.stringify(samples), contentType: "application/json" });
-        } finally { await trace.dispose(); }
+        await finishFollowingTrace(trace, testInfo, engine, touch, child, "smooth-shell-frames", traceBodyFailed);
       }
+      failed = false;
     } finally {
-      await browser.close();
+      await cleanup(failed, () => browser.close());
     }
   });
   }
@@ -348,7 +634,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     try {
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request);
-      const timeline = await open(page, request, touch);
+      const timeline = await open(page, request, engine, touch, false, `nested-${format}-reading-anchor`);
       const paragraphs = Array.from({ length: 35 }, (_, i) => `Nested paragraph ${i}. ${"Reading context. ".repeat(format === "tight-list" && i === 12 ? 120 : 12)}`);
       const wrap = (paragraphs: string[]) => format === "quote"
         ? paragraphs.map(text => `> ${text}`).join("\n>\n")
@@ -374,7 +660,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       await expect(timeline).toContainText("Earlier nested text grows.");
       await frames(page, 24);
       const final = await offset();
-      await testInfo.attach("nested-reading-anchor.json", { body: JSON.stringify({ format, initial, final, drift: final - initial }), contentType: "application/json" });
+      await saveEvidence(testInfo, evidenceName(engine, touch, false, `nested-${format}-reading-anchor`), JSON.stringify({ format, initial, final, drift: final - initial }));
       expect(Math.abs(final - initial), "a container fingerprint must not invalidate unchanged nested reading text").toBeLessThanOrEqual(2);
     } finally {
       await browser.close();
@@ -388,7 +674,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     try {
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request);
-      const timeline = await open(page, request, touch);
+      const timeline = await open(page, request, engine, touch, false, "collapsed-group-reading-anchor");
       for (let i = 0; i < 3; i++) await control(request, { action: "item", conversationId: conversation.id,
         item: { id: `contract:closed-tool:${i}`, type: "tool", createdAt: 90 + i, name: "read", status: "completed",
           input: JSON.stringify({ filePath: `context-${i}.ts` }), output: "Completed synthetic activity." } });
@@ -462,7 +748,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         return { offset: range.getBoundingClientRect().top - node.closest(".chat-timeline")!.getBoundingClientRect().top,
           width: node.getBoundingClientRect().width };
       }, reading.index);
-      await testInfo.attach("collapsed-group-reading-anchor.json", { body: JSON.stringify({ reading, final, drift: final.offset - reading.offset }), contentType: "application/json" });
+      await saveEvidence(testInfo, evidenceName(engine, touch, false, "collapsed-group-reading-anchor"), JSON.stringify({ reading, final, drift: final.offset - reading.offset }));
       expect(reading.hidden.height, "the closed group's descendant must expose a real placeholder box").toBeGreaterThan(0);
       expect(reading.hidden.top + reading.hidden.height, "the hidden placeholder must overlap the reading viewport").toBeGreaterThan(0);
       expect(reading.hidden.top).toBeLessThan(reading.viewportHeight);
@@ -481,7 +767,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     try {
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request);
-      const timeline = await open(page, request, touch);
+      const timeline = await open(page, request, engine, touch, false, "rewrapped-text-anchor");
       await control(request, { action: "item", conversationId: conversation.id,
         item: { id: "contract:rewrap", type: "assistant_message", createdAt: 100,
           markdown: Array.from({ length: 1600 }, (_, i) => `word${String(i).padStart(4, "0")}`).join(" ") } });
@@ -528,7 +814,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         range.setStart(node.firstChild!, index); range.setEnd(node.firstChild!, index + 1);
         return { offset: range.getBoundingClientRect().top - node.closest(".chat-timeline")!.getBoundingClientRect().top, width: node.getBoundingClientRect().width };
       }, reading.index);
-      await testInfo.attach("rewrapped-text-anchor.json", { body: JSON.stringify({ reading, final, drift: final.offset - reading.offset }), contentType: "application/json" });
+      await saveEvidence(testInfo, evidenceName(engine, touch, false, "rewrapped-text-anchor"), JSON.stringify({ reading, final, drift: final.offset - reading.offset }));
       expect(Math.abs(final.width - reading.width), "fixture must actually change the paragraph width").toBeGreaterThan(20);
       expect(Math.abs(final.offset - reading.offset), "the same visible text line must survive rewrapping").toBeLessThanOrEqual(2);
 
@@ -550,7 +836,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         range.setStart(text, index); range.setEnd(text, index + 1);
         return range.getBoundingClientRect().top - node.closest(".chat-timeline")!.getBoundingClientRect().top;
       }, reading.index);
-      await testInfo.attach("intrinsic-image-text-anchor.json", { body: JSON.stringify({ initial: reading.offset, afterImage, drift: afterImage - reading.offset }), contentType: "application/json" });
+      await saveEvidence(testInfo, evidenceName(engine, touch, false, "intrinsic-image-text-anchor"), JSON.stringify({ initial: reading.offset, afterImage, drift: afterImage - reading.offset }));
       expect(Math.abs(afterImage - reading.offset), "intrinsic growth above the text inside one paragraph must not move the reading line").toBeLessThanOrEqual(2);
     } finally {
       await browser.close();
@@ -564,7 +850,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     try {
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request, "Scroll contract", child);
-      const timeline = await open(page, request, touch, child);
+      const timeline = await open(page, request, engine, touch, child, "append-rewrap-word");
       const markdown = Array.from({ length: 1600 }, (_, i) => `word${String(i).padStart(4, "0")}`).join(" ");
       const update = (markdown: string) => control(request, { action: "item", conversationId: conversation.id,
         item: { id: "contract:append-rewrap", type: "assistant_message", createdAt: 100, markdown } });
@@ -623,7 +909,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
             offset: range.getBoundingClientRect().top - node.closest(".chat-timeline")!.getBoundingClientRect().top,
             width: node.getBoundingClientRect().width };
         }, reading);
-        await testInfo.attach("append-rewrap-word.json", { body: JSON.stringify({ reading, final, drift: final.offset - reading.offset }), contentType: "application/json" });
+        await saveEvidence(testInfo, evidenceName(engine, touch, child, "append-rewrap-word"), JSON.stringify({ reading, final, drift: final.offset - reading.offset }));
         expect(await previousNode!.evaluate(node => node.isConnected), "the append must exercise replacement DOM").toBe(false);
         expect(reading.bottom, "the captured word must intersect the viewport").toBeGreaterThan(0);
         expect(reading.offset, "the captured word must intersect the viewport").toBeLessThan(reading.height);
@@ -649,7 +935,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
       await page.emulateMedia({ reducedMotion: "reduce" });
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request);
-      const timeline = await open(page, request, touch);
+      const timeline = await open(page, request, engine, touch, false, "reduced-motion");
       const trace = await timeline.evaluateHandle(el => {
         const state = { active: true, samples: [] as Array<{ top: number; extent: number; height: number }>,
           writes: [] as Array<{ top: number; extent: number; height: number }> };
@@ -676,7 +962,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         await expect(timeline).toContainText("Reduced motion paragraph 11.");
         await frames(page, 12);
         const { samples, writes } = await trace.evaluate(state => { state.active = false; return { samples: state.samples, writes: state.writes }; });
-        await testInfo.attach("reduced-motion-frames.json", { body: JSON.stringify({ samples, writes }), contentType: "application/json" });
+        await saveEvidence(testInfo, evidenceName(engine, touch, false, "reduced-motion-frames"), JSON.stringify({ samples, writes }));
         expect(samples.at(-1)!.extent - samples.at(-1)!.height - samples.at(-1)!.top).toBeLessThanOrEqual(2);
         expect(writes.length).toBeGreaterThan(0);
         expect(writes.filter(write => Math.abs(write.extent - write.height - write.top) > 2),
@@ -810,7 +1096,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         try {
           const horizontalEvidence = await horizontal.evaluate(state => { state.stop(); return state.snapshot(); });
           const verticalEvidence = await vertical.evaluate(state => { state.active = false; return state.samples; });
-          await testInfo.attach("diagonal-shell-frames.json", { body: JSON.stringify({ horizontal: horizontalEvidence, vertical: verticalEvidence }), contentType: "application/json" });
+          await saveEvidence(testInfo, evidenceName(engine, touch, child, "diagonal-shell-frames"), JSON.stringify({ horizontal: horizontalEvidence, vertical: verticalEvidence }));
         } catch { /* evidence must not replace the original failure */ }
         await horizontal.dispose(); await vertical.dispose(); await viewportElement?.dispose();
       }
@@ -826,7 +1112,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
     try {
       await request.post("/__e2e/reset");
       const { conversation } = await seed(request);
-      const timeline = await open(page, request, touch);
+      const timeline = await open(page, request, engine, touch, false, "paused-send-anchor");
       await pause(page, timeline, touch);
       const anchor = await timeline.evaluate(el => {
         const top = el.getBoundingClientRect().top;
@@ -881,7 +1167,7 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
         expect(sentIndex, "fixture must contain the accepted submitted message").toBeGreaterThanOrEqual(0);
         expect(rows.indexOf(replyId), "the streamed reply must follow the submitted message").toBeGreaterThan(sentIndex);
         const offsets = await trace.evaluate(state => { state.active = false; return state.offsets; });
-        await testInfo.attach("paused-send-anchor.json", { body: JSON.stringify({ anchor, offsets }), contentType: "application/json" });
+        await saveEvidence(testInfo, evidenceName(engine, touch, false, "paused-send-anchor"), JSON.stringify({ anchor, offsets }));
         expect(offsets.length).toBeGreaterThan(0);
         expect(offsets, "the reading anchor must survive submission and reply rendering").not.toContain(null);
         const drift = Math.max(...offsets.map(offset => Math.abs(offset! - anchor.offset)));

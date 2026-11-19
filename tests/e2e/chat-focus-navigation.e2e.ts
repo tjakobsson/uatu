@@ -2,6 +2,7 @@ import { test as baseTest, expect } from "./fixtures";
 import { withEngineBrowsers, attachPageDiagnosticsOnFailure } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
 import { settleScroll } from "./chat-shell-helpers";
+import { saveEvidence } from "./evidence";
 import { LIVE_ENVELOPE_EVENT } from "../../src/shared/live-protocol";
 
 type RepublishProbe = {
@@ -77,7 +78,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       }).__requestNavigationProbe);
       await expect.poll(async () => (await probe()).triggered).toBe(true);
       expect((await probe()).gap).toBeGreaterThan(600);
-      await expect(card).toBeFocused();
+      await expect(card.locator(":scope > summary")).toBeFocused();
       const placement = () => card.evaluate(node => {
         const band = document.getElementById("chat-timeline")!.getBoundingClientRect();
         const rect = node.getBoundingClientRect();
@@ -97,7 +98,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       expect(retained.top).toBeGreaterThanOrEqual(-1);
       expect(retained.bottom).toBeLessThanOrEqual(1);
       expect(Math.abs(retained.top - revealed.top)).toBeLessThanOrEqual(2);
-      await info.attach("request-navigation-geometry", { body: JSON.stringify({ probe: await probe(), revealed, retained }), contentType: "application/json" });
+      await saveEvidence(info, `request-navigation-geometry-${engine}.json`, JSON.stringify({ probe: await probe(), revealed, retained }));
     } finally {
       await browser.close();
     }
@@ -175,14 +176,13 @@ for (const engine of ["chromium", "webkit"] as const) {
         await expect.poll(() => timeline.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(2);
         await settleScroll(timeline);
         await pill.click();
-        await expect(card).toBeFocused();
+        const summary = card.locator(":scope > summary");
+        await expect(summary).toBeFocused();
         await settleScroll(timeline);
         // Native keyboard traversal establishes control focus on both engines;
         // do not repair focus with script or waive this setup assertion.
         const control = card.getByRole("button", { name: "Allow once", exact: true });
-        for (let step = 0; step < 8 && !await control.evaluate(node => node === document.activeElement); step++) {
-          await page.keyboard.press(engine === "webkit" ? "Alt+Tab" : "Tab");
-        }
+        await page.keyboard.press(engine === "webkit" && process.platform === "darwin" ? "Alt+Tab" : "Tab");
         await expect(control).toBeFocused();
         const band = (await timeline.boundingBox())!;
         await page.mouse.move(band.x + band.width / 2, band.y + band.height / 2);
@@ -222,7 +222,7 @@ for (const engine of ["chromium", "webkit"] as const) {
             await expect(page.locator("body")).toBeFocused();
             expect((await placement()).belowTop).toBeLessThan(0);
           } else {
-            await expect(card).toBeFocused();
+            await expect(summary).toBeFocused();
             await expect.poll(async () => (await placement()).top).toBeGreaterThanOrEqual(-1);
             await expect.poll(async () => (await placement()).bottom).toBeLessThanOrEqual(1);
           }
@@ -238,7 +238,8 @@ for (const engine of ["chromium", "webkit"] as const) {
         await assertOutcome();
         const retained = await placement();
         expect(Math.abs(retained.top - revealed.top)).toBeLessThanOrEqual(2);
-        await info.attach("permission-republish-probe", { body: JSON.stringify({ probe: await probe(), revealed, retained }), contentType: "application/json" });
+        await saveEvidence(info, `permission-republish-probe-${engine}-${cancel ? "blur" : "retain"}.json`,
+          JSON.stringify({ probe: await probe(), revealed, retained }));
       } finally {
         // The transport wrapper and DOM references belong only to this context.
         await browser.close();
