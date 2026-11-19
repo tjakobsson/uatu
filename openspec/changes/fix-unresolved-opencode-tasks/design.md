@@ -257,6 +257,12 @@ records may conservatively deny reuse; missing/recreated observation state must
 not silently appear unchanged. The indistinguishable crossing-clear quiet case
 may require an independent reload, while no-crossing/identical observations
 retain reuse. Identity, outcome, source-guard and Stop assertions remain strict.
+The same deny-only snapshot carries a positive inbox read completed before
+registration. Its report facts live in the SessionChanges inbox facet, an
+approved, bounded, request-ordered amendment to that store's digests-only rule.
+If that known report disappears (delivery, eviction or overflow) while the
+transcript lacks it, the pending or installed entry is retired; it grants no
+report, activity or authority.
 
 ## Workers list: one Dismiss action
 

@@ -4995,3 +4995,174 @@ test(`a ${scope} child revert ${lifecycle} after history consumption fences only
     expect(fresh[0]?.summary).toBeUndefined();
   } finally { release(); abort.abort(); await pump; await recovery?.catch(() => undefined); await provider.dispose!(); await fake.stop(); }
 }, 10_000);
+
+// A revert can remove an idle from the child transcript after its native end
+// was already observed. That retained end still separates executions, so a
+// later exact response cannot correlate its report across it to an older call.
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+for (const variant of ["report", "report-free"] as const)
+test(`${read} keeps retained execution ends inside exact-response report intervals (${variant})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const barriers = new Map<string, () => void>();
+  const frame = (type: string, data: unknown, created: number | undefined) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory } })}\n\n`));
+  const barrier = (name: string) => new Promise<void>(resolve => { barriers.set(name, resolve); frame(name, {}, 70); });
+  const launch = (index: number, ran: number, completed: number) => ({
+    id: `launch-${index}`, type: "assistant", time: { created: ran - 1 },
+    content: [{ type: "tool", id: `call-${index}`, name: "subagent", time: { created: ran - 1, ran, completed },
+      state: { status: "completed", input: { agent: "explore", description: "Check", prompt: "Check", background: true },
+        metadata: { sessionID: child, status: "running" },
+        content: [{ type: "text", text: "The subagent is working in the background. You will be notified automatically." }] } }],
+  });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: {} });
+    if (route === `/api/session/${parent}/message`) return Response.json({ data: [
+      launch(1, 1, 2), launch(2, 21, 22), launch(3, 43, 45),
+      ...(variant === "report" ? [{ id: "report-3", type: "synthetic", time: { created: 61 }, description: "Check",
+        text: `<subagent sessionID="${child}" state="completed">\nThird result\n</subagent>`,
+        metadata: { source: "subagent", childID: child, state: "completed", agent: "explore" } }] : []),
+    ], cursor: {} });
+    // The idle at 40 was observed natively, then reverted out of the transcript.
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "input-1", type: "user", text: "Check", time: { created: 1 } },
+      { id: "idle-1", type: "idle", time: { created: 10 }, outcome: "succeeded" },
+      { id: "input-2", type: "user", text: "Check", time: { created: 21 } },
+      { id: "input-3", type: "user", text: "Check", time: { created: 43 } },
+      { id: "response-3", type: "assistant", finish: "stop", time: { created: 50, completed: 58 }, content: [{ type: "text", text: "Third result" }] },
+      { id: "idle-3", type: "idle", time: { created: 60 }, outcome: "succeeded" },
+    ], cursor: {} });
+    return fetch(request);
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const firstAbort = new AbortController(), abort = new AbortController();
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Retained ends inside report intervals")).id;
+    child = fake.launchRequestWorker(parent).childId;
+    pump = (async () => { for await (const event of provider.events(abort.signal)) { barriers.get(event.eventType)?.(); barriers.delete(event.eventType); } })();
+    await provider.waitForEventStream!(abort.signal);
+    frame("session.created", { sessionID: child, parentID: parent, location: { directory } }, 1);
+    frame("session.execution.failed", { sessionID: child, error: { type: "unknown", message: "Second execution failed" } }, 40);
+    frame("session.revert.committed", { sessionID: child, to: "removed-idle" }, 41);
+    await barrier("diagnostic.retained-end-observed");
+    const taskId = (index: number) => `v2:${parent}:call-${index}`;
+    const readRows = async () => read === "listMessages"
+      ? (await provider.listMessages(parent!, { limit: 100, signal: abort.signal })).items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task")
+      : await provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal });
+    await readRows();
+    const rows = await readRows();
+    const second = rows.find(row => row.taskId === taskId(2));
+    expect(second).toMatchObject({ status: "running", activity: { kind: "unavailable" } });
+    expect(second?.resultId).toBeUndefined(); expect(second?.summary).toBeUndefined();
+    expect(workerCanStop(second!)).toBe(false);
+    expect(rows.filter(row => row.resultId === "report-3").map(row => row.taskId)).not.toContain(taskId(2));
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);
+
+// Retained native ends refine an exact-response interval rather than discard
+// it. An end before the candidate's admission is only a lower bound; an
+// unknown end set (undated end, saturated stream memory) proves no interval.
+type RetainedEndCase = {
+  name: string; launches: readonly (readonly [index: number, ran: number, completed: number])[];
+  child: readonly { id: string; type: string; text?: string; created: number; completed?: number }[];
+  ends: readonly (number | undefined)[]; report: { index: number; text: string };
+};
+const retainedEndCases: readonly RetainedEndCase[] = [
+  { name: "a retained end before the only later admission", launches: [[1, 1, 2], [2, 21, 22]], ends: [20], report: { index: 2, text: "Second result" },
+    child: [{ id: "input-1", type: "user", created: 1 }, { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 },
+      { id: "response-2", type: "assistant", text: "Second result", created: 50, completed: 58 }, { id: "idle-2", type: "idle", created: 60 }] },
+  { name: "a retained end before every candidate admission", launches: [[1, 21, 22], [2, 43, 45]], ends: [15], report: { index: 1, text: "First result" },
+    child: [{ id: "input-0", type: "user", created: 1 }, { id: "idle-0", type: "idle", created: 10 }, { id: "input-1", type: "user", created: 21 },
+      { id: "response-1", type: "assistant", text: "First result", created: 30, completed: 35 }, { id: "idle-1", type: "idle", created: 40 },
+      { id: "input-2", type: "user", created: 43 }, { id: "response-2", type: "assistant", text: "Second result", created: 50, completed: 58 },
+      { id: "idle-2", type: "idle", created: 60 }] },
+  ...([["an undated retained end", [undefined]], ["saturated execution memory", [40, ...Array.from({ length: 130 }, (_, index) => 1_000 + index)]]] as const)
+    .map(([name, ends]): RetainedEndCase => ({ name, launches: [[1, 1, 2], [2, 21, 22], [3, 43, 45]], ends, report: { index: 3, text: "Third result" },
+      child: [{ id: "input-1", type: "user", created: 1 }, { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 },
+        { id: "input-3", type: "user", created: 43 }, { id: "response-3", type: "assistant", text: "Third result", created: 50, completed: 58 },
+        { id: "idle-3", type: "idle", created: 60 }] })),
+];
+for (const read of ["listMessages", "reconcileBackgroundTasks"] as const)
+for (const scenario of retainedEndCases)
+test(`${read} bounds exact-response report intervals with retained execution ends (${scenario.name})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, sequence = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const barriers = new Map<string, () => void>();
+  const frame = (type: string, data: unknown, created: number | undefined) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}:${sequence++}`, type, data, created, location: { directory } })}\n\n`));
+  const barrier = (name: string) => new Promise<void>(resolve => { barriers.set(name, resolve); frame(name, {}, 70); });
+  const launch = (index: number, ran: number, completed: number) => ({
+    id: `launch-${index}`, type: "assistant", time: { created: ran - 1 },
+    content: [{ type: "tool", id: `call-${index}`, name: "subagent", time: { created: ran - 1, ran, completed },
+      state: { status: "completed", input: { agent: "explore", description: "Check", prompt: "Check", background: true },
+        metadata: { sessionID: child, status: "running" },
+        content: [{ type: "text", text: "The subagent is working in the background. You will be notified automatically." }] } }],
+  });
+  const reportId = `report-${scenario.report.index}`;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: {} });
+    if (route === `/api/session/${parent}/message`) return Response.json({ data: [
+      ...scenario.launches.map(([index, ran, completed]) => launch(index, ran, completed)),
+      { id: reportId, type: "synthetic", time: { created: 61 }, description: "Check",
+        text: `<subagent sessionID="${child}" state="completed">\n${scenario.report.text}\n</subagent>`,
+        metadata: { source: "subagent", childID: child, state: "completed", agent: "explore" } },
+    ], cursor: {} });
+    if (route === `/api/session/${child}/message`) return Response.json({ data: scenario.child.map(message => message.type === "idle"
+      ? { id: message.id, type: "idle", time: { created: message.created }, outcome: "succeeded" }
+      : message.type === "user" ? { id: message.id, type: "user", text: "Check", time: { created: message.created } }
+      : { id: message.id, type: "assistant", finish: "stop", time: { created: message.created, completed: message.completed }, content: [{ type: "text", text: message.text }] }), cursor: {} });
+    return fetch(request);
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const firstAbort = new AbortController(), abort = new AbortController();
+  let firstPump: Promise<void> | undefined, pump: Promise<void> | undefined;
+  try {
+    firstPump = (async () => { for await (const _event of provider.events(firstAbort.signal)) {} })();
+    await provider.waitForEventStream!(firstAbort.signal); firstAbort.abort(); await firstPump;
+    parent = (await provider.createSession("Retained ends bound report intervals")).id;
+    child = fake.launchRequestWorker(parent).childId;
+    pump = (async () => { for await (const event of provider.events(abort.signal)) { barriers.get(event.eventType)?.(); barriers.delete(event.eventType); } })();
+    await provider.waitForEventStream!(abort.signal);
+    frame("session.created", { sessionID: child, parentID: parent, location: { directory } }, 1);
+    const [first, ...rest] = scenario.ends;
+    frame("session.execution.failed", { sessionID: child, error: { type: "unknown", message: "Removed execution failed" } }, first);
+    for (const end of rest) frame("session.execution.succeeded", { sessionID: child }, end);
+    frame("session.revert.committed", { sessionID: child, to: "removed-idle" }, 41);
+    await barrier("diagnostic.retained-end-observed");
+    const taskId = (index: number) => `v2:${parent}:call-${index}`;
+    const readRows = async () => read === "listMessages"
+      ? (await provider.listMessages(parent!, { limit: 100, signal: abort.signal })).items.filter((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task")
+      : await provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal });
+    await readRows();
+    const rows = await readRows();
+    const reported = rows.filter(row => row.resultId === reportId);
+    if (scenario.ends.length === 1 && scenario.ends[0] !== undefined) {
+      // The retained end precedes the reported run's admission: one canonical
+      // finished row per run, no notification-only row, no cascading launch.
+      expect(reported.map(row => row.taskId)).toEqual([taskId(scenario.report.index)]);
+      expect(reported[0]).toMatchObject({ status: "completed", summary: scenario.report.text });
+      for (const [index] of scenario.launches) expect(rows.find(row => row.taskId === taskId(index))).toMatchObject({ status: "completed" });
+    } else {
+      // Unknown retained ends cannot prove the reconstructed interval.
+      const second = rows.find(row => row.taskId === taskId(2));
+      expect(second).toMatchObject({ status: "running", activity: { kind: "unavailable" } });
+      expect(second?.resultId).toBeUndefined(); expect(second?.summary).toBeUndefined();
+      expect(reported.map(row => row.taskId)).not.toContain(taskId(2));
+    }
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { firstAbort.abort(); abort.abort(); await firstPump; await pump; await provider.dispose!(); await fake.stop(); }
+}, 10_000);

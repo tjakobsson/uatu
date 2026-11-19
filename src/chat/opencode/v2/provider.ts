@@ -192,6 +192,15 @@ export class OpenCodeV2Provider implements ChatProvider {
       observeHistory: (session, messages) => { this.sessionChanges.observe(session, "history", messages); },
       observeRecord: (value, requestedId) => { this.observeSessionRecord(value, requestedId); },
       snapshotRecord: session => this.sessionChanges.snapshotRecord(session),
+      observeInbox: (session, entries, facts) => {
+        // Even a first complete inbox can contradict a completion already inferred
+        // by a consumer. Scope that positive baseline to its native launcher children;
+        // empty or unrelated first observations remain ordinary initialization.
+        const counterproof = [...this.historyWorkerSources].some(source => source.parent === session
+          && source.historyParentLaunches?.size && (facts.overflow || facts.reports.some(report => source.historyParentLaunches!.has(report.child))));
+        this.sessionChanges.observeInbox(session, entries, facts, counterproof);
+      },
+      inboxFacts: session => this.sessionChanges.inboxFacts(session),
     });
   }
 
@@ -531,8 +540,17 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (!ends?.length) return;
       const end = ends.filter(at => at > response.completed).sort((a, b) => a - b)[0];
       if (end === undefined || ends.filter(at => at === end).length !== 1) return;
-      const after = ends.filter(at => at < end).sort((a, b) => b - a)[0];
-      if (after !== undefined && (ends.filter(at => at === after).length !== 1 || response.created <= after)) return;
+      const transcriptAfter = ends.filter(at => at < end).sort((a, b) => b - a)[0];
+      if (transcriptAfter !== undefined && ends.filter(at => at === transcriptAfter).length !== 1) return;
+      // A revert can remove a transcript idle whose native end was observed.
+      // That retained end still bounds the interval: launches before it are
+      // excluded, and one after an admission or response start vetoes below.
+      // Unknown retained ends (undated end, saturated memory) prove nothing.
+      const observed = this.executionWorkers ? this.executionWorkers.observedExecutionEnds(child) : [];
+      if (!observed) return;
+      const after = [...observed, ...transcriptAfter === undefined ? [] : [transcriptAfter]]
+        .filter(at => at < end).sort((a, b) => b - a)[0];
+      if (after !== undefined && response.created <= after) return;
       const intervalLaunches = competitionLaunches.filter(fact => counterproofChild(fact) === child).filter(fact => {
         const start = fact.ran ?? fact.created, finish = fact.completed ?? fact.reportedCompletion;
         return !(start !== undefined && start > end || after !== undefined && finish !== undefined && finish < after);
@@ -1756,15 +1774,8 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private async readPendingOutcomes(sessionId: string, signal: AbortSignal) {
-    const pending = await this.nativeHistory.inbox(sessionId, signal);
-    const { entries, observation: { reports, overflow } } = pending;
-    // Even a first complete inbox can contradict a completion already inferred
-    // by a consumer. Scope that positive baseline to its native launcher children;
-    // empty or unrelated first observations remain ordinary initialization.
-    const counterproof = [...this.historyWorkerSources].some(source => source.parent === sessionId
-      && source.historyParentLaunches?.size && (overflow || reports.some(report => source.historyParentLaunches!.has(report.child))));
-    this.sessionChanges.observe(sessionId, "inbox", entries, counterproof);
-    return pending;
+    // The native-history module records the inbox facet (observeInbox above).
+    return this.nativeHistory.inbox(sessionId, signal);
   }
 
   private observePendingOutcomes(parent: string, observation: PendingOutcomeRead, owner?: HistoryWorkerSource): void {

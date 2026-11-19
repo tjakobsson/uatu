@@ -1,12 +1,22 @@
 import { createHash } from "node:crypto";
+import { parentCounterproofMaxBytes, parentCounterproofMaxFacts } from "./native-history";
 
-type State = { revision: number; owners: number; facets: Map<string, { digest: string }> };
+export type InboxReportFact = Readonly<{ child: string; at?: number; digest: string; id?: string }>;
+/** Request-ordered facts of one complete inbox read; overflow means unknown. */
+export type InboxFacts = Readonly<{ started: number; reports: readonly InboxReportFact[]; overflow?: true }>;
+type State = { revision: number; owners: number; facets: Map<string, { digest: string }>;
+  /** Stored facts, the latest request start that confirmed them and their raw reply digest. */
+  inbox?: { facts: InboxFacts; started: number; digest?: string } };
 export type RecordSnapshot = Readonly<{ unchanged(): boolean }>;
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)])) : value;
 
 /** Observation order, deliberately not request order. Only digests are retained.
- * Active consumers pin their session, so eviction cannot reset their revision. */
+ * Exception: the inbox facet also keeps bounded report facts (digest, child, at,
+ * native id, overflow) ordered by request start, because they are deny-only
+ * qualification evidence for native-history reuse. Its digest and counter keep
+ * the general rule. Active consumers pin their session, so eviction cannot reset
+ * their revision. */
 export class SessionChanges {
   private readonly sessions = new Map<string, State>();
   constructor(private readonly capacity = 8192, private readonly facetCapacity = 256) {}
@@ -42,6 +52,25 @@ export class SessionChanges {
     if (!state || !facet) return;
     return { unchanged: () => this.sessions.get(session) === state && state.facets.get("record") === facet };
   }
+
+  /** The inbox facet's one writer. Facts from an older request never replace a
+   * newer one's; facts past the counterproof bounds keep only overflow. A newer
+   * reply with the stored reply's raw digest advances request order but keeps
+   * the stored facts object, so held snapshots see that no report disappeared. */
+  observeInbox(session: string, value: unknown, facts: InboxFacts, initialChange = false): void {
+    this.observe(session, "inbox", value, initialChange);
+    const state = this.sessions.get(session)!;
+    if (state.inbox && facts.started <= state.inbox.started) return;
+    const digest = state.facets.get("inbox")?.digest;
+    if (state.inbox && digest !== undefined && digest === state.inbox.digest) { state.inbox.started = facts.started; return; }
+    const bytes = facts.reports.reduce((sum, fact) => sum + JSON.stringify(fact).length * 2, 0);
+    state.inbox = { started: facts.started, digest, facts: facts.reports.length > parentCounterproofMaxFacts || bytes > parentCounterproofMaxBytes
+      ? { started: facts.started, reports: [], overflow: true } : facts };
+  }
+
+  /** Non-owning, like record snapshots: no state creation, LRU refresh or pin.
+   * Undefined after eviction, so a held snapshot sees its facts gone. */
+  inboxFacts(session: string): InboxFacts | undefined { return this.sessions.get(session)?.inbox?.facts; }
 
   observe(session: string, facet: string, value: unknown, initialChange = false): void {
     const state = this.state(session);

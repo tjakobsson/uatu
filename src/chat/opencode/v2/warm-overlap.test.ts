@@ -112,3 +112,83 @@ test(`pre-registration ${kind} response fences ${phase} raw history (${mode}/${s
     await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
   }
 }, 10_000);
+
+// A positive inbox read can finish before any warm entry exists. Delivery during
+// (or after) the first parent load must not leave its pre-delivery transcript
+// reusable once that known report disappears.
+for (const delivery of ["never", "during-load", "unseen-until-consumer"] as const)
+for (const seam of ["provider", "adapter"] as const)
+test(`known pre-registration inbox report fences warm history across delivery (${delivery}/${seam})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const rawEntered = gate(), rawRelease = gate();
+  let parent: string | undefined, child: string | undefined, delivered = false, rawReads = 0;
+  const report = () => ({ id: "native-failure", type: "synthetic", time: { created: 45 }, payload: {
+    text: "Known native failure", metadata: { source: "subagent", childID: child, state: "error" },
+  } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: delivered ? [] : [report()] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), launch = body.data[0], result = report();
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      // The transcript is captured when the request arrives, before any hold.
+      const data = [launch, ...(delivered ? [{ ...result.payload, id: result.id, type: result.type, time: result.time }] : [])];
+      if (++rawReads === 1) { rawEntered.release(); await rawRelease.promise; }
+      return Response.json({ data, cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-input", type: "user", time: { created: 15 }, text: "Work" },
+      { id: "old-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" },
+    ], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), owner = new AbortController();
+  let warm: Promise<unknown> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Known inbox across warm registration")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = adapter.startEventPump(); void pump.catch(() => undefined); await provider.waitForEventStream!(owner.signal);
+    // 1. The positive read completes before any reuse entry is registered.
+    await provider.listPendingInbox!(parent);
+    // 2. The first warm load captures the pre-delivery transcript and is held.
+    warm = provider.getReversibleHistoryState!(parent); void warm.catch(() => undefined); await rawEntered.promise;
+    // 3. Delivery empties the inbox; only during-load observes it before install.
+    delivered = delivery !== "never";
+    if (delivery === "during-load") await provider.listPendingInbox!(parent);
+    rawRelease.release(); await warm;
+    expect(rawReads).toBe(1);
+    const page = seam === "provider" ? { items: await provider.reconcileBackgroundTasks!(parent) } : await adapter.history(parent);
+    const items: ConversationItem[] = page.items;
+    const row = items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    let published = row;
+    if (delivery !== "unseen-until-consumer") expect(row).toMatchObject({ status: "failed", resultId: "native-failure", summary: "Known native failure" });
+    else {
+      // The consumer itself first observes disappearance; it may not publish
+      // the stale inferred completion, and a later quiet read reloads.
+      expect(row?.status).not.toBe("completed");
+      const quiet = seam === "provider" ? { items: await provider.reconcileBackgroundTasks!(parent) } : await adapter.history(parent);
+      const later = (quiet.items as ConversationItem[]).find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      expect(later).toMatchObject({ status: "failed", resultId: "native-failure", summary: "Known native failure" });
+      published = later;
+    }
+    // Disappearance retires the stale transcript; one later independent read
+    // loads the delivered report. (A still-pending report keeps its existing
+    // per-consumer counterproof, so the control's read count is not pinned.)
+    if (delivery !== "never") expect(rawReads).toBe(2);
+    if (seam === "adapter") {
+      // Dismissal evidence follows the Failed row, not a stale Completed one.
+      const expected = workerDismissalEvidence(published)!, evidence = await adapter.workerEvidence(parent);
+      expect(evidence.entries.find(entry => entry.executionId === expected.executionId)?.signature).toBe(expected.signature);
+    }
+    const fresh = (await provider.reconcileBackgroundTasks!(parent, { fresh: true })).find(item => item.taskId === worker.taskId);
+    expect(fresh).toMatchObject({ status: "failed", resultId: "native-failure" });
+    expect(fake.state().unhandled).toEqual([]);
+  } finally {
+    rawRelease.release(); owner.abort(); await warm?.catch(() => undefined);
+    await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
+  }
+}, 10_000);

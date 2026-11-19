@@ -1592,8 +1592,19 @@ export class ChatAdapter {
       if (this.provider.waitForEventStream) for (const task of recovered) if (task.status === "running" && !task.foreground) nativeLiveTasks.add(task.id);
       const { byId, supersedes } = indexRecoveredBackgroundTasks(recovered);
       const currentIds = options.workers ? new Set(items.map(item => item.id)) : undefined;
-      const retainedRows = this.projection(id).items().filter(known => !(known.type === "background_task" && known.outcomeWithheld
-        && items.some(item => item.type === "background_task" && item.id === known.id && item.status !== "running" && !item.stateUncertain)));
+      // A current page's explicit report also replaces a retained report-free
+      // row (an inference or withheld outcome); a report-free page row never
+      // displaces a retained report. On the latest page the complete source
+      // also discharges a withheld off-page row backfilled by an earlier read.
+      const settledSources = !cursor && page.completeItems ? [...items, ...page.completeItems] : items;
+      const retainedRows = this.projection(id).items().filter(known => {
+        const discharged = known.type === "background_task" && (items.some(item => item.type === "background_task" && item.id === known.id
+          && item.resultId !== undefined && known.resultId === undefined)
+          || known.outcomeWithheld && settledSources.some(item => item.type === "background_task" && item.id === known.id
+            && item.status !== "running" && !item.stateUncertain));
+        if (discharged && !items.some(item => item.id === known.id)) revokedRows.add(known.id);
+        return !discharged;
+      });
       // A fresh page can discharge a prior inference veto even when the
       // independent inventory is unavailable. Its retained counter projection
       // still gets the final publication veto; the old fallback is not evidence
@@ -2182,10 +2193,27 @@ export class ChatAdapter {
           && !visibility?.excludedItemIds.includes(itemId)
           && !(witness.childConversationId && revokedChildren.has(witness.childConversationId)) ? witness : undefined;
       };
+      const projectWorker = (item: ConversationItem) => coverage ? coverage.workerSources.project(item)
+        : item.type === "background_task" ? page.workerSource?.projectInferredOutcome?.(item) ?? item : item;
+      // Evidence can change after the provider filtered its page. On the
+      // latest page, bring an off-page worker that the final guards withhold
+      // or reopen; quiet and terminal off-page rows stay off the page. A row
+      // another publication changed or removed during this read keeps the
+      // merged current state; the stale page copy cannot restore it.
+      if (!cursor && page.completeItems) {
+        const held = new Set(items.map(item => item.id));
+        for (const item of page.completeItems) {
+          if (item.type !== "background_task" || held.has(item.id) || historyRemovals.has(item.id)
+            || coverage?.changed(item.id) || visibility?.excludedItemIds.includes(item.id)) continue;
+          const projected = projectWorker(item);
+          if (projected === item || projected.type !== "background_task" || !(projected.status === "running" || projected.outcomeWithheld)) continue;
+          const at = items.findIndex(existing => existing.createdAt > item.createdAt);
+          items.splice(at < 0 ? items.length : at, 0, item);
+        }
+      }
       for (let index = 0; index < items.length; index++) {
         const item = items[index]!;
-        const projected = coverage ? coverage.workerSources.project(item)
-          : item.type === "background_task" ? page.workerSource?.projectInferredOutcome?.(item) ?? item : item;
+        const projected = projectWorker(item);
         if (projected !== item) { items[index] = projected; revokedRows.add(item.id); }
         if (coverage && projected.type === "background_task") {
           // Covered history and compact evidence take the cursor of this

@@ -5,7 +5,7 @@ import { measureChatWork } from "../../performance";
 import { number as numberField } from "../normalization";
 import { prepareStoredMessage } from "./normalization";
 import type { LauncherEvidence } from "./background";
-import type { RecordSnapshot } from "./session-changes";
+import type { InboxFacts, InboxReportFact, RecordSnapshot } from "./session-changes";
 
 type StoredMessage = Record<string, unknown>;
 type NativeReadOrder = Readonly<{ started: number; completed: number }>;
@@ -19,6 +19,8 @@ type CompleteHistory = { messages: StoredMessage[]; nativeReadOrder: NativeReadO
 type Qualification = {
   recordsAfter: number; pendingAfter: number;
   recordSnapshot?: RecordSnapshot;
+  /** Deny-only: a positive inbox read completed before registration. */
+  inboxSnapshot?: InboxFacts;
   rawSignature?: string;
   visibility?: NativeReadOrder & { boundary: string | null };
 };
@@ -41,6 +43,8 @@ export class V2NativeHistory {
     observeHistory(session: string, messages: StoredMessage[]): void;
     observeRecord(value: unknown, requestedId: string | undefined): void;
     snapshotRecord(session: string): RecordSnapshot | undefined;
+    observeInbox(session: string, entries: unknown, facts: InboxFacts): void;
+    inboxFacts(session: string): InboxFacts | undefined;
   }) {
     this.workspace = path.resolve(options.directory);
     this.reuse = new HistoryReuse(undefined, undefined, () => ({
@@ -51,7 +55,8 @@ export class V2NativeHistory {
   async complete(session: string, signal: AbortSignal): Promise<CompleteHistory> {
     signal.throwIfAborted();
     this.qualifyRecordSnapshot(session);
-    const snapshot = this.options.snapshotRecord(session);
+    this.qualifyInboxSnapshot(session);
+    const snapshot = this.options.snapshotRecord(session), known = this.options.inboxFacts(session);
     const reading = this.reuse.readShared(session, this.options.version(), owner => {
       const sharedSignal = this.options.readSignal(owner);
       return this.coveredRead(sharedSignal, () => this.readComplete(session, sharedSignal));
@@ -59,7 +64,10 @@ export class V2NativeHistory {
     // readShared registers synchronously and defers its loader. Seed only this
     // entry, before native IO, without replacing a shared/installed baseline.
     const entry = this.reuse.peekObservation(session, this.options.version());
-    if (entry && !("recordSnapshot" in entry)) entry.recordSnapshot = snapshot;
+    if (entry && !("recordSnapshot" in entry)) {
+      entry.recordSnapshot = snapshot;
+      if (known && (known.reports.length || known.overflow)) entry.inboxSnapshot = known;
+    }
     const messages = await reading;
     signal.throwIfAborted();
     return { messages, nativeReadOrder: this.readOrders.get(messages)! };
@@ -71,7 +79,7 @@ export class V2NativeHistory {
     const entries = await this.options.client.session.inbox.list({ sessionID: session }, { signal });
     signal.throwIfAborted();
     const completed = this.options.historyOrder.next();
-    const reports: Array<PendingOutcomeRead["reports"][number]> = [], seen = new Set<string>();
+    const reports: Array<PendingOutcomeRead["reports"][number]> = [], seen = new Set<string>(), known: InboxReportFact[] = [];
     let bytes = 0, overflow: true | undefined;
     for (const value of entries as Array<Record<string, unknown>>) {
       if (value.type !== "synthetic") continue;
@@ -83,9 +91,14 @@ export class V2NativeHistory {
       const fact = { child: report.worker, at, digest }, size = JSON.stringify(fact).length * 2;
       if (reports.length >= parentCounterproofMaxFacts || bytes + size > parentCounterproofMaxBytes) { overflow = true; break; }
       reports.push(fact); seen.add(digest); bytes += size;
+      // The native id is retained only as deny-only coverage evidence; it is
+      // outside the counterproof byte budget, which SessionChanges re-bounds.
+      known.push(typeof value.id === "string" ? { ...fact, id: value.id } : fact);
     }
     const observation: PendingOutcomeRead = { started, completed, reports, ...(overflow ? { overflow } : {}) };
+    this.options.observeInbox(session, entries, { started, reports: known, ...(overflow ? { overflow } : {}) });
     this.qualifyInbox(session, observation);
+    this.qualifyInboxSnapshot(session);
     return { entries, observation };
   }
 
@@ -134,6 +147,7 @@ export class V2NativeHistory {
         if (entry.rawSignature !== undefined && entry.rawSignature !== signature) this.reuse.invalidate(session);
         else entry.rawSignature = signature;
       }
+      this.qualifyInboxSnapshot(session, messages);
       this.options.observeHistory(session, messages);
       this.readOrders.set(messages, { started, completed: this.options.historyOrder.next() });
       return messages;
@@ -144,22 +158,24 @@ export class V2NativeHistory {
     const version = this.options.version(), entry = this.reuse.peekObservation(session, version);
     if (!entry || observation.completed <= entry.pendingAfter || !observation.reports.length && !observation.overflow) return;
     const complete = this.reuse.peek(session, version);
-    if (!complete) { this.reuse.invalidate(session); return; }
-    const launches = new Map<string, LauncherEvidence[]>(), reports: PendingOutcomeRead["reports"][number][] = [];
-    for (const message of complete) {
-      const prepared = prepareStoredMessage(message);
-      for (const tool of prepared.tools.values()) if (tool.name === "subagent" && tool.fact.reportedChild) {
-        const child = tool.fact.reportedChild, facts = launches.get(child) ?? [];
-        facts.push(tool.fact); launches.set(child, facts);
-      }
-      const report = prepared.notification;
-      if (report?.source === "subagent" && report.valid && report.status && report.worker) {
-        const at = numberField(record(message.time).created);
-        reports.push({ child: report.worker, at, digest: historyVersion([identity(message), at, report]) });
-      }
-    }
-    const missing = { ...observation, reports: observation.reports.filter(report => !reports.some(cached => cached.digest === report.digest)) };
-    if (observation.overflow || [...launches].some(([child, facts]) => pendingOutcomeSignature(missing, child, facts) !== undefined)) this.reuse.invalidate(session);
+    if (!complete || inboxContradicts(complete, observation)) this.reuse.invalidate(session);
+  }
+
+  /** A known pre-registration report (the SessionChanges inbox facts) that
+   * later disappears, by delivery, eviction or overflow, retires a transcript
+   * that lacks it. A pending entry is checked when its transcript returns. */
+  private qualifyInboxSnapshot(session: string, loaded?: StoredMessage[]): void {
+    const version = this.options.version(), known = this.reuse.peekObservation(session, version)?.inboxSnapshot;
+    const current = this.options.inboxFacts(session);
+    // SessionChanges keeps the stored facts object across replies with an
+    // unchanged raw digest, so identity means no known report disappeared.
+    if (!known || current === known) return;
+    const gone = { ...known, reports: known.reports.filter(report => !current?.reports.some(next => next.digest === report.digest)) };
+    if (!gone.reports.length && !gone.overflow) return;
+    const messages = loaded ?? this.reuse.peek(session, version);
+    // Delivery may restamp the report's clock; its native id still covers it.
+    // Evicted facts are undefined, so every known report counts as gone.
+    if (messages && inboxContradicts(messages, gone)) this.reuse.invalidate(session);
   }
 
   private async coveredRead<T>(signal: AbortSignal, read: () => Promise<T>): Promise<T> {
@@ -194,8 +210,29 @@ export class V2NativeHistory {
   }
 }
 
+/** Overflow, or a relevant report that the transcript does not contain. */
+function inboxContradicts(complete: readonly StoredMessage[], observation: Pick<InboxFacts, "reports" | "overflow">): boolean {
+  if (observation.overflow) return true;
+  const launches = new Map<string, LauncherEvidence[]>(), reports: Array<PendingOutcomeRead["reports"][number] & { id: string }> = [];
+  for (const message of complete) {
+    const prepared = prepareStoredMessage(message);
+    for (const tool of prepared.tools.values()) if (tool.name === "subagent" && tool.fact.reportedChild) {
+      const child = tool.fact.reportedChild, facts = launches.get(child) ?? [];
+      facts.push(tool.fact); launches.set(child, facts);
+    }
+    const report = prepared.notification;
+    if (report?.source === "subagent" && report.valid && report.status && report.worker) {
+      const at = numberField(record(message.time).created);
+      reports.push({ child: report.worker, at, digest: historyVersion([identity(message), at, report]), id: identity(message) });
+    }
+  }
+  const missing = { ...observation, reports: observation.reports.filter(report => !reports.some(cached => cached.digest === report.digest
+    || report.id !== undefined && cached.id === report.id && cached.child === report.child)) };
+  return [...launches].some(([child, facts]) => pendingOutcomeSignature(missing, child, facts) !== undefined);
+}
+
 /** Also used by the independent worker activity veto; equality grants no report. */
-export function pendingOutcomeSignature(read: PendingOutcomeRead, child: string, launches: readonly LauncherEvidence[]): string | undefined {
+export function pendingOutcomeSignature(read: Pick<PendingOutcomeRead, "reports">, child: string, launches: readonly LauncherEvidence[]): string | undefined {
   let start: number | undefined = Infinity;
   for (const launch of launches) {
     const at = launch.ran ?? launch.created;

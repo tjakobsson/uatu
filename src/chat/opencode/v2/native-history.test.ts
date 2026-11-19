@@ -20,7 +20,7 @@ test("a retired native reply denies replacement reuse without replacing truth or
     return Response.json({ data: [{ id: "idle", type: "idle", time: { created: 40 }, outcome: read === 1 ? "succeeded" : "failed" }], cursor: {} });
   }) as unknown as typeof fetch });
   const history = new V2NativeHistory({ client, directory: process.cwd(), version: () => "1",
-    snapshotRecord: () => undefined,
+    snapshotRecord: () => undefined, observeInbox: () => {}, inboxFacts: () => undefined,
     historyOrder: { current: () => historyClock, next: () => ++historyClock },
     recordOrder: { current: () => recordClock, next: () => ++recordClock },
     readSignal: signal => signal, observeHistory: (_id, messages) => { observed.push(messages); }, observeRecord: () => {},
@@ -52,6 +52,8 @@ function nativeHarness(handler: (request: Request) => Response | Promise<Respons
   const client = OpenCode.make({ baseUrl: "http://native.test", fetch: (async (input: Request | string | URL, init?: RequestInit) => handler(new Request(input, init))) as typeof fetch });
   const history = new V2NativeHistory({ client, directory: process.cwd(), version: () => version,
     snapshotRecord: session => changes.snapshotRecord(session),
+    observeInbox: (session, entries, facts) => changes.observeInbox(session, entries, facts),
+    inboxFacts: session => changes.inboxFacts(session),
     historyOrder: { current: () => historyClock, next: () => ++historyClock },
     recordOrder: { current: () => recordClock, next: () => ++recordClock }, readSignal: signal => signal,
     observeHistory: (session, messages) => { observations.push({ session, messages }); },
@@ -332,6 +334,77 @@ test("completed inbox evidence before registration cannot contaminate the new en
     expect(first.messages).toEqual([fixture.launch, fixture.stored]);
     expect((await h.history.complete("parent", signal())).messages).toBe(first.messages);
     expect(reads).toBe(1);
+  } finally { h.history.dispose(); }
+});
+
+for (const phase of ["pending", "installed"] as const)
+for (const transcript of ["missing", "covered", "still-pending"] as const)
+test(`known pre-registration inbox report retires warm history only when it disappears (${phase}/${transcript})`, async () => {
+  const rawEntered = gate(), rawRelease = gate();
+  let reads = 0, delivered = false;
+  const h = nativeHarness(async request => {
+    if (new URL(request.url).pathname.endsWith("/inbox")) return Response.json({ data: delivered ? [] : [fixture.pending] });
+    const data = [fixture.launch, ...(transcript === "covered" ? [fixture.stored] : [])];
+    if (++reads === 1) { rawEntered.release(); await rawRelease.promise; }
+    return raw(data);
+  });
+  let warm: ReturnType<V2NativeHistory["complete"]> | undefined;
+  try {
+    await h.history.inbox("parent", signal()); // Completes before any reuse entry exists.
+    warm = h.history.complete("parent", signal()); await rawEntered.promise;
+    if (phase === "installed") { rawRelease.release(); await warm; }
+    delivered = transcript !== "still-pending";
+    if (delivered) await h.history.inbox("parent", signal());
+    rawRelease.release(); await warm;
+    expect(reads).toBe(1); // Disappearance starts no IO and cancels no waiter.
+    await h.history.complete("parent", signal());
+    expect(reads).toBe(transcript === "missing" ? 2 : 1);
+  } finally { rawRelease.release(); await warm?.catch(() => {}); h.history.dispose(); }
+});
+
+for (const phase of ["pending", "installed"] as const)
+test(`evicted known inbox facts fail closed for a transcript lacking the report (${phase})`, async () => {
+  const rawEntered = gate(), rawRelease = gate(); let reads = 0;
+  const h = nativeHarness(async request => {
+    if (new URL(request.url).pathname.endsWith("/inbox")) return Response.json({ data: [fixture.pending] });
+    if (++reads === 1) { rawEntered.release(); await rawRelease.promise; }
+    return raw([fixture.launch]);
+  });
+  let warm: ReturnType<V2NativeHistory["complete"]> | undefined;
+  try {
+    await h.history.inbox("parent", signal());
+    warm = h.history.complete("parent", signal()); await rawEntered.promise;
+    if (phase === "installed") { rawRelease.release(); await warm; }
+    await h.history.inbox("other", signal()); // Capacity one: evicts the parent's facts.
+    rawRelease.release(); await warm;
+    expect(reads).toBe(1);
+    await h.history.complete("parent", signal());
+    expect(reads).toBe(2);
+  } finally { rawRelease.release(); await warm?.catch(() => {}); h.history.dispose(); }
+});
+
+// Native ids can push stored inbox facts past the counterproof bounds even
+// when the native observation fits. An identical later reply then proves that
+// no known report disappeared; a relevant pending report still retires reuse.
+for (const inbox of ["unrelated-overflow", "related"] as const)
+test(`identical inbox replies keep warm history unless a relevant report is pending (${inbox})`, async () => {
+  const unrelated = "ses_0123456789abcdefghijklmnop";
+  const reports = inbox === "related" ? [fixture.pending] : Array.from({ length: 256 }, (_, index) => ({ ...fixture.pending,
+    id: `msg_${String(index).padStart(4, "0")}abcdefghijklmnopqrstuv`,
+    payload: { ...fixture.pending.payload, text: fixture.pending.payload.text.replace("ses_child", unrelated),
+      metadata: { ...fixture.pending.payload.metadata, childID: unrelated } } }));
+  let reads = 0;
+  const h = nativeHarness(async request => {
+    if (new URL(request.url).pathname.endsWith("/inbox")) return Response.json({ data: reports });
+    reads++; return raw([fixture.launch]);
+  });
+  try {
+    const first = await h.history.inbox("parent", signal());
+    expect(first.observation.overflow).toBeUndefined();
+    expect(h.changes.inboxFacts("parent")?.overflow).toBe(inbox === "unrelated-overflow" ? true : undefined);
+    await h.history.complete("parent", signal());
+    for (let read = 0; read < 3; read++) { await h.history.inbox("parent", signal()); await h.history.complete("parent", signal()); }
+    expect(reads).toBe(inbox === "related" ? 4 : 1);
   } finally { h.history.dispose(); }
 });
 

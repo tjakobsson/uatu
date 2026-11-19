@@ -31,9 +31,19 @@ therefore require that read; no-crossing and identical-record controls retain
 reuse. This read-count trade-off was explicitly approved without weakening
 outcome, identity, source-guard, Stop or no-automatic-retry assertions.
 
+The same deny-only rule covers the known inbox facet. As an approved, bounded
+amendment to the store's digests-only rule, the SessionChanges inbox facet keeps
+the latest inbox read's report facts (digest, child, clock, native message id,
+overflow), ordered by request start, within the existing counterproof bounds
+(256 facts, 64 KB) and session eviction. A new entry snapshots a positive read
+completed before registration. When a known report later disappears, by
+delivery, eviction or overflow, and the transcript lacks it (matched by digest
+or native message id), the entry is retired; a transcript that already contains
+it keeps reuse.
+
 ## Recovery contract clarification — 2026-11-17
 
-Complete the existing v2-local module with bounded, deny-only knowledge from the existing same-session record store; do not introduce a second ledger/cache, chronology engine or automatic retry. Keep retired-start admission corrections local to execution evidence, with outcome counters, activity, ownership and Stop authorization separate from reuse qualification.
+Complete the existing v2-local module with bounded, deny-only knowledge from the existing same-session record store; do not introduce a second ledger/cache, chronology engine or automatic retry (the bounded inbox report facts above extend that same store's inbox facet, not a second ledger). Keep retired-start admission corrections local to execution evidence, with outcome counters, activity, ownership and Stop authorization separate from reuse qualification.
 
 Cache retirement grants no authority. A later independent current read may earn existing Stop eligibility only from its own qualified evidence, without restoring revoked eligibility through retired starts, replays or reconnect gaps. Performing Stop still requires separate fresh authorization.
 

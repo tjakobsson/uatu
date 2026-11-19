@@ -462,7 +462,7 @@ unit, both browser legs, performance, contracts, specs and CodeQL. An automatic
 Codex review already exists for that exact head (`5911626346`), so no duplicate
 review request was posted. Its two findings remain pending, not a clean verdict.
 
-- [ ] 6.27 Reproduce and check introduction of a staged record completed before warm-history registration, followed by clear/commit while that raw load is pending. Establish a correction compatible with the approved module/state limits, escalating any required policy change before implementation.
+- [x] 6.27 Reproduce and check introduction of a staged record completed before warm-history registration, followed by clear/commit while that raw load is pending. Establish a correction compatible with the approved module/state limits, escalating any required policy change before implementation.
 - [x] 6.28 Reproduce and check introduction of retired native start proofs becoming positive execution bindings after reconnect and parent-content restatement. Preserve their replay/counterproof role without restoring unsupported activity or Stop authority.
 - [ ] 6.29 Verify and push any accepted corrections, require current-head GitHub CI, and resume GitHub Codex review without duplicating an existing current-head request or review.
 
@@ -701,3 +701,27 @@ view-only clear returns on replacement, covers Checking expiry in the browser,
 or exercises a Hub save failure, a shell row save or a local-mode row save end
 to end. Unit tests cover these paths. The broader GitHub CI run remains the
 integration gate.
+
+## 10. GitHub Codex review of 08fc6473
+
+Triage of the 14 unresolved current Codex threads at 08fc6473 found ten already
+fixed by later tasks (5.10, 5.24, 5.34, 5.35, 5.38, 5.45, 5.51, 5.77, 6.16, 6.27).
+6.27 is fixed in 08fc6473 by the pre-registration record snapshot;
+`pre-registration-record.test.ts` passes 8/8. Four reproduced and were introduced
+by this change, not present on main.
+
+- [x] 10.1 Carry known inbox reports across warm-history registration (Codex 4633181731). The SessionChanges inbox facet, written only by `observeInbox`, keeps bounded request-ordered report facts as an approved exception to its digests-only rule. When a known report disappears and the transcript lacks it, a pending or installed native-history entry is retired. An identical newer reply keeps the same facts object, so unrelated overflow no longer retires warm history. Tests: `warm-overlap.test.ts` "known pre-registration inbox report fences warm history across delivery"; `native-history.test.ts` "…retires warm history only when it disappears", "evicted known inbox facts fail closed…", "identical inbox replies keep warm history unless a relevant report is pending"; `session-changes.test.ts` inbox-facet tests.
+- [x] 10.2 Bound exact-response report intervals with retained execution ends (Codex 4575545403). The latest retained native end below the terminal idle raises the interval's lower bound, so a later run's report no longer attaches to an older task. An end before the admission only excludes older launches, and unknown retained ends (undated or saturated) skip correlation. Tests: `worker-outcome-race.test.ts` "keeps retained execution ends inside exact-response report intervals" and "bounds exact-response report intervals with retained execution ends".
+- [x] 10.3 Prefer fresh explicit reports over retained report-free inferences (Codex 4575352930). Tests: `worker-final-handoff.test.ts` "fresh explicit report replaces a retained report-free inference".
+- [x] 10.4 Backfill latest-page workers withheld at the final handoff (Codex 4575352932), skipping rows that another publication changed or removed during the read. Tests: `worker-final-handoff.test.ts` "latest page backfills an off-page worker withheld at the final handoff" and "latest page backfill keeps a concurrently superseded worker removed".
+
+A cross-family review of these fixes (a Claude Opus reviewer and OpenCode's
+reviewer on GPT-6.2 Sol) found four further issues, all reproduced before
+being fixed: the interval veto was too broad and too narrow, the backfill
+ignored concurrent removals, and identical overflowing inbox replies caused
+reloads. The entries above describe the corrected behaviour.
+
+Checks with Bun 1.4.4: `src/chat/opencode/v2/` 4566 pass, 1 skip; adapter,
+withheld-marker and dismissal-identity 960 pass; focused compact-work,
+workers-view, worker-dismissal, worker-state and Hub worker-dismissals 327 pass;
+typecheck, `git diff --check` and strict OpenSpec validation are clean.

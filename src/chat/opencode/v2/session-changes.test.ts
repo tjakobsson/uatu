@@ -77,6 +77,56 @@ test("record snapshot lookup does not refresh the observation store LRU", () => 
   expect(changes.snapshotRecord("new")?.unchanged()).toBe(true);
 });
 
+test("the inbox facet keeps bounded request-ordered report facts; other facets stay digests-only", () => {
+  const changes = new SessionChanges(1);
+  const positive = { started: 5, reports: [{ child: "child", at: 45, digest: "report", id: "msg_result" }] };
+  changes.observe("parent", "history", ["transcript"]); changes.observe("parent", "record", { id: "parent" });
+  expect(changes.inboxFacts("parent")).toBeUndefined(); // Other facets retain no facts.
+  const record = changes.snapshotRecord("parent")!, counter = changes.capture("parent");
+  changes.observeInbox("parent", ["positive"], positive);
+  expect(changes.inboxFacts("parent")).toBe(positive);
+  expect(record.unchanged()).toBe(true);
+  // An older empty reply arriving later keeps the newer positive facts, while
+  // the facet digest and counter still follow observation order.
+  changes.observeInbox("parent", [], { started: 3, reports: [] });
+  expect(changes.inboxFacts("parent")).toBe(positive);
+  expect(counter.unchanged()).toBe(false);
+  counter.release();
+  const newer = { started: 7, reports: [] };
+  changes.observeInbox("parent", [], newer);
+  expect(changes.inboxFacts("parent")).toBe(newer);
+  // Past the counterproof bounds only overflow remains, which denies reuse.
+  const many = Array.from({ length: 257 }, (_, index) => ({ child: "child", digest: `report-${index}` }));
+  changes.observeInbox("parent", ["many"], { started: 8, reports: many });
+  expect(changes.inboxFacts("parent")).toEqual({ started: 8, reports: [], overflow: true });
+  changes.observeInbox("parent", ["large"], { started: 9, reports: [{ child: "child", digest: "large", id: "x".repeat(40_000) }] });
+  expect(changes.inboxFacts("parent")).toEqual({ started: 9, reports: [], overflow: true });
+  // Lookup neither creates state nor refreshes LRU; eviction loses the facts.
+  changes.observeInbox("parent", ["positive"], { ...positive, started: 10 });
+  expect(changes.inboxFacts("unknown")).toBeUndefined();
+  expect(changes.inboxFacts("parent")?.started).toBe(10);
+  changes.observe("other", "record", {});
+  expect(changes.inboxFacts("parent")).toBeUndefined();
+  changes.observe("parent", "inbox", ["positive"]);
+  expect(changes.inboxFacts("parent")).toBeUndefined(); // Recreation cannot revive them.
+});
+
+test("an identical newer inbox reply keeps the stored facts object and advances request order", () => {
+  const changes = new SessionChanges(1);
+  const many = Array.from({ length: 257 }, (_, index) => ({ child: "child", digest: `report-${index}` }));
+  changes.observeInbox("parent", ["many"], { started: 5, reports: many });
+  const stored = changes.inboxFacts("parent")!;
+  expect(stored.overflow).toBe(true);
+  changes.observeInbox("parent", ["many"], { started: 7, reports: many });
+  expect(changes.inboxFacts("parent")).toBe(stored);
+  // The identical reply confirmed the facts at 7: an older reply cannot replace them.
+  changes.observeInbox("parent", [], { started: 6, reports: [] });
+  expect(changes.inboxFacts("parent")).toBe(stored);
+  // Any changed reply still installs new facts.
+  changes.observeInbox("parent", [], { started: 8, reports: [] });
+  expect(changes.inboxFacts("parent")).toEqual({ started: 8, reports: [] });
+});
+
 for (const changed of [false, true])
 test(`first child-scoped inventory ${changed ? "change withholds inference" : "equal observation preserves completion"}`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
