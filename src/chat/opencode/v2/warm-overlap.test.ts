@@ -295,7 +295,22 @@ test(`streamed pre-registration inbox report fences warm history across unseen d
       yield event;
     }
   })();
-  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), owner = new AbortController();
+  // The streamed frame also schedules the adapter's own recovery: the adapter's
+  // first reader of the stale warm transcript. Hold it until delivery.
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+  const deliveredGate = Promise.withResolvers<void>(), recovered = Promise.withResolvers<BackgroundTaskItem[]>();
+  const withheldProjected = Promise.withResolvers<void>();
+  let quietRead = false;
+  if (seam === "adapter") provider.reconcileBackgroundTasks = async (id, options) => {
+    if (id !== parent || quietRead) return nativeRecovery(id, options);
+    await deliveredGate.promise;
+    const rows = await nativeRecovery(id, options);
+    recovered.resolve(rows);
+    return rows;
+  };
+  const adapter: ChatAdapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0,
+    onActivityChange: () => { if (adapter.activity().unresolved) withheldProjected.resolve(); } });
+  const owner = new AbortController();
   let pump: Promise<void> | undefined;
   try {
     parent = (await provider.createSession("Streamed inbox before warm registration")).id;
@@ -316,8 +331,13 @@ test(`streamed pre-registration inbox report fences warm history across unseen d
       row = page.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
       expect(page.workerSource?.isCurrent()).toBe(true);
     } else {
-      const page = await adapter.history(parent);
-      row = (page.items as ConversationItem[]).find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      // The adapter's stale reader is the recovery the streamed frame scheduled.
+      deliveredGate.resolve();
+      row = (await recovered.promise).find(item => item.taskId === worker.taskId);
+      expect(row).toMatchObject({ status: "running", outcomeWithheld: true });
+      // Its withheld row must land before the quiet read, or that read keeps it.
+      await withheldProjected.promise;
+      quietRead = true;
     }
     // The already-observed failure denies a report-free, dismissible Completed.
     expect(row?.status).not.toBe("completed");
@@ -334,7 +354,7 @@ test(`streamed pre-registration inbox report fences warm history across unseen d
     expect(fresh).toMatchObject({ status: "failed", resultId: "streamed-failure" });
     expect(fake.state().unhandled).toEqual([]);
   } finally {
-    owner.abort(); await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
+    deliveredGate.resolve(); owner.abort(); await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
   }
 }, 10_000);
 

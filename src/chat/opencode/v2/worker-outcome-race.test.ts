@@ -3066,6 +3066,7 @@ test(`${read} retains boundary transitions during the first child transcript (${
   let coveredPageSignal: AbortSignal | undefined, heldConsumer: PrefixConsumer | undefined, taskId: string | undefined;
   let openingExecutionId: string | undefined;
   const atCoveredRecovery = Promise.withResolvers<void>(), releaseCoveredRecovery = Promise.withResolvers<void>();
+  const coveredPage = Promise.withResolvers<void>(), coveredSettled = Promise.withResolvers<void>();
   const nativeMessages = provider.listMessages.bind(provider);
   if (adapterPrefix) {
     if (explicitFirst) provider.listMessages = async (...args) => {
@@ -3077,6 +3078,7 @@ test(`${read} retains boundary transitions during the first child transcript (${
         openingExecutionId = openingRow?.activity?.executionId;
         expect(openingExecutionId).toBeDefined();
         coveredPageSignal = args[1].signal;
+        coveredPage.resolve();
       }
       return page;
     };
@@ -3084,14 +3086,20 @@ test(`${read} retains boundary transitions during the first child transcript (${
     provider.reconcileBackgroundTasks = async (id, options) => {
       if (id !== parent) return nativeRecovery(id, options);
       const consumer = prefixConsumer.getStore() ?? { kind: "adapter" };
-      // Hold just the adapter's covered recovery, before it enters the provider.
-      if (explicitFirst && !heldConsumer && coveredPageSignal && options?.signal === coveredPageSignal && !options.fresh) {
-        heldConsumer = consumer;
-        atCoveredRecovery.resolve();
-        await releaseCoveredRecovery.promise;
+      if (explicitFirst && !prefixConsumer.getStore() && !options?.fresh) {
+        await coveredPage.promise;
+        // Hold the adapter's covered recovery, before it enters the provider.
+        if (!heldConsumer && options?.signal === coveredPageSignal) {
+          heldConsumer = consumer;
+          atCoveredRecovery.resolve();
+          await releaseCoveredRecovery.promise;
+        // Stream discovery's recovery is an independent adapter reader: it must
+        // neither precede the explicit consumer nor take the held one's read.
+        } else await coveredSettled.promise;
       }
       const rows = await prefixConsumer.run(consumer, () => nativeRecovery(id, options));
       consumer.rows = rows;
+      if (consumer === heldConsumer) coveredSettled.resolve();
       return rows;
     };
   }
@@ -3230,7 +3238,7 @@ test(`${read} retains boundary transitions during the first child transcript (${
       });
       expect(quiet.find(item => item.taskId === worker.taskId)?.outcomeWithheld).toBeUndefined();
     }
-  } finally { releaseCoveredRecovery.resolve(); releaseFresh(); releaseParent(); releaseOutcome(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
+  } finally { releaseCoveredRecovery.resolve(); coveredPage.resolve(); coveredSettled.resolve(); releaseFresh(); releaseParent(); releaseOutcome(); releaseOlder(); release(); abort.abort(); await older?.catch(() => undefined); await reading?.catch(() => undefined); if (adapter) await adapter.dispose(); else await provider.dispose!(); await fake.stop(); }
 }, 10_000);
 
 for (const change of ["stale-cleared", "stale-staged", "unchanged", "newer-change"] as const)
