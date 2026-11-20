@@ -7903,6 +7903,45 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect(adapter.projectionForTests("session").items().filter(item => item.type === "background_task")).toEqual([canonical]);
     } finally { await adapter.dispose(); await pump; }
   });
+  // Recovery can discover an earlier launcher for a withheld worker: the
+  // canonical row id changes while its aliases still name the prior execution.
+  // The prior row's denial must move to that row, never to another execution.
+  for (const path of ["snapshot", "stream"] as const) for (const recovered of ["overlap", "disjoint", "other-child", "terminal"] as const) test(`${path} alias supersession carries a withheld veto to the canonical row (${recovered})`, async () => {
+    // Connected, so history and worker evidence take the covered read.
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("session")];
+    const prior: BackgroundTaskItem = { id: "task:joined", type: "background_task", taskId: "joined", toolUseId: "joined", childConversationId: "child",
+      taskType: "agent", createdAt: 2, description: "Worker", status: "running", stateUncertain: true, outcomeWithheld: true,
+      control: { available: false }, activity: { kind: "unavailable", generation: 1, executionId: "execution-b" } };
+    const canonical: BackgroundTaskItem = { ...prior, id: "task:first", taskId: "first", toolUseId: "first", toolUseIds: ["first", "joined"], createdAt: 1,
+      ...(recovered === "other-child" ? { childConversationId: "other-child" } : {}),
+      activity: { kind: "unavailable", generation: 1, executionId: "execution-a",
+        executionAliases: recovered === "disjoint" ? ["execution-a"] : ["execution-a", "execution-b"] } };
+    delete canonical.outcomeWithheld;
+    const current: BackgroundTaskItem = recovered === "terminal" ? { ...canonical, status: "failed", stateUncertain: false, resultId: "result", summary: "Failed",
+      activity: { ...canonical.activity!, kind: "ended", endedAt: 3 } } : canonical;
+    // The snapshot path keeps stream recovery empty until the covered history
+    // read starts, so that read itself performs the supersession.
+    let reads = 0, recovering = path === "stream";
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; return recovering ? [structuredClone(current)] : []; } });
+    provider.listMessages = async () => ({ items: [structuredClone(current)], completeItems: [structuredClone(current)], accounting: [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    adapter.projectionForTests("session").apply({ kind: "upsert", item: prior });
+    const pump = adapter.startEventPump();
+    const vetoed = recovered === "overlap";
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      if (path === "stream") await waitUntil(() => adapter.projectionForTests("session").has(canonical.id));
+      else { await waitUntil(() => reads >= 1); recovering = true; }
+      const workers = (await adapter.history("session")).items.filter((item): item is BackgroundTaskItem => item.type === "background_task");
+      expect(workers.map(item => item.id)).toEqual([canonical.id]);
+      expect(workers[0]!.outcomeWithheld).toBe(vetoed ? true : undefined);
+      expect((adapter.projectionForTests("session").get(canonical.id) as BackgroundTaskItem).outcomeWithheld).toBe(vetoed ? true : undefined);
+      const evidence = (await adapter.workerEvidence("session")).entries;
+      expect(evidence.length).toBeGreaterThan(0);
+      for (const entry of evidence) expect(entry.dismissible).toBe(!vetoed);
+    } finally { await adapter.dispose(); await pump; }
+  });
   for (const evict of [false, true]) test(`idle-parent snapshot recovers an out-of-page worker and its pending result${evict ? " after projection eviction" : ""}`, async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session"), fixtureSession("other")];

@@ -135,11 +135,16 @@ function indexRecoveredBackgroundTasks(tasks: readonly BackgroundTaskItem[]) {
   const byId = new Map(tasks.map(item => [item.id, item]));
   const results = new Map(tasks.flatMap(item => item.resultId ? [[item.resultId, item.id] as const] : []));
   const launches = new Map(tasks.flatMap(item => [...(item.toolUseIds ?? []), ...(item.toolUseId ? [item.toolUseId] : [])].map(call => [call, item.id] as const)));
+  const successor = (known: BackgroundTaskItem): BackgroundTaskItem | undefined => {
+    const id = known.resultId && results.has(known.resultId) && results.get(known.resultId) !== known.id ? results.get(known.resultId)
+      : known.toolUseId && launches.has(known.toolUseId) && launches.get(known.toolUseId) !== known.id ? launches.get(known.toolUseId) : undefined;
+    return id === undefined ? undefined : byId.get(id);
+  };
   return {
     byId,
-    supersedes: (known: BackgroundTaskItem): boolean => Boolean(
-      known.resultId && results.has(known.resultId) && results.get(known.resultId) !== known.id
-      || known.toolUseId && launches.has(known.toolUseId) && launches.get(known.toolUseId) !== known.id),
+    supersedes: (known: BackgroundTaskItem): boolean => successor(known) !== undefined,
+    /** The recovered canonical row replacing `known`, if any. */
+    successor,
   };
 }
 
@@ -317,6 +322,18 @@ function withWorkerOutcomeVeto(current: ConversationItem | undefined, incoming: 
   if (retainedBinding) item[workerOutcomeVeto] = retainedBinding;
   else delete item[workerOutcomeVeto];
   return item;
+}
+
+/** Alias supersession changes only the row's identity. Rescope the prior
+ * row's denial to the canonical row and let the ordinary rules decide: a
+ * qualified alias overlap in the same task type and child keeps it; another
+ * execution, scope or fresh terminal evidence does not. Deny-only. */
+function transferWorkerOutcomeVeto(prior: WorkerWithOutcomeVeto, canonical: BackgroundTaskItem): BackgroundTaskItem {
+  const binding = prior[workerOutcomeVeto];
+  if (!binding && prior.outcomeWithheld !== true) return canonical;
+  const rescoped: WorkerWithOutcomeVeto = { ...prior, id: canonical.id, taskId: canonical.taskId };
+  if (binding) rescoped[workerOutcomeVeto] = { ...binding, id: canonical.id, taskId: canonical.taskId };
+  return withWorkerOutcomeVeto(rescoped, canonical);
 }
 
 /** Covered native evidence may withdraw an inference, never an explicit report. */
@@ -1590,7 +1607,7 @@ export class ChatAdapter {
       for (const task of recovered) recoveredWorkerIds.add(task.id);
       for (const task of recovered) if (task.resultId) positiveReports.add(task.resultId);
       if (this.provider.waitForEventStream) for (const task of recovered) if (task.status === "running" && !task.foreground) nativeLiveTasks.add(task.id);
-      const { byId, supersedes } = indexRecoveredBackgroundTasks(recovered);
+      const { byId, supersedes, successor } = indexRecoveredBackgroundTasks(recovered);
       const currentIds = options.workers ? new Set(items.map(item => item.id)) : undefined;
       // A current page's explicit report also replaces a retained report-free
       // row (an inference or withheld outcome); a report-free page row never
@@ -1637,6 +1654,10 @@ export class ChatAdapter {
           stageHistoryRemoval(known.id);
           const index = items.findIndex(item => item.id === known.id);
           if (index >= 0) items.splice(index, 1);
+          // The canonical row inherits a same-execution denial before the
+          // prior row goes; several prior rows accumulate onto one entry.
+          const canonical = successor(known);
+          if (canonical) byId.set(canonical.id, transferWorkerOutcomeVeto(known, byId.get(canonical.id)!));
           continue;
         }
         // Missing/failed recovery can withdraw retained cache observations, not
@@ -6272,7 +6293,8 @@ export class ChatAdapter {
         const safeTasks = tasks.filter(item => !fence.changed(item.id) && !fence.workerChanged(item))
           .map(item => workerSources.project(item) as BackgroundTaskItem);
         const progressAliases = this.backgroundProgressAliases(recovery, projection);
-        const { byId, supersedes } = indexRecoveredBackgroundTasks(safeTasks);
+        const { byId, supersedes, successor } = indexRecoveredBackgroundTasks(safeTasks);
+        const replacements = new Map<string, BackgroundTaskItem>();
         const recoveryUpdates: Array<Extract<NormalizedProviderUpdate, { kind: "upsert" | "remove" }>> = [];
         // Uncertain, Stop-withdrawn, on the pre-check evidence (possibly none).
         const restorePrecheck = (item: BackgroundTaskItem, precheck: { activity?: WorkerActivity }): BackgroundTaskItem => {
@@ -6283,6 +6305,8 @@ export class ChatAdapter {
           if (fence.changed(known.id)) continue;
           if (known.type === "background_task" && supersedes(known)) {
             recoveryUpdates.push({ kind: "remove", itemId: known.id });
+            const canonical = successor(known);
+            if (canonical) replacements.set(canonical.id, transferWorkerOutcomeVeto(known, replacements.get(canonical.id) ?? canonical));
             continue;
           }
           if (workerSources.hasSources() && replacesHistoryOnlyOutcome(known, byId.get(known.id))) {
@@ -6296,7 +6320,8 @@ export class ChatAdapter {
             recoveryUpdates.push({ kind: "upsert", item: precheck ? restorePrecheck(known, precheck) : unverifyWorkerTask(known) });
           }
         }
-        for (const item of safeTasks) {
+        for (const read of safeTasks) {
+          const item = replacements.get(read.id) ?? read;
           // A returned row that is only the unverified form of the same
           // execution is the same inconclusive result as an omission.
           // Positive activity, an end, or another execution stays as read.
