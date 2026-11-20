@@ -192,3 +192,64 @@ test(`known pre-registration inbox report fences warm history across delivery ($
     await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
   }
 }, 10_000);
+
+// Pre-request invalidation cannot retire a child history warmed while the
+// stage request is in flight. If the stage is then committed before any staged
+// record or event is observed, and the cleared record matches the pre-stage
+// one, that warm entry must not supply the idle the commit removed.
+for (const seam of ["provider", "adapter"] as const)
+test(`successful revert staging retires child history warmed during the request (${seam})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const stageEntered = gate(), stageRelease = gate();
+  let parent: string | undefined, child: string | undefined, committed = false, childReads = 0;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === `/api/session/${child}/revert/stage`) { stageEntered.release(); await stageRelease.promise; }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [launch], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      childReads++;
+      return Response.json({ data: committed ? [] : [{ id: "child-input", type: "user", time: { created: 15 }, text: "Work" },
+        { id: "old-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    }
+    if (route === `/api/session/${child}` && committed) {
+      // The committed record clears its boundary: identical to the pre-stage record.
+      const body = await response.json(); delete body.data.revert; return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), owner = new AbortController();
+  let undo: Promise<unknown> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Revert stage warm overlap")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = adapter.startEventPump(); void pump.catch(() => undefined); await provider.waitForEventStream!(owner.signal);
+    undo = provider.undo!(child); void undo.catch(() => undefined); await stageEntered.promise;
+    const before = childReads;
+    // Warm the child's native history while the stage request is in flight.
+    expect(await provider.getReversibleHistoryState!(child)).toMatchObject({ staged: false });
+    expect(childReads).toBe(before + 1);
+    stageRelease.release(); await undo;
+    committed = true; // Committed before any staged record or event was observed.
+    const page = seam === "provider" ? { items: await provider.reconcileBackgroundTasks!(parent) } : await adapter.history(parent);
+    const items: ConversationItem[] = page.items;
+    const row = items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    expect(row).toMatchObject({ status: "running" });
+    expect(row?.resultId).toBeUndefined();
+    expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true);
+    const fresh = (await provider.reconcileBackgroundTasks!(parent, { fresh: true })).find(item => item.taskId === worker.taskId);
+    expect(fresh).toMatchObject({ status: "running", activity: { kind: "working" } });
+    expect(fake.state().unhandled).toEqual([]);
+  } finally {
+    stageRelease.release(); owner.abort(); await undo?.catch(() => undefined);
+    await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
+  }
+}, 10_000);

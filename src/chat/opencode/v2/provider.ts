@@ -2848,7 +2848,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.nativeHistory.invalidate(sessionId);
     if (context.turns[index + 1]) return this.stageRevert(sessionId, context, index + 1);
     await this.client.session.revert.clear({ sessionID: sessionId });
-    this.sessionChanges.advance(sessionId);
+    this.reversibleHistoryChanged(sessionId);
     return { outcome: "changed", state: reversibleState(context.turns) };
   }
 
@@ -2857,8 +2857,16 @@ export class OpenCodeV2Provider implements ChatProvider {
     const target = context.turns[index];
     if (!target) throw new ReversibleHistoryTargetError();
     await this.client.session.revert.stage({ sessionID: sessionId, messageID: target.providerId });
-    this.sessionChanges.advance(sessionId);
+    this.reversibleHistoryChanged(sessionId);
     return { outcome: "changed", state: reversibleState(context.turns, index), restoredDraft: target.draft };
+  }
+
+  /** A successful revert mutation fences earlier captures and, deny-only,
+   * retires native history warmed while the request was in flight: the
+   * pre-request invalidation cannot reach an entry installed after it. */
+  private reversibleHistoryChanged(sessionId: string): void {
+    this.nativeHistory.invalidate(sessionId);
+    this.sessionChanges.advance(sessionId);
   }
 
   private async reversibleHistoryContext(sessionId: string): Promise<ReversibleHistoryContext> {

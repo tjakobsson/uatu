@@ -234,3 +234,54 @@ test(`covered running replacement withdraws a retained inference without invento
     expect(fake.state().unhandled).toEqual([]);
   } finally { await adapter.dispose(); await fake.stop(); }
 }, 10_000);
+
+// Off-page counterpart: the latest page shows only a newer unrelated message,
+// while the complete native source holds the worker's newly stored report.
+for (const state of ["completed", "error"] as const)
+test(`complete-source report replaces a retained off-page inference (${state})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reported = false;
+  const status = state === "error" ? "failed" : "completed";
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [launch, ...(reported ? [{ id: "actual-report", type: "synthetic", time: { created: 45 },
+        text: "Actual result", metadata: { source: "subagent", childID: child, state } }] : []),
+        { id: "newest-input", type: "user", text: "Newest unrelated input", time: { created: 60 } }], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-input", type: "user", text: "Work", time: { created: 15 } },
+      { id: "child-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" },
+    ], cursor: {} });
+    if (route === `/api/session/${parent}` && reported) {
+      // A changed parent record invalidates parent history reuse.
+      const body = await response.json(); body.data.title = "Renamed parent"; return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  provider.reconcileBackgroundTasks = async () => { throw new Error("Optional inventory unavailable"); };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 2_000 });
+  try {
+    parent = (await provider.createSession("Complete-source report over retained inference")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const inferred = workerRow((await adapter.history(parent)).items, worker.taskId);
+    expect(inferred).toMatchObject({ status: "completed" });
+    expect(inferred?.resultId).toBeUndefined();
+    reported = true;
+    await provider.getSession(parent);
+    const native = await provider.listMessages(parent, { limit: 1 });
+    expect(workerRow(native.items, worker.taskId)).toBeUndefined();
+    expect(workerRow(native.completeItems ?? [], worker.taskId)).toMatchObject({ status, resultId: "actual-report", summary: "Actual result" });
+    for (let read = 0; read < 2; read++) {
+      const row = workerRow((await adapter.history(parent, { limit: 1 })).items, worker.taskId);
+      if (row) expect(row).toMatchObject({ status, resultId: "actual-report", summary: "Actual result" });
+      expect(workerRow(adapter.projectionForTests(parent).items(), worker.taskId)).toMatchObject({ status, resultId: "actual-report", summary: "Actual result" });
+    }
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 10_000);
