@@ -15,9 +15,10 @@ const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(
  * Exception: the inbox facet also keeps bounded report facts (digest, child, at,
  * native id, overflow) ordered by request start, from complete reads and streamed
  * enqueue/delivery/cancel deltas, because they are deny-only qualification
- * evidence for native-history reuse. Its digest and counter keep
- * the general rule. Active consumers pin their session, so eviction cannot reset
- * their revision. */
+ * evidence for native-history reuse. Its digest and counter keep the general
+ * rule. A streamed revert stage is an ordinary digest facet ("stage") that record
+ * snapshots also cover. Active consumers pin their session, so eviction cannot
+ * reset their revision. */
 export class SessionChanges {
   private readonly sessions = new Map<string, State>();
   constructor(private readonly capacity = 8192, private readonly facetCapacity = 256) {}
@@ -45,13 +46,22 @@ export class SessionChanges {
   /** A successful local mutation fences every earlier capture, even on replay. */
   advance(session: string): void { this.state(session).revision++; }
 
-  /** Deny-only, non-owning view of an already observed record. Looking up a
-   * snapshot neither creates state nor refreshes LRU/pins. Object identity detects
-   * ABA; missing or recreated session state cannot revive an evicted snapshot. */
+  /** Deny-only, non-owning view of an already observed record or streamed
+   * revert stage. Looking up a snapshot neither creates state nor refreshes
+   * LRU/pins. Object identity detects ABA; missing or recreated session state
+   * cannot revive an evicted snapshot. With only a stage known, any later record
+   * observation counts as a change. */
   snapshotRecord(session: string): RecordSnapshot | undefined {
-    const state = this.sessions.get(session), facet = state?.facets.get("record");
-    if (!state || !facet) return;
-    return { unchanged: () => this.sessions.get(session) === state && state.facets.get("record") === facet };
+    const state = this.sessions.get(session), facet = state?.facets.get("record"), stage = state?.facets.get("stage");
+    if (!state || !facet && !stage) return;
+    return { unchanged: () => this.sessions.get(session) === state && state.facets.get("record") === facet && state.facets.get("stage") === stage };
+  }
+
+  /** A streamed revert stage, kept as the digest-only "stage" facet for record
+   * snapshots. A commit or clear frame forgets it without creating state. */
+  observeRevertStage(session: string, messageId: string | null): void {
+    if (messageId !== null) this.observe(session, "stage", messageId);
+    else this.sessions.get(session)?.facets.delete("stage");
   }
 
   /** The inbox facet's one writer. Facts from an older request never replace a

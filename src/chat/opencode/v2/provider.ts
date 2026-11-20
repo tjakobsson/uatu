@@ -578,7 +578,9 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (this.executionWorkers?.intervalStartsContradicted(child, intervalLaunches, end, after)) return { contradicted: true as const };
       return { after, end, responseAt: response.created };
     };
-    const historyBudget = { entries: Infinity, bytes: Infinity, executionHistory, reportInterval, reportLaunches: competitionLaunches, observedEnds };
+    const startsContradicted = (child: string, launches: readonly LauncherEvidence[], at: number, previous?: number) =>
+      this.executionWorkers?.intervalStartsContradicted(child, launches, at, previous) ?? false;
+    const historyBudget = { entries: Infinity, bytes: Infinity, executionHistory, reportInterval, reportLaunches: competitionLaunches, observedEnds, startsContradicted };
     const workers = new BackgroundWorkers(historyBudget);
     const children = new Set(prepared.flatMap(message => message.notificationChild ? [message.notificationChild] : [...message.tools.values()].flatMap(tool => {
         const child = tool.fact.reportedChild;
@@ -2011,6 +2013,13 @@ export class OpenCodeV2Provider implements ChatProvider {
             const data = asRecord(asRecord(event).data);
             const identity = stringValue(data.messageID) ?? stringValue(data.inboxID) ?? stringValue(data.id) ?? "session";
             this.sessionChanges.observe(nativeSession, `event:${stringValue(asRecord(event).type)}:${identity}`, event, true);
+            // A stage consumed before any warm entry exists must still fence a
+            // later record snapshot; commit/clear frames retire that knowledge.
+            const eventType = stringValue(asRecord(event).type);
+            if (eventType === "session.revert.staged") {
+              const stage = stringValue(asRecord(data.revert).messageID);
+              if (stage) this.sessionChanges.observeRevertStage(nativeSession, stage);
+            } else if (eventType === "session.revert.committed" || eventType === "session.revert.cleared") this.sessionChanges.observeRevertStage(nativeSession, null);
           }
           // Lifecycle frames invalidate a captured observation; they do not
           // turn sparse or replayed event metadata into fresh ownership. The

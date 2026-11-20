@@ -5231,6 +5231,22 @@ const reportCounterproofCases: readonly ReportCounterproofCase[] = [
       child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "Same result", created: 3, completed: 5 },
         { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 },
         ...idles.flatMap(idle => [{ id: "response-2", type: "assistant", text: "Other", created: 30, completed: 35 }, { id: "idle-2", type: "idle", created: idle }])] })),
+  // A cohort whose surviving idle follows two distinct retained starts has no
+  // settled outcome of its own: its reverted intermediate response could be
+  // the report's source. One retained start leaves its outcome settled.
+  ...([["a later cohort with distinct retained starts", [23, 46], false], ["a later cohort with one retained start", [46], true]] as const)
+    .map(([name, starts, settled]): ReportCounterproofCase => ({ name, launches: [[1, 1, 2], [2, 21, 22], [3, 43, 45]], starts, task: 1, settled, report: "report-1",
+      reports: [{ id: "report-1", text: "Same result", created: 70, state: "failed" }],
+      child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "Same result", created: 3, completed: 5 },
+        { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 }, { id: "input-3", type: "user", created: 43 },
+        { id: "response-3", type: "assistant", text: "Other", created: 50, completed: 55 }, { id: "idle-3", type: "idle", created: 60 }] })),
+  ...([["an earlier cohort with distinct retained starts", [3, 13], false], ["an earlier cohort with one retained start", [13], true]] as const)
+    .map(([name, starts, settled]): ReportCounterproofCase => ({ name, launches: [[1, 1, 2], [2, 11, 12], [3, 31, 32]], starts, task: 3, settled, report: "report-3",
+      reports: [{ id: "report-3", text: "Same result", created: 70, state: "failed" }],
+      child: [{ id: "input-1", type: "user", created: 1 }, { id: "input-2", type: "user", created: 11 },
+        { id: "response-2", type: "assistant", text: "Other", created: 14, completed: 16 }, { id: "idle-2", type: "idle", created: 20 },
+        { id: "input-3", type: "user", created: 31 }, { id: "response-3", type: "assistant", text: "Same result", created: 40, completed: 45 },
+        { id: "idle-3", type: "idle", created: 50 }] })),
   { name: "an undated start", launches: [[1, 1, 3]], starts: [undefined], task: 1, settled: true, report: "report-1",
     reports: [{ id: "report-1", text: "First result", created: 11 }],
     child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "First result", created: 5, completed: 8 },

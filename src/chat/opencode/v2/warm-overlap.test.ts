@@ -337,3 +337,92 @@ test(`streamed pre-registration inbox report fences warm history across unseen d
     owner.abort(); await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
   }
 }, 10_000);
+
+// A streamed revert stage can be consumed before the first child warm-load
+// registration. A clear record observed while the pre-commit transcript is held,
+// before any commit frame, must not become that entry's visibility baseline.
+for (const seam of ["provider", "page", "adapter"] as const)
+test(`streamed pre-registration revert stage fences warm child history across a crossing clear (${seam})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const rawEntered = gate(), rawRelease = gate();
+  let parent: string | undefined, child: string | undefined, committed = false, rawReads = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const frame = (type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory } })}\n\n`));
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [launch], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      // The transcript is captured on arrival: the first read predates the commit.
+      const data = [{ id: "child-input", type: "user", time: { created: 15 }, text: "Work" },
+        ...(!committed ? [{ id: "old-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : [])];
+      if (++rawReads === 1) { rawEntered.release(); await rawRelease.promise; }
+      return Response.json({ data, cursor: {} });
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeEvents = provider.events.bind(provider);
+  let streamed!: () => void;
+  const staged = new Promise<void>(resolve => { streamed = resolve; });
+  provider.events = signal => (async function* () {
+    for await (const event of nativeEvents(signal)) {
+      if (event.eventType === "session.revert.staged") streamed();
+      yield event;
+    }
+  })();
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), owner = new AbortController();
+  let warm: Promise<unknown> | undefined, pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Streamed stage before warm registration")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = adapter.startEventPump(); void pump.catch(() => undefined); await provider.waitForEventStream!(owner.signal);
+    // 1. Only the stream reports the stage: no record read, no warm entry yet.
+    frame("session.revert.staged", { sessionID: child, revert: { messageID: "old-idle" } }, 50);
+    await staged;
+    // 2. The first child warm load captures the pre-commit transcript and is held.
+    warm = provider.getReversibleHistoryState!(child); void warm.catch(() => undefined); await rawEntered.promise;
+    // 3. The commit lands natively; a clear record is observed before its frame.
+    committed = true;
+    await provider.getSession(child);
+    rawRelease.release(); await warm;
+    let row: BackgroundTaskItem | undefined;
+    if (seam === "provider") row = (await provider.reconcileBackgroundTasks!(parent)).find(item => item.taskId === worker.taskId);
+    else if (seam === "page") {
+      const page = await provider.listMessages(parent, { limit: 100 });
+      row = page.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    } else {
+      const page = await adapter.history(parent);
+      row = (page.items as ConversationItem[]).find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    }
+    // The removed idle cannot supply a Completed outcome. A bare page has no
+    // inventory, so it reports Status unavailable under the existing policy;
+    // inventory-backed reads see the still-Working child, which is not dismissible.
+    expect(row).toMatchObject({ status: "running" });
+    if (seam !== "page") {
+      expect(row?.activity?.kind).toBe("working");
+      expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true);
+    }
+    expect(rawReads).toBe(2); // Only a later independent read loads current truth.
+    if (seam === "adapter") {
+      const expected = workerDismissalEvidence(row)!, evidence = await adapter.workerEvidence(parent);
+      expect(evidence.entries.find(item => item.executionId === expected.executionId)?.dismissible).not.toBe(true);
+    }
+    const fresh = (await provider.reconcileBackgroundTasks!(parent, { fresh: true })).find(item => item.taskId === worker.taskId);
+    expect(fresh).toMatchObject({ status: "running", activity: { kind: "working" } });
+    expect(fake.state().unhandled).toEqual([]);
+  } finally {
+    rawRelease.release(); owner.abort(); await warm?.catch(() => undefined);
+    await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
+  }
+}, 10_000);

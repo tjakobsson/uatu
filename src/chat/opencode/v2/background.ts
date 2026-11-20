@@ -765,6 +765,8 @@ export class BackgroundWorkers {
     reportLaunches?: readonly LauncherEvidence[];
     /** Scoped retained native ends for a history fold; undefined means unknown. */
     observedEnds?: (child: string) => readonly number[] | undefined;
+    /** Scoped distinct-start veto for a history fold (`intervalStartsContradicted`). */
+    startsContradicted?: (child: string, launches: readonly LauncherEvidence[], at: number, previous?: number) => boolean;
   } = {}) {}
   private readonly parents = new Map<string, string>();
   private readonly births = new Map<string, { parent?: string; proof?: NativeProof; shellCommand?: string; shellIdentity?: ShellBirthIdentity; shellEnd?: NativeProof; contradicted?: true }>();
@@ -1596,14 +1598,20 @@ export class BackgroundWorkers {
   }
 
   /** Each admission's first execution end is a transcript idle, which can
-   * supply its own outcome. A retained-only (reverted) or unknown end cannot. */
+   * supply its own outcome. A retained-only (reverted) or unknown end cannot,
+   * nor can an idle the distinct-start veto leaves unresolved (a reverted
+   * intermediate execution). Only ever withholds the exemption. */
   private ownHistoryOutcome(child: string, launches: readonly LauncherEvidence[]): boolean {
     const transcript = this.budget.executionHistory?.get(child), retained = this.retainedEnds(child);
     const ends = transcript && retained && [...transcript, ...retained];
-    return !!transcript && !!ends && launches.every(launch => {
+    if (!transcript || !ends) return false;
+    const starts = launches.map(launch => this.admissionWindow(launch)?.start).filter(start => start !== undefined);
+    const previous = ends.filter(end => end < Math.min(...starts)).sort((a, b) => b - a)[0];
+    return launches.every(launch => {
       const window = this.admissionWindow(launch);
       const first = window && ends.filter(end => end >= window.start).sort((a, b) => a - b)[0];
-      return !!window && first !== undefined && first > window.end && transcript.includes(first);
+      return !!window && first !== undefined && first > window.end && transcript.includes(first)
+        && !this.budget.startsContradicted?.(child, [launch], first, previous);
     });
   }
 

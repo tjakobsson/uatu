@@ -66,6 +66,29 @@ test("record snapshots do not pin evicted sessions and fail closed after identic
   expect(changes.snapshotRecord("child")?.unchanged()).toBe(true);
 });
 
+test("a streamed revert stage alone yields a record snapshot that any later record or stage change retires", () => {
+  const changes = new SessionChanges(1);
+  changes.observeRevertStage("child", null);
+  expect(changes.snapshotRecord("child")).toBeUndefined(); // A clear frame creates no state.
+  changes.observeRevertStage("child", "idle");
+  const staged = changes.snapshotRecord("child")!;
+  expect(staged.unchanged()).toBe(true);
+  changes.observeRevertStage("child", "idle"); // Exact replay.
+  expect(staged.unchanged()).toBe(true);
+  changes.observe("child", "history", ["unrelated"]);
+  expect(staged.unchanged()).toBe(true);
+  changes.observe("child", "record", { id: "child" }); // A crossing clear record.
+  expect(staged.unchanged()).toBe(false);
+  const both = changes.snapshotRecord("child")!;
+  changes.observeRevertStage("child", null); // Commit/clear frame forgets the stage.
+  expect(both.unchanged()).toBe(false);
+  changes.observeRevertStage("child", "idle");
+  const evicted = changes.snapshotRecord("child")!;
+  changes.observe("other", "record", {});
+  expect(evicted.unchanged()).toBe(false); // Eviction fails closed.
+  expect(changes.snapshotRecord("child")).toBeUndefined();
+});
+
 test("record snapshot lookup does not refresh the observation store LRU", () => {
   const changes = new SessionChanges(2);
   changes.observe("old", "record", "A");
