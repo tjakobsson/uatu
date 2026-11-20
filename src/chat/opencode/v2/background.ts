@@ -1579,17 +1579,19 @@ export class BackgroundWorkers {
       || right !== undefined && leftStart !== undefined && end > right.end && end < leftStart);
   }
 
-  /** Exact-response proof for this fold. An earlier admission on the child
-   * without a settled outcome of its own may be the report's source (a revert
-   * can remove its equal response), so it denies the interval. Deny-only. */
+  /** Exact-response proof for this fold. A revert can remove an execution's
+   * equal response, so an unresolved admission outside the interval may be
+   * the report's source: an earlier one, or a later one that ran (an end by
+   * the report's delivery) before its response vanished. Deny-only. */
   private exactReportInterval(child: string, summary: string, at?: number): ReturnType<NonNullable<typeof this.budget.reportInterval>> {
     const interval = this.budget.reportInterval?.(child, summary, at);
-    if (!interval || "contradicted" in interval || interval.after === undefined) return interval;
-    const after = interval.after;
+    if (!interval || "contradicted" in interval) return interval;
+    const ends = [...this.budget.executionHistory?.get(child) ?? [], ...this.retainedEnds(child) ?? []];
     return [...this.tasks.values()].some(task => task.worker === child && task.item.taskType === "agent" && task.item.status === "running"
       && task.evidence.launches.some(launch => {
-        const anchor = launch.ran ?? launch.created ?? launch.completed ?? launch.reportedCompletion;
-        return anchor !== undefined && anchor <= after;
+        const anchor = launch.ran ?? launch.created ?? launch.completed ?? launch.reportedCompletion, start = launch.ran ?? launch.created;
+        return anchor !== undefined && interval.after !== undefined && anchor <= interval.after
+          || start !== undefined && start > interval.end && ends.some(end => end >= start && (at === undefined || end <= at));
       }) && !this.ownHistoryOutcome(child, task.evidence.launches)) ? { contradicted: true } : interval;
   }
 

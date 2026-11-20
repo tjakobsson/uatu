@@ -127,6 +127,33 @@ test("an identical newer inbox reply keeps the stored facts object and advances 
   expect(changes.inboxFacts("parent")).toEqual({ started: 8, reports: [] });
 });
 
+test("streamed inbox deltas add and remove request-ordered facts; a read dropping one bumps the counter", () => {
+  const changes = new SessionChanges(1);
+  const report = { child: "child", at: 45, digest: "streamed", id: "msg_streamed" };
+  changes.observeInboxDelta("parent", 3, { remove: "msg_streamed" });
+  expect(changes.inboxFacts("parent")).toBeUndefined(); // A removal creates no state.
+  changes.observeInboxDelta("parent", 5, { add: report });
+  expect(changes.inboxFacts("parent")).toEqual({ started: 5, reports: [report] });
+  changes.observeInboxDelta("parent", 4, { remove: "msg_streamed" }); // Older than the enqueue.
+  expect(changes.inboxFacts("parent")?.reports).toEqual([report]);
+  const counter = changes.capture("parent");
+  changes.observeInbox("parent", [], { started: 2, reports: [] }); // An older complete read cannot drop it.
+  expect(changes.inboxFacts("parent")?.reports).toEqual([report]);
+  changes.observeInbox("parent", [], { started: 6, reports: [] });
+  expect(changes.inboxFacts("parent")).toEqual({ started: 6, reports: [] });
+  expect(counter.unchanged()).toBe(false); // First-known empty facet, yet a known report disappeared.
+  counter.release();
+  changes.observeInboxDelta("parent", 7, { add: report });
+  changes.observeInboxDelta("parent", 8, { remove: "msg_streamed" }); // Delivery or cancellation frame.
+  expect(changes.inboxFacts("parent")).toEqual({ started: 8, reports: [] });
+  changes.observeInboxDelta("parent", 9, { add: { ...report, digest: "large" }, overflow: true });
+  changes.observeInboxDelta("parent", 10, { add: report });
+  changes.observeInboxDelta("parent", 11, { remove: "msg_streamed" });
+  expect(changes.inboxFacts("parent")).toEqual({ started: 11, reports: [], overflow: true }); // Unknown stays closed.
+  changes.observe("other", "record", {});
+  expect(changes.inboxFacts("parent")).toBeUndefined(); // Eviction loses streamed facts too.
+});
+
 for (const changed of [false, true])
 test(`first child-scoped inventory ${changed ? "change withholds inference" : "equal observation preserves completion"}`, async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });

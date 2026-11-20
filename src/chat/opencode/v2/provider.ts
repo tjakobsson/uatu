@@ -2074,9 +2074,15 @@ export class OpenCodeV2Provider implements ChatProvider {
                   const at = numberField(asRecord(event).created), clock = ++this.parentHistoryReadClock;
                   const fact = { child: report.worker, at, digest: historyVersion([resultId, at, report]) };
                   const overflow = JSON.stringify(fact).length * 2 > parentCounterproofMaxBytes;
+                  // Seed the shared inbox facts too: a report streamed before any
+                  // source or warm entry exists still fences later reuse/inference.
+                  this.sessionChanges.observeInboxDelta(parent, clock, { add: { ...fact, id: resultId! }, ...(overflow ? { overflow: true as const } : {}) });
                   this.observePendingOutcomes(parent, { started: clock, completed: clock, reports: overflow ? [] : [fact], ...(overflow ? { overflow: true as const } : {}) });
                 }
               }
+              const eventType = stringValue(asRecord(event).type);
+              if (resultId && (eventType === "session.inbox.delivered" || eventType === "session.inbox.cancelled"))
+                this.sessionChanges.observeInboxDelta(parent, ++this.parentHistoryReadClock, { remove: resultId });
               for (const source of this.historyWorkerSources) if (source.parent === parent && source.pendingFingerprint !== undefined
                 && resultId && (source.pendingIds === undefined || source.pendingIds.includes(resultId))
                 && (!replaySignature || source.pendingContent?.get(resultId) !== replaySignature)) source.revision++;

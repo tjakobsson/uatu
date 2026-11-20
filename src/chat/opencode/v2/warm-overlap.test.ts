@@ -253,3 +253,87 @@ test(`successful revert staging retires child history warmed during the request 
     await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
   }
 }, 10_000);
+
+// A streamed same-child failure can arrive before any history source or warm
+// entry exists. Delivery without a frame or inbox read must not leave the
+// report-free warm transcript reusable for a publishable inferred completion.
+for (const seam of ["provider", "page", "adapter"] as const)
+test(`streamed pre-registration inbox report fences warm history across unseen delivery (${seam})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, delivered = false, rawReads = 0;
+  let wire!: ReadableStreamDefaultController<Uint8Array>;
+  const frame = (type: string, data: unknown, created: number) => wire.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: `${type}:${created}`, type, data, created, location: { directory } })}\n\n`));
+  const payload = () => ({ text: "Streamed native failure", metadata: { source: "subagent", childID: child, state: "error" } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      wire = controller; frame("server.connected", {}, 1); request.signal.addEventListener("abort", () => controller.close(), { once: true });
+    } }), { headers: { "content-type": "text/event-stream" } });
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route === "/api/session/active") return Response.json({ data: {} });
+    if (route === `/api/session/${parent}/inbox`) return Response.json({ data: delivered ? [] : [{ id: "streamed-failure", type: "synthetic", time: { created: 45 }, payload: payload() }] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      rawReads++;
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [launch, ...(delivered ? [{ ...payload(), id: "streamed-failure", type: "synthetic", time: { created: 45 } }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-input", type: "user", time: { created: 15 }, text: "Work" },
+      { id: "old-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" },
+    ], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeEvents = provider.events.bind(provider);
+  let streamed!: () => void;
+  const enqueued = new Promise<void>(resolve => { streamed = resolve; });
+  provider.events = signal => (async function* () {
+    for await (const event of nativeEvents(signal)) {
+      if (event.eventType === "session.inbox.enqueued" && event.conversationId === parent) streamed();
+      yield event;
+    }
+  })();
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0 }), owner = new AbortController();
+  let pump: Promise<void> | undefined;
+  try {
+    parent = (await provider.createSession("Streamed inbox before warm registration")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    pump = adapter.startEventPump(); void pump.catch(() => undefined); await provider.waitForEventStream!(owner.signal);
+    // 1. The failure is only streamed: no inbox read, no source, no warm entry.
+    frame("session.inbox.enqueued", { sessionID: parent, inboxID: "streamed-failure", item: { type: "synthetic", payload: payload() } }, 45);
+    await enqueued;
+    // 2. Parent history warms while the report is still pending.
+    await provider.getReversibleHistoryState!(parent);
+    expect(rawReads).toBe(1);
+    // 3. Native delivery happens with neither a frame nor an inbox read yet.
+    delivered = true;
+    let row: BackgroundTaskItem | undefined;
+    if (seam === "provider") row = (await provider.reconcileBackgroundTasks!(parent)).find(item => item.taskId === worker.taskId);
+    else if (seam === "page") {
+      const page = await provider.listMessages(parent, { limit: 100 });
+      row = page.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      expect(page.workerSource?.isCurrent()).toBe(true);
+    } else {
+      const page = await adapter.history(parent);
+      row = (page.items as ConversationItem[]).find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    }
+    // The already-observed failure denies a report-free, dismissible Completed.
+    expect(row?.status).not.toBe("completed");
+    expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true);
+    if (seam === "adapter") {
+      // The stale entry is retired: a later quiet read loads the delivered
+      // report, and dismissal evidence follows that Failed row.
+      const later = (await adapter.history(parent)).items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+      expect(later).toMatchObject({ status: "failed", resultId: "streamed-failure" });
+      const expected = workerDismissalEvidence(later)!, evidence = await adapter.workerEvidence(parent);
+      expect(evidence.entries.find(item => item.executionId === expected.executionId)?.signature).toBe(expected.signature);
+    }
+    const fresh = (await provider.reconcileBackgroundTasks!(parent, { fresh: true })).find(item => item.taskId === worker.taskId);
+    expect(fresh).toMatchObject({ status: "failed", resultId: "streamed-failure" });
+    expect(fake.state().unhandled).toEqual([]);
+  } finally {
+    owner.abort(); await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
+  }
+}, 10_000);

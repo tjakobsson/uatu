@@ -5183,7 +5183,7 @@ type ReportCounterproofCase = {
   child: readonly { id: string; type: string; text?: string; created: number; completed?: number }[];
   /** Native starts, then native ends removed from the transcript by a committed revert. */
   starts?: readonly (number | undefined)[]; ends?: readonly (number | undefined)[];
-  reports: readonly { id: string; text: string; created: number }[];
+  reports: readonly { id: string; text: string; created: number; state?: "completed" | "failed" }[];
   /** The task that must (settled) or must not (standalone) take `report`. */
   task: number; report: string; settled: boolean;
   /** Tasks that stay visible and running; `separate` also forbids aliasing them. */
@@ -5222,6 +5222,15 @@ const reportCounterproofCases: readonly ReportCounterproofCase[] = [
   ...([["a retained end between admissions", [40], [2, 3]], ["an unknown retained end between admissions", [undefined], [2]]] as const).map(([name, ends, running]): ReportCounterproofCase => ({
     name, launches: [[2, 21, 22], [3, 43, 45]], ends, task: 2, settled: false, report: "report-2", running, separate: running.length > 1,
     reports: [{ id: "report-2", text: "Second result", created: 48 }], child: activeChild })),
+  // Run 2's response and idle were reverted after its native end at 40; only
+  // run 1's equal response survives. Run 2 could have produced the report.
+  // Controls: run 2 kept its own idle, or never ran (no end at all).
+  ...([["a reverted later run", [40], false, []], ["a later run settled by its own idle", [40], true, [40]], ["a later run that never ran", [], true, []]] as const)
+    .map(([name, ends, settled, idles]): ReportCounterproofCase => ({ name, launches: [[1, 1, 2], [2, 21, 22]], ends, task: 1, settled, report: "report-1",
+      reports: [{ id: "report-1", text: "Same result", created: 70, state: "failed" }],
+      child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "Same result", created: 3, completed: 5 },
+        { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 },
+        ...idles.flatMap(idle => [{ id: "response-2", type: "assistant", text: "Other", created: 30, completed: 35 }, { id: "idle-2", type: "idle", created: idle }])] })),
   { name: "an undated start", launches: [[1, 1, 3]], starts: [undefined], task: 1, settled: true, report: "report-1",
     reports: [{ id: "report-1", text: "First result", created: 11 }],
     child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "First result", created: 5, completed: 8 },
@@ -5244,8 +5253,8 @@ test(`${read} ${scenario.settled ? "keeps" : "denies"} exact-response report cor
         content: [{ type: "text", text: "The subagent is working in the background. You will be notified automatically." }] } }],
   });
   const report = (entry: ReportCounterproofCase["reports"][number]) => ({ id: entry.id, type: "synthetic", time: { created: entry.created }, description: "Check",
-    text: `<subagent sessionID="${child}" state="completed">\n${entry.text}\n</subagent>`,
-    metadata: { source: "subagent", childID: child, state: "completed", agent: "explore" } });
+    text: `<subagent sessionID="${child}" state="${entry.state === "failed" ? "error" : "completed"}">\n${entry.text}\n</subagent>`,
+    metadata: { source: "subagent", childID: child, state: entry.state === "failed" ? "error" : "completed", agent: "explore" } });
   const transport = (async (input: Request | string | URL, init?: RequestInit) => {
     const request = new Request(input, init), route = new URL(request.url).pathname;
     if (route === "/api/event") return new Response(new ReadableStream<Uint8Array>({ start(controller) {
@@ -5285,9 +5294,9 @@ test(`${read} ${scenario.settled ? "keeps" : "denies"} exact-response report cor
       : await provider.reconcileBackgroundTasks!(parent!, { fresh: true, signal: abort.signal });
     await readRows();
     const rows = await readRows();
-    const row = rows.find(row => row.taskId === taskId(scenario.task)), text = scenario.reports.find(report => report.id === scenario.report)!.text;
+    const row = rows.find(row => row.taskId === taskId(scenario.task)), { text, state } = scenario.reports.find(report => report.id === scenario.report)!;
     if (scenario.settled) {
-      expect(row).toMatchObject({ status: "completed", resultId: scenario.report, summary: text });
+      expect(row).toMatchObject({ status: state ?? "completed", resultId: scenario.report, summary: text });
     } else {
       // The report stays its own uncorrelated row; the candidate takes no result from it.
       expect(row?.resultId).toBeUndefined(); expect(row?.summary).toBeUndefined(); expect(row?.terminalReportedAt).toBeUndefined();

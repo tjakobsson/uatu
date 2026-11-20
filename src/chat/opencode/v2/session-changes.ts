@@ -13,8 +13,9 @@ const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(
 
 /** Observation order, deliberately not request order. Only digests are retained.
  * Exception: the inbox facet also keeps bounded report facts (digest, child, at,
- * native id, overflow) ordered by request start, because they are deny-only
- * qualification evidence for native-history reuse. Its digest and counter keep
+ * native id, overflow) ordered by request start, from complete reads and streamed
+ * enqueue/delivery/cancel deltas, because they are deny-only qualification
+ * evidence for native-history reuse. Its digest and counter keep
  * the general rule. Active consumers pin their session, so eviction cannot reset
  * their revision. */
 export class SessionChanges {
@@ -61,8 +62,29 @@ export class SessionChanges {
     this.observe(session, "inbox", value, initialChange);
     const state = this.sessions.get(session)!;
     if (state.inbox && facts.started <= state.inbox.started) return;
+    // A newer complete read lacking a known report (one only streamed, say)
+    // changes the facet for captured consumers even when its raw digest is new.
+    if (state.inbox?.facts.reports.some(known => !facts.reports.some(fact => fact.digest === known.digest))) state.revision++;
     const digest = state.facets.get("inbox")?.digest;
     if (state.inbox && digest !== undefined && digest === state.inbox.digest) { state.inbox.started = facts.started; return; }
+    this.storeInbox(state, facts, digest);
+  }
+
+  /** Streamed deltas update the same request-ordered facts: an enqueue adds its
+   * report; a delivery or cancellation removes the report with that native id.
+   * A removal never creates state, and a delta has no raw reply digest. */
+  observeInboxDelta(session: string, started: number, delta: { add: InboxReportFact; overflow?: true } | { remove: string }): void {
+    const state = "add" in delta ? this.state(session) : this.sessions.get(session), previous = state?.inbox;
+    if (!state || previous && started <= previous.started) return;
+    const kept = previous?.facts.reports ?? [];
+    if ("remove" in delta) {
+      if (!kept.some(fact => fact.id === delta.remove)) return;
+      this.storeInbox(state, { started, reports: kept.filter(fact => fact.id !== delta.remove), ...(previous!.facts.overflow ? { overflow: true } : {}) });
+    } else this.storeInbox(state, { started, reports: delta.overflow ? kept : [...kept.filter(fact => fact.digest !== delta.add.digest), delta.add],
+      ...(delta.overflow || previous?.facts.overflow ? { overflow: true } : {}) });
+  }
+
+  private storeInbox(state: State, facts: InboxFacts, digest?: string): void {
     const bytes = facts.reports.reduce((sum, fact) => sum + JSON.stringify(fact).length * 2, 0);
     state.inbox = { started: facts.started, digest, facts: facts.reports.length > parentCounterproofMaxFacts || bytes > parentCounterproofMaxBytes
       ? { started: facts.started, reports: [], overflow: true } : facts };
