@@ -180,3 +180,57 @@ test(`latest page backfill keeps a concurrently superseded worker removed (${pri
     expect(fake.state().unhandled).toEqual([]);
   } finally { release.release(); await reading?.catch(() => undefined); await adapter.dispose(); await fake.stop(); }
 }, 10_000);
+
+// A child revert can hide the idle that justified a report-free completion.
+// With optional inventory unavailable, the covered running page row for the
+// same execution must still withdraw the retained inference on every read,
+// including when that worker is off the requested latest page.
+for (const placement of ["on-page", "off-page"] as const)
+test(`covered running replacement withdraws a retained inference without inventory (${placement})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, reverted = false;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [launch, ...(placement === "off-page"
+        ? [{ id: "newest-input", type: "user", text: "Newest unrelated input", time: { created: 60 } }] : [])], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [
+      { id: "child-input", type: "user", text: "Work", time: { created: 15 } },
+      { id: "idle", type: "idle", time: { created: 40 }, outcome: "succeeded" },
+    ], cursor: {} });
+    if (route === `/api/session/${child}` && reverted) {
+      const body = await response.json(); body.data.revert = { messageID: "idle" }; return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  provider.reconcileBackgroundTasks = async () => { throw new Error("Optional inventory unavailable"); };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 2_000 });
+  try {
+    parent = (await provider.createSession("Covered replacement withdraws inference")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const inferred = workerRow((await adapter.history(parent)).items, worker.taskId);
+    expect(inferred).toMatchObject({ status: "completed", stateUncertain: false });
+    expect(inferred?.resultId).toBeUndefined();
+    expect(inferred?.activity?.executionAliases?.length).toBeGreaterThan(0);
+    reverted = true;
+    await provider.getSession(child);
+    const page = workerRow((await provider.listMessages(parent, { limit: 100 })).items, worker.taskId);
+    expect(page).toMatchObject({ status: "running", activity: { kind: "unavailable", executionId: inferred?.activity?.executionId } });
+    for (let read = 0; read < 2; read++) {
+      const row = workerRow((await adapter.history(parent, placement === "off-page" ? { limit: 1 } : {})).items, worker.taskId);
+      expect(row).toMatchObject({ status: "running", stateUncertain: true, control: { available: false },
+        activity: { kind: "unavailable", executionId: inferred?.activity?.executionId } });
+      expect(row?.activity?.endedAt).toBeUndefined();
+      // Same unresolved evidence as the provider's page, not the old outcome.
+      expect(workerDismissalEvidence(row)).toEqual(workerDismissalEvidence(page));
+      expect(workerRow(adapter.projectionForTests(parent).items(), worker.taskId)).toMatchObject({ status: "running", stateUncertain: true });
+    }
+    expect(fake.state().unhandled).toEqual([]);
+  } finally { await adapter.dispose(); await fake.stop(); }
+}, 10_000);

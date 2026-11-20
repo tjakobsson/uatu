@@ -1956,6 +1956,10 @@ test(`scheduler captured child outcome observes late staged native record (${cha
     if (loadOverlap) { releaseChild(); await returned; expect(guards.length).toBeGreaterThan(0); expect(guards.every(guard => guard.isCurrent())).toBe(true); }
     if (change === "newer-source" || change === "owned-overlap-newer-source") await nativeRecovery(parent, { fresh: true, signal: abort.signal,
       onSource: source => newerGuards.push(source.workerSource.retain(abort.signal)) });
+    // Startup's public child-history read also records the child. Settle it
+    // first so the late staged record is the last observation before the
+    // fresh pass; a later quiet record would rightly let that pass complete.
+    if (change === "retained-prefix") await childHistorySettled;
     releaseOlder(); await older;
     if (collecting) { releaseChild(); await returned; }
     release(); await admitted;

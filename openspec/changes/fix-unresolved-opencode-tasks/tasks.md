@@ -749,3 +749,8 @@ Checks with Bun 1.4.4: `src/chat/opencode/v2/` 4588 pass, 1 skip; adapter,
 withheld-marker and dismissal-identity 960 pass; focused compact-work,
 workers-view, worker-dismissal, worker-state and Hub worker-dismissals 327 pass;
 typecheck, `git diff --check` and strict OpenSpec validation are clean.
+
+- [x] 11.5 Let a covered running row for the same execution withdraw a retained report-free inferred outcome before `knownRows` indexing, even when inventory recovery fails (Codex 4636786219). Explicit reports still win (10.3), and rows another publication changed during the read stay fenced (10.4). Tests: `worker-final-handoff.test.ts` "covered running replacement withdraws a retained inference without inventory (on-page|off-page)".
+- [x] 11.6 Fix a pre-existing ordering race in `worker-outcome-race.test.ts` "late staged native record (retained-prefix)", which failed once in CI on c406da9c and reproduces on 27e360a4 under injected ordering. Startup's child-history record read could land after the late staged record, so the fresh pass correctly completed. The test now waits for that read before releasing the staged record. Product code is unchanged.
+
+Checks with Bun 1.4.4 after 11.5 and 11.6: `src/chat/opencode/v2/` 4590 pass, 1 skip; adapter, withheld-marker and dismissal-identity 960 pass; focused worker files 327 pass; typecheck, `git diff --check` and strict OpenSpec validation are clean. A local `bun run test:ci` passed the target test. Two failures there also occur without this change: `site/site.test.ts` (EXDEV cross-device rename on the local host) and one Hub worker-dismissals test that fails only under local four-worker load.

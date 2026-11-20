@@ -1604,6 +1604,14 @@ export class ChatAdapter {
             && item.status !== "running" && !item.stateUncertain));
         if (discharged && !items.some(item => item.id === known.id)) revokedRows.add(known.id);
         return !discharged;
+      }).map(known => {
+        // A covered running row for the same execution withdraws a retained
+        // report-free inference before indexing, even without inventory: a
+        // child revert can hide the idle the inference rested on. Rows another
+        // publication changed during this read keep the change-fenced path.
+        if (!coverage || coverage.changed(known.id)) return known;
+        const source = page.workerSource && page.completeItems?.find(item => item.id === known.id);
+        return replacesHistoryOnlyOutcome(known, source) ? source as BackgroundTaskItem : known;
       });
       // A fresh page can discharge a prior inference veto even when the
       // independent inventory is unavailable. Its retained counter projection
