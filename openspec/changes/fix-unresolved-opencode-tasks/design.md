@@ -387,5 +387,5 @@ fail-closed reads and no-store behavior unchanged.
    Fix failing invariants; if they hold, explain that on the thread without code
    changes. Record accepted limits in the PR body with approval.
 
-No stored-data migration is proposed. Archive before merge; PR merge and deployment
+No stored-data migration is proposed. Archive the change after merge; PR merge and deployment
 still require separate authorization.
