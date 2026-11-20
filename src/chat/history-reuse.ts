@@ -27,11 +27,14 @@ export class HistoryReuse<T, Observation = never> {
   }
 
   /** Metadata belongs to an existing qualified load/value, never a new key.
-   * Invalidation retires it with that owner before a late value can install. */
+   * Invalidation retires it with that owner before a late value can install.
+   * An unversioned pending load still coalesces joiners, so it carries metadata
+   * too; its completed value is never retained. */
   peekObservation(key: string, version: string | undefined): Observation | undefined {
-    if (this.disposed || version === undefined) return;
-    const entry = this.retained.get(key) ?? this.pending.get(key);
-    return entry?.version === version ? entry.observation : undefined;
+    if (this.disposed) return;
+    // Never match a missing entry's undefined version to an unversioned read.
+    const retained = this.retained.get(key), entry = retained && retained.version === version ? retained : this.pending.get(key);
+    return entry && entry.version === version ? entry.observation : undefined;
   }
 
   async read(key: string, version: string | undefined, loader: () => Promise<T>): Promise<T> {

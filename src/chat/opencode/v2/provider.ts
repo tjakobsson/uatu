@@ -580,7 +580,9 @@ export class OpenCodeV2Provider implements ChatProvider {
     };
     const startsContradicted = (child: string, launches: readonly LauncherEvidence[], at: number, previous?: number) =>
       this.executionWorkers?.intervalStartsContradicted(child, launches, at, previous) ?? false;
-    const historyBudget = { entries: Infinity, bytes: Infinity, executionHistory, reportInterval, reportLaunches: competitionLaunches, observedEnds, startsContradicted };
+    const historyBudget = { entries: Infinity, bytes: Infinity, executionHistory, reportInterval, reportLaunches: competitionLaunches, observedEnds, startsContradicted, executionOutcomes,
+      visibleResponse: (child: string, start: number, end: number) => responses.get(child)?.some(response => response.visible && response.canonical
+        && response.created >= start && response.completed <= end) ?? false };
     const workers = new BackgroundWorkers(historyBudget);
     const children = new Set(prepared.flatMap(message => message.notificationChild ? [message.notificationChild] : [...message.tools.values()].flatMap(tool => {
         const child = tool.fact.reportedChild;

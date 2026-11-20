@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { HistoryReuse } from "../../history-reuse";
 import { ChatAdapter } from "../../adapter";
 import type { BackgroundTaskItem, ConversationItem } from "../../types";
 import type { WorkerSourceGuard } from "../../provider";
@@ -115,5 +116,79 @@ test(`completed pre-registration stage fences a crossing commit (${transition}/$
   } finally {
     rawRelease.release(); owner.abort(); await warm?.catch(() => undefined);
     await adapter.dispose(); await pump?.catch(() => undefined); await fake.stop();
+  }
+}, 10_000);
+
+// Without a connected stream the native-history version is undefined. Pending
+// loads still coalesce, so a recovery joining a held pre-commit load must see the
+// same record qualification: a crossing clear retires that in-flight load.
+for (const transition of ["commit-during-load", "unchanged-record"] as const)
+test(`unversioned in-flight child history is qualified before a later recovery joins it (${transition})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  const rawEntered = gate(), rawRelease = gate(), joined = gate();
+  let parent: string | undefined, child: string | undefined, staged = transition === "commit-during-load", removed = false, childReads = 0, armed = false;
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === "/api/event") return new Response(null, { status: 503 }); // No stream generation.
+    if (route === "/api/session" && request.method === "GET") return Response.json({ data: [], cursor: {} });
+    if (route.endsWith("/inbox")) return Response.json({ data: [] });
+    if (route === "/api/session/active") return Response.json({ data: child ? { [child]: { status: "running" } } : {} });
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [launch], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) {
+      const data = [{ id: "child-input", type: "user", time: { created: 15 }, text: "Work" },
+        ...(!removed ? [{ id: "old-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }] : [])];
+      if (++childReads === 1) { rawEntered.release(); await rawRelease.promise; }
+      return Response.json({ data, cursor: {} });
+    }
+    if (route === `/api/session/${child}` && request.method === "GET") {
+      const body = await response.json();
+      if (staged) body.data.revert = { messageID: "old-idle" };
+      else delete body.data.revert;
+      return Response.json(body);
+    }
+    return response;
+  }) as typeof globalThis.fetch;
+  // Observe only the synchronous join/registration point of the recovery's
+  // child history read; the native-history path itself is unchanged.
+  const readShared = HistoryReuse.prototype.readShared;
+  const spy = spyOn(HistoryReuse.prototype, "readShared").mockImplementation(function (this: HistoryReuse<unknown, unknown>, ...args: Parameters<typeof readShared>) {
+    const reading = readShared.apply(this, args);
+    if (armed && args[0] === child) joined.release();
+    return reading;
+  } as typeof readShared);
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  let warm: Promise<unknown> | undefined, recovery: Promise<BackgroundTaskItem[]> | undefined;
+  try {
+    parent = (await provider.createSession("Unversioned in-flight stage")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    await provider.getSession(child); // The stage (or an unchanged record) is known before registration.
+    warm = provider.getReversibleHistoryState!(child); void warm.catch(() => undefined); await rawEntered.promise;
+    // The commit lands natively and its clear record is observed while held.
+    staged = false; removed = transition === "commit-during-load";
+    await provider.getSession(child);
+    // Recovery starts after the clear and reaches the child history read.
+    armed = true;
+    recovery = provider.reconcileBackgroundTasks!(parent); void recovery.catch(() => undefined);
+    await joined.promise;
+    rawRelease.release(); await warm;
+    const row = (await recovery).find(item => item.taskId === worker.taskId);
+    if (transition === "commit-during-load") {
+      expect(row).toMatchObject({ status: "running", activity: { kind: "working" } });
+      expect(workerDismissalEvidence(row)?.dismissible).not.toBe(true);
+      expect(childReads).toBe(2); // The retired load is not joined; a new read starts.
+    } else {
+      expect(row).toMatchObject({ status: "completed" });
+      expect(childReads).toBe(1); // No crossing change: the in-flight load is shared.
+    }
+    const fresh = (await provider.reconcileBackgroundTasks!(parent, { fresh: true })).find(item => item.taskId === worker.taskId);
+    expect(fresh).toMatchObject(transition === "commit-during-load" ? { status: "running", activity: { kind: "working" } } : { status: "completed" });
+  } finally {
+    spy.mockRestore(); rawRelease.release(); await warm?.catch(() => undefined); await recovery?.catch(() => undefined);
+    await provider.dispose!(); await fake.stop();
   }
 }, 10_000);

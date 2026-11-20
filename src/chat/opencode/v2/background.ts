@@ -750,6 +750,21 @@ function identity(value: unknown): value is string {
  * Positive projection is disposable; complete provider history reconstructs it.
  * Deny-only execution continuity remains bounded across subscription gaps.
  */
+/** Transcript idles plus retained native ends, each clock once. */
+function outcomeEnds(transcript: readonly number[], retained: readonly number[]): number[] {
+  const ends = [...transcript];
+  for (const end of retained) if (!ends.includes(end)) ends.push(end);
+  return ends;
+}
+
+/** A visible, recognized outcome at `at` that history can settle from: one
+ * boundary at that clock and no conflicting status. */
+function settlingOutcome(results: readonly WorkerHistoryOutcome[], ends: readonly number[], at: number): boolean {
+  const status = results.find(result => result.at === at)?.status;
+  return status !== undefined && ends.filter(end => end === at).length === 1
+    && !results.some(other => other.at === at && other.status !== status);
+}
+
 export class BackgroundWorkers {
   private recoveryOnly = false;
   constructor(private readonly budget: { entries?: number; bytes?: number; retained?: () => { bytes: number; entries: number }; onSaturation?: () => void;
@@ -767,6 +782,10 @@ export class BackgroundWorkers {
     observedEnds?: (child: string) => readonly number[] | undefined;
     /** Scoped distinct-start veto for a history fold (`intervalStartsContradicted`). */
     startsContradicted?: (child: string, launches: readonly LauncherEvidence[], at: number, previous?: number) => boolean;
+    /** The visible, recognized idle outcomes `finishHistory()` settles from. */
+    executionOutcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>;
+    /** A visible canonical child response inside [start, end]. */
+    visibleResponse?: (child: string, start: number, end: number) => boolean;
   } = {}) {}
   private readonly parents = new Map<string, string>();
   private readonly births = new Map<string, { parent?: string; proof?: NativeProof; shellCommand?: string; shellIdentity?: ShellBirthIdentity; shellEnd?: NativeProof; contradicted?: true }>();
@@ -1509,10 +1528,9 @@ export class BackgroundWorkers {
       // Retained boundaries constrain outcomes only. Feeding them back into
       // the control/admission fold would revoke independently valid controls
       // and compatible ended activity, including after unrelated saturation.
-      const ends = [...transcriptEnds];
-      for (const end of observedEnds) if (!ends.includes(end)) ends.push(end);
+      const ends = outcomeEnds(transcriptEnds, observedEnds);
       for (const result of results) {
-        if (ends.filter(end => end === result.at).length !== 1 || results.some(other => other.at === result.at && other.status !== result.status)) continue;
+        if (!settlingOutcome(results, ends, result.at)) continue;
         const previous = ends.filter(end => end < result.at).reduce<number | undefined>((latest, end) => latest === undefined || end > latest ? end : latest, undefined);
         const overlaps = (launch: LauncherEvidence) => {
           const window = this.admissionWindow(launch), start = launch.ran ?? launch.created;
@@ -1597,20 +1615,24 @@ export class BackgroundWorkers {
       }) && !this.ownHistoryOutcome(child, task.evidence.launches)) ? { contradicted: true } : interval;
   }
 
-  /** Each admission's first execution end is a transcript idle, which can
-   * supply its own outcome. A retained-only (reverted) or unknown end cannot,
-   * nor can an idle the distinct-start veto leaves unresolved (a reverted
-   * intermediate execution). Only ever withholds the exemption. */
+  /** Each admission's first execution end is a visible idle with a recognized
+   * outcome that `finishHistory()` can settle from, or a surviving idle after
+   * the run's own visible canonical response (its report would carry that
+   * text, not the uniquely matched one). A retained-only (reverted), unknown,
+   * untyped or staged-hidden end without such a response cannot, nor can an
+   * idle the distinct-start veto leaves unresolved (a reverted intermediate
+   * execution). Only ever withholds the exemption. */
   private ownHistoryOutcome(child: string, launches: readonly LauncherEvidence[]): boolean {
     const transcript = this.budget.executionHistory?.get(child), retained = this.retainedEnds(child);
-    const ends = transcript && retained && [...transcript, ...retained];
+    const ends = transcript && retained && outcomeEnds(transcript, retained), results = this.budget.executionOutcomes?.get(child) ?? [];
     if (!transcript || !ends) return false;
     const starts = launches.map(launch => this.admissionWindow(launch)?.start).filter(start => start !== undefined);
     const previous = ends.filter(end => end < Math.min(...starts)).sort((a, b) => b - a)[0];
     return launches.every(launch => {
       const window = this.admissionWindow(launch);
       const first = window && ends.filter(end => end >= window.start).sort((a, b) => a - b)[0];
-      return !!window && first !== undefined && first > window.end && transcript.includes(first)
+      return !!window && first !== undefined && first > window.end && (settlingOutcome(results, ends, first)
+          || transcript.includes(first) && this.budget.visibleResponse?.(child, window.start, first) === true)
         && !this.budget.startsContradicted?.(child, [launch], first, previous);
     });
   }

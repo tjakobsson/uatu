@@ -19,6 +19,25 @@ test("entry observations follow pending ownership, replacement, eviction and dis
   cache.dispose(); expect(cache.peekObservation("other", "generation")).toBeUndefined(); expect(cache.retainedBytes).toBe(0);
 });
 
+test("unversioned pending loads carry observations that retire joiners, but never retain values", async () => {
+  let sequence = 0, release!: (value: string) => void, loads = 0;
+  const cache = new HistoryReuse<string, { order: number }>(1024, 2, () => ({ order: ++sequence }));
+  const signal = new AbortController().signal;
+  expect(cache.peekObservation("child", undefined)).toBeUndefined(); // No entry, no metadata.
+  const old = cache.readShared("child", undefined, () => { loads++; return new Promise<string>(resolve => { release = resolve; }); }, signal);
+  expect(cache.peekObservation("child", undefined)).toEqual({ order: 1 });
+  expect(cache.peekObservation("child", "generation")).toBeUndefined();
+  cache.invalidate("child"); // Contradicting qualification retires the in-flight load.
+  const joiner = cache.readShared("child", undefined, async () => { loads++; return "current"; }, signal);
+  expect(cache.peekObservation("child", undefined)).toEqual({ order: 2 });
+  expect(await joiner).toBe("current"); expect(loads).toBe(2);
+  release("obsolete"); expect(await old).toBe("obsolete");
+  expect(cache.size).toBe(0); expect(cache.peek("child", undefined)).toBeUndefined();
+  expect(cache.peekObservation("child", undefined)).toBeUndefined(); // Completed: nothing retained.
+  await cache.read("versioned", "generation", async () => "kept");
+  expect(cache.peekObservation("versioned", undefined)).toBeUndefined(); // Never matches a versioned entry.
+});
+
 test("shares concurrent reads, reuses verified versions, and isolates conversations", async () => {
   const cache = new HistoryReuse<number>();
   let calls = 0;

@@ -5180,7 +5180,9 @@ test(`${read} bounds exact-response report intervals with retained execution end
 // response, and earlier runs settled by their own outcomes still correlate.
 type ReportCounterproofCase = {
   name: string; launches: readonly (readonly [index: number, ran: number, completed: number])[];
-  child: readonly { id: string; type: string; text?: string; created: number; completed?: number }[];
+  child: readonly { id: string; type: string; text?: string; created: number; completed?: number; outcome?: string | null }[];
+  /** A staged child revert hiding the transcript from this message on. */
+  staged?: string;
   /** Native starts, then native ends removed from the transcript by a committed revert. */
   starts?: readonly (number | undefined)[]; ends?: readonly (number | undefined)[];
   reports: readonly { id: string; text: string; created: number; state?: "completed" | "failed" }[];
@@ -5247,6 +5249,18 @@ const reportCounterproofCases: readonly ReportCounterproofCase[] = [
         { id: "response-2", type: "assistant", text: "Other", created: 14, completed: 16 }, { id: "idle-2", type: "idle", created: 20 },
         { id: "input-3", type: "user", created: 31 }, { id: "response-3", type: "assistant", text: "Same result", created: 40, completed: 45 },
         { id: "idle-3", type: "idle", created: 50 }] })),
+  // A later run's idle that cannot settle it (no recognized outcome, or hidden
+  // by a staged child revert) leaves it a possible report source. Control: its
+  // own visible response names its report's text, so it cannot be the source.
+  ...([["a later idle without a recognized outcome", { outcome: null }, undefined, false, false],
+    ["a later idle with an unknown outcome", { outcome: "unknown" }, undefined, false, false],
+    ["a later idle hidden by a staged revert", {}, "input-2", false, false],
+    ["a later idle without a recognized outcome after its own response", { outcome: null }, undefined, true, true]] as const)
+    .map(([name, idle, staged, own, settled]): ReportCounterproofCase => ({ name, launches: [[1, 1, 2], [2, 21, 22]], staged, task: 1, settled, report: "report-1",
+      reports: [{ id: "report-1", text: "Same result", created: 70, state: "failed" }],
+      child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "Same result", created: 3, completed: 5 },
+        { id: "idle-1", type: "idle", created: 10 }, { id: "input-2", type: "user", created: 21 },
+        ...own ? [{ id: "response-2", type: "assistant", text: "Other", created: 30, completed: 35 }] : [], { id: "idle-2", type: "idle", created: 40, ...idle }] })),
   { name: "an undated start", launches: [[1, 1, 3]], starts: [undefined], task: 1, settled: true, report: "report-1",
     reports: [{ id: "report-1", text: "First result", created: 11 }],
     child: [{ id: "input-1", type: "user", created: 1 }, { id: "response-1", type: "assistant", text: "First result", created: 5, completed: 8 },
@@ -5281,8 +5295,12 @@ test(`${read} ${scenario.settled ? "keeps" : "denies"} exact-response report cor
     if (route === `/api/session/${parent}/message`) return Response.json({ data: [
       ...scenario.launches.map(([index, ran, completed]) => launch(index, ran, completed)), ...scenario.reports.map(report),
     ].sort((a, b) => a.time.created - b.time.created), cursor: {} });
+    if (route === `/api/session/${child}` && scenario.staged) {
+      const body = await (await fetch(request)).json();
+      return Response.json({ ...body, data: { ...body.data, revert: { messageID: scenario.staged } } });
+    }
     if (route === `/api/session/${child}/message`) return Response.json({ data: scenario.child.map(message => message.type === "idle"
-      ? { id: message.id, type: "idle", time: { created: message.created }, outcome: "succeeded" }
+      ? { id: message.id, type: "idle", time: { created: message.created }, ...message.outcome === null ? {} : { outcome: message.outcome ?? "succeeded" } }
       : message.type === "user" ? { id: message.id, type: "user", text: "Check", time: { created: message.created } }
       : { id: message.id, type: "assistant", finish: "stop", time: { created: message.created, completed: message.completed }, content: [{ type: "text", text: message.text }] }), cursor: {} });
     return fetch(request);
