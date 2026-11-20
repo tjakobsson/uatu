@@ -814,8 +814,9 @@ test(`transcript pending counterproof uses owned native request order (${order})
       release(); const page = await history;
       expect(page.workerSource?.isCurrent()).toBe(true);
       const row = page.items.find((item): item is import("../../types").BackgroundTaskItem => item.type === "background_task");
-      if (order === "newer-inbox") expect(row).toMatchObject({ status: "completed" }); // First-known complete facet initializes without a bump.
-      else expectWithheld(row);
+      // A first-known complete facet initializes without a counter bump, but its
+      // known relevant pending report still vetoes this source's inference.
+      expectWithheld(row);
       if (order === "native-pending-delivered") {
         const fresh = await provider.reconcileBackgroundTasks!(parent, { fresh: true, signal: abort.signal });
         expect(fresh).toContainEqual(expect.objectContaining({ status: "failed", resultId: "pending-result", summary: "Native failed report" }));

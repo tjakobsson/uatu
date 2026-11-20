@@ -147,8 +147,13 @@ test(`known unchanged inbox counterproof applies to each new consumer (${observa
       reading = adapter.history(parent); void reading.catch(() => undefined);
       await Promise.race([entered, reading.then(() => { throw new Error("History completed before inbox admission"); })]);
       const row = page!.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId)!;
-      expect(row).toMatchObject({ status: observation === "explicit" ? "failed" : "completed" });
-      expect(workerDismissalEvidence(row)?.dismissible).toBe(true);
+      // The known relevant report already vetoes this source's inference, before
+      // its own (identical) inbox reread; a covered retry may skip that reread.
+      if (observation === "relevant") withheld(row);
+      else {
+        expect(row).toMatchObject({ status: observation === "explicit" ? "failed" : "completed" });
+        expect(workerDismissalEvidence(row)?.dismissible).toBe(true);
+      }
       await provider.listPendingInbox!(parent); // Same bytes/digest as the pre-source native response.
       expect(guard!.isCurrent()).toBe(true);
       const projected = guard!.projectInferredOutcome!(row);
@@ -298,4 +303,50 @@ test(`local ${operation} acknowledgement before record or SSE (${outcome}/${seam
     captured.release(); admit.release(); recordRelease.release(); owner.abort();
     await reading?.catch(() => undefined); await followup?.catch(() => undefined); await adapter.dispose(); await fake.stop();
   }
+}, 10_000);
+
+// A covered retry reuses the attempt's inbox reconciliation and rereads no
+// inbox. The new source must still apply the already-known inbox facts.
+for (const observation of ["relevant", "empty"] as const)
+test(`covered history retry keeps the known inbox veto without rereading the inbox (${observation})`, async () => {
+  const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
+  let parent: string | undefined, child: string | undefined, parentReads = 0, inboxReads = 0, childLookups = 0, lookedUp = false;
+  const report = () => ({ id: "known-native-failure", type: "synthetic", time: { created: 45 }, payload: {
+    text: "Known native failure", metadata: { source: "subagent", childID: child, state: "error" } } });
+  const transport = (async (input: Request | string | URL, init?: RequestInit) => {
+    const request = new Request(input, init), route = new URL(request.url).pathname;
+    if (route === `/api/session/${parent}/inbox`) { inboxReads++; return Response.json({ data: observation === "relevant" ? [report()] : [] }); }
+    // The first ownership lookup fails; a successful one during the interaction
+    // reads, after the inbox was reconciled, changes the source and retries.
+    if (route === `/api/session/${child}` && request.method === "GET" && ++childLookups === 1)
+      return Response.json({ _tag: "UnknownError", message: "unavailable" }, { status: 500 });
+    if (route === "/api/form" && inboxReads === 1 && !lookedUp) { lookedUp = true; await provider.getSession(child!); }
+    const response = await fetch(request);
+    if (route === `/api/session/${parent}/message`) {
+      parentReads++;
+      const body = await response.json(), launch = body.data[0];
+      launch.time = { created: 10 }; launch.content[0].time = { created: 10, ran: 11, completed: 12 };
+      return Response.json({ data: [launch], cursor: {} });
+    }
+    if (route === `/api/session/${child}/message`) return Response.json({ data: [{ id: "child-idle", type: "idle", time: { created: 40 }, outcome: "succeeded" }], cursor: {} });
+    return response;
+  }) as typeof globalThis.fetch;
+  const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory, fetch: transport });
+  const nativeRecovery = provider.reconcileBackgroundTasks!.bind(provider);
+  provider.reconcileBackgroundTasks = async () => { throw new Error("Native inventory unavailable"); };
+  const adapter = new ChatAdapter({ provider, workspacePath: directory, coalesceWindowMs: 0, historyReadTimeoutMs: 2_000 });
+  try {
+    parent = (await provider.createSession("Covered retry keeps known inbox veto")).id;
+    const worker = fake.launchRequestWorker(parent); child = worker.childId;
+    const snapshot = await adapter.history(parent);
+    // The relevant case retries (two parent reads) but reads the inbox once.
+    expect({ parentReads, inboxReads }).toEqual({ parentReads: observation === "relevant" ? 2 : 1, inboxReads: 1 });
+    const row = snapshot.items.find((item): item is BackgroundTaskItem => item.type === "background_task" && item.taskId === worker.taskId);
+    if (observation === "empty") { expect(row).toMatchObject({ status: "completed" }); return; }
+    withheld(row);
+    const evidence = await adapter.workerEvidence(parent);
+    expect(evidence.entries.find(entry => entry.executionId === row?.activity?.executionId)?.dismissible).toBe(false);
+    const fresh = (await nativeRecovery(parent, { fresh: true })).find(item => item.taskId === worker.taskId);
+    expect(fresh).toMatchObject({ status: "failed", resultId: "known-native-failure" });
+  } finally { await adapter.dispose(); await fake.stop(); }
 }, 10_000);

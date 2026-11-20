@@ -728,6 +728,10 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (owner && occurrence && update.item.status !== "running" && !update.item.resultId) owner.inferred.add(update.item.id);
       }
     }
+    // A covered retry rereads no inbox. Apply the already-known inbox facts to
+    // this new source before its inference can publish (deny-only).
+    const knownInbox = owner?.inferred.size ? this.sessionChanges.inboxFacts(owner.parent) : undefined;
+    if (knownInbox) this.vetoInferredOnPendingReports(owner!, knownInbox);
     for (const [id, entry] of normalized) if (entry.item.type === "background_task") {
       const occurrence = workers.occurrence(entry.item.taskId), executionAliases = workerExecutionIds(occurrence);
       // A complete historical launcher identifies its recorded occurrence even
@@ -1789,6 +1793,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     return this.nativeHistory.inbox(sessionId, signal);
   }
 
+  private vetoInferredOnPendingReports(source: HistoryWorkerSource, read: Pick<PendingOutcomeRead, "reports" | "overflow">): void {
+    if (source.inferred.size) for (const [child, launches] of source.historyParentLaunches ?? []) {
+      if (read.overflow || pendingOutcomeSignature(read, child, launches) !== undefined) source.historyParentChanges.add(child);
+    }
+  }
+
   private observePendingOutcomes(parent: string, observation: PendingOutcomeRead, owner?: HistoryWorkerSource): void {
     // Pending reports still revoke independently recovered activity. This is
     // not outcome publication authority and never supplies report content.
@@ -1796,10 +1806,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       // Shared digest equality is not a baseline for a new inferred consumer.
       // Apply positive native counterproof to its existing negative veto, without
       // granting report content or revoking independently recovered activity.
-      if (source.inferred.size) for (const [child, launches] of source.historyParentLaunches ?? []) {
-        if (observation.overflow || pendingOutcomeSignature(observation, child, launches) !== undefined)
-          source.historyParentChanges.add(child);
-      }
+      this.vetoInferredOnPendingReports(source, observation);
       const previous = source.activityPending;
       // Activity follows native request order, independently of the outcome
       // counter (which already observed every different delivered response).
