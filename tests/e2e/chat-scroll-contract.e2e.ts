@@ -2,7 +2,7 @@ import type { APIRequestContext, Locator, Page, TestInfo } from "@playwright/tes
 import { test as baseTest, expect } from "./fixtures";
 import { openChatPanel, openChatWorkers } from "./chat-helpers";
 import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
-import { bootShell, control, log, shell } from "./chat-shell-helpers";
+import { bootShell, control, log, settleScroll, shell } from "./chat-shell-helpers";
 import { saveEvidence } from "./evidence";
 import { LIVE_ENVELOPE_EVENT, type LiveEnvelope } from "../../src/shared/live-protocol";
 
@@ -225,7 +225,7 @@ async function pause(page: Page, timeline: Locator, touch: boolean) {
     await page.mouse.wheel(0, -500);
   }
   await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(300);
-  await frames(page);
+  await settleScroll(timeline);
 }
 
 for (const engine of ["chromium", "webkit"] as const) {

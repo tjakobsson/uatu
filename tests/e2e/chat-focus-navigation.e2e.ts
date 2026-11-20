@@ -25,7 +25,7 @@ const test = withEngineBrowsers(baseTest);
 attachPageDiagnosticsOnFailure(test);
 
 for (const engine of ["chromium", "webkit"] as const) {
-  test(`${engine}: request navigation interrupts active forward catch-up @perf`, async ({ launchBrowser, request, baseURL }, info) => {
+  test(`${engine}: request navigation interrupts pending forward catch-up @perf`, async ({ launchBrowser, request, baseURL }, info) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
     try {
@@ -47,27 +47,26 @@ for (const engine of ["chromium", "webkit"] as const) {
       await settleScroll(timeline);
       await expect(page.locator("#chat-requests-jump")).toHaveAttribute("data-request-target", "permission:navigation");
 
-      // Arm the public pill action before the update. Its scroll event invokes
-      // the handler while forward catch-up is demonstrably unfinished, rather
-      // than racing a remote click against the short animation deadline.
+      // Arm the public pill action before the update. A resize observation on
+      // the transcript runs after the frame's animation callbacks, so it clicks
+      // once the growth is laid out and forward catch-up is due but has not yet
+      // written a position. This does not depend on frame cost or easing.
       await timeline.evaluate(node => {
         const state = { triggered: false, beforeTop: node.scrollTop, gap: 0, targetOffset: 0 };
         Object.assign(window, { __requestNavigationProbe: state });
-        const navigate = () => {
+        const observer = new ResizeObserver(() => {
           const target = node.querySelector<HTMLElement>('[data-chat-item-id="permission:navigation"]');
           const pill = document.querySelector<HTMLButtonElement>("#chat-requests-jump");
           if (!target || !pill || pill.dataset.requestTarget !== "permission:navigation") return;
-          const band = node.getBoundingClientRect();
-          const rect = target.getBoundingClientRect();
           const gap = node.scrollHeight - node.clientHeight - node.scrollTop;
-          if (node.scrollTop <= state.beforeTop + 1 || gap <= 600 || rect.top <= band.bottom + 20) return;
+          if (gap <= 600 || Math.abs(node.scrollTop - state.beforeTop) > 1) return;
           state.triggered = true;
           state.gap = gap;
-          state.targetOffset = rect.top - band.top;
-          node.removeEventListener("scroll", navigate);
+          state.targetOffset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
+          observer.disconnect();
           pill.click();
-        };
-        node.addEventListener("scroll", navigate, { passive: true });
+        });
+        observer.observe(document.getElementById("chat-items")!);
       });
       await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.conversation.id, item: {
         id: "navigation:lead", type: "assistant_message", createdAt: 1,
