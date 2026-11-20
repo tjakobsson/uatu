@@ -1204,8 +1204,11 @@ bun run test:e2e:perf -- tests/e2e/chat-scroll-contract.e2e.ts \
 ```
 
 The contract suite measures actual intermediate positions,
-monotonic following, catch-up within 300ms after the last layout update in its
-controlled fixture, and reading-anchor drift within 2px. The existing stability
+monotonic following, live catch-up after the last layout update against a loose
+guard, and reading-anchor drift within 2px. The 300ms catch-up limit is enforced
+on controlled frame clocks in `coordinated-scroll.test.ts` and
+`shell-output.test.ts`, because live rAF samples include renderer scheduling
+jitter. The existing stability
 suites additionally guard the single automatic position writer per frame and
 layout-work budgets. Tests tagged `@perf` run in the existing isolated CI perf
 project; frame traces and failure diagnostics are attached to the test report.

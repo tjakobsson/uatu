@@ -25,7 +25,7 @@ Four first-round defect reports were hypotheses when this plan was drafted. Targ
 - Preserve semantic reading location rather than a raw scroll offset, using stable opaque presentation keys without persisting message text.
 - Keep one cancellable correction owner per scrollport; distinguish reader intent from layout, focus, correction echoes and native rebound.
 - Restore asymmetric timeline intent: any deliberate upward input pauses; deliberate downward arrival within 48px resumes. Latest explicitly resumes regardless of distance.
-- Keep regression work bounded and observable in controlled fixtures.
+- Keep regression work bounded and observable in controlled fixtures. The 300ms catch-up limit is enforced on controlled frame clocks; browser fixtures record live catch-up against a loose guard because live frames include renderer scheduling jitter.
 
 **Non-Goals:**
 - No virtualization rewrite, new history fetching, new animation framework, transport changes, dependencies or compatibility expansion.
@@ -41,6 +41,8 @@ Existing render, resize, reveal and follow paths converge on `CoordinatedScrollO
 
 Retain this design rather than repeatedly calling native smooth scrolling or introducing a second layout scheduler: repeated native restarts and competing writers can countersteer during streaming. Preserve immediate wheel/touch/key cancellation and ordinary keyboard/accessibility focus reveals; a focused button is not an answer-field hold.
 
+The final source adds three narrow owner rules from local review. Request-pill jumps center the request card through the owner and focus a disclosure's native `<summary>`, not the `<details>` element, so Tab reaches the card's controls in WebKit. While a timeline is paused with no answer hold or pending navigation restore, a native summary activation (pointer or keyboard) on a timeline disclosure selects that row before layout changes; the owner keeps it through already-queued passive corrections, queued transcript renders, scroll echoes and same-view snapshot refreshes until a quiet frame. A `toggle` alone, which the renderer can emit when it creates or opens a disclosure, does not take that priority. Shell adapters read horizontal intent on every observed scroll, including pinned downward progress and layout clamps, so a coincident height change keeps the reader's horizontal offset.
+
 ### 2. Restore 48px timeline arrival without weakening departure
 
 Pending work belongs in `TimelineAnchorController` and affected tests/documentation. Its current default is 0.5px; restore 48px for parent/child timeline **downward reader arrival**, inclusive at 48px. A position outside that band remains paused. Do not apply that tolerance to upward departure, no-movement observations, restored/corrected positions or layout clamps. Latest continues to cancel pending reveals and explicitly request following.
@@ -51,7 +53,7 @@ Boundary regressions must include 49px, exactly 48px, a point inside the band, a
 
 ### 3. Retain semantic fallback instead of guessing identity
 
-Existing geometry uses opaque versioned fingerprints for unchanged Markdown regions, with optional character offsets resolved afresh after DOM replacement. Leaf blocks, own inline list text and retained wrapper compatibility avoid anchoring an entire list/table/quote when earlier content changes. Duplicate, missing or unmeasurable content falls back to the item box; existing legacy anchors remain valid. Closed details descendants and nested shell output cannot become outer reading anchors, while visible summaries remain eligible.
+Existing geometry uses opaque versioned fingerprints (`src/chat/markdown-anchor-key.ts`, which also validates stored keys) for unchanged Markdown regions, with optional character offsets resolved afresh after DOM replacement. Leaf blocks, own inline list text and retained wrapper compatibility avoid anchoring an entire list/table/quote when earlier content changes. Duplicate, missing or unmeasurable content falls back to the item box; existing legacy anchors remain valid. Closed details descendants and nested shell output cannot become outer reading anchors, while visible summaries remain eligible.
 
 Raw offsets alone lose words during rewrap; indexing duplicate text as if it had stable identity can restore the wrong occurrence. Retain the conservative row fallback instead. Investigate whether whole-text fingerprints are too coarse when a paragraph appends while an unchanged visible word rewraps; if confirmed, retain enough unambiguous reading identity across that append without persisting raw text or guessing duplicate identity. This does not promise to preserve a word that was removed or rewritten.
 
@@ -63,7 +65,7 @@ If hit testing is absent, occluded or inconclusive, retain the full conservative
 
 ### 5. Keep loaded prose laid out, defer only the existing activity bodies
 
-Normal layout for already-loaded assistant text avoids placeholder-height replacement under the reader. Preserve existing activity `content-visibility` and closed-tool deferral; do not fetch or materialize extra history. First parent/child presentation without a saved anchor crosses the render/layout boundary before instant bottom placement. Snapshot replacement retains an already owed instant placement using fresh geometry, but hiding, navigation and upward input retire stale movement. Saved anchors and ordinary updates keep atomic correction.
+Normal layout for already-loaded assistant text avoids placeholder-height replacement under the reader. Preserve existing activity `content-visibility` and closed-tool deferral; do not fetch or materialize extra history. First parent/child presentation without a saved anchor crosses the render/layout boundary before instant bottom placement. Snapshot replacement retains an already owed instant placement using fresh geometry. Hiding retires stale callbacks; navigation and upward input also clear the owed placement. Saved anchors and ordinary updates keep atomic correction.
 
 An empty child-loading render must not consume placement intended for the still-pending transcript. Keep that intent through hide/reopen and layout callbacks until loaded content can use it. Hiding after the first render also cancels the scheduled callback without discarding the owed instant placement; the same view uses fresh geometry on return. Departure or newer reader input clears it.
 
@@ -90,4 +92,4 @@ Retain the existing 50% compact-desktop reserve, bounded to 200–420px, with th
 
 ## Migration Plan
 
-No data migration or deployment is needed for planning. After explicit authorization to apply: make the narrow threshold/test/documentation change, verify preserved contracts on the final source, and reconcile the main spec with this delta. Preserve existing client-local anchor compatibility. A rollback should target the new threshold change without discarding unrelated scrolling fixes; re-run affected acceptance checks. Sync/archive only after final verification and the appropriate authorization, without claiming the missing original planning step occurred.
+No data migration or deployment is needed for planning. After explicit authorization to apply: make the narrow threshold/test/documentation change, verify preserved contracts on the final source, and reconcile the main spec with this delta. Preserve existing client-local anchor compatibility. A rollback should target the new threshold change without discarding unrelated scrolling fixes; re-run affected acceptance checks. The main spec was reconciled with this delta under task 5.3. Archiving is not a task of this change and needs separate authorization; it must not claim the missing original planning step occurred.

@@ -75,7 +75,8 @@ Chat timelines and shell viewports SHALL preserve reading anchors and independen
 - **THEN** initial instant placement occurs after the rendering layout boundary and remains at the bottom through subsequent layout
 - **AND** a snapshot replacement before placement retains the owed instant placement using the replacement's current geometry rather than animating from an unrelated position
 - **AND** upward reader input before placement cancels that automatic movement and later output preserves the chosen reading position
-- **AND** hiding or leaving the view prevents stale placement work
+- **AND** hiding or leaving the view prevents stale placement callbacks
+- **AND** hiding retains the owed instant placement for the same view, which uses current geometry when shown again, while leaving the view or newer reader input clears it
 - **AND** saved reading-anchor restoration and ordinary updates retain their existing atomic correction behavior
 
 #### Scenario: Reading older content is not interrupted
@@ -119,12 +120,15 @@ Chat timelines and shell viewports SHALL preserve reading anchors and independen
 #### Scenario: Expanding activity does not cause an unrelated jump
 - **WHEN** the user expands or collapses a tool entry away from the timeline end
 - **THEN** the chosen entry remains anchored in the viewport
+- **AND** while following is paused, the activated row stays anchored through already-queued passive corrections, transcript renders, scroll echoes and same-view snapshot refreshes
+- **AND** a disclosure opened or toggled by rendering rather than by reader activation does not take that priority
 
 #### Scenario: Keyboard and accessibility focus remain navigable
 - **WHEN** keyboard or accessibility navigation reveals a control outside the paused viewport
 - **THEN** the control remains visible
 - **AND** an ordinary timeline correction does not undo the requested navigation
 - **AND** a focused button alone is not treated as a temporary shell handoff
+- **AND** jumping to a pending request disclosure focuses its summary so keyboard navigation reaches the request's controls
 
 #### Scenario: Collapsed activity does not steal the reading anchor
 - **WHEN** a paused reader views a message after a collapsed activity group and the viewport width changes
@@ -214,7 +218,7 @@ Chat timelines and shell viewports SHALL preserve reading anchors and independen
 
 #### Scenario: Diagonal shell reading retains horizontal progress
 - **WHEN** downward and rightward native reader movement occurs together while shell output is following
-- **THEN** the next follow correction and subsequent output preserve the new horizontal offset within available bounds
+- **THEN** the next follow correction and subsequent output preserve the new horizontal offset within available bounds, including when a height change coincides with that movement
 - **AND** the shell and outer timeline retain their independent follow intent
 
 #### Scenario: Following survives resize and completion
