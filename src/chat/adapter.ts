@@ -328,12 +328,28 @@ function withWorkerOutcomeVeto(current: ConversationItem | undefined, incoming: 
  * row's denial to the canonical row and let the ordinary rules decide: a
  * qualified alias overlap in the same task type and child keeps it; another
  * execution, scope or fresh terminal evidence does not. Deny-only. */
-function transferWorkerOutcomeVeto(prior: WorkerWithOutcomeVeto, canonical: BackgroundTaskItem): BackgroundTaskItem {
+function transferWorkerOutcomeVeto(prior: WorkerWithOutcomeVeto, canonical: WorkerWithOutcomeVeto): BackgroundTaskItem {
   const binding = prior[workerOutcomeVeto];
   if (!binding && prior.outcomeWithheld !== true) return canonical;
   const rescoped: WorkerWithOutcomeVeto = { ...prior, id: canonical.id, taskId: canonical.taskId };
   if (binding) rescoped[workerOutcomeVeto] = { ...binding, id: canonical.id, taskId: canonical.taskId };
-  return withWorkerOutcomeVeto(rescoped, canonical);
+  const earlier = canonical[workerOutcomeVeto];
+  if (!earlier) return withWorkerOutcomeVeto(rescoped, canonical);
+  // An earlier predecessor already bound this row. Qualify this one against
+  // the recovered row alone, then union what it proves.
+  const { [workerOutcomeVeto]: _earlier, outcomeWithheld: _withheld, ...recovered } = canonical;
+  const next = (withWorkerOutcomeVeto(rescoped, recovered) as WorkerWithOutcomeVeto)[workerOutcomeVeto];
+  if (!next || next.dormant) return canonical;
+  // Same union and saturation rules as a restatement: add new proven
+  // aliases; past the bound, keep every known one and fail closed.
+  const base = earlier.dormant ? next : earlier, other = base === earlier ? next : earlier;
+  const known = new Set(base.executionIds);
+  const added = base.saturated || other.saturated ? [] : other.executionIds.filter(id => !known.has(id));
+  const saturated = base.saturated || other.saturated || known.size + added.length > WORKER_DISMISSAL_ALIAS_LIMIT;
+  const merged: WorkerOutcomeVeto = { ...base, ...(saturated ? { saturated: true as const } : { executionIds: [...base.executionIds, ...added] }) };
+  const item: WorkerWithOutcomeVeto = { ...canonical, outcomeWithheld: true };
+  item[workerOutcomeVeto] = merged;
+  return item;
 }
 
 /** Covered native evidence may withdraw an inference, never an explicit report. */

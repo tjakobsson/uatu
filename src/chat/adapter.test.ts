@@ -7906,19 +7906,29 @@ describe("prompt, abort, permission, and question mutations", () => {
   // Recovery can discover an earlier launcher for a withheld worker: the
   // canonical row id changes while its aliases still name the prior execution.
   // The prior row's denial must move to that row, never to another execution.
-  for (const path of ["snapshot", "stream"] as const) for (const recovered of ["overlap", "disjoint", "other-child", "terminal"] as const) test(`${path} alias supersession carries a withheld veto to the canonical row (${recovered})`, async () => {
+  for (const path of ["snapshot", "stream"] as const) for (const recovered of ["overlap", "disjoint", "other-child", "terminal", "cohorts", "cohorts-unqualified"] as const) test(`${path} alias supersession carries a withheld veto to the canonical row (${recovered})`, async () => {
     // Connected, so history and worker evidence take the covered read.
     const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
     provider.sessions = [fixtureSession("session")];
+    const cohorts = recovered.startsWith("cohorts");
     const prior: BackgroundTaskItem = { id: "task:joined", type: "background_task", taskId: "joined", toolUseId: "joined", childConversationId: "child",
       taskType: "agent", createdAt: 2, description: "Worker", status: "running", stateUncertain: true, outcomeWithheld: true,
-      control: { available: false }, activity: { kind: "unavailable", generation: 1, executionId: "execution-b" } };
-    const canonical: BackgroundTaskItem = { ...prior, id: "task:first", taskId: "first", toolUseId: "first", toolUseIds: ["first", "joined"], createdAt: 1,
+      control: { available: false }, activity: { kind: "unavailable", generation: 1, executionId: "execution-b",
+        ...(cohorts ? { executionAliases: ["execution-b", "execution-c"] } : {}) } };
+    // Cohorts: two withheld predecessors, [B,C] and [D,E], recovered as one
+    // canonical [B,D] row and later restated by E alone. Unqualified: the
+    // canonical row names only B, so the second cohort proves nothing.
+    const second: BackgroundTaskItem = { ...prior, id: "task:second", taskId: "second", toolUseId: "second", createdAt: 3,
+      activity: { kind: "unavailable", generation: 1, executionId: "execution-d", executionAliases: ["execution-d", "execution-e"] } };
+    const canonical: BackgroundTaskItem = { ...prior, id: "task:first", taskId: "first", toolUseId: "first", createdAt: 1,
+      toolUseIds: cohorts ? ["first", "joined", "second"] : ["first", "joined"],
       ...(recovered === "other-child" ? { childConversationId: "other-child" } : {}),
-      activity: { kind: "unavailable", generation: 1, executionId: "execution-a",
-        executionAliases: recovered === "disjoint" ? ["execution-a"] : ["execution-a", "execution-b"] } };
+      activity: cohorts ? { kind: "unavailable", generation: 1, executionId: "execution-b",
+        executionAliases: recovered === "cohorts" ? ["execution-b", "execution-d"] : ["execution-b"] }
+        : { kind: "unavailable", generation: 1, executionId: "execution-a",
+          executionAliases: recovered === "disjoint" ? ["execution-a"] : ["execution-a", "execution-b"] } };
     delete canonical.outcomeWithheld;
-    const current: BackgroundTaskItem = recovered === "terminal" ? { ...canonical, status: "failed", stateUncertain: false, resultId: "result", summary: "Failed",
+    let current: BackgroundTaskItem = recovered === "terminal" ? { ...canonical, status: "failed", stateUncertain: false, resultId: "result", summary: "Failed",
       activity: { ...canonical.activity!, kind: "ended", endedAt: 3 } } : canonical;
     // The snapshot path keeps stream recovery empty until the covered history
     // read starts, so that read itself performs the supersession.
@@ -7927,12 +7937,10 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.listMessages = async () => ({ items: [structuredClone(current)], completeItems: [structuredClone(current)], accounting: [] });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     adapter.projectionForTests("session").apply({ kind: "upsert", item: prior });
+    if (cohorts) adapter.projectionForTests("session").apply({ kind: "upsert", item: second });
     const pump = adapter.startEventPump();
-    const vetoed = recovered === "overlap";
-    try {
-      provider.eventQueue.push({ type: "server.connected", data: {} });
-      if (path === "stream") await waitUntil(() => adapter.projectionForTests("session").has(canonical.id));
-      else { await waitUntil(() => reads >= 1); recovering = true; }
+    let vetoed = recovered === "overlap" || cohorts;
+    const expectVeto = async () => {
       const workers = (await adapter.history("session")).items.filter((item): item is BackgroundTaskItem => item.type === "background_task");
       expect(workers.map(item => item.id)).toEqual([canonical.id]);
       expect(workers[0]!.outcomeWithheld).toBe(vetoed ? true : undefined);
@@ -7940,6 +7948,18 @@ describe("prompt, abort, permission, and question mutations", () => {
       const evidence = (await adapter.workerEvidence("session")).entries;
       expect(evidence.length).toBeGreaterThan(0);
       for (const entry of evidence) expect(entry.dismissible).toBe(!vetoed);
+    };
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      if (path === "stream") await waitUntil(() => adapter.projectionForTests("session").has(canonical.id));
+      else { await waitUntil(() => reads >= 1); recovering = true; }
+      await expectVeto();
+      if (cohorts) {
+        // A partial restatement naming only the second predecessor's alias.
+        current = { ...canonical, activity: { kind: "unavailable", generation: 1, executionId: "execution-e" } };
+        vetoed = recovered === "cohorts";
+        await expectVeto();
+      }
     } finally { await adapter.dispose(); await pump; }
   });
   for (const evict of [false, true]) test(`idle-parent snapshot recovers an out-of-page worker and its pending result${evict ? " after projection eviction" : ""}`, async () => {
