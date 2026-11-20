@@ -6709,6 +6709,84 @@ describe("chat outstanding-request pill", () => {
   });
   }
 
+  test("request pill reveals a question whose queued replacement detaches an answer field released by reader scroll", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const timeline = document.querySelector<HTMLElement>("#chat-timeline")!;
+    const card = () => document.querySelector<HTMLElement>('[data-chat-item-id="question:q1"]');
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: () => 2000 },
+    });
+    timeline.scrollTop = 0;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 640, width: 640 }) as DOMRect;
+    timeline.getBoundingClientRect = () => rect(0, 400);
+    const prototype = window.HTMLElement.prototype;
+    const originalBounds = prototype.getBoundingClientRect, originalFocus = prototype.focus;
+    prototype.getBoundingClientRect = function () {
+      const id = this.getAttribute("data-chat-item-id");
+      if (id === "message:before-question") return rect(-timeline.scrollTop, 800);
+      if (id === "question:q1") return rect(800 - timeline.scrollTop, 200);
+      if (id === "message:after-question") return rect(1000 - timeline.scrollTop, 1000);
+      return originalBounds.call(this);
+    };
+    let active: HTMLElement | null = null;
+    Object.defineProperty(document, "activeElement", { configurable: true, get: () => active && document.contains(active) ? active : document.body });
+    prototype.focus = function () {
+      active = this;
+      this.dispatchEvent(new window.Event("focusin", { bubbles: true }));
+    };
+    const question = pendingQuestion("q1", 2);
+    const before = { id: "message:before-question", type: "assistant_message" as const, createdAt: 1, markdown: "Initial response" };
+    const after = { id: "message:after-question", type: "assistant_message" as const, createdAt: 3, markdown: "Output after question" };
+    const api = questionApi(document, { items: () => [before, question, after] });
+    let stream: Parameters<ChatApiClient["stream"]>[2] | undefined;
+    api.stream = (_id, _cursor, handlers) => { stream = handlers; return { close() {} }; };
+    const { frames, drain, restore } = controlAnimationFrames();
+    try {
+      const { initChat } = await import(`./ui.ts?released-answer-pill=${Date.now()}`);
+      initChat(api);
+      await waitUntil(() => { drain(); return !!stream && !!card() && timeline.scrollTop === 1600; });
+      const oldCard = card()!;
+      oldCard.querySelector<HTMLElement>("[data-question-custom-toggle]")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const field = oldCard.querySelector<HTMLInputElement>("[data-question-custom-input]")!;
+      field.focus();
+      expect(document.documentElement.hasAttribute("data-chat-answering")).toBe(true);
+      drain();
+      // The reader scrolls away while the field keeps focus: the hold ends,
+      // the latched answer identity does not.
+      timeline.dispatchEvent(Object.assign(new window.Event("wheel"), { deltaY: -1 }));
+      timeline.scrollTop = 200; timeline.dispatchEvent(new window.Event("scroll"));
+      drain();
+      expect(frames.size).toBe(0);
+      // A real update queues a render that rebuilds the still-pending form.
+      stream!.event({ type: "item.upsert", conversationId: "one", generation: "g", sequence: 1,
+        item: { ...question, questions: [{ ...question.questions[0]!, prompt: "Which branch now?" }] } }, "question-replacement-1");
+      expect(frames.size).toBeGreaterThan(0);
+      expect(card()).toBe(oldCard);
+      const pill = document.querySelector<HTMLButtonElement>("#chat-requests-jump")!;
+      expect(pill.dataset.requestTarget).toBe(question.id);
+      // Safari activates the pill without moving DOM focus off the field.
+      pill.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(document.activeElement).toBe(field);
+      drain();
+      expect(field.isConnected).toBe(false);
+      expect(card()).not.toBe(oldCard);
+      expect(card()!.textContent).toContain("Which branch now?");
+      expect({ top: card()!.getBoundingClientRect().top, focused: card()!.contains(document.activeElement) })
+        .toEqual({ top: 100, focused: true });
+    } finally {
+      window.dispatchEvent(new window.Event("pagehide"));
+      restore();
+      prototype.getBoundingClientRect = originalBounds;
+      prototype.focus = originalFocus;
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+    }
+  });
+
   test("yields while its request is on screen and re-targets when the request changes", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);

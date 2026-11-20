@@ -364,14 +364,18 @@ export class CoordinatedScrollOwner {
     }
   }
 
+  /** A hold owns only its own unserved reveal. Navigation queued since — a
+   *  request pill's logical reveal, say — survives the hold's end. */
   private clearHold(): void {
+    if (this.heldTarget && this.revealTarget === this.heldTarget) {
+      this.revealTarget = null;
+      this.revealOptions = undefined;
+    }
     this.resumeFollowing = false;
     this.heldPosition = undefined;
     this.heldTarget = null;
     this.heldOptions = undefined;
     this.heldTop = null;
-    this.revealTarget = null;
-    this.revealOptions = undefined;
   }
 
   /**

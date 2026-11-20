@@ -1056,6 +1056,40 @@ describe("coordinated scrolling", () => {
     expect(card.getBoundingClientRect().top).toBe(130);
   });
 
+  for (const hold of ["ended by reader scroll", "still active", "detached before the frame"] as const) test(`releasing an answer hold ${hold} keeps queued request navigation`, () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input"), card = f.document.createElement("div");
+    f.element.append(field, card);
+    stubRect(field, () => ({ top: 400 - f.element.scrollTop, bottom: 440 - f.element.scrollTop }));
+    stubRect(card, () => ({ top: 800 - f.element.scrollTop, bottom: 840 - f.element.scrollTop }));
+    f.grow(1600); f.owner.request(); f.flush(0);
+    f.owner.hold(field as unknown as HTMLElement); f.flush(20);
+    if (hold === "ended by reader scroll") f.event("wheel", { deltaY: -1 });
+    let resolutions = 0;
+    f.owner.reveal(() => { resolutions++; return card as unknown as HTMLElement; }, { align: "center" });
+    // Focus synchronization after the queued render removed the held field,
+    // or the owner's own frame retiring a hold whose field is already gone.
+    if (hold === "detached before the frame") field.remove();
+    else f.owner.release();
+    f.flush(40);
+    expect(resolutions).toBe(1);
+    expect(card.getBoundingClientRect().top).toBe(130);
+  });
+
+  test("releasing a hold still retires its own unserved reveal", () => {
+    const f = fixture();
+    stubRect(f.element, () => ({ top: 0, bottom: 300 }));
+    const field = f.document.createElement("input"); f.element.append(field);
+    stubRect(field, () => ({ top: 800 - f.element.scrollTop, bottom: 840 - f.element.scrollTop }));
+    f.grow(1600); f.move(100); f.owner.pause();
+    const writes = f.writes.length;
+    f.owner.hold(field as unknown as HTMLElement);
+    f.owner.release(); f.flush(20);
+    expect(f.writes.slice(writes)).toEqual([]);
+    expect(f.element.scrollTop).toBe(100);
+  });
+
   test("passive snapshot retains a logical reveal through the staged initial-render handshake", () => {
     const f = fixture(() => "smooth");
     stubRect(f.element, () => ({ top: 0, bottom: 300 }));
