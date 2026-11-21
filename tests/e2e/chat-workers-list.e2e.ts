@@ -209,6 +209,53 @@ for (const engine of ["chromium", "webkit"] as const) test.describe(`canonical w
     await expect(page.locator('#chat-items [data-chat-item-id="failed"]')).toHaveCount(1);
   });
 
+  // An identified Session active row, and an Unavailable row with no proven
+  // execution, which only the task's own identity can follow.
+  for (const [label, activity] of [
+    ["Session active", { kind: "session-active", executionId: "exec:cleared", executionAliases: ["exec:cleared"], generation: 1 }],
+    ["Status unavailable", { kind: "unavailable", observedAt: 1 }],
+  ] as const) test(`a dismissed ${label} row stays cleared through a Checking cycle until verified activity`, async ({ page, request }) => {
+    // Chat suites seed a conversation and open it with a terminal token;
+    // standardBeforeEach targets the tokenless desktop file-preview shell.
+    await request.post("/__e2e/reset");
+    await request.post("/__e2e/chat", { data: { action: "agents", count: 2 } });
+    const row: ConversationItem = { id: "task:cleared", type: "background_task", taskId: "cleared", taskType: "agent", description: "Unverified session", status: "running", createdAt: 1, activity };
+    const anchor: ConversationItem = { id: "task:anchor", type: "background_task", taskId: "anchor", taskType: "agent", description: "Visible sibling", status: "running", createdAt: 2,
+      activity: { kind: "unavailable" } };
+    const snapshot = await request.post("/__e2e/chat", { data: { action: "seed", agent: "claude", title: "Checking cycle", items: [row, anchor] } }).then(response => response.json());
+    const update = async (item: ConversationItem) => {
+      expect((await request.post("/__e2e/chat", { data: { action: "item", conversationId: snapshot.conversation.id, item } })).ok()).toBe(true);
+    };
+    const { token } = await request.get("/__e2e/terminal-token").then(response => response.json());
+    await page.goto(`/?t=${encodeURIComponent(token)}`);
+    await page.locator("#touch-tab-chat").tap();
+    const track = page.locator("#chat-compact-workers");
+    if (await track.getAttribute("open") === null) await track.locator(":scope > summary").tap();
+    const cleared = track.locator('[data-worker-id="task:cleared"]');
+    const sibling = track.locator('[data-worker-id="task:anchor"]');
+    await expect(cleared).toContainText(label);
+    await cleared.locator("[data-dismiss-worker]").tap();
+    await expect(cleared).toHaveCount(0);
+    // Presentation-only replacements of the same task and execution: Checking,
+    // its restore, field churn. Events apply in order: once the sibling's
+    // later rename paints, the list has also painted the replacement before it.
+    const applied = async (item: ConversationItem, step: string) => {
+      await update(item);
+      await update({ ...anchor, description: `Visible sibling after ${step}` });
+      await expect(sibling.locator(".chat-worker-name")).toHaveText(`Visible sibling after ${step}`);
+      await expect(cleared).toHaveCount(0);
+    };
+    await applied({ ...row, activity: { ...activity, kind: "checking" } }, "Checking");
+    await applied({ ...row, activity }, "restore");
+    await applied({ ...row, activity, progress: "Still unverified", usage: { totalTokens: 1200, toolUses: 1, durationMs: 4000 } }, "churn");
+    // Verified activity shows the row again and ends the clear.
+    await update({ ...row, activity: { ...activity, kind: "working" } });
+    await expect(cleared).toHaveCount(1);
+    await expect(cleared.locator("[data-dismiss-worker]")).toHaveCount(0);
+    await update({ ...row, activity });
+    await expect(cleared).toContainText(label);
+  });
+
   test("unanswered questions survive worker/keyboard updates without manual Continue or automatic replies", async ({ page, request }, info) => {
     await request.post("/__e2e/reset");
     await request.post("/__e2e/chat", { data: { action: "agents", count: 2 } });

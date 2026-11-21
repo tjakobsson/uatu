@@ -1,7 +1,8 @@
 import { appUrl } from "../shared/app-url";
 import type { LiveChannel, LiveSubscriptionHandle } from "../shell/live-channel";
-import type { CompactWorker } from "./compact-work";
-import { workerIsActive } from "./worker-state";
+import { workerLaunchClock, type CompactWorker } from "./compact-work";
+import type { ConversationItem, WorkerActivity } from "./types";
+import { WORKER_DISMISSAL_ALIAS_LIMIT } from "./worker-dismissal-identity";
 
 type Entry = { executionId: string; revision: number; dismissed: boolean };
 type IdentityFence = { generation: number; ids: Set<string>; resolvedAt?: number };
@@ -15,13 +16,146 @@ export function workerExecutionIds(worker: CompactWorker): string[] {
   // A projected empty set is a refusal, not permission to retry malformed or
   // deliberately withheld provider aliases through the compatibility path.
   if (worker.dismissalIds !== undefined) return [...new Set(worker.dismissalIds)];
-  return [...new Set([worker.activity?.executionId, ...(worker.activity?.executionAliases ?? [])].filter((id): id is string => Boolean(id)))];
+  return activityExecutionIds(worker.activity);
+}
+
+function activityExecutionIds(activity: WorkerActivity | undefined): string[] {
+  return [...new Set([activity?.executionId, ...(activity?.executionAliases ?? [])].filter((id): id is string => Boolean(id)))];
 }
 
 export function workerDismissible(worker: CompactWorker): boolean {
-  if (worker.activity?.kind === "working" || worker.activity?.kind === "needs-answer") return false;
-  return !workerIsActive(worker.state) || worker.activity?.kind === "unavailable" || worker.activity?.kind === "ended"
-    || worker.state === "unknown" && worker.activity === undefined;
+  if (worker.outcomeWithheld === true) return false;
+  switch (worker.activity?.kind) {
+    case "working": case "needs-answer": return false;
+    // As in the source predicate, these protect only a non-terminal row. A
+    // terminal report can keep stale activity that the presented state ignores.
+    case "checking": case "session-active": return worker.state !== "working" && worker.state !== "unknown";
+    case "unavailable": case "ended": return true;
+    // Keep compatibility for existing standalone marks on legacy rows.
+    default: return worker.state !== "working";
+  }
+}
+
+/** Row affordance for unresolved and ended-without-result rows, not permission
+ * to save a mark. Known final results use "Dismiss finished". Uses the
+ * presented state.
+ */
+export function workerCanDismissRow(worker: CompactWorker): boolean {
+  switch (worker.activity?.kind) {
+    case "working": case "needs-answer": case "checking": return false;
+    default: return worker.state === "unknown";
+  }
+}
+
+/** The scope of "Dismiss finished": a known terminal result that may be saved. */
+export function workerFinishedDismissible(worker: CompactWorker): boolean {
+  return worker.state !== "working" && worker.state !== "unknown" && workerDismissible(worker);
+}
+
+type NativeReference = "outputFile" | "resultId" | "launchRef" | "launchedAt";
+type NativeReferences = Partial<Record<NativeReference, string | number>>;
+type ViewClear = { source: ConversationItem; ids: Set<string>; kind: WorkerActivity["kind"] | undefined; references: NativeReferences };
+
+/** Native references a restatement may add but never change: an OpenCode
+ * shell's native shell id (`outputFile`), a result notification, a launch
+ * reference, and the launch time (a reused launcher's later launch).
+ */
+function nativeReferences(item: ConversationItem): NativeReferences {
+  if (item.type !== "background_task") return {};
+  const { outputFile, resultId } = item, launchRef = item.activity?.launchRef, launchedAt = workerLaunchClock(item);
+  return { ...(outputFile ? { outputFile } : {}), ...(resultId ? { resultId } : {}), ...(launchRef ? { launchRef } : {}),
+    ...(launchedAt !== undefined ? { launchedAt } : {}) };
+}
+
+/** Whether `item`, with proven execution ids `ids`, still presents the cleared
+ * row's task and execution. Task fields must match; the ids must overlap the
+ * ids learned so far, as saved marks do, and a row without them must stay
+ * without them; a learned native reference may not change. Checking and its
+ * restore are presentation, so the activity kind may swap only with Checking.
+ */
+function matchesViewClear(clear: ViewClear, item: ConversationItem, ids: readonly string[]): boolean {
+  const { source } = clear;
+  if (item === source) return true;
+  if (source.type !== "background_task" || item.type !== "background_task") return false;
+  if (item.taskId !== source.taskId || item.taskType !== source.taskType
+    || item.childConversationId !== source.childConversationId || item.toolUseId !== source.toolUseId) return false;
+  if ((ids.length || clear.ids.size) && !ids.some(id => clear.ids.has(id))) return false;
+  for (const [key, value] of Object.entries(nativeReferences(item)) as [NativeReference, string | number][])
+    if (clear.references[key] !== undefined && clear.references[key] !== value) return false;
+  const kind = item.activity?.kind;
+  return kind === "checking" || clear.kind === "checking" || clear.kind === kind;
+}
+
+/** Learns a matching observation: its proven ids, so an overlapping chain of
+ * restatements stays one execution, its native references, and its kind
+ * outside Checking. Returns false past the alias bound, where the clear ends
+ * and the row shows.
+ */
+function learnViewClear(clear: ViewClear, item: ConversationItem, ids: readonly string[]): boolean {
+  if (item.type !== "background_task") return true;
+  if (item.activity?.kind !== "checking") clear.kind = item.activity?.kind;
+  Object.assign(clear.references, nativeReferences(item));
+  for (const id of ids) clear.ids.add(id);
+  return clear.ids.size <= WORKER_DISMISSAL_ALIAS_LIMIT;
+}
+
+/** Current-view clears follow the row's task and proven execution, not the
+ * item object: Checking, its restore, alias enrichment, an overlapping alias
+ * chain, an added native reference and other field churn keep the clear. A
+ * different task, native shell, result, launch, launch time or execution, a
+ * newly proven or lost execution, the alias bound, another unresolved kind,
+ * verified activity, a known result, a lost or duplicated row, or a reset ends
+ * it.
+ */
+export class WorkerViewDismissals {
+  private readonly cleared = new Map<string, ViewClear>();
+  private painted: readonly ConversationItem[] = [];
+
+  /** Records the items behind the rows now on screen. */
+  paint(items: readonly ConversationItem[]): void { this.painted = items; }
+
+  /** Saves an exact eligible run, or clears only that row from the view.
+   * Either way it acts only on the one source item that was painted: the live
+   * projection can replace a reusable row key before its next paint, and a
+   * stale or duplicated source does nothing until that paint.
+   * `canSave` false means the store refuses before submitting anything, so
+   * eligibility is indeterminate and the row clears from the view instead.
+   * Returns whether the current view changed.
+   */
+  dismiss(items: readonly ConversationItem[], current: CompactWorker, presented: CompactWorker, save: (ids: readonly string[]) => void, canSave = true): boolean {
+    if (!workerCanDismissRow(presented)) return false;
+    const sources = items.filter(item => item.id === current.id);
+    const source = sources.length === 1 ? sources[0]! : undefined;
+    if (!source || !this.painted.includes(source)) return false;
+    // Use the source evidence for saving. An expired presentation timer does
+    // not make Checking into verified, save-eligible Unavailable evidence.
+    // The row gate leaves only unresolved rows, which save only with activity.
+    const ids = current.activity && workerDismissible(current) ? workerExecutionIds(current) : [];
+    if (ids.length && canSave) {
+      save(ids);
+      return false; // The saved path alone decides visibility, even on failure.
+    }
+    const activity = source.type === "background_task" ? source.activity : undefined;
+    this.cleared.set(source.id, { source, ids: new Set(activityExecutionIds(activity)), kind: activity?.kind, references: nativeReferences(source) });
+    return true;
+  }
+
+  filter(items: readonly ConversationItem[], workers: readonly CompactWorker[]): readonly CompactWorker[] {
+    if (!this.cleared.size) return workers;
+    const current = new Map<string, ConversationItem | null>();
+    for (const item of items) if (this.cleared.has(item.id)) current.set(item.id, current.has(item.id) ? null : item);
+    const rows = new Map(workers.map(worker => [worker.id, worker]));
+    for (const [id, clear] of this.cleared) {
+      const item = current.get(id), row = rows.get(id);
+      // Checking is presentation of the same evidence, not a new row state.
+      const eligible = row && (workerCanDismissRow(row) || row.activity?.kind === "checking" && row.state === "unknown");
+      const ids = item?.type === "background_task" ? activityExecutionIds(item.activity) : [];
+      if (!item || !eligible || !matchesViewClear(clear, item, ids) || !learnViewClear(clear, item, ids)) this.cleared.delete(id);
+    }
+    return workers.filter(worker => !this.cleared.has(worker.id));
+  }
+
+  reset(): void { this.cleared.clear(); this.painted = []; }
 }
 
 export function visibleWorkers(workers: readonly CompactWorker[], dismissed: ReadonlySet<string>): CompactWorker[] {
@@ -122,6 +256,9 @@ export class WorkerDismissalClient {
         if (this.queued) this.refresh();
       });
   }
+
+  /** False while a conversation-wide fence refuses every save before any POST. */
+  canSave(): boolean { return !this.identityUnavailable && !this.capacityExceeded; }
 
   /** Whether this explicit action saved; retained feedback may belong to another execution. */
   async dismiss(executionId?: string, aliases: readonly string[] = []): Promise<boolean> {
