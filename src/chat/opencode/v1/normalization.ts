@@ -26,6 +26,7 @@ import {
   usageUpsert,
 } from "../normalization";
 import type { TokenUsage } from "../../types";
+import { CHAT_STATUS_REPEAT } from "../../turn-liveness";
 import { OPENCODE_COMPLETION_ALIAS, type OpenCodeCompletionAlias } from "../normalization-types";
 
 // The OpenCode 1.x mapper over the shared normalization core: 1.18's
@@ -240,5 +241,5 @@ export function normalizeProviderEvent(value: unknown, memory?: ProviderEventMem
   const normalized = normalizeEventWith(value, openCodeV1Mapper, memory);
   if ((value as OpenCodeCompletionAlias | null)?.[OPENCODE_COMPLETION_ALIAS] !== true) return normalized;
   return { ...normalized, updates: normalized.updates.map(update => update.kind === "status"
-    ? { ...update, [OPENCODE_COMPLETION_ALIAS]: true as const } : update) };
+    ? { ...update, [CHAT_STATUS_REPEAT]: true as const } : update) };
 }

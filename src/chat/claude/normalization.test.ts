@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import { createClaudeEventMemory, describeSessionScopedUpdates, normalizeClaudeMessage, normalizeTranscriptEntries, sessionScopedSuggestions } from "./normalization";
-import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./normalization-types";
-import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "../visual-identity";
+import { CHAT_TURN, type ChatTurnIdentity } from "../turn-liveness";
+import { CHAT_TEXT_BLOCKS, CHAT_VISUAL_MESSAGE, visualAdmissionIdentity, visualCaptureIdentity, type ChatVisualIdentity } from "../visual-identity";
 import { parseConversationItem } from "../validation";
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
+import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
+import { livenessChecker, livenessConformance } from "../../../tests/fixtures/liveness-conformance";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -24,9 +26,9 @@ describe("Claude native text-block capture identity", () => {
     const update = stopped.updates[0]!;
     if (update.kind !== "upsert") throw new Error("expected stopped text block");
     expect(update.item).toMatchObject({ id: opened.item.id, type: "assistant_message", markdown: "", completedAt: 4 });
-    expect(claudeVisualIdentity(update.item, "offset:0")).toEqual({ messageId: "claude:text:native-block:0", key: "offset:0" });
-    const turn = (update.item as typeof update.item & ClaudeTextIdentity)[CLAUDE_TURN];
-    const openedTurn = (opened.item as typeof opened.item & ClaudeTextIdentity)[CLAUDE_TURN];
+    expect(visualCaptureIdentity(update.item, "offset:0")).toEqual({ messageId: "claude:text:native-block:0", key: "offset:0" });
+    const turn = (update.item as typeof update.item & ChatTurnIdentity)[CHAT_TURN];
+    const openedTurn = (opened.item as typeof opened.item & ChatTurnIdentity)[CHAT_TURN];
     if (!turn || !openedTurn) throw new Error("expected native turn metadata on both block frames");
     expect(turn).toBe(openedTurn);
     expect(turn.completed).toBe(false);
@@ -46,18 +48,18 @@ describe("Claude native text-block capture identity", () => {
     normalize(first);
     const joined = frame("joined", [{ type: "thinking", thinking: "Planning" }, { type: "text", text: "![one](one.png)" }, { type: "text", text: "![two](two.svg)" }]);
     const item = normalize(joined);
-    const identity = item as typeof item & ClaudeTextIdentity;
-    expect(identity[CLAUDE_TEXT_BLOCKS]).toEqual([
+    const identity = item as typeof item & ChatVisualIdentity;
+    expect(identity[CHAT_TEXT_BLOCKS]).toEqual([
       { id: "claude:text:msg_api:1", offset: 0 },
       { id: "claude:text:msg_api:2", offset: "![one](one.png)".length + 2 },
     ]);
-    expect(claudeVisualIdentity({ ...item }, "offset:0")).toEqual({ messageId: "claude:text:msg_api:1", key: "offset:0" });
-    expect(claudeVisualIdentity({ ...item }, `offset:${"![one](one.png)".length + 2}`)).toEqual({ messageId: "claude:text:msg_api:2", key: "offset:0" });
+    expect(visualCaptureIdentity({ ...item }, "offset:0")).toEqual({ messageId: "claude:text:msg_api:1", key: "offset:0" });
+    expect(visualCaptureIdentity({ ...item }, `offset:${"![one](one.png)".length + 2}`)).toEqual({ messageId: "claude:text:msg_api:2", key: "offset:0" });
     expect(identity[CHAT_VISUAL_MESSAGE]).toBe("claude:message:msg_api");
     expect(visualAdmissionIdentity({ ...item })).toBe("claude:message:msg_api");
     expect(normalize(joined)).toEqual(item);
     const later = normalize(frame("later", [{ type: "text", text: "After." }]));
-    expect(claudeVisualIdentity(later, "offset:0").messageId).toBe("claude:text:msg_api:3");
+    expect(visualCaptureIdentity(later, "offset:0").messageId).toBe("claude:text:msg_api:3");
     const history = normalizeTranscriptEntries([first, joined].map(value => ({ kind: "assistant", uuid: value.uuid, timestamp: 1, message: value.message, parentUuid: null, isSidechain: false, parentToolUseId: null })));
     expect(history.items.find(item => item.id === "message:joined")).toEqual(item);
     // The JSON contract keeps native timeline IDs and carries no internal identity.
@@ -71,7 +73,7 @@ describe("Claude native turn boundaries", () => {
     const normalize = (frame: Record<string, unknown>) => normalizeClaudeMessage({ uuid: "frame", timestamp: 1, ...frame }, memory, "live");
     const first = normalize({ type: "assistant", message: { id: "native-first", content: [{ type: "text", text: "![shot](later.png)" }] } }).updates.find(update => update.kind === "upsert" && update.item.type === "assistant_message");
     if (first?.kind !== "upsert") throw new Error("expected text item");
-    const turn = (first.item as typeof first.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
+    const turn = (first.item as typeof first.item & ChatTurnIdentity)[CHAT_TURN]!;
     expect(first.item).toHaveProperty("completedAt");
     expect(turn.completed).toBe(false);
     normalize({ type: "assistant", message: { content: [{ type: "tool_use", id: "write", name: "Write", input: {} }] } });
@@ -82,9 +84,10 @@ describe("Claude native turn boundaries", () => {
     expect(turn.completed).toBe(true);
     const next = normalize({ type: "assistant", uuid: "next", message: { id: "native-next", content: [{ type: "text", text: "next turn" }] } }).updates.find(update => update.kind === "upsert" && update.item.type === "assistant_message");
     if (next?.kind !== "upsert") throw new Error("expected next text item");
-    expect((next.item as typeof next.item & ClaudeTextIdentity)[CLAUDE_TURN]).not.toBe(turn);
-    expect((next.item as typeof next.item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
-    expect(JSON.stringify(first.item)).not.toContain("completed\":true");
+    expect((next.item as typeof next.item & ChatTurnIdentity)[CHAT_TURN]).not.toBe(turn);
+    expect((next.item as typeof next.item & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
+    // The token, seal, blocks and message identity stay off the wire.
+    expect(JSON.parse(JSON.stringify(first.item))).toEqual({ id: "message:frame", type: "assistant_message", createdAt: 1, markdown: "![shot](later.png)", completedAt: 1 });
   });
 
   test("native transcript completion survives disk normalization without inventing timeline footers", async () => {
@@ -104,7 +107,7 @@ describe("Claude native turn boundaries", () => {
       expect(entries[1]).toMatchObject({ kind: "system", subtype: "turn_duration" });
       const { items } = normalizeTranscriptEntries(entries);
       const texts = items.filter(item => item.type === "assistant_message");
-      expect(texts.map(item => (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN]?.completed)).toEqual([true, false]);
+      expect(texts.map(item => (item as typeof item & ChatTurnIdentity)[CHAT_TURN]?.completed)).toEqual([true, false]);
       expect(items.some(item => item.type === "turn_status")).toBe(false);
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
@@ -527,4 +530,36 @@ describe("Claude login failures", () => {
     expect(normalizeClaudeMessage(frame({ isAuthenticating: false }), memory, "live")).toMatchObject({ outcome: "ignored", updates: [] });
     expect(normalizeClaudeMessage(frame({ isAuthenticating: false, error: "Token refresh failed" }), memory, "live").updates[0]).toMatchObject({ kind: "upsert", item: { id: "notice:auth-status", level: "error", code: "login-failed", message: "Token refresh failed" } });
   });
+});
+
+// D1 liveness contract: live producer turns carry provisional tokens only, a
+// reply never carries two kinds, and Claude Code sends no status flags.
+test("Claude Code normalization conforms to the liveness contract", () => {
+  const memory = createClaudeEventMemory();
+  // Each frame is observed as it is normalized, so an in-place token change shows.
+  const checker = livenessChecker();
+  let uuid = 0;
+  const live = (message: Record<string, unknown>) => checker.observe(normalizeClaudeMessage({ uuid: `c-${++uuid}`, timestamp: uuid, ...message }, memory, "live").updates);
+  const updates = [
+    ...(spike as { entries: Array<{ label: string; message: Record<string, unknown> }> }).entries.filter(entry => entry.label.startsWith("turn-")).flatMap(entry => checker.observe(normalizeClaudeMessage(entry.message, memory, "live").updates)),
+    ...live({ type: "stream_event", event: { type: "message_start", message: { id: "api-stream" } } }),
+    ...live({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } }),
+    ...live({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "![shot](s.png)" } } }),
+    ...live({ type: "stream_event", event: { type: "content_block_stop", index: 0 } }),
+    ...live({ type: "assistant", message: { id: "api-stream", content: [{ type: "text", text: "![shot](s.png)" }] } }),
+    ...live({ type: "result", subtype: "success", is_error: false }),
+    // A turn whose native turn footer closes its token without emitting updates.
+    ...live({ type: "assistant", message: { id: "api-footer", content: [{ type: "text", text: "Done" }] } }),
+    ...checker.observe(normalizeClaudeMessage({ type: "system", subtype: "turn_duration", uuid: `c-${++uuid}`, timestamp: uuid, durationMs: 5 }, memory, "live").updates, { turnEnd: true }),
+  ];
+  const history = normalizeTranscriptEntries([{ kind: "assistant", uuid: "row", timestamp: 1, parentUuid: null, isSidechain: false, parentToolUseId: null,
+    message: { id: "api-history", content: [{ type: "text", text: "Hi" }] } }]).items;
+  for (const facts of [checker.result(), livenessConformance(history)]) {
+    expect(facts.tokens).toBeGreaterThan(0);
+    expect([...facts.authorities]).toEqual(["provisional"]);
+    expect(facts.mixed).toEqual([]);
+  }
+  expect(updates.length).toBeGreaterThan(0);
+  expect(checker.result()).toMatchObject({ repeats: 0, continuations: 0, both: 0, repeatOffCompleted: 0, continuesOffFailed: 0, textFactChanges: [], tokenChanges: [] });
+  expect(memory.visualTurn).toBeUndefined(); // The footer closed the last turn.
 });

@@ -91,20 +91,40 @@ Per assistant reply:
    what `visualTextEnded` does today from these two forms. A reply with
    neither form never treats a completion time as sealing its text.
 2. **Execution live: yes, no, or unknown.** Yes and no are the reply's own
-   execution evidence (OpenCode's execution marker today). Unknown keeps
-   today's fallback: live while the conversation streams, unless the reply
-   has a completion time that is not text-only.
+   execution evidence (OpenCode's execution marker today). This fact is not a
+   separate annotation: it is the authoritative turn token below, open for yes
+   and closed for no. Unknown, a reply without a token, keeps today's
+   fallback: live while the conversation streams, unless the reply has a
+   completion time that is not text-only.
 
 Per status update:
 
-3. **Turn continues despite this terminal status.** A failed step that is not
-   the end of the execution (OpenCode's step marker today).
-4. **Repeat status, not a turn boundary.** A restated idle status that must not
-   end a newer turn (OpenCode's completion alias today). The continuation the
-   adapter derives from it (OpenCode's alias-live marker today) becomes adapter
-   state, not a normalizer fact.
+3. **Turn continues despite this failed status.** A failed status, not a
+   repeat, that is not the end of the turn: a retryable failed step
+   (OpenCode's step marker, the only writer today). It neither seals the
+   turn's replies nor finalizes their captures. On any other status it means
+   nothing and is ignored, as at base.
+4. **Repeat status, not a capture boundary.** A restated `completed` status
+   that must not end a newer turn's captures (OpenCode 1.x's restated idle,
+   its completion alias, the only writer today). The flag scopes visual
+   liveness only: the public `completed` status still reaches the adapter's
+   lifecycle handling, which clears live-turn tracking, records settlement and
+   schedules held-message delivery, as at base. The continuation the adapter
+   derives from it (OpenCode's alias-live marker today) becomes adapter state,
+   not a normalizer fact: an ordered repeat continues the turn only if that
+   turn was still live, or continuing, when the repeat arrived. The
+   continuation holds in the live stream and in a snapshot a reloading client
+   reads, for `completed` only, as at base. On any other status the repeat
+   marker is ignored: the status is processed normally, so a failed or
+   interrupted one ends the turn. Inherited from base, and out of scope here:
+   background reconciliation can end a repeat continuation, because the
+   `background` status the adapter reports for a still-running worker is not
+   live.
 
-`isVisualTurnLive` moves to a shared module and reads facts 3 and 4.
+`isVisualTurnLive` moves to a shared module. It reads fact 3 and the
+continuation the adapter derives from fact 4, never the repeat flag itself, so
+an idle alias that arrives after a genuine end does not make that turn live
+again.
 
 **Shared sealable turn token.** Claude Code's turn token becomes a neutral
 token any normalizer may attach to every reply of one turn. The adapter is
@@ -115,11 +135,108 @@ sealing in `statusUpdate`, and the recovery comparison). Each token is either:
 - **provisional**: in live projection the producer's own completion is
   ignored, and only the in-order status sequence seals it (Claude Code's live
   token today); or
-- **authoritative**: the producer's completion is adopted, and recovery
-  republishes a row whose evidence changed even when its JSON is equal
-  (OpenCode 2.x stored-history execution evidence today).
+- **authoritative**: the producer's completion is adopted wherever the token
+  appears, in either direction (OpenCode 2.x stored-history execution evidence
+  today).
 
-A closed token is never reopened by a later, stale row, for either kind.
+These rules describe replies that keep one token kind. For a provisional
+reply, a closed token is never reopened by a row with an open provisional
+token or with no token, at every entry point (recover, seed, replace, upsert,
+ordered apply). For an authoritative reply, stored rows (seed, replace,
+recovery and direct upserts) adopt the evidence in either direction; ordered
+provider input (`apply`) that carries it is treated as carrying no token. A row
+without a token merges sparsely and keeps the projection's evidence (a token,
+a text seal or a `completedAt` written as an explicit undefined counts as
+absent; no current path writes one), except a full replacement, which takes
+the row as given. For a row whose public JSON is
+unchanged, covered-history recovery decides whether to stage it from the turn
+token alone: a token appearing on a row that had none (an OpenCode 2.x row
+first seen live gaining its first stored execution boundary), or a same-kind
+open/closed change. A staged row is merged over the projected one, as any
+recovered row is: the facts it carries, its text seal included, replace the
+projected ones, and facts it omits, such as a text seal seen live, are kept.
+No wire frame is published. A change to any other fact, such as a text seal
+alone, does not trigger staging: that read returns it, but the projection
+keeps its row. The live subscription router keeps a capture it has finished: a later
+row carrying open evidence does not reopen it.
+
+**The liveness contract.** These are obligations on each normalizer, and
+each normalizer's conformance test checks them:
+
+1. **Reply facts travel with whole items.** A reply's facts are its text seal
+   (either form, including the `completedAt` the completion form relies on)
+   and its turn token. A normalizer sends a change to them as an item upsert
+   (or on the item that creates the row), never on a later text update: a
+   text update may carry only the row's own token object, and a different
+   token object counts as a change even in the same state. A producer may
+   close a shared token in place only at a turn boundary (a terminal status or
+   a turn footer). Closing the producer's token is not what ends the turn for
+   live subscribers: a footer closes only the producer's token, and so the
+   snapshot and transcript evidence, while the live projection holds its own
+   frozen copy that only an ordered terminal status seals. Every agent must
+   therefore emit an ordered terminal status to end a turn for live
+   subscribers; a footer alone leaves the live projection open (inherited
+   from base).
+2. **One token kind per reply.** For its whole life a reply carries either
+   provisional tokens (a live producer turn) or authoritative tokens (stored
+   history evidence on snapshot, history and recovery rows), never both, and
+   no live item carries an authoritative token. This is a normalizer
+   obligation only, enforced by the per-normalizer conformance tests. How the
+   adapter handles a reply that mixes kinds is out of contract and
+   unspecified: it keeps base behaviour, and nothing may rely on it.
+3. **A status is a repeat or a continuation, never both.** The repeat flag
+   appears only on a completed status, and the turn-continues flag only on a
+   failed one.
+
+The adapter reads the facts from the item that creates a row, item upserts,
+and snapshot, history and recovery rows. It applies these rules after the
+update coalescer has merged one window. Its text-item merge follows the
+projection's rules for reply facts: within a window a later text update's item
+is merged over the buffered one by the same sparse rule as the projection's
+(`withRetainedReplyFacts`), so facts it carries replace the buffered ones and
+reach a row the window creates, while facts it omits or carries as explicit
+undefined keep the buffered values. An upsert for the row buffered in between
+is a barrier for reply facts only: the later item still replaces the buffered
+one as at base (its start time and other fields included), but it keeps the
+buffered item's text seal, `completedAt` and turn token, or none when the
+buffered entry had none or no item, so a later text item's facts never create,
+seal or change a row ahead of that upsert. No current normalizer puts
+`completedAt` on a text update's item, so treating it as a reply fact here
+changes nothing visible. This is the whole guarantee: the coalescer does not
+make reply facts independent of window boundaries in general. Two inherited
+orderings, kept as at base and out of scope for this change, still depend on
+the window:
+
+- Consecutive upserts for a row in one window fold together at the first
+  one's position, so a text delta buffered between them sees the later
+  upsert's facts. For example Claude Code's block start, a delta ending in
+  `![shot]` and the block stop in one window publish the row already
+  completed, and the delta lands on it; in separate windows the delta stays
+  provisional until the stop arrives.
+- Text still merges into the earlier buffered entry across an upsert: for
+  OpenCode 1.x a covered trailing delta after a text end can briefly publish
+  doubled text that the end's upsert then corrects.
+Outside the contract, the adapter deterministically ignores, without
+throwing, exactly these inputs:
+
+- a text update's facts for a row that already exists;
+- an authoritative token on ordered `apply` input (treated as no token);
+- an open provisional or unannotated row that would reopen a closed
+  provisional token;
+- a repeat flag on any status other than completed: it is dropped, and the
+  status is processed normally;
+- a turn-continues flag on any status other than failed, including a
+  completed repeat: it is dropped, and the status (or repeat) applies as usual.
+
+The flag invalid for a status is dropped first, then the other is evaluated.
+On `failed`, a repeat flag is dropped and a turn-continues flag is honoured,
+so a failed status carrying both keeps its turn live; with the repeat flag
+alone it ends the turn. On `completed`, a turn-continues flag is dropped and
+the repeat flag applies. On `interrupted`, both are dropped and the turn ends.
+
+Mixing token kinds on one reply is not on this list and is not accepted
+either: its handling is unspecified, as rule 2 says. Every other input the
+adapter receives is within the contract.
 
 **Visual identity.** Stored captures are keyed by hashes of the identity
 strings, so `claude:message:<id>`, `claude:text:<apiId>:<n>` and

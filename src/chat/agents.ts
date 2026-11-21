@@ -2,9 +2,8 @@ import { createAttachmentStore, type AttachmentStore, type StoredAttachment } fr
 import { VisualStore, type VisualFileReader, type StoredVisual } from "./visual-store";
 import { getChatVisuals } from "./visual-markdown";
 import { VISUAL_MAX_COUNT } from "./visual-types";
-import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, claudeVisualIdentity, type ClaudeTextIdentity } from "./claude/normalization-types";
-import { isVisualTurnLive, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "./opencode/normalization-types";
-import { CHAT_VISUAL_MESSAGE, visualAdmissionIdentity } from "./visual-identity";
+import { CHAT_STATUS_REPEAT, executionLive, isReplyLive, isTextSealed, isVisualTurnLive, type ChatStatusLiveness } from "./turn-liveness";
+import { visualAdmissionIdentity, visualCaptureIdentity } from "./visual-identity";
 import { decodeReplayCursor } from "./replay";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import { NotificationFeed } from "./notification-feed";
@@ -561,7 +560,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const enrich = async (tracked: Tracked, force = false) => {
       if (!force && Date.now() - tracked.enrichedAt < enrichmentCadenceMs) return false;
       const previous = tracked.item;
-      const live = this.visualItemLive(previous, tracked.live, true);
+      // Ordered projection: a queued frame's provisional turn token may
+      // already be closed by its producer, so wait for the ordered status.
+      const live = isReplyLive(previous, tracked.live, true);
       tracked.item = await this.enrichItem(id, previous, live, true) as Assistant;
       tracked.enrichedAt = tracked.item.markdown.length ? Date.now() : -Infinity;
       return JSON.stringify(previous.visuals) !== JSON.stringify(tracked.item.visuals);
@@ -628,10 +629,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
         const resync: ChatEvent = { ...base, type: "resync", reason: "conversation-rewritten" };
         if (event.type === "item.remove") items.delete(event.itemId);
         if (event.type === "conversation.status" || event.type === "conversation.updated") {
-          // A source-witnessed V1 idle alias repeats an already ordered end.
-          // Preserve its public status, but neither finalize newer captures nor
-          // change their live state while the other source is catching up.
-          if (event.type === "conversation.status" && (event as typeof event & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]) return [event];
+          // A repeat restates an already ordered end. Preserve its public
+          // status, but neither finalize newer captures nor change their live
+          // state while its source is catching up.
+          if (event.type === "conversation.status" && (event as typeof event & ChatStatusLiveness)[CHAT_STATUS_REPEAT]) return [event];
           streaming = isVisualTurnLive(event.type === "conversation.status" ? event : event.conversation);
           // Status errors, /reload refreshes and label changes are authoritative
           // events, not replaceable invalidations. Visual resync is additional.
@@ -652,8 +653,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
             const appended = previous && event.item.markdown.startsWith(previous.item.markdown)
               ? event.item.markdown.slice(previous.item.markdown.length) : undefined;
             const syntaxCompleted = previous && (appended === undefined || completesVisualSyntax(previous.item, appended));
-            const textEnded = this.visualTextEnded(event.item);
-            await enrich(tracked, Boolean(textEnded) || !this.visualItemLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
+            await enrich(tracked, isTextSealed(event.item) || !isReplyLive(event.item, tracked.live, true) || Boolean(syntaxCompleted));
             // Normal events are sequence-deduplicated by the client. Enrich
             // this one native upsert, retaining all its text and other fields.
             return [{ ...event, item: tracked.item }];
@@ -718,12 +718,12 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   private async enrichItem(conversationId: string, item: ConversationItem, streaming: boolean, resolvedLiveness = false): Promise<ConversationItem> {
     if (item.type !== "assistant_message") return item;
-    const live = resolvedLiveness ? streaming : this.visualItemLive(item, streaming);
+    const live = resolvedLiveness ? streaming : isReplyLive(item, streaming);
     // Deliberately overinclusive: any image opener or Markdown fence may
     // produce a visual, including reference syntax, raw HTML, nested/indented
     // fences and whitespace before the SVG info string. Plain prose needs no
     // Markdown parse/highlight on every streamed token.
-    const textEnded = this.visualTextEnded(item);
+    const textEnded = isTextSealed(item);
     const inputs = /!\[|<(?:img|image|pre)\b|`{3}|~{3}/i.test(item.markdown) ? getChatVisuals(item.markdown, live && !textEnded) : [];
     if (!inputs.length) {
       const { visuals: _visuals, ...rest } = item;
@@ -731,7 +731,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     }
     const requests = function* () {
       for (const input of inputs) {
-        const identity = claudeVisualIdentity(item, input.key);
+        const identity = visualCaptureIdentity(item, input.key);
         yield { messageId: identity.messageId, input: { ...input, key: identity.key } };
       }
     };
@@ -740,35 +740,12 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     return { ...item, visuals };
   }
 
-  private visualTextEnded(item: Extract<ConversationItem, { type: "assistant_message" }>): boolean {
-    const identity = item as typeof item & ClaudeTextIdentity & OpenCodeTextIdentity;
-    // Claude's native per-block completedAt seals syntax, not the turn. It is
-    // immutable on this frame, unlike the shared turn token. Other agents'
-    // arbitrary completedAt values do not stand in for Claude block identity.
-    return Boolean(identity[OPENCODE_TEXT_END] || item.completedAt !== undefined
-      && (identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:")));
-  }
-
-  private visualItemLive(item: Extract<ConversationItem, { type: "assistant_message" }>, streaming: boolean, orderedTurnState = false): boolean {
-    // API/text completion is distinct from the execution that may still run
-    // a file-producing tool. Native execution evidence overrides completedAt;
-    // incompatible/unannotated histories retain the historical fallback.
-    const identity = item as typeof item & ClaudeTextIdentity & OpenCodeExecutionIdentity;
-    // Queued Claude frames share a token the provider may already have sealed.
-    // Live projection must instead wait for its ordered status/turn boundary;
-    // history/snapshot reads use the immutable copy captured with native
-    // snapshot text/cursor by the adapter, before the service promise resolves.
-    if (identity[CLAUDE_TURN]) return streaming && (orderedTurnState || !identity[CLAUDE_TURN].completed);
-    if (identity[OPENCODE_EXECUTION_LIVE] !== undefined) return streaming && identity[OPENCODE_EXECUTION_LIVE] === true;
-    const claudeBlock = Boolean(identity[CLAUDE_TEXT_BLOCKS]?.length || identity[CHAT_VISUAL_MESSAGE]?.startsWith("claude:message:"));
-    return streaming && (claudeBlock || item.completedAt === undefined);
-  }
-
   private async enrichSnapshot(snapshot: AgentConversationSnapshot, newestPage = true): Promise<AgentConversationSnapshot> {
-    // Native execution metadata is computed before pagination: an older
-    // page can still belong to the same running turn. Without authoritative
-    // metadata, keep older pages terminal rather than inferring from a user
-    // row or a page-local footer.
+    // A reply's execution evidence is computed before pagination: an older
+    // page can still belong to the same running turn. Without evidence, keep
+    // older pages terminal rather than inferring from a user row or a
+    // page-local footer. Snapshot and history reads adopt the evidence as the
+    // adapter captured it, with the snapshot's text and cursor.
     const lastTurn = snapshot.items.findLastIndex(item => item.type === "turn_status");
     const streaming = isVisualTurnLive(snapshot.conversation);
     // Plan every row synchronously before the first await. In particular,
@@ -778,9 +755,7 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const liveness = new Map<string, boolean>();
     const planned = snapshot.items.map((item, index) => {
       if (item.type !== "assistant_message") return { item, live: false };
-      const turn = (item as typeof item & ClaudeTextIdentity)[CLAUDE_TURN];
-      const execution = (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE];
-      const live = this.visualItemLive(item, streaming && (Boolean(turn) || execution !== undefined || newestPage && index > lastTurn));
+      const live = isReplyLive(item, streaming && (executionLive(item) !== undefined || newestPage && index > lastTurn));
       liveness.set(item.id, live);
       return { item, live };
     });

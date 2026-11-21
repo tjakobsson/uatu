@@ -9,8 +9,8 @@ import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { CLAUDE_TEXT_BLOCKS, CLAUDE_TURN, type ClaudeTextIdentity } from "./normalization-types";
-import { CHAT_VISUAL_MESSAGE } from "../visual-identity";
+import { CHAT_TEXT_SEAL, CHAT_TURN, type ChatTurnIdentity } from "../turn-liveness";
+import { CHAT_TEXT_BLOCKS, CHAT_VISUAL_MESSAGE } from "../visual-identity";
 import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
@@ -168,10 +168,10 @@ test("native turn metadata survives provider history pagination and cached reads
     const sameTurn = await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor });
     expect(sameTurn.items.map(item => item.id)).toEqual(["message:row-3"]);
     const current = sameTurn.items[0]!;
-    expect((current as typeof current & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(false);
+    expect((current as typeof current & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(false);
     const oldPage = await provider.listMessages("turn-pages", { limit: 10, cursor: sameTurn.nextCursor });
     const old = oldPage.items.find(item => item.id === "message:row-0")!;
-    expect((old as typeof old & ClaudeTextIdentity)[CLAUDE_TURN]?.completed).toBe(true);
+    expect((old as typeof old & ChatTurnIdentity)[CHAT_TURN]?.completed).toBe(true);
     expect((await provider.listMessages("turn-pages", { limit: 1, cursor: newest.nextCursor })).items).toEqual(sameTurn.items);
     expect(queries).toHaveLength(0);
   } finally { await provider.dispose(); }
@@ -585,16 +585,16 @@ describe("streaming and session signals (D10, D11)", () => {
     const opened = normalizeClaudeMessage(stream("s2", 0, { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }), memory, "live");
     const openedUpdate = opened.updates[0];
     if (openedUpdate?.kind !== "upsert") throw new Error("expected opened text block");
-    const turn = (openedUpdate.item as typeof openedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]!;
-    expect(turn).toEqual({ completed: false });
-    const textIdentity = { [CLAUDE_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1", [CLAUDE_TURN]: turn };
+    const turn = (openedUpdate.item as typeof openedUpdate.item & ChatTurnIdentity)[CHAT_TURN]!;
+    expect(turn).toEqual({ completed: false, authority: "provisional" });
+    const textIdentity = { [CHAT_TEXT_BLOCKS]: [{ id: "claude:text:msg_1:0", offset: 0 }], [CHAT_VISUAL_MESSAGE]: "claude:message:msg_1", [CHAT_TEXT_SEAL]: "completion", [CHAT_TURN]: turn };
     expect(opened.updates).toEqual([{ kind: "upsert", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     const first = normalizeClaudeMessage(stream("s3", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Autumn brings" } }), memory, "live");
     const second = normalizeClaudeMessage(stream("s4", 1, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " a crisp chill." } }), memory, "live");
     expect(first.updates).toEqual([{ kind: "text", itemId: "message:stream:msg_1:0", identity: "message:stream:msg_1:0", mode: "incremental", text: "Autumn brings", item: { id: "message:stream:msg_1:0", type: "assistant_message", createdAt: Date.parse(at(0)), markdown: "", ...textIdentity } }]);
     const firstUpdate = first.updates[0];
     if (firstUpdate?.kind !== "text" || !firstUpdate.item) throw new Error("expected text delta identity");
-    expect((firstUpdate.item as typeof firstUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
+    expect((firstUpdate.item as typeof firstUpdate.item & ChatTurnIdentity)[CHAT_TURN]).toBe(turn);
     expect(second.updates[0]).toEqual(expect.objectContaining({ kind: "text", itemId: "message:stream:msg_1:0", text: " a crisp chill." }));
     // Thinking deltas and a subagent's stream stay out.
     expect(normalizeClaudeMessage(stream("s5", 1, { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }), memory, "live").outcome).toBe("ignored");
@@ -605,7 +605,7 @@ describe("streaming and session signals (D10, D11)", () => {
     expect(completed.updates[1]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "message:a1", type: "assistant_message", markdown: "Autumn brings a crisp chill." }) });
     const completedUpdate = completed.updates[1];
     if (completedUpdate?.kind !== "upsert") throw new Error("expected completed text block");
-    expect((completedUpdate.item as typeof completedUpdate.item & ClaudeTextIdentity)[CLAUDE_TURN]).toBe(turn);
+    expect((completedUpdate.item as typeof completedUpdate.item & ChatTurnIdentity)[CHAT_TURN]).toBe(turn);
     expect(turn.completed).toBe(false); // A text-block stop is not a turn end.
     // A second text block of the same API message consumes the next streamed index.
     normalizeClaudeMessage(stream("s7", 3, { type: "content_block_start", index: 2, content_block: { type: "text", text: "" } }), memory, "live");

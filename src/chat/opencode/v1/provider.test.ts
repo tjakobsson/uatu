@@ -13,7 +13,7 @@ import { VisualReadError, VisualStore } from "../../visual-store";
 import type { WorkspaceChatService } from "../../service";
 import type { AssistantMessageItem, ChatEvent, ConversationItem } from "../../types";
 import type { NormalizedProviderEvent } from "../../provider";
-import { isVisualTurnLive, OPENCODE_COMPLETION_ALIAS, OPENCODE_EXECUTION_LIVE, type OpenCodeCompletionAlias, type OpenCodeExecutionIdentity } from "../normalization-types";
+import { CHAT_STATUS_REPEAT, executionLive, isVisualTurnLive, type ChatStatusLiveness } from "../../turn-liveness";
 
 // Acknowledgement is at the raw source consumer, before merge deduplication.
 // Normalized-event acknowledgements below separately fence projection commits.
@@ -139,12 +139,12 @@ test.each([
     // to an idle status already projected, not to the new pending image.
     const alias = await send(classic, { id: "old-alias", type: "session.idle", properties: { sessionID } });
     const aliasUpdate = alias!.updates.find(update => update.kind === "status")!;
-    expect((aliasUpdate as typeof aliasUpdate & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBe(true);
+    expect((aliasUpdate as typeof aliasUpdate & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBe(true);
     releaseRead.resolve(); await draining;
     const aliased = await drain();
     const aliasStatus = aliased.find(event => event.type === "conversation.status")!;
     expect(JSON.parse(JSON.stringify(aliasStatus))).toMatchObject({ type: "conversation.status", status: "completed" });
-    expect(isVisualTurnLive(aliasStatus as Extract<ChatEvent, { type: "conversation.status" }> & OpenCodeCompletionAlias)).toBe(true);
+    expect(isVisualTurnLive(aliasStatus as Extract<ChatEvent, { type: "conversation.status" }> & ChatStatusLiveness)).toBe(true);
     expect(aliased.some(event => event.type === "resync")).toBe(false);
     expect(reads).toEqual({ "old.png": 2, "current.png": 1 });
     // Read behind the queued alias too, before any running-resume frame. The
@@ -169,7 +169,7 @@ test.each([
       // that could swallow this idle-first completion if a frame is absent.
       const genuine = await send(native, idle("genuine-idle-first"));
       const update = genuine!.updates.find(update => update.kind === "status")!;
-      expect((update as typeof update & OpenCodeCompletionAlias)[OPENCODE_COMPLETION_ALIAS]).toBeUndefined();
+      expect((update as typeof update & ChatStatusLiveness)[CHAT_STATUS_REPEAT]).toBeUndefined();
     } else if (completion === "failed") {
       await send(native, { id: "terminal-error", type: "session.error", data: { sessionID, error: { message: "Failed after file creation" } } });
     } else {
@@ -939,10 +939,10 @@ describe("history across both OpenCode message stores", () => {
     const provider = new OpenCodeV1Provider(client([{ data: [] }], legacy), "/workspace");
     const page = await provider.listMessages("ses_history", { limit: 1 });
     expect(page.items.find(item => item.id === "part:stop-text")).toMatchObject({ completedAt: 8 });
-    expect(page.completeItems?.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+    expect(page.completeItems?.every(item => executionLive(item) === undefined)).toBe(true);
     const older = await provider.listMessages("ses_history", { limit: 2, cursor: page.nextCursor });
     expect(older.items.find(item => item.id === "part:steered-step-text")).toMatchObject({ completedAt: 6 });
-    expect(older.items.every(item => (item as typeof item & OpenCodeExecutionIdentity)[OPENCODE_EXECUTION_LIVE] === undefined)).toBe(true);
+    expect(older.items.every(item => executionLive(item) === undefined)).toBe(true);
     expect((await provider.listMessages("ses_history", { limit: 100 })).accounting).toEqual([]);
   });
 
