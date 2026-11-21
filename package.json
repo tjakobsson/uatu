@@ -43,7 +43,7 @@
     "@anthropic-ai/sdk": "1.8.0",
     "@asciidoctor/core": "^4.0.7",
     "@block65/webcrypto-web-push": "2.0.0",
-    "@opencode-ai/sdk": "1.19.5",
+    "@opencode-ai/sdk": "1.19.6",
     "@opencode/client": "2.3.0",
     "@pierre/diffs": "1.6.4",
     "@pierre/trees": "1.0.0",
