@@ -46,12 +46,13 @@ For OpenCode outcomes without a parent report, recovery SHALL record each parent
 
 ### Requirement: Workers list dismissal does not depend on proving an unresolved execution
 
-The Workers list SHALL keep verified Working and Needs your answer rows visible and SHALL keep Checking visible during its bounded status check. An ended-without-result or unresolved worker or shell row SHALL offer one Dismiss action; rows with a known final result SHALL be dismissed through the existing Dismiss finished action. Stop eligibility and fresh Stop authorization SHALL remain independent of list visibility and dismissal.
+The Workers list SHALL keep verified Working and Needs your answer rows visible and SHALL keep Checking visible during its bounded status check unless the user has cleared that row from the current view. An ended-without-result or unresolved worker or shell row SHALL offer one Dismiss action; rows with a known final result SHALL be dismissed through the existing Dismiss finished action. Stop eligibility and fresh Stop authorization SHALL remain independent of list visibility and dismissal.
 
 #### Scenario: No safe saved dismissal can be established
 - **WHEN** the user dismisses an ended or unresolved row that lacks verified execution identity or has evidence barring a saved dismissal
 - **THEN** the client SHALL clear that row from the current view without creating a saved mark or issuing a persisted dismissal write
 - **AND** that clear SHALL NOT survive refresh or hide a different execution
+- **AND** presentation-only changes to the same task and execution, such as Checking and its restore, SHALL NOT undo that clear
 
 #### Scenario: An exact eligible execution can be saved
 - **WHEN** the user dismisses a row with an exact execution identity that qualifies for saved dismissal

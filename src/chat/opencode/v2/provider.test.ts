@@ -22,6 +22,7 @@ import { VisualReadError, VisualStore } from "../../visual-store";
 import type { WorkspaceChatService } from "../../service";
 import type { AssistantMessageItem, ChatEvent, ConversationSnapshot } from "../../types";
 import { OPENCODE_EXECUTION_LIVE, OPENCODE_TEXT_END, type OpenCodeExecutionIdentity, type OpenCodeTextIdentity } from "../normalization-types";
+import { eventPump } from "../../../../tests/e2e/opencode-v2-provider-harness";
 
 // The stored records of a real 2.0.13 session: user, assistant (read tool),
 // assistant (text), idle, user — see normalization.test.ts for provenance.
@@ -6478,17 +6479,8 @@ function nativeBackgroundStack() {
 }
 
 function observedNativeStream(provider: OpenCodeV2Provider) {
-  const lifetime = new AbortController(), events: import("../../provider").NormalizedProviderEvent[] = [];
-  const waiting = new Set<{ matches: (event: import("../../provider").NormalizedProviderEvent) => boolean; resolve: () => void }>();
-  const pump = (async () => {
-    for await (const event of provider.events(lifetime.signal)) {
-      events.push(event);
-      for (const waiter of waiting) if (waiter.matches(event)) { waiting.delete(waiter); waiter.resolve(); }
-    }
-  })();
-  void pump.catch(() => undefined);
-  return { lifetime, pump, events, seen: (matches: (event: import("../../provider").NormalizedProviderEvent) => boolean) =>
-    events.some(matches) ? Promise.resolve() : new Promise<void>(resolve => waiting.add({ matches, resolve })) };
+  const lifetime = new AbortController();
+  return { lifetime, ...eventPump(provider, lifetime.signal) };
 }
 
 for (const scenario of ["single-known", "browser-two-reports", "known-zero-cost", "known-unpriced", "history-recovery", "no-reported-usage"] as const)
@@ -7028,6 +7020,43 @@ for (const live of ["cold", "content", "tool-success"] as const) for (const exec
     }
     expect(server.calls.every(call => call.method === "GET")).toBe(true);
   } finally { stream?.lifetime.abort(); await stream?.pump; await provider.dispose(); }
+});
+
+test("a pre-existing background shell with matching inventory stays Working after pre-ownership evidence is lost", async () => {
+  // The pre-ownership store tracks agent execution boundaries only. Losing some
+  // of them must not fence a shell, whose activity rests on its own inventory.
+  const command = "sleep 30; printf 'Timer task finished\\n'";
+  const launch = { id: "message-timer", type: "assistant", time: { created: 1_790_000_000_000, completed: 1_790_000_002_338 }, content: [{
+    id: "call-timer", type: "tool", name: "shell", executed: true,
+    time: { created: 1_790_000_002_071, ran: 1_790_000_002_264, completed: 1_790_000_002_305 },
+    state: { status: "completed", input: { command, background: true },
+      metadata: { status: "running", truncated: false, shellID: "sh_timer" },
+      content: [{ type: "text", text: "Moved to background. Output file: /fixture/timer.out" }] },
+  }] };
+  const server = fakeOpenCode({
+    "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      const flood = Array.from({ length: 2_200 }, (_, index) => ({ id: `flood-${index}`, type: "session.execution.succeeded", created: 1_790_000_000_100 + index,
+        location: { directory: WORKSPACE }, data: { sessionID: `ses_flood_${index}`.padEnd(500, "x") } }));
+      // A pre-existing shell: its launcher predates this stream, so recovery is cold.
+      for (const event of [{ type: "server.connected", data: {} }, ...flood]) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    } }), { headers: { "content-type": "text/event-stream" } }),
+    "GET /api/session/ses_parent": () => session("ses_parent"),
+    "GET /api/session/ses_parent/message": () => ({ data: [launch], cursor: {} }),
+    "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    "GET /api/session/active": () => ({}),
+    "GET /api/shell/sh_timer": () => scoped({ id: "sh_timer", command, cwd: WORKSPACE,
+      shell: "/bin/sh", file: "/fixture/timer.out", status: "running", metadata: { sessionID: "ses_parent" },
+      time: { started: 1_790_000_002_265 } } satisfies ShellInfo),
+  });
+  const provider = server.provider();
+  const stream = observedNativeStream(provider);
+  try {
+    await stream.seen(event => event.eventType === "session.execution.succeeded" && event.conversationId === "ses_flood_2199".padEnd(500, "x"));
+    expect((provider as unknown as { eventMemory: { workers: { preOwnershipLost: boolean } } }).eventMemory.workers.preOwnershipLost).toBe(true);
+    const rows = await provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "running", activity: { kind: "working" } });
+  } finally { stream.lifetime.abort(); await stream.pump; await provider.dispose(); }
 });
 
 for (const unavailableControl of [false, true]) test(`exact shell inventory end remains unresolved independently of control (unavailable=${unavailableControl})`, async () => {

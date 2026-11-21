@@ -1,7 +1,8 @@
 import { appUrl } from "../shared/app-url";
 import type { LiveChannel, LiveSubscriptionHandle } from "../shell/live-channel";
-import type { CompactWorker } from "./compact-work";
-import type { ConversationItem } from "./types";
+import { workerLaunchClock, type CompactWorker } from "./compact-work";
+import type { ConversationItem, WorkerActivity } from "./types";
+import { WORKER_DISMISSAL_ALIAS_LIMIT } from "./worker-dismissal-identity";
 
 type Entry = { executionId: string; revision: number; dismissed: boolean };
 type IdentityFence = { generation: number; ids: Set<string>; resolvedAt?: number };
@@ -15,7 +16,11 @@ export function workerExecutionIds(worker: CompactWorker): string[] {
   // A projected empty set is a refusal, not permission to retry malformed or
   // deliberately withheld provider aliases through the compatibility path.
   if (worker.dismissalIds !== undefined) return [...new Set(worker.dismissalIds)];
-  return [...new Set([worker.activity?.executionId, ...(worker.activity?.executionAliases ?? [])].filter((id): id is string => Boolean(id)))];
+  return activityExecutionIds(worker.activity);
+}
+
+function activityExecutionIds(activity: WorkerActivity | undefined): string[] {
+  return [...new Set([activity?.executionId, ...(activity?.executionAliases ?? [])].filter((id): id is string => Boolean(id)))];
 }
 
 export function workerDismissible(worker: CompactWorker): boolean {
@@ -47,11 +52,63 @@ export function workerFinishedDismissible(worker: CompactWorker): boolean {
   return worker.state !== "working" && worker.state !== "unknown" && workerDismissible(worker);
 }
 
-/** Current-view clears are bound to the underlying item object, not to the
- * worker ID or any aliases. Recompacting an unchanged item preserves its clear.
+type NativeReference = "outputFile" | "resultId" | "launchRef" | "launchedAt";
+type NativeReferences = Partial<Record<NativeReference, string | number>>;
+type ViewClear = { source: ConversationItem; ids: Set<string>; kind: WorkerActivity["kind"] | undefined; references: NativeReferences };
+
+/** Native references a restatement may add but never change: an OpenCode
+ * shell's native shell id (`outputFile`), a result notification, a launch
+ * reference, and the launch time (a reused launcher's later launch).
+ */
+function nativeReferences(item: ConversationItem): NativeReferences {
+  if (item.type !== "background_task") return {};
+  const { outputFile, resultId } = item, launchRef = item.activity?.launchRef, launchedAt = workerLaunchClock(item);
+  return { ...(outputFile ? { outputFile } : {}), ...(resultId ? { resultId } : {}), ...(launchRef ? { launchRef } : {}),
+    ...(launchedAt !== undefined ? { launchedAt } : {}) };
+}
+
+/** Whether `item`, with proven execution ids `ids`, still presents the cleared
+ * row's task and execution. Task fields must match; the ids must overlap the
+ * ids learned so far, as saved marks do, and a row without them must stay
+ * without them; a learned native reference may not change. Checking and its
+ * restore are presentation, so the activity kind may swap only with Checking.
+ */
+function matchesViewClear(clear: ViewClear, item: ConversationItem, ids: readonly string[]): boolean {
+  const { source } = clear;
+  if (item === source) return true;
+  if (source.type !== "background_task" || item.type !== "background_task") return false;
+  if (item.taskId !== source.taskId || item.taskType !== source.taskType
+    || item.childConversationId !== source.childConversationId || item.toolUseId !== source.toolUseId) return false;
+  if ((ids.length || clear.ids.size) && !ids.some(id => clear.ids.has(id))) return false;
+  for (const [key, value] of Object.entries(nativeReferences(item)) as [NativeReference, string | number][])
+    if (clear.references[key] !== undefined && clear.references[key] !== value) return false;
+  const kind = item.activity?.kind;
+  return kind === "checking" || clear.kind === "checking" || clear.kind === kind;
+}
+
+/** Learns a matching observation: its proven ids, so an overlapping chain of
+ * restatements stays one execution, its native references, and its kind
+ * outside Checking. Returns false past the alias bound, where the clear ends
+ * and the row shows.
+ */
+function learnViewClear(clear: ViewClear, item: ConversationItem, ids: readonly string[]): boolean {
+  if (item.type !== "background_task") return true;
+  if (item.activity?.kind !== "checking") clear.kind = item.activity?.kind;
+  Object.assign(clear.references, nativeReferences(item));
+  for (const id of ids) clear.ids.add(id);
+  return clear.ids.size <= WORKER_DISMISSAL_ALIAS_LIMIT;
+}
+
+/** Current-view clears follow the row's task and proven execution, not the
+ * item object: Checking, its restore, alias enrichment, an overlapping alias
+ * chain, an added native reference and other field churn keep the clear. A
+ * different task, native shell, result, launch, launch time or execution, a
+ * newly proven or lost execution, the alias bound, another unresolved kind,
+ * verified activity, a known result, a lost or duplicated row, or a reset ends
+ * it.
  */
 export class WorkerViewDismissals {
-  private readonly cleared = new Map<string, ConversationItem>();
+  private readonly cleared = new Map<string, ViewClear>();
   private painted: readonly ConversationItem[] = [];
 
   /** Records the items behind the rows now on screen. */
@@ -78,7 +135,8 @@ export class WorkerViewDismissals {
       save(ids);
       return false; // The saved path alone decides visibility, even on failure.
     }
-    this.cleared.set(source.id, source);
+    const activity = source.type === "background_task" ? source.activity : undefined;
+    this.cleared.set(source.id, { source, ids: new Set(activityExecutionIds(activity)), kind: activity?.kind, references: nativeReferences(source) });
     return true;
   }
 
@@ -86,9 +144,13 @@ export class WorkerViewDismissals {
     if (!this.cleared.size) return workers;
     const current = new Map<string, ConversationItem | null>();
     for (const item of items) if (this.cleared.has(item.id)) current.set(item.id, current.has(item.id) ? null : item);
-    const clearable = new Set(workers.filter(workerCanDismissRow).map(worker => worker.id));
-    for (const [id, source] of this.cleared) {
-      if (current.get(id) !== source || !clearable.has(id)) this.cleared.delete(id);
+    const rows = new Map(workers.map(worker => [worker.id, worker]));
+    for (const [id, clear] of this.cleared) {
+      const item = current.get(id), row = rows.get(id);
+      // Checking is presentation of the same evidence, not a new row state.
+      const eligible = row && (workerCanDismissRow(row) || row.activity?.kind === "checking" && row.state === "unknown");
+      const ids = item?.type === "background_task" ? activityExecutionIds(item.activity) : [];
+      if (!item || !eligible || !matchesViewClear(clear, item, ids) || !learnViewClear(clear, item, ids)) this.cleared.delete(id);
     }
     return workers.filter(worker => !this.cleared.has(worker.id));
   }

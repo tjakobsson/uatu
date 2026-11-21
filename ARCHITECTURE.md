@@ -1308,14 +1308,17 @@ Before granting history-only Working, recovery also consults the existing scoped
 execution ledger, even when no launcher was retained. An observed end at or after
 the admission window's lower bound, or a later distinct execution starting beyond
 its upper bound, vetoes attribution of active-session membership to that launch.
-Scoped native end proofs observed before the first child ownership read are kept
-under the same ledger budget, without admitting a parent/child association.
+Scoped native boundaries observed before the first child ownership read are kept
+in the bounded pre-ownership store described below, outside the shared budget
+until the child becomes a worker, without admitting a parent/child association.
 A committed child revert cannot erase this already processed counterproof.
+An ordinary reconnect keeps it; only replacing a saturated ledger discards it.
 The old row becomes activity-unavailable with no invented outcome/end clock or
 new Stop authority; its execution clock does not restart. Boundaries before a
 new admission, unrelated/foreign events, a first execution starting after
 background admission, and exact start replays do not create that veto. This is a
-read of the existing bounded ledger, not another observation cache or buffer.
+read of the existing bounded ledger and its pre-ownership store, not another
+observation cache or buffer.
 Distinct-start counterproof keeps the greatest observed native start clock (or
 an unknown-clock veto) in one scalar inside the existing ledger record. An older
 start replay may not erase that negative evidence or revive the old execution;
@@ -1413,9 +1416,49 @@ installation slot without creating a worker outcome. Existing healthy waiters
 still finish; a later independent reader may load current native history.
 Exact terminal replay identities, like starts, remain in the same serialized,
 aggregate-budgeted execution ledger across negative-only retirement. Up to 128
-distinct terminal identities per child are recognized; overflow sets sticky
-recovery-only uncertainty. Replaying an earlier observed terminal after a later
-one cannot revoke a current lease or bind that proof to a new occurrence.
+distinct terminal identities per session are recognized; overflow makes that
+session's own ends unknown, which is sticky and withholds its activity, outcome
+inference and Stop basis without touching other sessions. Live retention keeps
+one tally of distinct end identities, proof keys plus the clocks of ends without
+a proof, so ends with and without proofs share the one 128-end cap. The cap keeps
+per-session memory bounded, and reaching it fails closed. A complete-history
+fold keeps every transcript end. Both ledgers record execution boundaries only for a
+known or possible worker: a verified parent, an observed birth with a parent, a
+task, or retained boundary evidence (a start alone never makes one). A
+top-level conversation's turns and a read-only session lookup add nothing to
+either ledger. Any other session's boundaries go to a pre-ownership store
+outside both budgets, kept in the ledger's own per-session form: distinct start
+proofs and clocks, end clocks and terminal identities, each up to 128 before
+that session's own starts or ends become unknown. A live boundary without a
+usable native proof is kept as an unknown start or end count for Stop admission
+only, so it still withholds a later Stop basis as main's control turn note did,
+without changing activity or outcome inference. Cold-recovery and replay
+queries read the store for a session the ledger does not hold, so task 5.30's
+vetoes, distinct-start counting and retired-start binding behave as if the
+boundaries were in the ledger. When the session becomes a worker, live or by a
+history reconciliation's ownership verification, its evidence moves into the
+ledger and counts against the shared budget from then on; that move asserts no
+ownership. The
+control ledger does not note those turns. Stop admission instead applies the
+store's counts and latest proofs as main applied its turn notes: a consumed or
+historical proof is skipped, any other revokes, and an unknown count leaves
+admission unresolved. The store holds at most 4,096 sessions and 1 MiB of
+serialized payload. Over the byte cap, the least recently active full session is
+compacted to a marker whose ends and start clocks are unknown, a few hundred
+bytes that stay exact, fail-closed evidence for that session; a full session
+costs about 1.5 KB after one turn and up to about 32 KB at 128 turns. Compaction
+also comes first at the session-count limit. Only a marker is ever dropped,
+oldest first, and only when compaction cannot bring the store within its caps. A drop sets a sticky loss
+flag: any agent worker without a birth observed in the current subscription has
+unknown ends and starts, across ordinary reconnects, until the ledger is
+replaced after saturation. Workers born live and shells, which have no execution
+boundaries, are unaffected. A parentless owned record, from a lookup or a
+listing, proves a session top-level and removes it from the store without loss.
+The store retires with the ledger, survives an ordinary reconnect, and is
+replaced only with the ledger.
+Replaying an
+earlier observed terminal after a later one cannot revoke a current lease or
+bind that proof to a new occurrence.
 
 Qualification belongs to the cache entry before any worker consumer exists.
 Record visibility and native transcript contradictions affect pending as well
@@ -1446,10 +1489,15 @@ Retained starts are explicitly retired and excluded from positive unbound-start
 admission when a launcher is restated on a later subscription. Exact old-start
 replay stays negative; a distinct current-subscription start remains eligible for
 ordinary activity binding, without restoring Stop across the observation gap.
-The same entry/byte accounting includes the retained control ledger; no second
-counterproof cache is created. Saturation remains fail-closed across reconnect,
-not reset into an assertion that lost negative facts never concerned this child.
-Disconnected reads consult the stripped ledger too. Provider disposal releases
+The same entry/byte accounting includes the retained control ledger; apart from
+the bounded pre-ownership store above, no second counterproof cache is created. Aggregate saturation stays fail-closed for the
+rest of that subscription and the disconnected gap after it; the next
+subscription replaces a saturated ledger with a fresh one, and scoped recovery
+reads supply authority from then on. The observation gap also ends the control
+ledger's projection-loss latch: a worker born after the gap can gain Stop again,
+while a pre-gap worker stays unavailable. This replaces task 5.54's sticky
+saturation, as the maintainer's review of PR #625 requested. Disconnected reads
+consult the stripped ledger too. Provider disposal releases
 it; workspace/provider instances never share it.
 
 Cold activity publication has a separate native active-inventory dependency.
@@ -1629,8 +1677,9 @@ aggregate, including sixteen-guard / 128 KiB admission headroom.
 The byte ledger serializes only inserted or changed entries, subtracts their
 cached sizes on replacement/removal, and includes JSON escaping and collection
 overhead; unrelated events do not rescan retained history. Projection saturation
-discards disposable correlation records and latches read-only recovery, without
-clearing retained control proof or known revocations. Healthy retained targets
+discards disposable correlation records and latches read-only recovery until the
+next observation gap, without clearing retained control proof or known
+revocations. The control cohort's own capacity closure stays sticky. Healthy retained targets
 can remain controllable without reconnect. Missing, revoked or overflowed proof
 uses the existing uncertain state and withholds Stop consistently in live,
 history and reconciliation results. Target-specific unavailable stubs prevent
@@ -2002,6 +2051,9 @@ one that matches what actually broke.
 
 1. Pick the right feature file under `tests/e2e/` (look at the existing file names — they mirror the `src/` folder taxonomy). If your test doesn't fit any existing file, create a new one named after the feature.
 2. Import the shared setup: `import { standardBeforeEach } from "./fixtures";`.
+   Chat tests (`chat-*.e2e.ts`) are the exception: `standardBeforeEach` opens the
+   desktop file-tree page without the chat token, so each chat file uses its own
+   tokenized chat setup instead.
 3. The harness reset (`/__e2e/reset`) is in `tests/e2e/config.ts`; the workspace fixture lives at `testdata/watch-docs/`.
 
 ## Run and test

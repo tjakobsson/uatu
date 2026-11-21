@@ -217,7 +217,21 @@ The confirmed compatibility envelope is OpenCode-v2-local. Keep the shared
 HistoryReuse interface and other providers unchanged. Preserve retention limits,
 collective cancellation, stream-generation/reconnect behavior, current freshness
 invalidation scope and error behavior except for the approved contradictory-
-evidence reload policy.
+evidence reload policy. One reconnect change is approved by the maintainer's
+review of PR #625 and narrows task 5.54: the next subscription replaces a
+saturated worker ledger instead of keeping it recovery-only until disposal.
+Scoped recovery reads supply authority from then on, and only workers born after
+the observation gap can gain Stop. The same review keeps top-level
+conversations out of both ledgers: execution boundaries enter them only for
+known or possible workers. Other sessions' boundaries stay in a bounded
+pre-ownership store (4,096 sessions, 1 MiB) in the ledger's own form, readable
+by cold recovery and moved into the ledger when the session becomes a worker,
+including through a history reconciliation's ownership verification. A boundary
+without a usable proof is kept as an unknown count for Stop admission. The store survives ordinary
+reconnects. Overflow, by bytes or session count, first compacts sessions to
+unknown markers; only a dropped marker sets the loss flag, which persists until
+the ledger is replaced and fails closed for agent workers without a birth
+observed in the current subscription (see ADR 0001).
 
 The selected direction is native-history access. Complete-history reads
 share one v2-local module with the native inbox and record observations needed
@@ -269,7 +283,8 @@ report, activity or authority.
 The Workers list distinguishes the state of the work from whether its row is
 shown. Verified Working and Needs your answer stay visible, even with a matching
 saved dismissal or a previous view-only clear. Checking stays visible during the
-existing bounded check; unavailable evidence does not count as completion.
+existing bounded check unless the user already cleared that row from the current
+view; unavailable evidence does not count as completion.
 A window that expires without a result restores each row's pre-check evidence,
 so Checking and its deadline never make a row save-eligible.
 Known limit (pre-existing, deferred): any read that omits a Session active row
@@ -292,9 +307,19 @@ The existing bulk **Dismiss finished** action stays limited to finished rows
 and remains their only dismissal.
 
 The temporary clear belongs to the current conversation view, not a durable
-execution identity. Refresh, a new view, disappearance or replacement of the
-row can show it again. A new observation of verified activity always shows the
-row and ends the temporary clear. Dismiss does not alter task state, native
+execution identity. It follows the row's task (row id, task id and type, child
+session, launch call), its native references once known (an OpenCode shell's
+native shell id, a result notification, a launch reference, the launch time,
+so a reused launcher's later launch shows again) and its
+provider-proven execution ids, not the item object. An active parent replaces that object for Checking, its restore and
+other field churn; those keep the row cleared. Ids that overlap the clear's
+(as saved marks match) are the same execution and join its set, so a chain of
+overlapping restatements stays cleared; past the dismissal alias limit the
+clear ends. Refresh, a new view, disappearance, a different task or execution
+(ids disjoint from that set), a newly proven or lost execution,
+another unresolved state such as Session active becoming Status unavailable, or
+a known final result shows it again. A new observation of verified activity
+always shows the row and ends the temporary clear. Dismiss does not alter task state, native
 history, or Stop. Alias retention in authoritative dismissal evidence is a
 separate fix (task 8.5); the view-only action does not replace it.
 

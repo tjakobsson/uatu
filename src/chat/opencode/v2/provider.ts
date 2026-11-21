@@ -121,7 +121,8 @@ export class OpenCodeV2Provider implements ChatProvider {
   // Fixed-size digests and at most 128 timestamps bound this separate cache;
   // eviction loses only a last-seen caption, never an authorization fence.
   private readonly coldActivityObservations = new Map<string, number>();
-  private readonly controls = new BackgroundControls({ changed: () => this.executionWorkers?.enforceBudget() });
+  private readonly controls = new BackgroundControls({ changed: () => this.executionWorkers?.enforceBudget(),
+    preOwnership: worker => this.executionWorkers?.preOwnershipBoundaries(worker) });
   private eventMemory?: ReturnType<typeof createOpenCodeV2Memory>;
   private streamWorkers?: BackgroundWorkers;
   private get executionWorkers(): BackgroundWorkers | undefined { return this.eventMemory?.workers ?? this.streamWorkers; }
@@ -619,6 +620,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       && tool.fact.reportedChild && !verified.has(tool.fact.reportedChild)))) this.controls.incompleteRead(controlRead);
     for (const child of verified) {
       workers.verifyChild(child, sessionId);
+      this.executionWorkers?.adoptVerifiedChild(child);
       const launches = prepared.flatMap(message => [...message.tools.values()]).filter(tool => tool.fact.reportedChild === child);
       if (launches.length > 1 || launches.some(tool => tool.fact.background === true)) {
         // An idle record is an execution boundary, not a worker report. It
@@ -1962,8 +1964,13 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.streamReads = reads;
     const streamReadSignal = this.readSignal(AbortSignal.any([signal, reads.signal]));
     // Positive memory is subscription-scoped. The previous subscription has
-    // stripped its shared worker ledger down to deny-only execution facts.
-    const memory = createOpenCodeV2Memory({ controls: this.controls, workers: this.streamWorkers });
+    // stripped its shared worker ledger down to deny-only execution facts and
+    // that unsaturated counterproof carries over. A saturated (recovery-only)
+    // ledger is replaced: from here on, scoped recovery reads supply authority.
+    // Control revocations live in `this.controls`; its observation gap retired
+    // every pre-gap Stop basis, so only workers born after it can gain Stop.
+    const retained = this.streamWorkers?.controlEvidenceAvailable ? this.streamWorkers : undefined;
+    const memory = createOpenCodeV2Memory({ controls: this.controls, workers: retained });
     this.streamWorkers = memory.workers;
     this.eventMemory = memory;
     // Live only once a frame has arrived: until the subscription's first
@@ -2032,7 +2039,7 @@ export class OpenCodeV2Provider implements ChatProvider {
           }
           controlUpdates = this.controls.observe(evidence, (!evidence.directory || path.resolve(evidence.directory) === this.workspace)
             && (!evidence.lifecycle?.directory || path.resolve(evidence.lifecycle.directory) === this.workspace),
-            prepared.notification, prepared.notificationProof);
+            prepared.notification, prepared.notificationProof, session => memory.workers.mayBeWorker(session));
           memory.workers.enforceBudget();
           this.observeStopEvent(evidence);
           if (evidence.lifecycle?.kind === "session.created") {
@@ -2984,6 +2991,8 @@ export class OpenCodeV2Provider implements ChatProvider {
       this.sessionChanges.observe(subject, "record", info);
       if (foreignWorkspace || requestedId !== undefined && id !== undefined && id !== requestedId) this.revokeKnownSessionOwnership(subject);
       else if (this.owns(info) && id === subject && actualParent) this.revokeKnownSessionOwnership(subject, actualParent);
+      // A parentless owned record is top-level: drop its pre-ownership boundaries.
+      else if (this.owns(info) && id === subject) this.executionWorkers?.forgetTopLevel(subject);
       // Every authoritative record path (including ordinary getSession and
       // collection reads) participates in the same scoped source guard. Missing
       // metadata is not fresh ownership or counterproof; transport cancellation

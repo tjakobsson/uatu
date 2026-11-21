@@ -5,6 +5,7 @@ import type { BackgroundTaskItem, ConversationItem } from "./types";
 import { parseConversationItem } from "./validation";
 import type { LiveTopicConsumer } from "../shell/live-channel";
 import { CheckingPresentation } from "./worker-dismissal-client-checking";
+import { WORKER_DISMISSAL_ALIAS_LIMIT } from "./worker-dismissal-identity";
 
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 const body = (conversationId = "opencode:parent", dismissed = true, revision = 1) => ({ version: 1, conversationId, entries: [{ executionId: "exec:one", revision, dismissed }] });
@@ -76,7 +77,7 @@ test.each([
   { description: "ended shell without execution proof", task: { ...viewSource, taskType: "shell", activity: { kind: "ended" } } },
   { description: "withheld exact execution", task: { ...viewSource, outcomeWithheld: true } },
   { description: "session active but exact task unverified", task: { ...viewSource, activity: { kind: "session-active", executionId: "exec:one" } } },
-] satisfies { description: string; task: BackgroundTaskItem }[])("$description clears only the same source without attempting a save", ({ task }) => {
+] satisfies { description: string; task: BackgroundTaskItem }[])("$description clears only the same row without attempting a save", ({ task }) => {
   const view = new WorkerViewDismissals();
   const writes: (readonly string[])[] = [];
   const items = [task];
@@ -84,7 +85,9 @@ test.each([
   expect(paintedDismiss(view, task, raw, raw, ids => writes.push(ids))).toBe(true);
   expect(writes).toEqual([]);
   expect(view.filter([...items], compactWorkers(items))).toEqual([]);
-  const replaced = [{ ...task }];
+  // A real replacement shows the row again: a different execution, or a
+  // newly proven one when the row had none.
+  const replaced = [{ ...task, activity: { ...task.activity!, executionId: "exec:two" } }];
   expect(view.filter(replaced, compactWorkers(replaced))).toHaveLength(1);
   expect(view.filter(items, compactWorkers(items))).toHaveLength(1);
   expect(paintedDismiss(view, task, raw, raw, ids => writes.push(ids))).toBe(true);
@@ -290,6 +293,187 @@ test("a view-only clear ends when its row disappears and does not hide a later r
   expect(view.filter([], [])).toEqual([]);
   // The same item object returning after disappearance is a new presentation.
   expect(view.filter([task], rows)).toEqual(rows);
+});
+
+// Review 4652039484: an active parent replaces the row's item for Checking,
+// its restore and unrelated churn. None of those is a different execution.
+const identified = { executionId: "exec:one", executionAliases: ["exec:one", "exec:alias"], generation: 2, launchRef: "launch" };
+const identifiedRow: BackgroundTaskItem = { ...viewSource, outcomeWithheld: true, activity: { kind: "session-active", ...identified } };
+/** A view whose painted row for `item` was dismissed into a view-only clear. */
+const clearedView = (item: BackgroundTaskItem): WorkerViewDismissals => {
+  const view = new WorkerViewDismissals();
+  const row = compactWorkers([item])[0]!;
+  expect(paintedDismiss(view, item, row, row, () => { throw new Error("not save-eligible"); })).toBe(true);
+  return view;
+};
+test.each(["session-active", "unavailable"] as const)("a view-only clear on a %s row follows its execution through presentation-only replacements", kind => {
+  let item: BackgroundTaskItem = { ...viewSource, outcomeWithheld: true, activity: { kind, ...identified } };
+  const view = clearedView(item);
+  const paint = (next: BackgroundTaskItem) => { item = next; return view.filter([item], compactWorkers([item])); };
+  expect(paint({ ...item, activity: { ...item.activity!, kind: "checking" } })).toEqual([]);
+  expect(paint({ ...item, activity: { ...item.activity!, kind } })).toEqual([]);
+  expect(paint({ ...item, usage: { totalTokens: 1_234, toolUses: 2, durationMs: 5_000 }, progress: "Still running" })).toEqual([]);
+  // The client's own Checking deadline presents an expired window as Unavailable.
+  const checking = { ...item, activity: { ...item.activity!, kind: "checking" as const } };
+  item = checking;
+  expect(view.filter([checking], [{ ...compactWorkers([checking])[0]!, activity: { ...checking.activity, kind: "unavailable" } }])).toEqual([]);
+  expect(paint({ ...item, activity: { ...item.activity!, kind } })).toEqual([]);
+});
+
+test.each([
+  ["a new execution id", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, executionId: "exec:two", executionAliases: ["exec:two"] } })],
+  ["a disjoint alias set", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, executionId: "exec:other", executionAliases: ["exec:other", "exec:third"] } })],
+  ["a changed launch reference", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, launchRef: "relaunch" } })],
+  ["an unresolved kind change", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, kind: "unavailable" as const } })],
+  ["lost execution proof", (item: BackgroundTaskItem) => ({ ...item, activity: { kind: item.activity!.kind } })],
+  ["verified Working", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, kind: "working" as const } })],
+  ["verified Needs your answer", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, kind: "needs-answer" as const, request: { id: "q", kind: "question" as const } } })],
+  ["a known final result", (item: BackgroundTaskItem) => ({ ...item, status: "completed" as const })],
+] as const)("an identified view-only clear ends on %s and does not return", (_name, change) => {
+  const item = identifiedRow, view = clearedView(item);
+  const next = change(item) as BackgroundTaskItem;
+  expect(view.filter([next], compactWorkers([next]))).toHaveLength(1);
+  // Returning to the original evidence afterwards is a new presentation.
+  expect(view.filter([item], compactWorkers([item]))).toHaveLength(1);
+});
+
+test.each([
+  ["the row disappears", (view: WorkerViewDismissals, item: BackgroundTaskItem) => { view.filter([], []); }],
+  ["a duplicated source appears", (view: WorkerViewDismissals, item: BackgroundTaskItem) => { view.filter([item, { ...item }], compactWorkers([item])); }],
+  ["the view resets (snapshot install, conversation switch or live teardown)", (view: WorkerViewDismissals) => { view.reset(); }],
+] as const)("an identified view-only clear ends when %s", (_name, end) => {
+  const item = identifiedRow, view = clearedView(item);
+  end(view, item);
+  expect(view.filter([item], compactWorkers([item]))).toHaveLength(1);
+});
+
+// Same execution, richer or reordered provider proof: the durable marks also
+// match on any shared alias.
+test.each([
+  ["an added proven alias", { executionId: "exec:one", executionAliases: ["exec:alias", "exec:extra", "exec:one"] }],
+  ["a new primary id sharing a stored alias", { executionId: "exec:alias", executionAliases: ["exec:alias", "exec:extra"] }],
+  ["a narrower overlapping alias set", { executionId: "exec:one", executionAliases: ["exec:one"] }],
+] as const)("an identified view-only clear survives %s on the same execution", (_name, proof) => {
+  const item = identifiedRow, view = clearedView(item);
+  const enriched: BackgroundTaskItem = { ...item, activity: { ...item.activity!, ...proof, executionAliases: [...proof.executionAliases] } };
+  expect(view.filter([enriched], compactWorkers([enriched]))).toEqual([]);
+  const checking: BackgroundTaskItem = { ...enriched, activity: { ...enriched.activity!, kind: "checking" } };
+  expect(view.filter([checking], compactWorkers([checking]))).toEqual([]);
+});
+
+// Each restatement overlaps the one before, so the clear learns its ids:
+// [A,B] -> [B,C] -> [C] stays one execution even though [C] misses [A,B].
+const restated = (item: BackgroundTaskItem, ...ids: string[]): BackgroundTaskItem => ({ ...item, activity: { ...item.activity!, executionId: ids[0], executionAliases: ids } });
+test("an identified view-only clear follows an alias chain through Checking", () => {
+  const item = restated(identifiedRow, "exec:a", "exec:b"), view = clearedView(item);
+  for (const next of [restated(item, "exec:b", "exec:c"), { ...restated(item, "exec:b", "exec:c"), activity: { ...restated(item, "exec:b", "exec:c").activity!, kind: "checking" as const } }, restated(item, "exec:c")])
+    expect(view.filter([next], compactWorkers([next]))).toEqual([]);
+  // A disjoint set after the chain is a different execution.
+  const other = restated(item, "exec:d");
+  expect(view.filter([other], compactWorkers([other]))).toHaveLength(1);
+  expect(view.filter([restated(item, "exec:c")], compactWorkers([restated(item, "exec:c")]))).toHaveLength(1);
+});
+
+test("an identified view-only clear past the alias bound shows the row instead of learning more", () => {
+  const ids = (from: number, count: number) => Array.from({ length: count }, (_, index) => `exec:${String(from + index).padStart(5, "0")}`);
+  const item = restated(identifiedRow, ...ids(0, WORKER_DISMISSAL_ALIAS_LIMIT)), view = clearedView(item);
+  expect(view.filter([item], compactWorkers([item]))).toEqual([]);
+  const grown = restated(item, ...ids(WORKER_DISMISSAL_ALIAS_LIMIT - 1, 2));
+  expect(view.filter([grown], compactWorkers([grown]))).toHaveLength(1);
+});
+
+// An OpenCode shell's native identity is its `outputFile`; it has no child
+// conversation. A reused launcher call can restate the row as another shell.
+const unprovenShell = (outputFile?: string): BackgroundTaskItem => {
+  const { childConversationId: _child, activity: _activity, ...rest } = viewSource;
+  return { ...rest, taskType: "shell", activity: { kind: "unavailable" }, ...(outputFile ? { outputFile } : {}) };
+};
+test("an unproven view-only clear ends when the row is restated as a different native shell", () => {
+  const view = clearedView(unprovenShell("shell:A"));
+  const checking: BackgroundTaskItem = { ...unprovenShell("shell:A"), activity: { kind: "checking" } };
+  expect(view.filter([checking], compactWorkers([checking]))).toEqual([]);
+  const other = unprovenShell("shell:B");
+  expect(view.filter([other], compactWorkers([other]))).toHaveLength(1);
+});
+
+test.each([["outputFile", "late", "later"], ["resultId", "result:one", "result:two"], ["launchRef", "launch:one", "launch:two"]] as const)(
+  "a native %s a restatement adds keeps the clear; changing it afterwards ends it", (key, first, second) => {
+    const with_ = (value?: string): BackgroundTaskItem => key === "launchRef"
+      ? { ...unprovenShell(), activity: { kind: "unavailable", ...(value ? { launchRef: value } : {}) } }
+      : { ...unprovenShell(), ...(value ? { [key]: value } : {}) };
+    const view = clearedView(with_());
+    for (const value of [first, first]) expect(view.filter([with_(value)], compactWorkers([with_(value)]))).toEqual([]);
+    expect(view.filter([with_(second)], compactWorkers([with_(second)]))).toHaveLength(1);
+  });
+
+// The launch time is the row's `createdAt`, except on a provisional result
+// with no launch call, whose row timestamp is not a launch (as in compactWorkers).
+test("an unproven view-only clear ends when a reused launcher restates the row with a later launch time", () => {
+  const item = unproven({ kind: "unavailable" }), view = clearedView(item);
+  const checking: BackgroundTaskItem = { ...item, activity: { kind: "checking" } };
+  expect(view.filter([checking], compactWorkers([checking]))).toEqual([]);
+  const relaunched = { ...item, createdAt: item.createdAt + 10 };
+  expect(view.filter([relaunched], compactWorkers([relaunched]))).toHaveLength(1);
+});
+
+test("an unproven view-only clear keeps an unchanged launch time and learns one filled in for the first time", () => {
+  const unchanged = unproven({ kind: "unavailable" }), view = clearedView(unchanged);
+  const churn = { ...unchanged, progress: "Still running", activity: { kind: "unavailable" as const, observedAt: 99 } };
+  expect(view.filter([churn], compactWorkers([churn]))).toEqual([]);
+  // A provisional result row has no launch time until its launch call joins.
+  const { toolUseId: _call, ...rest } = unproven({ kind: "unavailable" });
+  const provisional: BackgroundTaskItem = { ...rest, resultId: "result:one", createdAt: 5 };
+  const filled = clearedView(provisional);
+  const launched: BackgroundTaskItem = { ...provisional, toolUseIds: ["call"], createdAt: 10 };
+  expect(filled.filter([launched], compactWorkers([launched]))).toEqual([]);
+  expect(filled.filter([launched], compactWorkers([launched]))).toEqual([]);
+  const relaunched = { ...launched, createdAt: 20 };
+  expect(filled.filter([relaunched], compactWorkers([relaunched]))).toHaveLength(1);
+});
+
+// Without a proven execution the clear follows the task's own identity, and
+// the Checking window's clone and restore are presentation only.
+const unproven = (activity?: BackgroundTaskItem["activity"]): BackgroundTaskItem => {
+  const { activity: _activity, ...rest } = viewSource;
+  return activity ? { ...rest, activity } : { ...rest, stateUncertain: true };
+};
+test.each([
+  ["Unavailable", unproven({ kind: "unavailable", observedAt: 5 })],
+  ["Session active", unproven({ kind: "session-active", generation: 1 })],
+  ["legacy unknown without activity", unproven()],
+] as const)("a view-only clear on an unproven %s row survives a Checking cycle and field churn", (_name, original) => {
+  const view = clearedView(original);
+  let item = original;
+  const paint = (next: BackgroundTaskItem) => { item = next; return view.filter([item], compactWorkers([item])); };
+  // As workerCheckingPresentation builds it: the pre-check activity with kind Checking.
+  const checking = (): BackgroundTaskItem => ({ ...item, activity: { ...item.activity, kind: "checking" } });
+  expect(paint(checking())).toEqual([]);
+  expect(view.filter([item], [{ ...compactWorkers([item])[0]!, activity: { ...item.activity!, kind: "unavailable" } }])).toEqual([]);
+  expect(paint({ ...original })).toEqual([]);
+  expect(paint({ ...item, usage: { totalTokens: 1_234, toolUses: 2, durationMs: 5_000 }, progress: "Still running", control: { available: false } })).toEqual([]);
+  expect(paint(checking())).toEqual([]);
+  expect(paint(original.activity ? { ...item, activity: { ...original.activity, generation: 3, observedAt: 9 } } : { ...original })).toEqual([]);
+});
+
+test.each([
+  ["a newly proven execution", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, executionId: "exec:new", executionAliases: ["exec:new"] } })],
+  ["a different child session", (item: BackgroundTaskItem) => ({ ...item, childConversationId: "other-child" })],
+  ["a different launch call", (item: BackgroundTaskItem) => ({ ...item, toolUseId: "other-call" })],
+  ["a different task id", (item: BackgroundTaskItem) => ({ ...item, taskId: "other" })],
+  ["an unresolved kind change", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, kind: "session-active" as const } })],
+  ["verified Working", (item: BackgroundTaskItem) => ({ ...item, activity: { ...item.activity!, kind: "working" as const } })],
+  ["a known final result", (item: BackgroundTaskItem) => ({ ...item, status: "completed" as const })],
+] as const)("an unproven view-only clear ends on %s, including after a Checking cycle", (_name, change) => {
+  for (const cycle of [false, true]) {
+    const item = unproven({ kind: "unavailable" }), view = clearedView(item);
+    if (cycle) {
+      const checking: BackgroundTaskItem = { ...item, activity: { kind: "checking" } };
+      expect(view.filter([checking], compactWorkers([checking]))).toEqual([]);
+    }
+    const next = change(item) as BackgroundTaskItem;
+    expect(view.filter([next], compactWorkers([next]))).toHaveLength(1);
+    expect(view.filter([item], compactWorkers([item]))).toHaveLength(1);
+  }
 });
 
 test("legacy bare marks cannot re-hide strong V2 after reconnect and reordered positive aliases", async () => {
