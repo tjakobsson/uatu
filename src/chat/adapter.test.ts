@@ -4558,6 +4558,9 @@ class FakeProvider implements ChatProvider {
   listPermissions?: ChatProvider["listPermissions"];
   listQuestions?: ChatProvider["listQuestions"];
   listModes?: ChatProvider["listModes"];
+  listActiveSessions?: ChatProvider["listActiveSessions"];
+  waitForEventStream?: ChatProvider["waitForEventStream"];
+  reconcileBackgroundTasks?: ChatProvider["reconcileBackgroundTasks"];
   getReversibleHistoryState?: ChatProvider["getReversibleHistoryState"];
   undo?: ChatProvider["undo"];
   redo?: ChatProvider["redo"];
@@ -12569,6 +12572,282 @@ describe("workspace activity summary", () => {
     expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: false });
     expect(changes()).toBe(before);
     inventory.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("session.moved out clears background and interaction activity, discards buffered coalescer updates, skips attached revocation updates, invalidates listed inventory, and ignores unrelated foreign moves", async () => {
+    const provider = new FakeProvider();
+    provider.reconcileBackgroundTasks = async () => [];
+    let lookups = 0;
+    const baseGetSession = provider.getSession.bind(provider);
+    provider.getSession = async id => { lookups += 1; return baseGetSession(id); };
+    const local = fixtureSession("a");
+    provider.sessions = [local];
+    let changes = 0;
+    // Use a generous coalescer window so non-urgent pre-move updates stay buffered under parallel CI load.
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 200, onActivityChange: () => { changes += 1; } });
+    expect((await adapter.listConversations()).map(c => c.id)).toEqual(["a"]);
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: { id: "task:bg1", type: "background_task", taskId: "bg1", description: "BG worker", status: "running", createdAt: 1, stateUncertain: true, activity: { kind: "unavailable" } } });
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: { id: "task:bg2", type: "background_task", taskId: "bg2", description: "Verified BG worker", status: "running", createdAt: 1, activity: { kind: "working", observedAt: 1 } } });
+    adapter.projectionForTests("a").apply({ kind: "status", status: "background" });
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1") });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: true });
+    const lookupsBeforeForeign = lookups;
+
+    // An unrelated foreign move causes neither a lookup nor an inventory invalidation.
+    let unrelatedInvalidated = false;
+    const nextSignal = inventory.next().then(result => { unrelatedInvalidated = true; return result; });
+    provider.eventQueue.push({ normalized: {
+      conversationId: "foreign_ses",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "foreign_ses", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await Bun.sleep(20);
+    expect(unrelatedInvalidated).toBe(false);
+    expect(lookups).toBe(lookupsBeforeForeign);
+
+    // Push a non-urgent update while `local` is still in `provider.sessions` so requireSession accepts it
+    // and buffers it inside the 200ms coalescer window (not yet flushed to projection).
+    const lookupsBeforeBuffered = lookups;
+    provider.eventQueue.push({ normalized: {
+      conversationId: "a",
+      updates: [{ kind: "upsert", item: { id: "task:buffered", type: "background_task", taskId: "buffered", description: "Buffered worker", status: "running", createdAt: 2 } }],
+      outcome: "handled",
+      eventType: "session.text.delta",
+    } });
+    await waitUntil(() => lookups > lookupsBeforeBuffered);
+    expect(adapter.projectionForTests("a").has("task:buffered")).toBe(false);
+
+    // Move `a` out before the coalescer window elapses, carrying an attached revocation update (as V2 provider emits).
+    const beforeMoveChanges = changes;
+    const lookupsBeforeMove = lookups;
+    provider.eventQueue.push({ normalized: {
+      conversationId: "a",
+      updates: [{ kind: "upsert", item: { id: "task:bg1", type: "background_task", taskId: "bg1", description: "BG worker", status: "running", createdAt: 1, stateUncertain: true } }],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "a", directory: `${process.cwd()}-moved`, title: "", sparse: true },
+    } });
+
+    await waitUntil(() => !adapter.activity().working);
+    expect((await nextSignal).done).toBe(false);
+    // Moved-out session.moved must short-circuit without calling requireSession() again.
+    expect(lookups).toBe(lookupsBeforeMove);
+    // Wait past the coalescer window to confirm buffered pre-move updates were discarded and did not flush or resurrect activity.
+    await Bun.sleep(240);
+    expect(adapter.projectionForTests("a").has("task:buffered")).toBe(false);
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("a").status).toBe("idle");
+    expect(changes - beforeMoveChanges).toBe(1);
+
+    inventory.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("moving a parent out re-verifies known active children (including those learned via requireSession), forgetting moved ones and keeping local ones", async () => {
+    const { adapter, provider } = activityAdapter();
+    const parent = fixtureSession("parent");
+    const movedChild = { ...fixtureSession("child-moved"), parentId: "parent" };
+    const stayedChild = { ...fixtureSession("child-stayed"), parentId: "parent" };
+    provider.sessions = [parent, movedChild, stayedChild];
+    const pump = adapter.startEventPump();
+
+    // Learn parentage via live events (requireSession), without calling listConversations().
+    provider.eventQueue.push({ type: "session.status", data: { sessionID: "parent", status: { type: "busy" } } });
+    provider.eventQueue.push({ type: "session.status", data: { sessionID: "child-moved", status: { type: "busy" } } });
+    provider.eventQueue.push({ type: "session.status", data: { sessionID: "child-stayed", status: { type: "busy" } } });
+    await waitUntil(() => adapter.projectionForTests("parent").status === "running"
+      && adapter.projectionForTests("child-moved").status === "running"
+      && adapter.projectionForTests("child-stayed").status === "running");
+
+    // Parent and child-moved relocate (getSession returns null for directory-scoped providers); child-stayed remains.
+    provider.sessions = [stayedChild];
+    provider.eventQueue.push({ normalized: {
+      conversationId: "parent",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "parent", directory: `${process.cwd()}-moved`, title: "", sparse: true },
+    } });
+    await waitUntil(() => adapter.projectionForTests("child-moved").status === "idle");
+    expect(adapter.projectionForTests("parent").status).toBe("idle");
+    expect(adapter.projectionForTests("child-stayed").status).toBe("running");
+    expect(adapter.activity().working).toBe(true);
+
+    // Once child-stayed completes, workspace is no longer working.
+    adapter.projectionForTests("child-stayed").apply({ kind: "status", status: "completed" });
+    expect(adapter.activity().working).toBe(false);
+
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("directory-scoped listConversations and requireSession null misses heal stale activity and allow later move-back invalidation", async () => {
+    const { adapter, provider, changes } = activityAdapter();
+    const created = await adapter.createConversation();
+    const child = { ...fixtureSession("child"), parentId: created.conversation.id };
+    const transient = fixtureSession("transient");
+    provider.sessions = [fixtureSession(created.conversation.id), child, transient];
+    adapter.projectionForTests(created.conversation.id).apply({ kind: "status", status: "running" });
+    adapter.projectionForTests(created.conversation.id).apply({ kind: "upsert", item: permission("p1") });
+    adapter.projectionForTests("child").apply({ kind: "status", status: "running" });
+    adapter.projectionForTests("transient").apply({ kind: "status", status: "running" });
+
+    // Simulate a directory-scoped provider where listSessions omits the moved session, omits child, and transient fails getSession.
+    provider.listSessions = async () => [];
+    provider.getSession = async id => {
+      if (id === created.conversation.id) return null;
+      if (id === "child") return child;
+      if (id === "transient") throw new Error("network blip");
+      return null;
+    };
+    await adapter.listConversations();
+    expect(adapter.projectionForTests(created.conversation.id).status).toBe("idle");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("child").status).toBe("running");
+    expect(adapter.projectionForTests("transient").status).toBe("running");
+
+    // requireSession getting null forgets stale activity on direct lookup too.
+    provider.getSession = async () => null;
+    const before = changes();
+    await adapter.getConversation("child").catch(() => undefined);
+    await adapter.getConversation("transient").catch(() => undefined);
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(changes() - before).toBe(1);
+
+    // Moving the healed session back into this workspace still invalidates inventory.
+    provider.getSession = async id => id === created.conversation.id ? fixtureSession(created.conversation.id) : null;
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+    provider.eventQueue.push({ normalized: {
+      conversationId: created.conversation.id,
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: created.conversation.id, directory: process.cwd(), title: "", sparse: true },
+    } });
+    await expectInventorySignal(inventory);
+    inventory.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("session.moved into the workspace invalidates inventory, schedules background recovery, seeds active execution, and guards against terminal and move-out races", async () => {
+    const { adapter, provider } = activityAdapter();
+    const arrived = fixtureSession("arrived");
+    const racingTerminal = fixtureSession("racing-terminal");
+    const racingMoveOut = fixtureSession("racing-moveout");
+    const recoveredBackground: string[] = [];
+    provider.reconcileBackgroundTasks = async id => {
+      recoveredBackground.push(id);
+      return [];
+    };
+    const resolvers: Array<(ids: string[]) => void> = [];
+    let probeCall = 0;
+    provider.listActiveSessions = () => {
+      probeCall += 1;
+      if (probeCall === 1) return Promise.resolve(["arrived"]);
+      return new Promise<string[]>(resolve => { resolvers.push(resolve); });
+    };
+    provider.sessions = [arrived, racingTerminal, racingMoveOut];
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+    // Mark background stream connected so scheduleBackgroundRecovery drains immediately.
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+    await waitUntil(() => recoveredBackground.includes("arrived"));
+    recoveredBackground.length = 0;
+
+    provider.eventQueue.push({ normalized: {
+      conversationId: "arrived",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "arrived", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await expectInventorySignal(inventory);
+    await waitUntil(() => adapter.activity().working && recoveredBackground.includes("arrived"));
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+
+    // Settle arrived, then test an in-flight active probe that races a terminal transition.
+    adapter.projectionForTests("arrived").apply({ kind: "status", status: "completed" });
+    expect(adapter.activity().working).toBe(false);
+
+    provider.eventQueue.push({ normalized: {
+      conversationId: "racing-terminal",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "racing-terminal", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await expectInventorySignal(inventory);
+    await waitUntil(() => resolvers.length === 1);
+    adapter.projectionForTests("racing-terminal").apply({ kind: "status", status: "completed" });
+    resolvers[0]!(["racing-terminal"]);
+    await Bun.sleep(20);
+    expect(adapter.activity().working).toBe(false);
+    expect(adapter.projectionForTests("racing-terminal").status).toBe("completed");
+
+    // Test an in-flight active probe that races a subsequent session.moved out of the workspace.
+    provider.eventQueue.push({ normalized: {
+      conversationId: "racing-moveout",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "racing-moveout", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await expectInventorySignal(inventory);
+    await waitUntil(() => resolvers.length === 2);
+    provider.eventQueue.push({ normalized: {
+      conversationId: "racing-moveout",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "racing-moveout", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
+    } });
+    await expectInventorySignal(inventory);
+    resolvers[1]!(["racing-moveout"]);
+    await Bun.sleep(20);
+    expect(adapter.activity().working).toBe(false);
+    expect(adapter.projectionForTests("racing-moveout").status).toBe("idle");
+
+    inventory.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("server.connected reconciles missed moves out without fabricating unobserved runs", async () => {
+    const { adapter, provider } = activityAdapter();
+    provider.waitForEventStream = async () => {};
+    const movedAway = fixtureSession("moved-away");
+    const unobserved = fixtureSession("unobserved");
+    provider.sessions = [movedAway, unobserved];
+    adapter.projectionForTests("moved-away").apply({ kind: "status", status: "running" });
+    expect(adapter.activity().working).toBe(true);
+
+    // On reconnect, moved-away is gone from this workspace while unobserved never emitted a live start or move-in.
+    provider.sessions = [unobserved];
+    provider.listActiveSessions = async () => ["unobserved", "foreign-active"];
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ normalized: { updates: [], outcome: "ignored", eventType: "server.connected" } });
+
+    await waitUntil(() => adapter.projectionForTests("moved-away").status === "idle");
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("unobserved").status).toBe("idle");
+    expect(adapter.projectionForTests("foreign-active").status).toBe("idle");
+
     await adapter.dispose();
     await pump;
   });

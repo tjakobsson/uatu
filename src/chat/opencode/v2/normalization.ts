@@ -53,9 +53,10 @@ export type { NormalizedProviderEvent };
  * the session's running total and is deliberately not a second carrier),
  * `form.*` presented as structured questions, and content restatements.
  *
- * Every event carrying a `location` for another directory yields nothing:
- * one 2.x server serves every directory of one database, and the workspace
- * owns only its own.
+ * Every event carrying a `location` for another directory yields nothing
+ * except `session.moved`: one 2.x server serves every directory of one
+ * database, and the source workspace must still observe a session leaving
+ * when `session.moved` already carries the destination directory.
  */
 export type OpenCodeV2Memory = ProviderEventMemory & {
   workers: BackgroundWorkers;
@@ -265,8 +266,27 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
   }
 
   function own(event: RecordValue, data: RecordValue, context: EventContext, memory?: OpenCodeV2Memory): KnownEvent | undefined {
-    if (foreign(event)) return { updates: [] };
     const { conversationId, eventId } = context;
+    if (event.type === "session.moved") {
+      // Relocations must reach the source workspace even when `event.location`
+      // already names the destination directory; otherwise the source adapter
+      // never learns the session left and keeps its working status forever.
+      const id = string(data.sessionID, "session id");
+      const destination = optionalString(record(data.location).directory) ?? optionalString(record(event.location).directory);
+      if (!destination) return { updates: [] };
+      return {
+        conversationId: conversationId ?? id,
+        updates: [],
+        sessionLifecycle: {
+          kind: "moved",
+          id,
+          directory: destination,
+          title: "",
+          sparse: true,
+        },
+      };
+    }
+    if (foreign(event)) return { updates: [] };
     const createdAt = number(event.created) ?? context.createdAt;
     switch (event.type) {
       case "session.usage.updated": {

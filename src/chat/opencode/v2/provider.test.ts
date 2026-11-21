@@ -13150,3 +13150,120 @@ describe("OpenCodeV2Provider accounts", () => {
     ]);
   });
 });
+
+describe("OpenCodeV2Provider session moves and active sessions", () => {
+  test("listActiveSessions reads active session IDs from /api/session/active", async () => {
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({ ses_one: { type: "running" }, ses_two: { type: "running" } }),
+    });
+    const provider = server.provider();
+    try {
+      expect(await provider.listActiveSessions()).toEqual(["ses_one", "ses_two"]);
+      expect(server.requests("GET", "/api/session/active")).toHaveLength(1);
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  test("session.moved clears source workspace activity and reflects live work on destination workspace", async () => {
+    const otherWorktree = "/tmp/uatu-other-worktree";
+    let currentDirectory = WORKSPACE;
+    let active = true;
+    const listeners = new Set<(frame: unknown) => void>();
+    const push = (frame: unknown) => { for (const listener of listeners) listener(frame); };
+
+    const makeServer = () => fakeOpenCode({
+      "GET /api/event": () => {
+        let send!: (frame: unknown) => void;
+        return new Response(new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            send = frame => controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
+            listeners.add(send);
+            send({ type: "server.connected", data: {} });
+          },
+          cancel() { listeners.delete(send); },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+      "GET /api/session": ({ query }) => {
+        const requested = query.get("directory");
+        const matches = requested ? path.resolve(requested) === path.resolve(currentDirectory) : true;
+        return { data: matches ? [session("ses_1", { location: { directory: currentDirectory } })] : [], cursor: { next: null } };
+      },
+      "GET /api/session/ses_1": () => session("ses_1", { location: { directory: currentDirectory } }),
+      "GET /api/session/active": () => active ? { ses_1: { type: "running" } } : {},
+      "GET /api/session/ses_1/message": () => ({ data: [], cursor: { next: null } }),
+      "GET /api/session/ses_1/inbox": () => ({ data: [] }),
+    });
+
+    const sourceServer = makeServer();
+    const destServer = makeServer();
+    const sourceProvider = sourceServer.provider(WORKSPACE);
+    const destProvider = destServer.provider(otherWorktree);
+    const sourceAdapter = new ChatAdapter({ provider: sourceProvider, workspacePath: WORKSPACE, coalesceWindowMs: 0 });
+    const destAdapter = new ChatAdapter({ provider: destProvider, workspacePath: otherWorktree, coalesceWindowMs: 0 });
+    const sourcePump = sourceAdapter.startEventPump();
+    const destPump = destAdapter.startEventPump();
+    const waitUntil = async (predicate: () => boolean) => {
+      const deadline = Date.now() + 2_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+        await Bun.sleep(5);
+      }
+    };
+    try {
+      await waitUntil(() => listeners.size === 2);
+      push({
+        id: "evt_started",
+        created: Date.now(),
+        type: "session.execution.started",
+        location: { directory: WORKSPACE },
+        data: { sessionID: "ses_1" },
+      });
+      await waitUntil(() => sourceAdapter.activity().working);
+      expect(await sourceAdapter.listConversations()).toHaveLength(1);
+      expect(destAdapter.activity().working).toBe(false);
+
+      const sourceInventory = sourceAdapter.subscribeInventory();
+      const destInventory = destAdapter.subscribeInventory();
+      await sourceInventory.next();
+      await destInventory.next();
+
+      // Move the still-running conversation to the other worktree.
+      currentDirectory = otherWorktree;
+      push({
+        id: "evt_moved",
+        created: Date.now(),
+        type: "session.moved",
+        location: { directory: otherWorktree },
+        data: { sessionID: "ses_1", location: { directory: otherWorktree }, projectID: "proj_1" },
+      });
+
+      await waitUntil(() => !sourceAdapter.activity().working && destAdapter.activity().working && destServer.requests("GET", "/api/session/ses_1/inbox").length > 0);
+      expect(sourceAdapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+      expect(destAdapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+      expect((await sourceInventory.next()).done).toBe(false);
+      expect((await destInventory.next()).done).toBe(false);
+      expect(await sourceAdapter.listConversations()).toEqual([]);
+
+      // When execution finishes on the destination worktree, destination clears too.
+      active = false;
+      push({
+        id: "evt_done",
+        created: Date.now(),
+        type: "session.execution.succeeded",
+        location: { directory: otherWorktree },
+        data: { sessionID: "ses_1" },
+      });
+      await waitUntil(() => !destAdapter.activity().working);
+      expect(destAdapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
+
+      sourceInventory.cancel();
+      destInventory.cancel();
+    } finally {
+      await sourceAdapter.dispose();
+      await destAdapter.dispose();
+      await Promise.allSettled([sourcePump, destPump]);
+    }
+  });
+});

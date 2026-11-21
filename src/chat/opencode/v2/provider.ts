@@ -329,6 +329,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     return sessions;
   }
 
+  async listActiveSessions(options?: { signal?: AbortSignal }): Promise<string[]> {
+    const signal = this.readSignal(options?.signal);
+    const active = await this.client.session.active({ signal });
+    return active && typeof active === "object" && !Array.isArray(active) ? Object.keys(active) : [];
+  }
+
   async createSession(_id: string, configuration: ConversationConfiguration = {}): Promise<ProviderSession> {
     const info = await this.client.session.create({
       location: { directory: this.directory },

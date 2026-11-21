@@ -567,6 +567,12 @@ export class ChatAdapter {
   // survives projection eviction. This is what distinguishes "the store says
   // running because OpenCode died mid-turn" from "running right now".
   private readonly liveTurns = new Map<string, ConversationStatus>();
+  // Monotonic per-session revision bumped on every live status transition and
+  // activity forget so an in-flight active-session probe cannot overwrite a
+  // newer terminal transition or move-out.
+  private statusClock = 0;
+  private readonly statusSequences = new Map<string, number>();
+  private readonly activeSessionProbes = new Map<string, number>();
   // Request-scoped execution fences, not inbox/activity revisions. A native
   // parent wake can overtake an interrupt response (even across projection
   // eviction); its live status makes that old response stale. Only in-flight
@@ -755,11 +761,15 @@ export class ChatAdapter {
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
+    const previousListed = new Set(this.listedSessions.keys());
     const sessions = await this.provider.listSessions();
     const accepted: ConversationSummary[] = [];
+    const inWorkspaceIds = new Set<string>();
+    const listedTopLevel = new Set<string>();
     for (let session of sessions) {
       const metadata = await this.classifyInventorySession(session);
       if (!metadata.inWorkspace) continue;
+      inWorkspaceIds.add(session.id);
       // Subagent children stay out of the picker: they are reached from the
       // parent's subagent rows, and listing them as peers buries the real
       // conversations under machine-titled entries.
@@ -788,9 +798,19 @@ export class ChatAdapter {
           // A title repair must not make an otherwise usable conversation disappear.
         }
       }
+      listedTopLevel.add(session.id);
       boundedSet(this.listedSessions, session.id, true, INVENTORY_SESSION_LIMIT);
       accepted.push(this.summary(session));
     }
+    for (const id of previousListed) {
+      if (listedTopLevel.has(id)) continue;
+      this.listedSessions.delete(id);
+      const cached = this.inventorySessions.get(id);
+      if (cached?.inWorkspace && cached.parentId === null) {
+        boundedSet(this.inventorySessions, id, { ...cached, inWorkspace: false }, INVENTORY_SESSION_LIMIT);
+      }
+    }
+    await this.reconcileTrackedActivity(inWorkspaceIds);
     return accepted.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
   }
 
@@ -2114,11 +2134,119 @@ export class ChatAdapter {
     this.activityMayHaveChanged();
   }
 
+  private bumpStatusSequence(conversationId: string): void {
+    boundedSet(this.statusSequences, conversationId, ++this.statusClock, INVENTORY_SESSION_LIMIT);
+  }
+
+  private trackedActivityIds(): string[] {
+    return [...new Set([
+      ...this.liveTurns.keys(),
+      ...this.backgroundWork.keys(),
+      ...this.unresolvedBackgroundWork,
+      ...this.pendingInteractions.keys(),
+    ])];
+  }
+
+  private hasAncestor(id: string, ancestorId: string): boolean {
+    const visited = new Set<string>([id]);
+    let current = this.sessionParents.get(id);
+    while (current && !visited.has(current)) {
+      if (current === ancestorId) return true;
+      visited.add(current);
+      current = this.sessionParents.get(current);
+    }
+    return false;
+  }
+
+  private forgetMissingSession(id: string): void {
+    this.forgetActivity(id);
+    this.listedSessions.delete(id);
+    const cached = this.inventorySessions.get(id);
+    if (cached?.inWorkspace) {
+      boundedSet(this.inventorySessions, id, { ...cached, inWorkspace: false }, INVENTORY_SESSION_LIMIT);
+    }
+  }
+
+  private async verifyTrackedSessions(ids: readonly string[], signal?: AbortSignal): Promise<void> {
+    for (const id of ids) {
+      if (this.disposed || signal?.aborted) return;
+      const baseline = this.statusSequences.get(id) ?? 0;
+      try {
+        const session = await this.provider.getSession(id);
+        if (this.disposed || signal?.aborted) return;
+        const missingOrForeign = !session || !await isSessionInWorkspace(session.directory, this.workspacePath);
+        if (this.disposed || signal?.aborted) return;
+        if ((this.statusSequences.get(id) ?? 0) !== baseline) continue;
+        if (missingOrForeign) this.forgetMissingSession(id);
+      } catch {
+        // Keep tracked activity when a transient provider error prevents verification.
+      }
+    }
+  }
+
+  private async reconcileTrackedActivity(presentIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
+    const missing = this.trackedActivityIds().filter(id => !presentIds.has(id));
+    await this.verifyTrackedSessions(missing, signal);
+  }
+
+  private async reconcileMovedChildren(parentId: string, signal?: AbortSignal): Promise<void> {
+    const descendants = this.trackedActivityIds().filter(id => id !== parentId && this.hasAncestor(id, parentId));
+    await this.verifyTrackedSessions(descendants, signal);
+  }
+
+  private async syncActiveSessions(candidateIds: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
+    if (!this.provider.listActiveSessions || candidateIds.size === 0 || this.disposed || signal?.aborted) return;
+    const baselines = new Map<string, number>();
+    for (const id of candidateIds) {
+      baselines.set(id, this.statusSequences.get(id) ?? 0);
+      this.activeSessionProbes.set(id, (this.activeSessionProbes.get(id) ?? 0) + 1);
+    }
+    try {
+      let activeIds: string[];
+      try {
+        activeIds = await this.provider.listActiveSessions(signal ? { signal } : undefined);
+      } catch {
+        return;
+      }
+      if (this.disposed || signal?.aborted) return;
+      const active = new Set(activeIds);
+      for (const id of candidateIds) {
+        if (!active.has(id)) continue;
+        if ((this.statusSequences.get(id) ?? 0) !== baselines.get(id)) continue;
+        const metadata = this.inventorySessions.get(id);
+        if (metadata && (!metadata.inWorkspace || metadata.deleted)) continue;
+        const projection = this.projection(id);
+        if (!isLiveConversationStatus(projection.status)) projection.statusUpdate("running", undefined, false);
+      }
+    } finally {
+      for (const id of candidateIds) {
+        const remaining = (this.activeSessionProbes.get(id) ?? 1) - 1;
+        if (remaining <= 0) this.activeSessionProbes.delete(id);
+        else this.activeSessionProbes.set(id, remaining);
+      }
+    }
+  }
+
   // A conversation that is deleted or has left the workspace can neither work
   // nor wait on the user here: requireSession rejects its later events, so
   // nothing else would ever settle its adapter-level records. If it returns,
   // its activity is re-derived from new events.
   private forgetActivity(conversationId: string): void {
+    const known = this.statusSequences.has(conversationId)
+      || this.activeSessionProbes.has(conversationId)
+      || this.projections.has(conversationId)
+      || this.liveTurns.has(conversationId)
+      || this.backgroundWork.has(conversationId)
+      || this.unresolvedBackgroundWork.has(conversationId)
+      || this.pendingInteractions.has(conversationId)
+      || this.inventorySessions.has(conversationId)
+      || this.listedSessions.has(conversationId);
+    if (known) this.bumpStatusSequence(conversationId);
+    this.eventCoalescer?.discard(conversationId);
+    const projection = this.projections.get(conversationId);
+    if (projection && (isLiveConversationStatus(projection.status) || projection.status === "background")) {
+      projection.status = "idle";
+    }
     const recovery = this.backgroundRecoveries.get(conversationId);
     recovery?.checking?.finish();
     if (recovery) clearTimeout(recovery.timer);
@@ -5510,10 +5638,17 @@ export class ChatAdapter {
           // Only an initialized, connected provider is read. Activity itself
           // remains memory-only and cannot start a runtime.
           void this.provider.listSessions().then(async sessions => {
+            const inWorkspaceIds = new Set<string>();
             for (const session of sessions) {
               if (signal.aborted || this.disposed) break;
-              if (!session.parentId && await this.isInWorkspace(session)) this.scheduleBackgroundRecovery(session.id);
+              if (await this.isInWorkspace(session)) {
+                inWorkspaceIds.add(session.id);
+                boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
+                if (!session.parentId) this.scheduleBackgroundRecovery(session.id);
+              }
             }
+            if (signal.aborted || this.disposed) return;
+            await this.reconcileTrackedActivity(inWorkspaceIds, signal);
           }).catch(() => undefined);
         }
         if (this.provider.waitForEventStream && normalized.eventType === "server.connected") reconcileInboxes();
@@ -5533,11 +5668,12 @@ export class ChatAdapter {
         }
         for (const blockType of normalized.skippedBlocks ?? []) this.countSkippedBlock(blockType);
         if (normalized.sessionLifecycle) {
-          await this.applySessionLifecycle(normalized.sessionLifecycle);
+          const inWorkspace = await this.applySessionLifecycle(normalized.sessionLifecycle);
           if (signal.aborted) break;
-          // A deleted session is already gone. Its event metadata is the full
-          // confinement and parentage authority; never follow it with a lookup.
-          if (normalized.sessionLifecycle.kind === "deleted") continue;
+          // A deleted or moved-out session is already gone from this workspace.
+          // Its event metadata is the confinement authority; never follow it
+          // with a lookup or apply attached revocation updates after forgetting.
+          if (normalized.sessionLifecycle.kind === "deleted" || !inWorkspace) continue;
         }
         if (!normalized.conversationId) continue;
         // An event with no timeline updates can still carry a child's model
@@ -6455,7 +6591,11 @@ export class ChatAdapter {
     // "skip this frame" but must restart on transport errors, and the API
     // routes should answer 500, not 404, when the provider is unreachable.
     const session = await this.provider.getSession(id);
-    if (!session || !await this.isInWorkspace(session)) throw new ConversationNotFoundError();
+    if (!session || !await this.isInWorkspace(session)) {
+      this.forgetMissingSession(id);
+      throw new ConversationNotFoundError();
+    }
+    boundedSet(this.sessionParents, session.id, session.parentId ?? null, INVENTORY_SESSION_LIMIT);
     return session;
   }
 
@@ -6482,10 +6622,48 @@ export class ChatAdapter {
     if (wasVisible !== isVisible || (isVisible && previous?.title !== next.title)) this.inventory.invalidate();
   }
 
-  private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<void> {
+  private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<boolean> {
     if (lifecycle.kind === "deleted") {
       this.cancelRevertReconciliation(lifecycle.id);
       this.forgetActivity(lifecycle.id);
+    }
+    if (lifecycle.kind === "moved") {
+      const inWorkspace = await this.isInWorkspace(lifecycle);
+      if (!inWorkspace) {
+        this.cancelRevertReconciliation(lifecycle.id);
+        const wasListed = this.listedSessions.delete(lifecycle.id);
+        const previous = this.inventorySessions.get(lifecycle.id);
+        if (previous !== undefined || wasListed) {
+          const parentId = this.sessionParents.get(lifecycle.id) ?? null;
+          const next: InventorySessionMetadata = {
+            inWorkspace: false,
+            parentId,
+            title: previous?.title ?? lifecycle.title,
+            deleted: false,
+          };
+          this.rememberInventorySession(lifecycle.id, next, true);
+          if (wasListed && !inventoryVisible(previous)) this.inventory.invalidate();
+        }
+        await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal);
+        return false;
+      }
+      const parentId = await this.parentOf(lifecycle.id).catch(() => this.sessionParents.get(lifecycle.id) ?? null);
+      const previous = this.inventorySessions.get(lifecycle.id);
+      const next: InventorySessionMetadata = {
+        inWorkspace: true,
+        parentId,
+        title: previous?.title ?? lifecycle.title,
+        deleted: false,
+      };
+      // Fence any concurrent stale reconcileTrackedActivity lookup from before move-in.
+      this.bumpStatusSequence(lifecycle.id);
+      this.rememberInventorySession(lifecycle.id, next, true);
+      if (parentId === null) {
+        boundedSet(this.listedSessions, lifecycle.id, true, INVENTORY_SESSION_LIMIT);
+        this.scheduleBackgroundRecovery(lifecycle.id);
+      }
+      void this.syncActiveSessions(new Set([lifecycle.id]), this.pumpController?.signal);
+      return true;
     }
     // A sparse update names only what changed (2.x's rename: id and title).
     // Parentage it does not mention is unchanged, not cleared: a child
@@ -6503,17 +6681,25 @@ export class ChatAdapter {
     const next = await this.classifyInventorySession({ ...lifecycle, parentId: parentId ?? undefined }, lifecycle.kind === "deleted");
     if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
     const previous = this.inventorySessions.get(lifecycle.id);
+    const wasListed = this.listedSessions.has(lifecycle.id);
+    if (lifecycle.kind === "deleted" || !next.inWorkspace) this.listedSessions.delete(lifecycle.id);
     // A sparse event's directory is the workspace by assumption, not by the
     // wire (2.x's deletion carries none), so it vouches for nothing unseen:
     // only a session this adapter listed can have left the list.
     const eventDescribesVisibleSession = lifecycle.sparse
-      ? this.listedSessions.has(lifecycle.id)
+      ? wasListed
       : next.inWorkspace && next.parentId === null;
     const relevantDeletion = lifecycle.kind === "deleted"
       && previous?.deleted !== true
       && (inventoryVisible(previous) || eventDescribesVisibleSession);
     this.rememberInventorySession(lifecycle.id, next, lifecycle.kind !== "deleted");
-    if (relevantDeletion) this.inventory.invalidate();
+    if (relevantDeletion || (lifecycle.kind !== "deleted" && !next.inWorkspace && wasListed && !inventoryVisible(previous))) {
+      this.inventory.invalidate();
+    }
+    if (lifecycle.kind === "deleted" || !next.inWorkspace) {
+      await this.reconcileMovedChildren(lifecycle.id, this.pumpController?.signal);
+    }
+    return next.inWorkspace;
   }
 
   private async configuration(id: string): Promise<ConversationConfiguration> {
@@ -6544,6 +6730,9 @@ export class ChatAdapter {
       return existing;
     }
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes, this.replayClock), (status, sourceTransition) => {
+      // Adapter-synthesized `background` status must not supersede an in-flight
+      // active-session probe for a live turn on the same conversation.
+      if (status !== "background") this.bumpStatusSequence(id);
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.
       const stop = this.stoppingTurns.get(id);

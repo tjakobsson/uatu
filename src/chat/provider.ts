@@ -101,16 +101,17 @@ export type NormalizedProviderUpdate =
   | { kind: "inbox"; delta: InboxDelta };
 
 export type NormalizedSessionLifecycle = {
-  kind: "created" | "updated" | "deleted";
+  kind: "created" | "updated" | "deleted" | "moved";
   id: string;
   directory: string;
   title: string;
   parentId?: string;
   // The wire event named only the fields it carries (2.x `session.renamed`:
-  // id and title; 2.x `session.deleted`: id alone). Parentage it omits is
-  // unchanged, not cleared, and a directory it omits is the workspace by
-  // assumption, vouching for nothing the adapter has not seen. A full
-  // record (1.x `session.updated`) without a parent means top-level.
+  // id and title; 2.x `session.deleted`: id alone; 2.x `session.moved`: id and
+  // destination directory). Parentage it omits is unchanged, not cleared, and
+  // a directory it omits is the workspace by assumption, vouching for nothing
+  // the adapter has not seen. A full record (1.x `session.updated`) without a
+  // parent means top-level.
   sparse?: true;
 };
 
@@ -386,6 +387,12 @@ export interface ChatProvider {
   switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void>;
   renameSession?(sessionId: string, title: string): Promise<ProviderSession>;
   listSessions(): Promise<ProviderSession[]>;
+  /**
+   * Session IDs currently executing a live turn on the provider, if exposed.
+   * Used to reflect already-running work when a conversation moves into this
+   * workspace via a live `session.moved` event.
+   */
+  listActiveSessions?(options?: { signal?: AbortSignal }): Promise<string[]>;
   newConversationConfiguration(): Promise<ConversationConfiguration>;
   createSession(id: string, configuration?: ConversationConfiguration): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;

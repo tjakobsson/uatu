@@ -872,6 +872,66 @@ describe("OpenCode 2.x normalization: forms, shell, lifecycle", () => {
     const [deleted] = byType("session.deleted");
     expect(deleted?.sessionLifecycle).toEqual({ kind: "deleted", id: deleted!.conversationId!, directory: WORKSPACE, title: "", sparse: true });
   });
+
+  test("session.moved emits a moved lifecycle event for both source (foreign location) and destination workspaces", () => {
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const movedOut = normalize({
+      id: "evt_move_out",
+      created: 100,
+      type: "session.moved",
+      location: { directory: "/other/worktree" },
+      data: { sessionID: "ses_move", location: { directory: "/other/worktree" }, projectID: "proj_1" },
+    });
+    expect(movedOut.outcome).toBe("handled");
+    expect(movedOut.sessionLifecycle).toEqual({
+      kind: "moved",
+      id: "ses_move",
+      directory: "/other/worktree",
+      title: "",
+      sparse: true,
+    });
+
+    const movedIn = normalize({
+      id: "evt_move_in",
+      created: 101,
+      type: "session.moved",
+      location: { directory: WORKSPACE },
+      data: { sessionID: "ses_move", location: { directory: WORKSPACE }, projectID: "proj_1" },
+    });
+    expect(movedIn.outcome).toBe("handled");
+    expect(movedIn.sessionLifecycle).toEqual({
+      kind: "moved",
+      id: "ses_move",
+      directory: WORKSPACE,
+      title: "",
+      sparse: true,
+    });
+
+    const eventLocationFallback = normalize({
+      id: "evt_move_fallback",
+      created: 102,
+      type: "session.moved",
+      location: { directory: "/fallback/worktree" },
+      data: { sessionID: "ses_move", projectID: "proj_1" },
+    });
+    expect(eventLocationFallback.outcome).toBe("handled");
+    expect(eventLocationFallback.sessionLifecycle).toEqual({
+      kind: "moved",
+      id: "ses_move",
+      directory: "/fallback/worktree",
+      title: "",
+      sparse: true,
+    });
+
+    const withoutLocation = normalize({
+      id: "evt_move_bare",
+      created: 103,
+      type: "session.moved",
+      data: { sessionID: "ses_move" },
+    });
+    expect(withoutLocation.outcome).toBe("ignored");
+    expect(withoutLocation.sessionLifecycle).toBeUndefined();
+  });
 });
 
 describe("OpenCode 2.x normalization: compaction, switches, interrupted tools", () => {
