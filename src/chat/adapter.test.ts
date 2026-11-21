@@ -7906,15 +7906,19 @@ describe("prompt, abort, permission, and question mutations", () => {
   // Recovery can discover an earlier launcher for a withheld worker: the
   // canonical row id changes while its aliases still name the prior execution.
   // The prior row's denial must move to that row, never to another execution.
-  for (const path of ["snapshot", "stream"] as const) for (const recovered of ["overlap", "disjoint", "other-child", "terminal", "cohorts", "cohorts-unqualified"] as const) test(`${path} alias supersession carries a withheld veto to the canonical row (${recovered})`, async () => {
+  for (const path of ["snapshot", "stream"] as const) for (const recovered of ["overlap", "disjoint", "other-child", "terminal", "cohorts", "cohorts-unqualified", "retained-canonical"] as const) test(`${path} alias supersession carries a withheld veto to the canonical row (${recovered})`, async () => {
     // Connected, so history and worker evidence take the covered read.
     const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
     provider.sessions = [fixtureSession("session")];
     const cohorts = recovered.startsWith("cohorts");
+    // Retained canonical: the canonical row is already withheld as [A,B]; a
+    // withheld [C,D] predecessor folds into it as [A,C]; B alone restates it.
+    const retainedCanonical = recovered === "retained-canonical";
     const prior: BackgroundTaskItem = { id: "task:joined", type: "background_task", taskId: "joined", toolUseId: "joined", childConversationId: "child",
       taskType: "agent", createdAt: 2, description: "Worker", status: "running", stateUncertain: true, outcomeWithheld: true,
-      control: { available: false }, activity: { kind: "unavailable", generation: 1, executionId: "execution-b",
-        ...(cohorts ? { executionAliases: ["execution-b", "execution-c"] } : {}) } };
+      control: { available: false }, activity: retainedCanonical
+        ? { kind: "unavailable", generation: 1, executionId: "execution-c", executionAliases: ["execution-c", "execution-d"] }
+        : { kind: "unavailable", generation: 1, executionId: "execution-b", ...(cohorts ? { executionAliases: ["execution-b", "execution-c"] } : {}) } };
     // Cohorts: two withheld predecessors, [B,C] and [D,E], recovered as one
     // canonical [B,D] row and later restated by E alone. Unqualified: the
     // canonical row names only B, so the second cohort proves nothing.
@@ -7926,8 +7930,10 @@ describe("prompt, abort, permission, and question mutations", () => {
       activity: cohorts ? { kind: "unavailable", generation: 1, executionId: "execution-b",
         executionAliases: recovered === "cohorts" ? ["execution-b", "execution-d"] : ["execution-b"] }
         : { kind: "unavailable", generation: 1, executionId: "execution-a",
-          executionAliases: recovered === "disjoint" ? ["execution-a"] : ["execution-a", "execution-b"] } };
+          executionAliases: recovered === "disjoint" ? ["execution-a"] : retainedCanonical ? ["execution-a", "execution-c"] : ["execution-a", "execution-b"] } };
     delete canonical.outcomeWithheld;
+    const withheldCanonical: BackgroundTaskItem = { ...canonical, outcomeWithheld: true,
+      activity: { kind: "unavailable", generation: 1, executionId: "execution-a", executionAliases: ["execution-a", "execution-b"] } };
     let current: BackgroundTaskItem = recovered === "terminal" ? { ...canonical, status: "failed", stateUncertain: false, resultId: "result", summary: "Failed",
       activity: { ...canonical.activity!, kind: "ended", endedAt: 3 } } : canonical;
     // The snapshot path keeps stream recovery empty until the covered history
@@ -7938,8 +7944,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     adapter.projectionForTests("session").apply({ kind: "upsert", item: prior });
     if (cohorts) adapter.projectionForTests("session").apply({ kind: "upsert", item: second });
+    if (retainedCanonical) adapter.projectionForTests("session").apply({ kind: "upsert", item: withheldCanonical });
     const pump = adapter.startEventPump();
-    let vetoed = recovered === "overlap" || cohorts;
+    let vetoed = recovered === "overlap" || cohorts || retainedCanonical;
     const expectVeto = async () => {
       const workers = (await adapter.history("session")).items.filter((item): item is BackgroundTaskItem => item.type === "background_task");
       expect(workers.map(item => item.id)).toEqual([canonical.id]);
@@ -7951,13 +7958,14 @@ describe("prompt, abort, permission, and question mutations", () => {
     };
     try {
       provider.eventQueue.push({ type: "server.connected", data: {} });
-      if (path === "stream") await waitUntil(() => adapter.projectionForTests("session").has(canonical.id));
+      if (path === "stream") await waitUntil(() => !adapter.projectionForTests("session").has(prior.id));
       else { await waitUntil(() => reads >= 1); recovering = true; }
       await expectVeto();
-      if (cohorts) {
-        // A partial restatement naming only the second predecessor's alias.
-        current = { ...canonical, activity: { kind: "unavailable", generation: 1, executionId: "execution-e" } };
-        vetoed = recovered === "cohorts";
+      if (cohorts || retainedCanonical) {
+        // A partial restatement naming only one remembered alias: the second
+        // predecessor's E, or the canonical row's own B.
+        current = { ...canonical, activity: { kind: "unavailable", generation: 1, executionId: retainedCanonical ? "execution-b" : "execution-e" } };
+        vetoed = recovered !== "cohorts-unqualified";
         await expectVeto();
       }
     } finally { await adapter.dispose(); await pump; }

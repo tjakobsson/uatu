@@ -221,6 +221,17 @@ function workerVetoStreamGap(known: WorkerOutcomeVeto["launch"], next: WorkerOut
     && (next.generation < known.generation || next.generation > known.generation && (!next.ref || nativeWorkerLaunchRef.test(next.ref)));
 }
 
+/** Two qualified bindings of one execution: keep `base`'s scope and launch
+ * and add every alias `other` proves. Past the bound, or if either side is
+ * already saturated, keep every known alias and fail closed. Deny-only. */
+function unionWorkerOutcomeVetoes(base: WorkerOutcomeVeto, other: WorkerOutcomeVeto): WorkerOutcomeVeto {
+  const known = new Set(base.executionIds);
+  const added = base.saturated || other.saturated ? [] : other.executionIds.filter(id => !known.has(id));
+  if (!added.length && (base.saturated || !other.saturated)) return base;
+  const saturated = base.saturated || other.saturated || known.size + added.length > WORKER_DISMISSAL_ALIAS_LIMIT;
+  return { ...base, ...(saturated ? { saturated: true as const } : { executionIds: [...base.executionIds, ...added] }) };
+}
+
 function withWorkerOutcomeVeto(current: ConversationItem | undefined, incoming: WorkerWithOutcomeVeto,
   target: WorkerWithOutcomeVeto = incoming, coveredLaunch?: BackgroundTaskItem): BackgroundTaskItem {
   const worker: WorkerWithOutcomeVeto | undefined = current?.type === "background_task" ? current : undefined;
@@ -297,8 +308,12 @@ function withWorkerOutcomeVeto(current: ConversationItem | undefined, incoming: 
     && carried.launch.ref === launch.ref && carried.launch.generation === launch.generation;
   // A fresh denial of a proven-overlapping execution keeps the remembered union.
   // A saturated veto cannot prove disjointness, so a same-scope one stays.
+  // A carried denial (from a fresh source or an alias transfer) and the row's
+  // own qualified veto describe one execution: union them, never choose.
+  const qualifiedRetained = keepsOwnDenial || provenOverlap || retained?.saturated ? retained : undefined;
   const veto = incoming.outcomeWithheld === true && (!carried || !carried.dormant && (matches(carried) || sameConflictingDenial))
-    ? carried ?? (keepsOwnDenial || provenOverlap || retained?.saturated ? retained : undefined) ?? binding(incoming, ids, launch)
+    ? (carried && (provenOverlap || retained?.saturated) ? unionWorkerOutcomeVetoes(carried, retained!) : carried ?? qualifiedRetained)
+      ?? binding(incoming, ids, launch)
     : restatement ? retained : undefined;
   // Protect the public row during an unresolved gap, including from local
   // row/launcher marks. The private binding still requires qualified proof.
@@ -340,15 +355,8 @@ function transferWorkerOutcomeVeto(prior: WorkerWithOutcomeVeto, canonical: Work
   const { [workerOutcomeVeto]: _earlier, outcomeWithheld: _withheld, ...recovered } = canonical;
   const next = (withWorkerOutcomeVeto(rescoped, recovered) as WorkerWithOutcomeVeto)[workerOutcomeVeto];
   if (!next || next.dormant) return canonical;
-  // Same union and saturation rules as a restatement: add new proven
-  // aliases; past the bound, keep every known one and fail closed.
-  const base = earlier.dormant ? next : earlier, other = base === earlier ? next : earlier;
-  const known = new Set(base.executionIds);
-  const added = base.saturated || other.saturated ? [] : other.executionIds.filter(id => !known.has(id));
-  const saturated = base.saturated || other.saturated || known.size + added.length > WORKER_DISMISSAL_ALIAS_LIMIT;
-  const merged: WorkerOutcomeVeto = { ...base, ...(saturated ? { saturated: true as const } : { executionIds: [...base.executionIds, ...added] }) };
   const item: WorkerWithOutcomeVeto = { ...canonical, outcomeWithheld: true };
-  item[workerOutcomeVeto] = merged;
+  item[workerOutcomeVeto] = earlier.dormant ? unionWorkerOutcomeVetoes(next, earlier) : unionWorkerOutcomeVetoes(earlier, next);
   return item;
 }
 
