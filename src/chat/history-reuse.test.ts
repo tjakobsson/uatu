@@ -1,6 +1,43 @@
 import { expect, test } from "bun:test";
 import { HistoryReuse, historyPageCursor, historyPageEnd } from "./history-reuse";
 
+test("entry observations follow pending ownership, replacement, eviction and disposal", async () => {
+  let sequence = 0, release!: (value: string) => void;
+  const cache = new HistoryReuse<string, { order: number }>(1024, 1, () => ({ order: ++sequence }));
+  const old = cache.read("child", "generation", () => new Promise<string>(resolve => { release = resolve; }));
+  await Promise.resolve();
+  const first = cache.peekObservation("child", "generation"); expect(first).toEqual({ order: 1 });
+  expect(cache.peek("child", "generation")).toBeUndefined(); expect(cache.peekObservation("other", "generation")).toBeUndefined();
+  cache.invalidate("child"); expect(cache.peekObservation("child", "generation")).toBeUndefined();
+  expect(await cache.read("child", "generation", async () => "fresh")).toBe("fresh");
+  const current = cache.peekObservation("child", "generation"); expect(current).toEqual({ order: 2 });
+  release("obsolete"); expect(await old).toBe("obsolete");
+  expect(cache.peek("child", "generation")).toBe("fresh"); expect(cache.peekObservation("child", "generation")).toBe(current);
+  await cache.read("other", "generation", async () => "other");
+  expect(cache.peekObservation("child", "generation")).toBeUndefined(); expect(cache.size).toBe(1);
+  expect(cache.peekObservation("other", undefined)).toBeUndefined();
+  cache.dispose(); expect(cache.peekObservation("other", "generation")).toBeUndefined(); expect(cache.retainedBytes).toBe(0);
+});
+
+test("unversioned pending loads carry observations that retire joiners, but never retain values", async () => {
+  let sequence = 0, release!: (value: string) => void, loads = 0;
+  const cache = new HistoryReuse<string, { order: number }>(1024, 2, () => ({ order: ++sequence }));
+  const signal = new AbortController().signal;
+  expect(cache.peekObservation("child", undefined)).toBeUndefined(); // No entry, no metadata.
+  const old = cache.readShared("child", undefined, () => { loads++; return new Promise<string>(resolve => { release = resolve; }); }, signal);
+  expect(cache.peekObservation("child", undefined)).toEqual({ order: 1 });
+  expect(cache.peekObservation("child", "generation")).toBeUndefined();
+  cache.invalidate("child"); // Contradicting qualification retires the in-flight load.
+  const joiner = cache.readShared("child", undefined, async () => { loads++; return "current"; }, signal);
+  expect(cache.peekObservation("child", undefined)).toEqual({ order: 2 });
+  expect(await joiner).toBe("current"); expect(loads).toBe(2);
+  release("obsolete"); expect(await old).toBe("obsolete");
+  expect(cache.size).toBe(0); expect(cache.peek("child", undefined)).toBeUndefined();
+  expect(cache.peekObservation("child", undefined)).toBeUndefined(); // Completed: nothing retained.
+  await cache.read("versioned", "generation", async () => "kept");
+  expect(cache.peekObservation("versioned", undefined)).toBeUndefined(); // Never matches a versioned entry.
+});
+
 test("shares concurrent reads, reuses verified versions, and isolates conversations", async () => {
   const cache = new HistoryReuse<number>();
   let calls = 0;
