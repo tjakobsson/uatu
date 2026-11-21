@@ -22,7 +22,8 @@ function withDom<T>(
       : new Promise<string>(resolve => { waiters.push(resolve); })
   );
   Object.defineProperty(globalThis, "document", { configurable: true, value: document });
-  Object.defineProperty(globalThis, "window", { configurable: true, value: Object.assign(window, { setTimeout: () => 0 }) });
+  // Avoid mutating Linkedom's `window` proxy (which forwards assignments to `globalThis.setTimeout`).
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout: () => 0 } });
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: {
