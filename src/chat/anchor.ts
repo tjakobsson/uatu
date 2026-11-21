@@ -1,11 +1,25 @@
-export type TimelineAnchor = { itemId: string; offset: number };
+export type TimelineAnchor = {
+  itemId: string;
+  offset: number;
+  /** Opaque stable block key, never raw message text. Offsets are viewport-relative. */
+  content?: { key: string; offset: number };
+};
+/** A paused view can have no measurable item yet; that is not following. */
+export type TimelinePosition =
+  | { kind: "following" }
+  | { kind: "anchor"; anchor: TimelineAnchor }
+  | { kind: "paused"; top: number };
 /** Which way a scroll event moved the viewport, judged against the previous event. */
 export type ScrollMovement = "up" | "down" | "none";
 export type AnchorGeometry = {
   scrollTop: number;
   clientHeight: number;
   scrollHeight: number;
-  items: Array<{ id: string; top: number; bottom: number }>;
+  items: Array<{
+    id: string; top: number; bottom: number;
+    /** Block rectangles use the same viewport-relative coordinates as the item. */
+    content?: Array<{ key: string; top: number; bottom: number }>;
+  }>;
 };
 
 export class TimelineAnchorController {
@@ -17,20 +31,17 @@ export class TimelineAnchorController {
   private expected: number | null = null;
   private previous: AnchorGeometry | null = null;
   private restoring = false;
+  private fallbackTop: number | null = null;
 
   constructor(private readonly endThreshold = 48) {}
 
   /**
-   * Reads where the reader is after a scroll. Arriving near the end pins —
-   * anything within the threshold counts, so a reader who stops just short
-   * still follows the stream. Leaving is judged differently: `movement`
-   * says which way the scroll went, and any upward step unpins, however
-   * small. The
-   * threshold cannot apply on the way out — while a turn streams, a render
-   * lands every few frames, and each one drags a still-pinned viewport back
-   * to the end, so a reader nudging a trackpad never gets past 48px and
-   * feels every wheel tick reset. A decrease caused by a measured extent
-   * clamp preserves the existing intent, including paused intent.
+   * Reads where the reader is after a scroll. Downward arrival within the
+   * end threshold pins; placement or stopping in that band does not.
+   * Leaving is judged differently: `movement` says which way the scroll
+   * went, and any upward step unpins, however small. Otherwise frequent
+   * streaming renders pull the reader back before their next trackpad tick.
+   * A measured extent clamp preserves existing intent, including paused intent.
    *
    * A scroll that lands where `afterMutation` or `jumpToLatest` just put it
    * is not the reader at all — it is that assignment echoing back, whether
@@ -42,9 +53,12 @@ export class TimelineAnchorController {
    * treated the same way: only a downward movement is an arrival.
    */
   observe(geometry: AnchorGeometry, movement: ScrollMovement = "down"): void {
+    this.fallbackTop = null;
     const expected = this.expected;
     const maximum = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
-    const echo = expected !== null && Math.abs(geometry.scrollTop - Math.max(0, Math.min(expected, maximum))) <= 1;
+    // A nearby but distinct position can be a genuine fractional reader step.
+    // Assignment echoes match the applied top, allowing arithmetic roundoff only.
+    const echo = expected !== null && Math.abs(geometry.scrollTop - Math.max(0, Math.min(expected, maximum))) < 1e-6;
     const previous = this.previous;
     const clamped = previous !== null && maximum < previous.scrollHeight - previous.clientHeight
       && previous.scrollTop > maximum && Math.abs(geometry.scrollTop - maximum) <= 1;
@@ -63,6 +77,7 @@ export class TimelineAnchorController {
 
   /** Input intent arrives before the browser's scroll event or default action. */
   pause(geometry: AnchorGeometry): void {
+    this.fallbackTop = null;
     this.expected = null;
     this.previous = geometry;
     this.pinned = false;
@@ -79,7 +94,11 @@ export class TimelineAnchorController {
   afterMutation(geometry: AnchorGeometry, hasNewContent = false): number {
     if (this.pinned) return this.handOut(Math.max(0, geometry.scrollHeight - geometry.clientHeight));
     if (hasNewContent) this.unseen = true;
-    if (!this.anchor) return this.handOut(geometry.scrollTop);
+    if (!this.anchor) {
+      const top = this.fallbackTop ?? geometry.scrollTop;
+      this.fallbackTop = null;
+      return this.handOut(top);
+    }
     // Nothing measured means nothing rendered or laid out yet — a render
     // that ran before the surface had its size, a resize of a still-empty
     // timeline. That says nothing about whether the anchored item exists,
@@ -89,6 +108,11 @@ export class TimelineAnchorController {
     const item = geometry.items.find(candidate => candidate.id === this.anchor!.itemId);
     if (item) {
       this.restoring = false;
+      const content = this.anchor.content;
+      const blocks = content && item.content?.filter(candidate => candidate.key === content.key);
+      if (content && blocks?.length === 1) {
+        return this.handOut(geometry.scrollTop + blocks[0]!.top - content.offset);
+      }
       return this.handOut(geometry.scrollTop + item.top - this.anchor.offset);
     }
     if (!this.restoring) {
@@ -103,6 +127,7 @@ export class TimelineAnchorController {
   }
 
   jumpToLatest(geometry: AnchorGeometry): number {
+    this.fallbackTop = null;
     this.pinned = true;
     this.unseen = false;
     this.restoring = false;
@@ -118,7 +143,21 @@ export class TimelineAnchorController {
   isPinned(): boolean { return this.pinned; }
   hasUnseen(): boolean { return this.unseen; }
   currentAnchor(): TimelineAnchor | null { return this.anchor; }
+  capturePosition(scrollTop: number): TimelinePosition {
+    if (this.pinned) return { kind: "following" };
+    if (this.anchor) return { kind: "anchor", anchor: this.anchor };
+    return { kind: "paused", top: this.fallbackTop ?? (Number.isFinite(scrollTop) ? scrollTop : 0) };
+  }
+  restorePosition(position: TimelinePosition): void {
+    if (position.kind === "paused" && !Number.isFinite(position.top)) return;
+    this.restore(position.kind === "anchor" ? position.anchor : null);
+    if (position.kind === "paused") {
+      this.pinned = false;
+      this.fallbackTop = position.top;
+    }
+  }
   restore(anchor: TimelineAnchor | null): void {
+    this.fallbackTop = null;
     this.restoring = anchor !== null;
     this.anchor = anchor;
     this.pinned = anchor === null;
@@ -130,5 +169,12 @@ export class TimelineAnchorController {
 
 export function captureAnchor(geometry: AnchorGeometry): TimelineAnchor | null {
   const visible = geometry.items.find(item => item.bottom > 0 && item.top < geometry.clientHeight);
-  return visible ? { itemId: visible.id, offset: visible.top } : null;
+  if (!visible) return null;
+  const anchor: TimelineAnchor = { itemId: visible.id, offset: visible.top };
+  const counts = new Map<string, number>();
+  for (const block of visible.content ?? []) counts.set(block.key, (counts.get(block.key) ?? 0) + 1);
+  const block = visible.content?.find(block => block.bottom > 0 && block.top < geometry.clientHeight
+    && counts.get(block.key) === 1);
+  if (block) anchor.content = { key: block.key, offset: block.top };
+  return anchor;
 }

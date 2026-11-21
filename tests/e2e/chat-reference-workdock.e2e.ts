@@ -186,10 +186,11 @@ for (const engine of ["chromium", "webkit"] as const) for (const touch of [false
             });
             await saveEvidence(info, `expanded-budget-${enlarged ? "200" : "100"}.json`, JSON.stringify(budget, null, 2));
             if (!enlarged) {
-              // Fine-pointer desktop keeps a 35% reading band (200–280px);
+              // Fine-pointer desktop keeps a balanced 50% reading band (200–420px);
               // comfortable/touch keeps 20% (32–96px), not one phone budget.
-              const reading = touch ? Math.min(96, Math.max(32, budget.remaining * .2)) : Math.min(280, Math.max(200, budget.remaining * .35));
-              expect(budget.dock).toBeGreaterThan(budget.oldCap);
+              const reading = touch ? Math.min(96, Math.max(32, budget.remaining * .2)) : Math.min(420, Math.max(200, budget.remaining * .5));
+              if (touch) expect(budget.dock).toBeGreaterThan(budget.oldCap);
+              else expect(budget.transcript).toBeGreaterThanOrEqual(300);
               expect(budget.transcript).toBeCloseTo(reading, 0);
               expect(budget.dock + budget.transcript).toBeCloseTo(budget.remaining, 0);
               // Reconstruct only 005cb41's original normal-size caps, so the

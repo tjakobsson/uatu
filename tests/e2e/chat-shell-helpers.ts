@@ -47,6 +47,14 @@ export async function bootShell(page: Page, request: APIRequestContext, options:
     await page.locator(".chat-worker-inspect").filter({ has: page.locator('.chat-worker-name', { hasText: /^Shell child$/ }) }).click();
   }
   const timeline = page.locator(child ? "#chat-drilldown-timeline" : "#chat-timeline");
+  // Establish the initial reading state before native focus/toggle actions.
+  // Otherwise a late initial-layout clamp can arrive after disclosure growth
+  // and legitimately retire following before this fixture starts its checks.
+  await expect(timeline.locator('[data-chat-item-id="shell:a"]')).toBeAttached();
+  const bottomGap = () => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
+  await expect.poll(bottomGap).toBeLessThan(2);
+  await settleScroll(timeline);
+  await expect.poll(bottomGap).toBeLessThan(2);
   await openShellRow(timeline, "shell:a");
   const outputView = page.locator('.chat-shell-output[data-shell-item-id="shell:a"]');
   const viewport = outputView.locator(".chat-shell-viewport");
