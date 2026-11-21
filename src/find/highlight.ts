@@ -127,6 +127,29 @@ export function clearHighlights(): void {
 // context in view, which is usually what you want to read next.
 const REVEAL_BIAS = 0.4;
 
+// Compute the vertical scroll delta needed to bring `range` comfortably into
+// view inside `container`. Returns `null` for a collapsed/unrendered range,
+// `0` when the range is already inside the visible band, or the signed pixel
+// delta to add to `container.scrollTop`.
+export function revealRangeDelta(range: Range, container: HTMLElement): number | null {
+  const rect = range.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) {
+    return null;
+  }
+  const view = scrollportRect(container);
+  // `scroll-padding-top` on the container reserves room for the sticky
+  // preview header; honour it so a revealed match never lands underneath.
+  const paddingTop = Number.parseFloat(
+    getComputedStyle(container).scrollPaddingTop || "0",
+  ) || 0;
+  const topLimit = view.top + paddingTop;
+  if (rect.top >= topLimit && rect.bottom <= view.bottom) {
+    return 0;
+  }
+  const usable = view.height - paddingTop;
+  return rect.top - topLimit - (usable - rect.height) * REVEAL_BIAS;
+}
+
 // Scroll `container` so `range` is comfortably in view, and do nothing when it
 // already is. Ranges have no `scrollIntoView`, and scrolling the nearest
 // element instead would land on the top of a long code block rather than on
@@ -137,21 +160,9 @@ const REVEAL_BIAS = 0.4;
 // unconditionally, which is right on desktop and a silent no-op in touch mode
 // and the ≤900px stacked layout, where the page scrolls instead (#181).
 export function revealRange(range: Range, container: HTMLElement): void {
-  const rect = range.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0) {
+  const delta = revealRangeDelta(range, container);
+  if (delta === null || delta === 0) {
     return;
   }
-  const view = scrollportRect(container);
-  // `scroll-padding-top` on the container reserves room for the sticky
-  // preview header; honour it so a revealed match never lands underneath.
-  const paddingTop = Number.parseFloat(
-    getComputedStyle(container).scrollPaddingTop || "0",
-  ) || 0;
-  const topLimit = view.top + paddingTop;
-  if (rect.top >= topLimit && rect.bottom <= view.bottom) {
-    return;
-  }
-  const usable = view.height - paddingTop;
-  const target = rect.top - topLimit - (usable - rect.height) * REVEAL_BIAS;
-  container.scrollTop += target;
+  container.scrollTop += delta;
 }

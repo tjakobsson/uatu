@@ -10,7 +10,8 @@ import { materializeChatActivity, revealChatMatch } from "../chat/timeline-rende
 import { findDocument } from "../shared/types";
 import type { FindEngine } from "./engine";
 import { clampSeed, describeStatus } from "./find-status";
-import { revealRange, supportsHighlights } from "./highlight";
+import { revealRange, revealRangeDelta, supportsHighlights } from "./highlight";
+import { coordinatedScrollOwner } from "../chat/coordinated-scroll";
 import { DEFAULT_MATCH_OPTIONS, type MatchOptions } from "./matcher";
 import { createPreviewEngine } from "./preview-engine";
 import { setActiveTab } from "../shell/tab-bar";
@@ -102,6 +103,17 @@ function chatBarHost(): HTMLElement {
   return slot;
 }
 
+function revealChatRange(range: Range, container: HTMLElement): void {
+  const owner = coordinatedScrollOwner(container);
+  if (!owner) {
+    revealRange(range, container);
+    return;
+  }
+  const delta = revealRangeDelta(range, container);
+  if (delta === null) return;
+  owner.revealBy(delta);
+}
+
 const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFindSlotMaybe, {
   target: chatTarget,
   barHost: chatBarHost,
@@ -112,12 +124,15 @@ const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFin
   revealMatch: range => {
     if (revealShellOutputMatch(range)) return true;
     const viewport = range.startContainer.parentElement?.closest(".chat-shell-viewport, .chat-shell-output .chat-tool-error");
-    if (!viewport) return false;
-    // The shell schedules its own range reveal. Bring its viewport into the
-    // transcript now, rather than scrolling toward a still-clipped text rect.
-    const outerRange = document.createRange();
-    outerRange.selectNode(viewport);
-    revealRange(outerRange, chatScrollRoot());
+    if (viewport) {
+      // The shell schedules its own range reveal. Bring its viewport into the
+      // transcript now, rather than scrolling toward a still-clipped text rect.
+      const outerRange = document.createRange();
+      outerRange.selectNode(viewport);
+      revealChatRange(outerRange, chatScrollRoot());
+      return true;
+    }
+    revealChatRange(range, chatScrollRoot());
     return true;
   },
   includeClosedDetails: true,
@@ -128,7 +143,6 @@ const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFin
     expandChatPanel();
     if (document.documentElement.dataset.uiMode === "touch") setActiveTab("chat");
   },
-  scrollRoot: chatScrollRoot,
 });
 
 let open = false;

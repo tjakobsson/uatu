@@ -102,6 +102,120 @@ for (const engine of ["chromium", "webkit"] as const) {
       await browser.close();
     }
   });
+
+  test(`${engine}: Find Next pauses following when revealing a match below the viewport during catch-up @perf`, async ({ launchBrowser, request, baseURL }, info) => {
+    const browser = await launchBrowser(engine);
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
+    try {
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await request.post("/__e2e/reset");
+      const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "Find catch-up navigation", items: [
+        { id: "find:lead", type: "assistant_message", createdAt: 1, markdown: "Initial short context." },
+      ] } }).then(response => response.json());
+      const { token } = await request.get("/__e2e/terminal-token").then(response => response.json());
+      await page.goto(`/?t=${encodeURIComponent(token)}`);
+      await openChatPanel(page);
+      await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+      const timeline = page.locator("#chat-timeline");
+      await expect.poll(() => timeline.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(2);
+      await settleScroll(timeline);
+
+      // Open Find on a query not yet in the transcript so following remains active.
+      const needle = "catchup-find-target";
+      await timeline.focus();
+      await page.keyboard.press("ControlOrMeta+f");
+      await expect(page.locator("#find-query")).toBeFocused();
+      await page.locator("#find-query").fill(needle);
+      await expect(page.locator("#find-status")).toHaveText("No results");
+
+      // Arm Find Next once streamed output grows the timeline far below the
+      // viewport and smooth catch-up is pending/active. Focus stays in Find.
+      await timeline.evaluate((node, query) => {
+        const measureMatch = (): { top: number; bottom: number } | null => {
+          const band = node.getBoundingClientRect();
+          const walker = document.createTreeWalker(document.getElementById("chat-items")!, NodeFilter.SHOW_TEXT);
+          let current: Node | null;
+          while ((current = walker.nextNode())) {
+            const offset = current.textContent?.indexOf(query) ?? -1;
+            if (offset < 0) continue;
+            const range = document.createRange();
+            range.setStart(current, offset);
+            range.setEnd(current, offset + query.length);
+            const rect = range.getBoundingClientRect();
+            return { top: rect.top - band.top, bottom: rect.bottom - band.bottom };
+          }
+          return null;
+        };
+        const state = { triggered: false, gap: 0, matchTopBefore: 0, viewportHeight: node.clientHeight, measureMatch };
+        Object.assign(window, { __findCatchupProbe: state });
+        const trigger = () => {
+          if (state.triggered) return;
+          const next = document.querySelector<HTMLButtonElement>("#find-next");
+          const gap = node.scrollHeight - node.clientHeight - node.scrollTop;
+          const match = measureMatch();
+          if (!next || next.disabled || gap <= 600 || !match || match.top <= node.clientHeight) return;
+          state.triggered = true;
+          state.gap = gap;
+          state.matchTopBefore = match.top;
+          state.viewportHeight = node.clientHeight;
+          observer.disconnect();
+          next.click();
+        };
+        const observer = new ResizeObserver(() => {
+          trigger();
+          if (!state.triggered) queueMicrotask(trigger);
+        });
+        observer.observe(document.getElementById("chat-items")!);
+      }, needle);
+
+      const streamed = [
+        "Streamed lead paragraph above the target match.\n\n".repeat(100),
+        `Target match line: ${needle}\n\n`,
+        "Streamed tail paragraph below the target match.\n\n".repeat(100),
+      ].join("");
+      await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.conversation.id, item: {
+        id: "find:stream", type: "assistant_message", createdAt: 2, markdown: streamed,
+      } } });
+
+      const probe = () => page.evaluate(() => {
+        const { triggered, gap, matchTopBefore, viewportHeight } = (window as unknown as {
+          __findCatchupProbe: { triggered: boolean; gap: number; matchTopBefore: number; viewportHeight: number };
+        }).__findCatchupProbe;
+        return { triggered, gap, matchTopBefore, viewportHeight };
+      });
+      await expect.poll(async () => (await probe()).triggered).toBe(true);
+      expect((await probe()).gap).toBeGreaterThan(600);
+      expect((await probe()).matchTopBefore).toBeGreaterThan((await probe()).viewportHeight);
+      await expect(page.locator("#find-status")).toHaveText("1 of 1");
+
+      const matchPlacement = () => page.evaluate(() => (window as unknown as {
+        __findCatchupProbe: { measureMatch: () => { top: number; bottom: number } | null };
+      }).__findCatchupProbe.measureMatch());
+
+      await settleScroll(timeline);
+      const revealed = await matchPlacement();
+      expect(revealed).not.toBeNull();
+      expect(revealed!.top).toBeGreaterThanOrEqual(-1);
+      expect(revealed!.bottom).toBeLessThanOrEqual(1);
+
+      // Additional streamed output after Find Next must keep following paused
+      // and retain the selected match in place.
+      await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.conversation.id, item: {
+        id: "find:after", type: "assistant_message", createdAt: 3, markdown: "Later output after Find Next.\n\n".repeat(30),
+      } } });
+      await expect(page.locator('[data-chat-item-id="find:after"]')).toContainText("Later output after Find Next.");
+      await settleScroll(timeline);
+      const retained = await matchPlacement();
+      expect(retained).not.toBeNull();
+      expect(retained!.top).toBeGreaterThanOrEqual(-1);
+      expect(retained!.bottom).toBeLessThanOrEqual(1);
+      expect(Math.abs(retained!.top - revealed!.top)).toBeLessThanOrEqual(2);
+      await expect(page.locator("#chat-latest")).toBeVisible();
+      await saveEvidence(info, `find-catchup-geometry-${engine}.json`, JSON.stringify({ probe: await probe(), revealed, retained }));
+    } finally {
+      await browser.close();
+    }
+  });
 }
 
 for (const engine of ["chromium", "webkit"] as const) {
