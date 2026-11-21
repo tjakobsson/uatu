@@ -1,6 +1,9 @@
 import { describeToolDetail } from "./tool-detail";
 import type { ToolItem } from "./types";
 
+/** Most occurrence aliases one worker row may claim for dismissal. */
+export const WORKER_DISMISSAL_ALIAS_LIMIT = 2048;
+
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const identifier = (value: unknown): value is string => typeof value === "string" && value.length > 0
   && new TextEncoder().encode(value).length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
@@ -35,12 +38,12 @@ export function workerDismissalIdentities(value: unknown): string[] {
     const activity = record(item.activity);
     if (!activity || activity.executionId !== undefined && !identifier(activity.executionId)) return [];
     const aliases = activity.executionAliases;
-    if (aliases !== undefined && (!Array.isArray(aliases) || aliases.length > 2048 || !aliases.every(identifier)
+    if (aliases !== undefined && (!Array.isArray(aliases) || aliases.length > WORKER_DISMISSAL_ALIAS_LIMIT || !aliases.every(identifier)
       || !identifier(activity.executionId) || new Set(aliases).size !== aliases.length || !aliases.includes(activity.executionId))) return [];
     if (identifier(activity.executionId)) activityIds.push(activity.executionId, ...(aliases as string[] | undefined ?? []));
   }
   const calls = item.toolUseIds;
-  if (calls !== undefined && (!Array.isArray(calls) || calls.length > 2048 || !calls.every(identifier))) return [];
+  if (calls !== undefined && (!Array.isArray(calls) || calls.length > WORKER_DISMISSAL_ALIAS_LIMIT || !calls.every(identifier))) return [];
   if (item.toolUseId !== undefined && !identifier(item.toolUseId)) return [];
   const launchers = [...new Set([...(calls as string[] | undefined ?? []), ...(identifier(item.toolUseId) ? [item.toolUseId] : [])])];
   // Do not bridge a strong occurrence to an unqualified call/task/result.

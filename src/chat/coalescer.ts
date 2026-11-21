@@ -1,8 +1,10 @@
 import type { NormalizedProviderUpdate } from "./provider";
 import type { ConversationItem } from "./types";
+import { chatTimeout, clearChatTimeout, type ChatTaskScheduler } from "./task-scheduler";
 
 export type CoalescerOptions = {
   windowMs?: number;
+  taskScheduler?: ChatTaskScheduler;
   onFlush: (conversationId: string, updates: NormalizedProviderUpdate[]) => void | Promise<void>;
   // How a later upsert of an item folds into one already buffered for the
   // same window. Without it the later one replaces the earlier, which loses
@@ -27,6 +29,7 @@ export class ProviderUpdateCoalescer {
   private readonly windowMs: number;
   private readonly onFlush: CoalescerOptions["onFlush"];
   private readonly mergeUpsert: CoalescerOptions["mergeUpsert"];
+  private readonly taskScheduler: ChatTaskScheduler | undefined;
   private readonly buffers = new Map<string, NormalizedProviderUpdate[]>();
   private readonly tails = new Map<string, Promise<void>>();
   private readonly epochs = new Map<string, number>();
@@ -37,6 +40,7 @@ export class ProviderUpdateCoalescer {
     this.windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
     this.onFlush = options.onFlush;
     this.mergeUpsert = options.mergeUpsert;
+    this.taskScheduler = options.taskScheduler;
   }
 
   push(conversationId: string, updates: NormalizedProviderUpdate[]): void {
@@ -54,7 +58,7 @@ export class ProviderUpdateCoalescer {
       this.flushConversation(conversationId);
       return;
     }
-    this.timer ??= setTimeout(() => {
+    this.timer ??= chatTimeout(this.taskScheduler, "coalescer.window", () => {
       this.timer = null;
       for (const id of [...this.buffers.keys()]) this.flushConversation(id);
     }, this.windowMs);
@@ -62,7 +66,7 @@ export class ProviderUpdateCoalescer {
 
   flushAll(): void {
     if (this.timer !== null) {
-      clearTimeout(this.timer);
+      clearChatTimeout(this.taskScheduler, this.timer);
       this.timer = null;
     }
     for (const id of [...this.buffers.keys()]) this.flushConversation(id);
@@ -74,7 +78,7 @@ export class ProviderUpdateCoalescer {
     this.epochs.set(conversationId, (this.epochs.get(conversationId) ?? 0) + 1);
     if (!this.tails.has(conversationId)) this.epochs.delete(conversationId);
     if (this.buffers.size === 0 && this.timer !== null) {
-      clearTimeout(this.timer);
+      clearChatTimeout(this.taskScheduler, this.timer);
       this.timer = null;
     }
   }
@@ -96,8 +100,11 @@ export class ProviderUpdateCoalescer {
     const epoch = this.epochs.get(conversationId) ?? 0;
     const tail = this.tails.get(conversationId) ?? Promise.resolve();
     const next = tail.then(() => {
-      if ((this.epochs.get(conversationId) ?? 0) !== epoch) return;
-      return this.onFlush(conversationId, buffer);
+      const flush = () => {
+        if ((this.epochs.get(conversationId) ?? 0) !== epoch) return;
+        return this.onFlush(conversationId, buffer);
+      };
+      return this.taskScheduler ? this.taskScheduler.run(`coalescer.flush:${conversationId}`, flush) : flush();
     }).catch(() => undefined).then(() => {
       // Release the chain once it is the last one queued for this conversation.
       if (this.tails.get(conversationId) === next) {

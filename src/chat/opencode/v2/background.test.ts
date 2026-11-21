@@ -8,6 +8,243 @@ import { createOpenCodeV2Normalizer } from "./normalization";
 
 const launch = (id: string, worker = id, command = "fixture") => ({ id, name: "shell", state: { status: "completed", input: { command }, metadata: { status: "running", shellID: worker } } });
 
+for (const sameClock of [false, true])
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`within-admission proof multiplicity is bounded and replay precise (${sameClock}/${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 15 }] };
+  const first = nativeProof({ id: "first", created: 11 }, { phase: "started" });
+  const second = nativeProof({ id: "second", created: sameClock ? 11 : 13 }, { phase: "started" });
+  workers.executionStarted("child", first); expect(workers.coldActivityContradicted(candidate)).toBe(false);
+  workers.executionStarted("child", second);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true); expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true);
+  const bytes = retained(workers).bytes;
+  for (let replay = 0; replay < 300; replay++) { workers.executionStarted("child", first); workers.executionStarted("child", second); }
+  expect(retained(workers).bytes).toBe(bytes); expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  workers.retainExecutionCounterproof(); expect(workers.startReplay("child", first)).toBe(true); expect(workers.startReplay("child", second)).toBe(true);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true); expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true); checkBytes(workers);
+  for (let index = 0; index < 130; index++) workers.executionStarted("child", nativeProof({ id: `proof-${index}`, created: 11 }, { phase: "started" }));
+  expect(workers.controlEvidenceAvailable).toBe(budget.bytes === undefined);
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true); workers.retainExecutionCounterproof();
+  expect(workers.coldActivityContradicted(candidate)).toBe(true); checkBytes(workers);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+});
+
+for (const mode of ["positive-only", "ended", "unknown-end", "unknown-start", "entry-saturated", "byte-saturated", "aggregate-saturated"] as const)
+test(`subscription retirement retains only accounted negative execution evidence (${mode})`, () => {
+  let external = { entries: 0, bytes: 0 };
+  const budget = mode === "entry-saturated" ? { entries: 1 } : mode === "byte-saturated" ? { bytes: 100 }
+    : { entries: 100, bytes: 20_000, retained: () => external };
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "old", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  workers.verifyChild("child", "parent");
+  workers.launchPrepared("parent", prepareTool({ id: "call", name: "subagent", time: { created: 10, ran: 11, completed: 12 },
+    state: { status: "completed", input: { background: true }, metadata: { sessionID: "child", status: "running" } } }, 12, "snapshot", "message"), 12);
+  const start = nativeProof({ id: "start", created: 11 }, { phase: "started" });
+  workers.executionStarted("child", start);
+  if (mode !== "positive-only") {
+    const end = nativeProof({ id: "end", ...(mode === "unknown-end" ? {} : { created: 20 }) }, { phase: "ended" });
+    workers.executionEnded("child", 20, end);
+    workers.executionStarted("child", nativeProof({ id: "later", ...(mode === "unknown-start" ? {} : { created: 35 }) }, { phase: "started" }));
+  }
+  if (mode === "aggregate-saturated") { external = { entries: 100, bytes: 20_000 }; workers.enforceBudget(); external = { entries: 0, bytes: 0 }; }
+  const saturated = mode.endsWith("saturated");
+  for (let gap = 0; gap < 3; gap++) {
+    workers.retainExecutionCounterproof(); checkBytes(workers);
+    expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+    expect(workers.controlWitnesses(candidate.taskId)).toEqual([]); expect(workers.readbackControlWitnesses(candidate)).toEqual([]);
+    expect(workers.activityEvidence(candidate)).toBeUndefined();
+    expect(workers.controlEvidenceAvailable).toBe(!saturated);
+    expect(workers.coldActivityContradicted(candidate)).toBe(mode !== "positive-only");
+    expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(mode !== "positive-only");
+    if (mode === "positive-only") { expect(workers.startReplay("child", start)).toBe(true); workers.executionStarted("child", start); }
+  }
+});
+
+for (const evidence of ["none", "other-child", "end", "start", "unknown-start"] as const)
+test(`cold activity needs scoped counterproof before requiring admission clocks (${evidence})`, () => {
+  const workers = new BackgroundWorkers();
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child" }] };
+  if (evidence === "end") workers.executionEnded("child", 20, nativeProof({ id: "end", created: 20 }, { child: "child", phase: "ended" }));
+  if (evidence === "start" || evidence === "unknown-start" || evidence === "other-child")
+    workers.executionStarted(evidence === "other-child" ? "other" : "child", nativeProof({ id: "start", ...(evidence === "unknown-start" ? {} : { created: 11 }) }, { phase: "started" }));
+  expect(workers.coldActivityContradicted(candidate)).toBe(!["none", "other-child"].includes(evidence));
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0); checkBytes(workers);
+});
+
+for (const context of ["observed", "transcript"] as const)
+for (const budget of [{ entries: 8 }, { bytes: 2_000 }])
+test(`distinct-start vetoes respect the admission interval (${context}/${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "new", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 30, ran: 31, completed: 32 }] };
+  const old = { ...candidate, launches: candidate.launches.map(launch => ({ ...launch, created: 10, ran: 11, completed: 12 })) };
+  const start = (at: number) => workers.executionStarted("child", nativeProof({ id: `start-${at}`, created: at }, { child: "child", phase: "started" }));
+  start(11);
+  if (context === "observed") workers.executionEnded("child", 20, nativeProof({ id: "prior-end", created: 20 }, { child: "child", phase: "ended" }));
+  start(35);
+  const prior = workers.historyIntervalStart(candidate, [20]); expect(prior).toBe(20);
+  expect(workers.coldActivityContradicted(candidate, prior)).toBe(false);
+  expect(workers.historyOutcomeContradicted(candidate, 40, [20])).toBe(false);
+  expect(workers.coldActivityContradicted(old)).toBe(true); expect(workers.historyOutcomeContradicted(old, 40, [20])).toBe(true);
+  start(55); start(11);
+  expect(workers.historyOutcomeContradicted(candidate, 40, [20])).toBe(false);
+  expect(workers.coldActivityContradicted(candidate, prior)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  workers.executionStarted("child", nativeProof({ id: "unknown-start" }, { child: "child", phase: "started" }));
+  expect(workers.coldActivityContradicted(candidate, prior)).toBe(true);
+  expect(workers.historyOutcomeContradicted(candidate, 40, [20])).toBe(true);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0); checkBytes(workers);
+});
+
+for (const budget of [{ entries: 8 }, { bytes: 2_000 }])
+test(`earlier terminal replays retain accounted negative identities (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const first = nativeProof({ id: "first-end", created: 20 }, { phase: "ended" })!;
+  const second = nativeProof({ id: "second-end", created: 25 }, { phase: "ended" })!;
+  workers.executionEnded("child", 20, first); workers.executionEnded("child", 25, second);
+  const bytes = retained(workers).bytes;
+  for (let index = 0; index < 100; index++) { workers.executionEnded("child", 20, first); workers.executionEnded("child", 25, second); }
+  expect(retained(workers).bytes).toBe(bytes); checkBytes(workers);
+  workers.retainExecutionCounterproof();
+  expect(workers.terminalReplay("child", first)).toBe(true); expect(workers.terminalReplay("child", second)).toBe(true);
+  expect(workers.terminalReplay("other", first)).toBe(false);
+  expect(workers.terminalReplay("child", nativeProof({ id: "first-end", created: 20 }, { phase: "changed" }))).toBe(false);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  expect(workers.controlWitnesses("task")).toEqual([]); checkBytes(workers);
+  for (let index = 0; index < 130; index++) workers.executionEnded("child", 30 + index, nativeProof({ id: `end-${index}`, created: 30 + index }, { phase: "ended" }));
+  expect(workers.controlEvidenceAvailable).toBe(false); checkBytes(workers);
+});
+
+for (const mode of ["unowned", "new-occurrence", "saturated"] as const)
+test(`retained start replay grants no new occurrence authority (${mode})`, () => {
+  const workers = new BackgroundWorkers(mode === "saturated" ? { entries: 1 } : {});
+  const proof = nativeProof({ id: "start", created: 11 }, { child: "child", phase: "started" });
+  workers.executionStarted("child", proof);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  if (mode === "saturated") workers.executionEnded("other", 20, nativeProof({ id: "overflow", created: 20 }, { child: "other", phase: "ended" }));
+  expect(workers.startReplay("child", proof)).toBe(mode !== "saturated");
+  expect(workers.startReplay("child", nativeProof({ id: "start", created: 11, durable: { aggregateID: "child", seq: 1, version: 1 } }, { child: "child", phase: "started" }))).toBe(false);
+  if (mode === "new-occurrence") {
+    workers.verifyChild("child", "parent");
+    workers.launchPrepared("parent", prepareTool({ id: "later-call", name: "subagent", time: { created: 30, ran: 31, completed: 32 },
+      state: { status: "completed", input: { background: true }, metadata: { sessionID: "child", status: "running" } } }, 32, "snapshot", "later-message"), 32);
+    const occurrence = workers.occurrence("v2:parent:later-call"); workers.executionStarted("child", proof);
+    expect(workers.occurrence("v2:parent:later-call")).toBe(occurrence);
+    const different = nativeProof({ id: "later-start", created: 40 }, { child: "child", phase: "started" });
+    expect(workers.startReplay("child", different)).toBe(false);
+    workers.executionStarted("child", different); expect(workers.startReplay("child", different)).toBe(true);
+  }
+  checkBytes(workers);
+});
+
+for (const mode of ["unowned", "new-occurrence", "saturated"] as const)
+test(`retained terminal replay remains negative-only across ledger changes (${mode})`, () => {
+  const workers = new BackgroundWorkers(mode === "saturated" ? { entries: 1 } : {});
+  const proof = nativeProof({ id: "terminal", created: 20 }, { child: "child", phase: "ended" });
+  workers.executionEnded("child", 20, proof);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  expect(workers.terminalReplay("child", proof)).toBe(mode !== "saturated");
+  if (mode === "new-occurrence") {
+    workers.verifyChild("child", "parent");
+    workers.launchPrepared("parent", prepareTool({ id: "later-call", name: "subagent", time: { created: 30, ran: 31, completed: 32 },
+      state: { status: "completed", input: { background: true }, metadata: { sessionID: "child", status: "running" } } }, 32, "snapshot", "later-message"), 32);
+    workers.executionEnded("child", 20, proof);
+    expect(workers.occurrence("v2:parent:later-call")?.executionEnd).toBeUndefined();
+    const different = nativeProof({ id: "later-terminal", created: 40 }, { child: "child", phase: "ended" });
+    expect(workers.terminalReplay("child", different)).toBe(false);
+    workers.executionEnded("child", 40, different); expect(workers.terminalReplay("child", different)).toBe(true);
+  }
+  checkBytes(workers);
+});
+
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`intervening start vetoes share the ledger budget and coalesce replay (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  for (const at of [11, 35, 55]) workers.executionStarted("child", nativeProof({ id: `start-${at}`, created: at }, { child: "child", phase: "started" }));
+  for (let replay = 0; replay < 300; replay++) workers.executionStarted("child", nativeProof({ id: "start-11", created: 11 }, { child: "child", phase: "started" }));
+  expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(true);
+  const newer = { ...candidate, launches: candidate.launches.map(launch => ({ ...launch, created: 34, ran: 35, completed: 36 })) };
+  expect(workers.historyOutcomeContradicted(newer, 40)).toBe(false);
+  expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  // Distinct clock growth is charged to the existing aggregate byte budget,
+  // not a new unbounded event log or a silently lossy maximum.
+  for (let at = 56; at < 356 && workers.controlEvidenceAvailable; at++)
+    workers.executionStarted("child", nativeProof({ id: `start-${at}`, created: at }, { child: "child", phase: "started" }));
+  // Per-child overflow is an outcome-only unknown; tighter aggregate byte
+  // budgets may saturate first. Neither case silently forgets the old veto.
+  expect(workers.controlEvidenceAvailable).toBe(budget.bytes === undefined);
+  expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(true); checkBytes(workers);
+});
+
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`outcome veto clocks remain bounded and unknown ends stay sticky (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  const dated = nativeProof({ id: "end", created: 20 }, { child: "child", phase: "ended" });
+  for (let replay = 0; replay < 300; replay++) workers.executionEnded("child", 20, dated);
+  expect(workers.observedExecutionEnds("child")).toEqual([20]);
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(false);
+  expect(workers.historyOutcomeContradicted(candidate, 40)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  workers.executionEnded("child", 30, nativeProof({ id: "undated" }, { child: "child", phase: "ended" }));
+  workers.executionEnded("child", 20, dated);
+  expect(workers.observedExecutionEnds("child")).toBeUndefined();
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true); checkBytes(workers);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+  for (let index = 0; index < 50; index++) workers.executionEnded(`other-${index}`, 40 + index,
+    nativeProof({ id: `end-${index}`, created: 40 + index }, { child: `other-${index}`, phase: "ended" }));
+  expect(workers.controlEvidenceAvailable).toBe(false);
+  expect(workers.observedExecutionEnds("child")).toBeUndefined();
+  expect(workers.historyOutcomeContradicted(candidate, 20)).toBe(true); checkBytes(workers);
+});
+
+for (const budget of [{ entries: 4 }, { bytes: 1_000 }])
+test(`distinct-start counterproof survives replay in constant ledger space (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "child", reportedChild: "child", created: 10, ran: 11, completed: 12 }] };
+  const first = nativeProof({ id: "first-start", created: 11 }, { child: "child", phase: "started" });
+  const later = nativeProof({ id: "later-start", created: 35 }, { child: "child", phase: "started" });
+  workers.executionStarted("child", first); expect(workers.coldActivityContradicted(candidate)).toBe(false);
+  workers.executionStarted("child", later); expect(workers.coldActivityContradicted(candidate)).toBe(true);
+  for (let replay = 0; replay < 300; replay++) workers.executionStarted("child", first);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true); // Replays do not consume a growing history budget.
+  workers.executionStarted("child", nativeProof({ id: "undated-start" }, { child: "child", phase: "started" }));
+  workers.executionStarted("child", first);
+  expect(workers.coldActivityContradicted(candidate)).toBe(true);
+  expect(workers.controlEvidenceAvailable).toBe(true);
+  expect(workers.ownershipParent("child")).toBeUndefined(); expect(workers.evidenceSnapshot().size).toBe(0);
+});
+
+for (const budget of [{ entries: 8 }, { bytes: 200 }])
+test(`unowned native ends share the existing worker budget (${JSON.stringify(budget)})`, () => {
+  const workers = new BackgroundWorkers(budget);
+  const candidate: WorkerOccurrenceEvidence = { key: "cold", parent: "parent", worker: "cold-child", kind: "agent", taskId: "v2:parent:call",
+    launches: [{ call: "call", workerType: "agent", phase: "snapshot", child: "cold-child", reportedChild: "cold-child", created: 10, ran: 11, completed: 12 }] };
+  for (let index = 0; index < 16; index++) {
+    const child = index === 0 ? "cold-child" : `unknown-child-${index}`;
+    const proof = nativeProof({ id: `native-end-${index}`, created: 20 + index }, { child, phase: "ended" });
+    workers.executionEnded(child, 20 + index, proof);
+    expect(workers.ownershipParent(child)).toBeUndefined();
+    expect(workers.evidenceSnapshot().size).toBe(0);
+  }
+  expect(workers.controlEvidenceAvailable).toBe(false);
+  expect(workers.hasRetainedReference(candidate)).toBe(true); // Saturation blocks cold positive recovery.
+  workers.verifyChild("cold-child", "parent");
+  expect(workers.ownershipParent("cold-child")).toBeUndefined();
+  expect(workers.controlEvidenceAvailable).toBe(false);
+});
+
 test("activity contradiction projection requires native negative facts, not missing aggregate or control evidence", () => {
   const history = new BackgroundWorkers();
   history.launchPrepared("parent", prepareTool(launch("call", "shell"), 12, "snapshot", "message"), 12);

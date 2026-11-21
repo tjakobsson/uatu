@@ -786,6 +786,9 @@ export type BackgroundTaskItem = TimelineItemBase & {
   // Known history is retained, but current execution/occurrence is unverified.
   // Never use an uncertain row as authority for a worker stop.
   stateUncertain?: boolean;
+  // Native observations changed during a report-free outcome read. This is
+  // deny-only dismissal evidence, never activity or Stop authority.
+  outcomeWithheld?: boolean;
   // Structured provider notification identity; deduplicates provisional/live
   // results against the same notification recovered with its launcher.
   resultId?: string;

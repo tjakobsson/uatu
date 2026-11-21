@@ -3,17 +3,20 @@ import { parseHTML } from "linkedom";
 import { compactWorkers, workerSummary, type CompactWorker } from "./compact-work";
 import { CompactWorkersView } from "./compact-workers-view";
 
-test("only unavailable and ended rows offer individual presentation dismissal; requests remain canonical links", () => {
+test("ended, unavailable, withheld and session-active rows offer one Dismiss; requests remain canonical links", () => {
   const { document, window } = parseHTML('<html><body><div id="workers"></div></body></html>');
   const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
   Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);
   try {
     const host = document.getElementById("workers")! as unknown as HTMLElement;
-    const kinds = ["working", "needs-answer", "checking", "session-active", "unavailable", "ended"] as const;
-    const workers = compactWorkers(kinds.map((kind, index) => ({ type: "background_task" as const, id: kind, taskId: kind, description: kind, status: "running" as const, createdAt: index + 1,
-      activity: { kind, executionId: `exec:${kind}`, ...(kind === "needs-answer" ? { request: { id: "canonical", kind: "question" as const } } : {}) } })));
+    const cases = ["working", "needs-answer", "checking", "session-active", "unavailable", "ended", "withheld"] as const;
+    const workers = compactWorkers(cases.map((id, index) => ({ type: "background_task" as const, id, taskId: id, description: id, status: "running" as const, createdAt: index + 1,
+      outcomeWithheld: id === "withheld" ? true as const : undefined,
+      activity: { kind: id === "withheld" ? "unavailable" : id, executionId: `exec:${id}`, ...(id === "needs-answer" ? { request: { id: "canonical", kind: "question" as const } } : {}) } })));
     new CompactWorkersView(host).paint("parent", workers, new Set(), true);
-    expect([...host.querySelectorAll<HTMLElement>("[data-dismiss-worker]")].map(button => button.dataset.dismissWorker)).toEqual(["unavailable", "ended"]);
+    expect([...host.querySelectorAll<HTMLElement>("[data-dismiss-worker]")].map(button => button.dataset.dismissWorker)).toEqual(["session-active", "unavailable", "ended", "withheld"]);
+    // Dismiss never replaces Stop: verified activity keeps its independent Stop.
+    expect([...host.querySelectorAll<HTMLElement>("[data-stop-task]")].map(button => button.dataset.stopTask)).toEqual(["working", "needs-answer"]);
     expect(host.querySelector('[data-worker-id="needs-answer"] [data-worker-request]')?.getAttribute("data-worker-request")).toBe("canonical");
     expect(host.querySelector('[data-worker-id="needs-answer"] [data-elapsed-since]')).toBeNull();
     expect(host.querySelector('[data-worker-id="ended"] .chat-worker-clock')?.textContent).toContain("End time unknown");
@@ -44,6 +47,7 @@ test.each(["agent", "shell"] as const)("uncertain %s stays inspectable without S
     expect(row.querySelector("[data-elapsed-since]")).toBeNull();
     expect(row.querySelector(".chat-worker-inspect")!.getAttribute("aria-label")).not.toContain("working");
     expect(row.querySelectorAll("[data-stop-task]").length).toBe(0);
+    expect(row.querySelectorAll("[data-dismiss-worker]").length).toBe(1);
     const coldHost = document.createElement("div") as unknown as HTMLElement;
     new CompactWorkersView(coldHost).paint("parent", uncertain, new Set(), true);
     expect(coldHost.querySelectorAll("[data-stop-task]").length).toBe(0);
@@ -96,6 +100,8 @@ test.each(["completed", "failed", "stopped"] as const)("confirmed %s with ended 
       expect(meta.querySelectorAll(".chat-worker-clock").length).toBe(1);
       expect(meta.textContent).toBe("Shell · Reported 19:43");
       expect(meta.querySelector("[data-elapsed-since]")).toBeNull();
+      // A known final result is dismissed only through "Dismiss finished".
+      expect(host.querySelectorAll("[data-dismiss-worker]").length).toBe(0);
     }
   } finally {
     format.mockRestore();
@@ -116,6 +122,7 @@ test("verified post-exit shell removal stays available without Working counts or
     view.paint("parent", workers, new Set(), true);
     expect(workerSummary(workers)).toBe("1 unresolved");
     expect(host.querySelector<HTMLButtonElement>("[data-stop-task]")?.disabled).toBe(false);
+    expect(host.querySelectorAll("[data-dismiss-worker]").length).toBe(1);
     expect(host.querySelector("[data-elapsed-since]")).toBeNull();
     expect(host.querySelector('[data-state="working"]')).toBeNull();
     for (const control of [undefined, { available: false }]) {
@@ -278,7 +285,7 @@ test("running and finished workers share one flat list and a single compact head
   } finally { for (const [key, value] of previous) Reflect.set(globalThis, key, value); }
 });
 
-test("finished dismissal is view-only and exposes no Restore control", () => {
+test("finished rows use only the bulk Dismiss finished action and expose no Restore control", () => {
   const { document, window } = parseHTML('<html><body><details><summary>Workers</summary><div id="workers"></div></details></body></html>');
   const previous = new Map(["document", "Element"].map(key => [key, Reflect.get(globalThis, key)]));
   Reflect.set(globalThis, "document", document); Reflect.set(globalThis, "Element", window.Element);

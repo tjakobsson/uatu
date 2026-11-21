@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
-import { WorkerDismissalClient, visibleWorkers, workerExecutionIds } from "./worker-dismissal-client";
+import { WorkerDismissalClient, WorkerViewDismissals, visibleWorkers, workerCanDismissRow, workerDismissible, workerExecutionIds, workerFinishedDismissible } from "./worker-dismissal-client";
 import { compactWorkers, type CompactWorker } from "./compact-work";
-import type { BackgroundTaskItem } from "./types";
+import type { BackgroundTaskItem, ConversationItem } from "./types";
+import { parseConversationItem } from "./validation";
 import type { LiveTopicConsumer } from "../shell/live-channel";
+import { CheckingPresentation } from "./worker-dismissal-client-checking";
 
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 const body = (conversationId = "opencode:parent", dismissed = true, revision = 1) => ({ version: 1, conversationId, entries: [{ executionId: "exec:one", revision, dismissed }] });
@@ -29,6 +31,265 @@ test("visibility uses exact execution and current activity always wins", () => {
   const marks = new Set(["exec:one"]);
   expect(visibleWorkers([worker("unavailable"), worker("ended")], marks)).toHaveLength(0);
   expect(visibleWorkers([worker("working"), worker("needs-answer"), worker("unavailable", "exec:two")], marks)).toHaveLength(3);
+});
+
+for (const [scenario, status, kind, withheld, dismissible, visibleWithMark] of [
+  ["withheld Unavailable", "running", "unavailable", true, false, true],
+  ["withheld Ended", "running", "ended", true, false, true],
+  ["ordinary Unavailable", "running", "unavailable", false, true, false],
+  ["ordinary Ended", "running", "ended", false, true, false],
+  ["ordinary Completed", "completed", "ended", false, true, false],
+  ["ordinary Working", "running", "working", false, false, true],
+] as const) test(`projected dismissal: ${scenario}`, () => {
+  const executionId = `v1:${"1".repeat(64)}`;
+  const item = parseConversationItem({
+    type: "background_task", id: "task:run", taskId: "run", toolUseId: "call",
+    taskType: "agent", description: "Review", createdAt: 10, status,
+    ...(withheld ? { outcomeWithheld: true, stateUncertain: true } : {}),
+    activity: { kind, executionId },
+  });
+  const workers = compactWorkers([item]);
+  expect(workers).toHaveLength(1);
+  const row = workers[0]!;
+  expect(workerExecutionIds(row)).toEqual([executionId]);
+  expect(visibleWorkers(workers, new Set([`v1:${"2".repeat(64)}`]))).toEqual([row]);
+  expect({
+    dismissible: workerDismissible(row),
+    visibleWithMark: visibleWorkers(workers, new Set([executionId])).includes(row),
+  }).toEqual({ dismissible, visibleWithMark });
+  if (!withheld) expect(row).not.toHaveProperty("outcomeWithheld");
+});
+
+/** Dismiss from a row whose one source item is the painted one. */
+const paintedDismiss = (view: WorkerViewDismissals, source: ConversationItem, current: CompactWorker, presented: CompactWorker, save: (ids: readonly string[]) => void) => {
+  view.paint([source]);
+  return view.dismiss([source], current, presented, save);
+};
+
+const viewSource: BackgroundTaskItem = {
+  type: "background_task", id: "task:run", taskId: "run", childConversationId: "child", toolUseId: "call",
+  description: "Review", status: "running", createdAt: 10, activity: { kind: "unavailable", executionId: "exec:one" },
+};
+
+test.each([
+  { description: "agent without execution proof", task: { ...viewSource, activity: { kind: "unavailable" } } },
+  { description: "ended shell without execution proof", task: { ...viewSource, taskType: "shell", activity: { kind: "ended" } } },
+  { description: "withheld exact execution", task: { ...viewSource, outcomeWithheld: true } },
+  { description: "session active but exact task unverified", task: { ...viewSource, activity: { kind: "session-active", executionId: "exec:one" } } },
+] satisfies { description: string; task: BackgroundTaskItem }[])("$description clears only the same source without attempting a save", ({ task }) => {
+  const view = new WorkerViewDismissals();
+  const writes: (readonly string[])[] = [];
+  const items = [task];
+  const raw = compactWorkers(items)[0]!;
+  expect(paintedDismiss(view, task, raw, raw, ids => writes.push(ids))).toBe(true);
+  expect(writes).toEqual([]);
+  expect(view.filter([...items], compactWorkers(items))).toEqual([]);
+  const replaced = [{ ...task }];
+  expect(view.filter(replaced, compactWorkers(replaced))).toHaveLength(1);
+  expect(view.filter(items, compactWorkers(items))).toHaveLength(1);
+  expect(paintedDismiss(view, task, raw, raw, ids => writes.push(ids))).toBe(true);
+  view.reset();
+  expect(view.filter(items, compactWorkers(items))).toHaveLength(1);
+  expect(writes).toEqual([]);
+});
+
+test.each(["working", "needs-answer"] as const)("verified %s overrides previous saved and view-only dismissal", kind => {
+  const view = new WorkerViewDismissals();
+  const task: BackgroundTaskItem = { ...viewSource, outcomeWithheld: true };
+  const rows = compactWorkers([task]);
+  const noSave = () => { throw new Error("not save-eligible"); };
+  expect(paintedDismiss(view, task, rows[0]!, rows[0]!, noSave)).toBe(true);
+  expect(view.filter([task], rows)).toHaveLength(0);
+  const active = { ...rows[0]!, state: "working", activity: { kind, executionId: "exec:one" }, outcomeWithheld: undefined } satisfies CompactWorker;
+  const marks = new Set(["exec:one"]);
+  expect(visibleWorkers([active], marks)).toEqual([active]);
+  // Exercise activity independently of object replacement.
+  expect(view.filter([task], [active])).toEqual([active]);
+  expect(paintedDismiss(view, task, active, active, noSave)).toBe(false);
+  expect(view.filter([task], rows)).toEqual(rows);
+});
+
+test("Checking does not dismiss until expiry, and the presentation deadline cannot authorize a save", () => {
+  let now = 0;
+  const checking = new CheckingPresentation(() => {}, () => now, { setTimeout: () => 1, clearTimeout: () => {} });
+  const view = new WorkerViewDismissals();
+  const task: BackgroundTaskItem = { ...viewSource, activity: { kind: "checking", executionId: "exec:one" } };
+  const raw = compactWorkers([task]);
+  const noSave = () => { throw new Error("the timer must not grant save authority"); };
+  const before = checking.paint("parent", raw);
+  expect(paintedDismiss(view, task, raw[0]!, before[0]!, noSave)).toBe(false);
+  expect(visibleWorkers(raw, new Set(["exec:one"]))).toEqual(raw);
+  expect(view.filter([task], before)).toEqual(before);
+  now = 10_000;
+  const expired = checking.paint("parent", raw);
+  expect(expired[0]?.activity?.kind).toBe("unavailable");
+  expect(paintedDismiss(view, task, raw[0]!, expired[0]!, noSave)).toBe(true);
+  expect(view.filter([task], expired)).toEqual([]);
+  checking.dispose();
+});
+
+test("an exact eligible dismissal uses the saved path and a failed save does not clear the row", async () => {
+  const view = new WorkerViewDismissals();
+  const posts: unknown[] = [];
+  let fail = true;
+  const client = new WorkerDismissalClient({ changed: () => {}, fetcher: async (_url, init) => {
+    if (init?.method !== "POST") return Response.json(body(undefined, false, 7));
+    posts.push(JSON.parse(init.body as string));
+    return fail ? new Response(null, { status: 503 }) : Response.json(body(undefined, true, 8));
+  } });
+  const rows = compactWorkers([viewSource]);
+  let save: Promise<boolean> | undefined;
+  const dismiss = () => {
+    view.paint([viewSource]);
+    expect(client.canSave()).toBe(true);
+    return view.dismiss([viewSource], rows[0]!, rows[0]!, ids => { save = client.dismiss(ids[0], ids); }, client.canSave());
+  };
+  const visible = () => view.filter([viewSource], visibleWorkers(rows, client.dismissed));
+  try {
+    client.select("opencode:parent");
+    await flush();
+    expect(dismiss()).toBe(false);
+    expect(visible()).toEqual(rows);
+    expect(await save).toBe(false);
+    expect(client.error).toContain("Could not save");
+    expect(visible()).toEqual(rows);
+    fail = false;
+    expect(dismiss()).toBe(false);
+    expect(await save).toBe(true);
+    expect(visible()).toEqual([]);
+    expect(posts).toEqual(Array(2).fill({ version: 1, conversationId: "opencode:parent", executionId: "exec:one", expectedRevision: 7, operation: "dismiss" }));
+  } finally { client.dispose(); }
+});
+
+test.each([
+  { fence: "identity unavailable", notice: "complete execution identity",
+    workers: [{ ...viewSource, id: "task:other", taskId: "other", activity: { kind: "working" } }] },
+  { fence: "capacity exceeded", notice: "tracking is full",
+    workers: Array.from({ length: 8193 }, (_, i): BackgroundTaskItem => ({ ...viewSource, id: `task:${i}`, taskId: `${i}`, activity: { kind: "working", executionId: `exec:active:${i}` } })) },
+] satisfies { fence: string; notice: string; workers: BackgroundTaskItem[] }[])("a Hub preflight refusal ($fence) falls back to a view-only clear without a save attempt", async ({ notice, workers }) => {
+  const view = new WorkerViewDismissals();
+  let posts = 0;
+  const client = new WorkerDismissalClient({ changed: () => {}, fetcher: async (_url, init) => {
+    if (init?.method === "POST") posts++;
+    return Response.json(body(undefined, false, 7));
+  } });
+  const rows = compactWorkers([viewSource]);
+  try {
+    client.select("opencode:parent");
+    await flush();
+    client.observe(compactWorkers(workers));
+    expect(client.error).toContain(notice);
+    expect(client.canSave()).toBe(false);
+    view.paint([viewSource]);
+    // A stale painted source still does nothing.
+    expect(view.dismiss([{ ...viewSource }], rows[0]!, rows[0]!, () => { throw new Error("must not save"); }, client.canSave())).toBe(false);
+    expect(view.dismiss([viewSource], rows[0]!, rows[0]!, () => { throw new Error("preflight refusal must not save"); }, client.canSave())).toBe(true);
+    await flush();
+    expect(posts).toBe(0);
+    expect(view.filter([viewSource], visibleWorkers(rows, client.dismissed))).toEqual([]);
+    expect(client.error).toContain(notice);
+  } finally { client.dispose(); }
+});
+
+test.each(["agent", "shell"] as const)("an unresolved legacy %s without activity clears the view only, even with launcher ids", taskType => {
+  const view = new WorkerViewDismissals();
+  const task: BackgroundTaskItem = { type: "background_task", id: "task:legacy", taskId: "legacy", toolUseId: "call", taskType,
+    description: "Legacy", status: "running", stateUncertain: true, createdAt: 10 };
+  const rows = compactWorkers([task]);
+  expect(rows[0]!.state).toBe("unknown");
+  const noSave = () => { throw new Error("uncertain identity must not save"); };
+  expect(paintedDismiss(view, task, rows[0]!, rows[0]!, noSave)).toBe(true);
+  expect(view.filter([task], rows)).toEqual([]);
+});
+
+test.each(["agent", "shell"] as const)("an ended-without-result %s with exact ids saves its painted run", taskType => {
+  const view = new WorkerViewDismissals();
+  const task: BackgroundTaskItem = { ...viewSource, taskType, activity: { kind: "ended", executionId: "exec:one" } };
+  const rows = compactWorkers([task]);
+  expect(rows[0]!.state).toBe("unknown");
+  const writes: (readonly string[])[] = [];
+  expect(paintedDismiss(view, task, rows[0]!, rows[0]!, ids => writes.push(ids))).toBe(false);
+  expect(writes).toEqual([["exec:one"]]);
+  expect(view.filter([task], rows)).toEqual(rows);
+});
+
+test.each(["completed", "failed", "stopped"] as const)("a %s row has no row Dismiss; Dismiss finished owns it, legacy ids included", status => {
+  const task: BackgroundTaskItem = { type: "background_task", id: "task:local", taskId: "local", description: "Local", status, createdAt: 10 };
+  for (const row of [compactWorkers([task])[0]!, { ...compactWorkers([task])[0]!, dismissalIds: [] }]) {
+    expect(workerCanDismissRow(row)).toBe(false);
+    expect(paintedDismiss(new WorkerViewDismissals(), task, row, row, () => { throw new Error("row action must not save"); })).toBe(false);
+    // The bulk action's single rule still includes the row; locally it then
+    // saves `executionId ?? worker.id`, so a row without execution ids keeps
+    // its legacy worker-id mark.
+    expect(workerFinishedDismissible(row)).toBe(true);
+  }
+});
+
+// A terminal report without an `activity` key merges over the running row and
+// keeps its stale activity; the presented state ignores it, and so must
+// dismissal, as the source predicate does for non-running rows.
+for (const status of ["completed", "failed", "stopped"] as const) for (const kind of ["session-active", "checking"] as const) {
+  test(`a ${status} row with stale ${kind} activity stays dismissible through Dismiss finished and saved marks`, () => {
+    const task: BackgroundTaskItem = { ...viewSource, status, activity: { kind, executionId: "exec:one" } };
+    const row = compactWorkers([task])[0]!;
+    expect(row.state).toBe(status);
+    expect(workerFinishedDismissible(row)).toBe(true);
+    expect(visibleWorkers([row], new Set(["exec:one"]))).toEqual([]);
+    expect(workerCanDismissRow(row)).toBe(false);
+    expect(paintedDismiss(new WorkerViewDismissals(), task, row, row, () => { throw new Error("row action must not save"); })).toBe(false);
+    const withheld = compactWorkers([{ ...task, outcomeWithheld: true }])[0]!;
+    expect(workerDismissible(withheld)).toBe(false);
+    expect(workerFinishedDismissible(withheld)).toBe(false);
+    expect(visibleWorkers([withheld], new Set(["exec:one"]))).toEqual([withheld]);
+    // A running row with the same activity keeps refusing.
+    const running = compactWorkers([{ ...task, status: "running" }])[0]!;
+    expect(workerDismissible(running)).toBe(false);
+    expect(visibleWorkers([running], new Set(["exec:one"]))).toEqual([running]);
+  });
+}
+
+test.each([
+  { description: "session active", task: { ...viewSource, activity: { kind: "session-active" } } },
+  { description: "status unavailable", task: { ...viewSource, activity: { kind: "unavailable" } } },
+  { description: "ended with result unavailable", task: { ...viewSource, taskType: "shell", activity: { kind: "ended" } } },
+  { description: "legacy unknown without activity", task: { ...viewSource, activity: undefined, stateUncertain: true } },
+] satisfies { description: string; task: BackgroundTaskItem }[])("an unresolved row ($description) without verified identity clears the view only", ({ task }) => {
+  const view = new WorkerViewDismissals();
+  const row: CompactWorker = { ...compactWorkers([task])[0]!, dismissalIds: [] };
+  expect(row.state).toBe("unknown");
+  expect(workerCanDismissRow(row)).toBe(true);
+  expect(paintedDismiss(view, task, row, row, () => { throw new Error("must not save"); })).toBe(true);
+  expect(view.filter([task], [row])).toEqual([]);
+});
+
+test.each([
+  { description: "unresolved without proof", activity: { kind: "unavailable" } },
+  { description: "save-eligible exact run", activity: { kind: "ended", executionId: "exec:one" } },
+] as const)("a stale, missing or duplicated painted source neither saves nor clears ($description)", ({ activity }) => {
+  const view = new WorkerViewDismissals();
+  const painted: BackgroundTaskItem = { ...viewSource, activity: { kind: "unavailable" } };
+  // The projection replaced the row key with a different run after paint.
+  const replaced: BackgroundTaskItem = { ...viewSource, activity };
+  const rows = compactWorkers([replaced]);
+  const never = () => { throw new Error("a run the user never saw must not be saved"); };
+  view.paint([painted]);
+  expect(view.dismiss([replaced], rows[0]!, rows[0]!, never)).toBe(false);
+  expect(view.dismiss([], rows[0]!, rows[0]!, never)).toBe(false);
+  view.paint([replaced, replaced]);
+  expect(view.dismiss([replaced, replaced], rows[0]!, rows[0]!, never)).toBe(false);
+  view.paint([replaced]); view.reset();
+  expect(view.dismiss([replaced], rows[0]!, rows[0]!, never)).toBe(false);
+  expect(view.filter([replaced], rows)).toEqual(rows);
+});
+
+test("a view-only clear ends when its row disappears and does not hide a later row with the same key", () => {
+  const view = new WorkerViewDismissals();
+  const task: BackgroundTaskItem = { ...viewSource, activity: { kind: "ended" } };
+  const rows = compactWorkers([task]);
+  expect(paintedDismiss(view, task, rows[0]!, rows[0]!, () => { throw new Error("not save-eligible"); })).toBe(true);
+  expect(view.filter([], [])).toEqual([]);
+  // The same item object returning after disappearance is a new presentation.
+  expect(view.filter([task], rows)).toEqual(rows);
 });
 
 test("legacy bare marks cannot re-hide strong V2 after reconnect and reordered positive aliases", async () => {

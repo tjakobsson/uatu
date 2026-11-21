@@ -57,6 +57,10 @@ channels:
           a provider report clock rather than execution end. Live admission
           and stored delivery clocks can differ after recovery. It conveys
           no additional worker-state or accounting authority.
+          Background items may also carry `outcomeWithheld`. True denies dismissal
+          after an inferred outcome was withheld; clients must preserve the marker
+          when replacing a row and must not treat Unavailable or Ended activity as
+          overriding it. It grants no outcome or Stop authority.
       activity:
         domain: hub
         dataSchema: WorkspaceActivity

@@ -68,6 +68,7 @@ export type CompactWorker = {
   taskId?: string;
   stoppable?: boolean;
   activity?: WorkerActivity;
+  outcomeWithheld?: true;
   dismissalIds?: string[];
   controlAvailable?: boolean;
   controlReason?: string;
@@ -108,6 +109,7 @@ export function compactWorkers(items: readonly ConversationItem[]): CompactWorke
     workers.set(item.id, {
       id: item.id, state: workerState(item.status, item.stateUncertain, item.activity), references: [],
       activity: item.activity, controlAvailable: workerCanStop(item), controlReason: item.control?.reason,
+      ...(item.outcomeWithheld === true ? { outcomeWithheld: item.outcomeWithheld } : {}),
       dismissalIds: workerDismissalIdentities(item),
       clockRunning: workerExecutionClockRuns(item),
       name: item.description, kind: shellTask(item.taskType) ? "shell" : "agent", agent: item.subagentType,

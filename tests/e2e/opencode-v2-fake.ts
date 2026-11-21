@@ -21,7 +21,7 @@
 //     cancelled (and announced); a delivered or missing one is a silent no-op.
 
 import path from "node:path";
-import type { FormCreated, PermissionAsked, ShellDeleted, ShellExited, ShellInfo } from "@opencode/client";
+import type { FormCreated, PermissionAsked, SessionMessageIdle, ShellDeleted, ShellExited, ShellInfo } from "@opencode/client";
 
 export type NativeWorkerRequestReply = { kind: "permission" | "question"; childId: string; requestId: string; body: Record<string, unknown> };
 
@@ -79,6 +79,8 @@ export type OpenCodeV2Fake = {
   launchShell(sessionId: string, background: boolean): { shellId: string; taskId: string };
   shellPhase(shellId: string, phase: "exit" | "capture" | "captureBeforeRemove"): void;
   settleWorker(childId: string, state: "completed" | "error" | "cancelled", text: string): void;
+  /** Persist an explicit native outcome without creating a parent notification. */
+  settleWorkerWithoutReport(childId: string, outcome: SessionMessageIdle["outcome"], text: string): void;
   workerReport(childId: string, model: string, effort: string | undefined, cost: number | undefined): void;
   disconnect(): void;
   pauseEvents(paused: boolean): void;
@@ -330,12 +332,19 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     return { requestId, childId, messageId, toolId, kind };
   }
 
-  function settleWorker(childId: string, state: "completed" | "error" | "cancelled", text: string) {
+  function settleWorker(childId: string, state: "completed" | "error" | "cancelled", text: string, outcome?: SessionMessageIdle["outcome"]) {
     const worker = workers.get(childId);
     if (!worker || worker.settled) return;
     worker.settled = true;
     finish(worker.child, text);
     const created = now();
+    if (outcome) {
+      const idle: SessionMessageIdle = { id: mint("msg"), type: "idle", time: { created }, outcome };
+      worker.child.messages.push(idle);
+      return;
+    }
+    // Preserve the legacy fixture: a bare idle is only a boundary, never an
+    // explicit outcome. The default control still creates its parent report.
     worker.child.messages.push({ id: mint("msg"), type: "idle", time: { created } });
     const entry: InboxEntry = { id: mint("msg"), sessionID: worker.parent.info.id, type: "synthetic", delivery: "steer", time: { created }, payload: { description: "Inspect safe fixture", text: `<subagent sessionID="${childId}" state="${state}">\n${text}\n</subagent>`, metadata: { source: "subagent", childID: childId, state, agent: "explore" } } };
     worker.parent.inbox.push(entry);
@@ -713,6 +722,9 @@ export function startOpenCodeV2Fake(options: { directory: string; password?: str
     launchShell,
     shellPhase,
     settleWorker,
+    settleWorkerWithoutReport(childId, outcome, text) {
+      settleWorker(childId, outcome === "succeeded" ? "completed" : outcome === "failed" ? "error" : "cancelled", text, outcome);
+    },
     workerReport,
     disconnect: closeStreams,
     pauseEvents(paused) { eventsPaused = paused; if (paused) closeStreams(); },
