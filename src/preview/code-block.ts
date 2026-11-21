@@ -78,21 +78,26 @@ export function applySourceWrap(container: HTMLElement, wrap: boolean): void {
   });
 }
 
+export type CodeCopyOptions = {
+  /** Strip the single parser-synthesized trailing line break from Markdown code blocks. */
+  markdown?: boolean;
+};
+
 // Markdown fenced and indented code blocks end with a parser-synthesized
-// trailing line break inside `<code>`. Strip that single terminator so
-// copying a command does not execute it on paste, while preserving internal
-// line breaks, intentional blank trailing lines, verbatim whole-file source
-// views (`pre.uatu-source-pre`), and AsciiDoc blocks (`.listingblock` /
-// `.literalblock`, where Asciidoctor does not synthesize a trailing newline).
-export function codeBlockCopyText(pre: HTMLPreElement, code: Element): string {
+// trailing line break inside `<code>`. Strip that single terminator when
+// copying Markdown output so a copied command does not execute on paste,
+// while preserving internal line breaks, intentional blank trailing lines,
+// verbatim whole-file source views (`pre.uatu-source-pre`), and AsciiDoc
+// documents (including the large-file fallback).
+export function codeBlockCopyText(pre: HTMLPreElement, code: Element, options: CodeCopyOptions = {}): string {
   const raw = code.textContent ?? "";
-  if (pre.classList.contains("uatu-source-pre") || pre.closest(".listingblock, .literalblock")) {
+  if (options.markdown === false || pre.classList.contains("uatu-source-pre") || pre.closest(".listingblock, .literalblock")) {
     return raw;
   }
   return raw.replace(/\r?\n$/, "");
 }
 
-export function attachCopyButtons(container: HTMLElement) {
+export function attachCopyButtons(container: HTMLElement, options: CodeCopyOptions = {}) {
   const blocks = container.querySelectorAll<HTMLPreElement>("pre");
   blocks.forEach(pre => {
     const code = pre.querySelector<HTMLElement>("code");
@@ -112,7 +117,7 @@ export function attachCopyButtons(container: HTMLElement) {
 
     button.addEventListener("click", async event => {
       event.preventDefault();
-      const text = codeBlockCopyText(pre, code);
+      const text = codeBlockCopyText(pre, code, options);
       if (await writeClipboardText(text)) {
         flashCopyButton(button, "Copied!", "is-copied");
       } else {

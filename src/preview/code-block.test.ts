@@ -114,4 +114,15 @@ describe("attachCopyButtons", () => {
       expect(await Promise.all([firstWrite, secondWrite])).toEqual(["bun test", "const a = 1;\nconst b = 2;"]);
     });
   });
+
+  test("preserves the real trailing newline for non-Markdown rendered fallbacks such as oversized AsciiDoc", async () => {
+    const html = '<pre><code class="hljs">= Title\n\nBody\n</code></pre>';
+    await withDom(html, async (container, window, nextWrite) => {
+      attachCopyButtons(container, { markdown: false });
+      const button = container.querySelector<HTMLButtonElement>("pre > .code-copy")!;
+      const write = nextWrite();
+      button.dispatchEvent(new window.Event("click", { bubbles: true, cancelable: true }));
+      expect(await write).toBe("= Title\n\nBody\n");
+    });
+  });
 });

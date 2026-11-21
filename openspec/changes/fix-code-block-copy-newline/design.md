@@ -23,14 +23,8 @@ In contrast:
 1. **Share `codeBlockCopyText(pre, code)` from `src/preview/code-block.ts`.**
    `src/chat/visual-ui.ts` already imports `attachCopyButtons` from `../preview/code-block`, and `code-block.ts` only depends on `../shared/clipboard` and `./highlight-lines` (no circular imports). Sharing the helper guarantees consistent behavior across Preview, Chat messages, side-reader (`/btw`), request plans, and subagent results.
 
-2. **Use DOM-based exclusion for verbatim surfaces and strip one `\r?\n$`.**
-   ```ts
-   if (pre.classList.contains("uatu-source-pre") || pre.closest(".listingblock, .literalblock")) {
-     return raw;
-   }
-   return raw.replace(/\r?\n$/, "");
-   ```
-   Stripping only one trailing line break removes the exact terminator `micromark` adds without erasing intentional extra blank lines inside a fenced block.
+2. **Positively identify Markdown output in Preview and keep DOM exclusions as defense in depth.**
+   `src/preview/mount.ts` passes `{ markdown: payload.kind === "markdown" && payload.view === "rendered" }` (and `{ markdown: false }` on split source panes / `{ markdown: renderedPayload.kind === "markdown" }` on split rendered panes) to `attachCopyButtons()`, so non-Markdown documents — including the oversized AsciiDoc plain-`<pre>` fallback — are always copied verbatim. `codeBlockCopyText()` also checks `pre.classList.contains("uatu-source-pre") || pre.closest(".listingblock, .literalblock")` and strips only one `\r?\n$` for Markdown blocks, removing the exact terminator `micromark` adds without erasing intentional extra blank lines inside a fenced block.
 
 ## Risks / Trade-offs
 
