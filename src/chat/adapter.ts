@@ -1020,7 +1020,8 @@ export class ChatAdapter {
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
-    const previousListed = new Set(this.listedSessions.keys());
+    const previousListed = new Map<string, number>();
+    for (const id of this.listedSessions.keys()) previousListed.set(id, this.statusSequences.get(id) ?? 0);
     const sessions = await this.provider.listSessions();
     const accepted: ConversationSummary[] = [];
     const inWorkspaceIds = new Set<string>();
@@ -1061,14 +1062,19 @@ export class ChatAdapter {
       boundedSet(this.listedSessions, session.id, true, INVENTORY_SESSION_LIMIT);
       accepted.push(this.summary(session));
     }
-    for (const id of previousListed) {
+    let droppedListed = false;
+    for (const [id, baseline] of previousListed) {
       if (listedTopLevel.has(id)) continue;
-      this.listedSessions.delete(id);
+      if ((this.statusSequences.get(id) ?? 0) !== baseline) continue;
+      const wasListed = this.listedSessions.delete(id);
       const cached = this.inventorySessions.get(id);
+      const wasVisible = inventoryVisible(cached);
       if (cached?.inWorkspace && cached.parentId === null) {
         boundedSet(this.inventorySessions, id, { ...cached, inWorkspace: false }, INVENTORY_SESSION_LIMIT);
       }
+      if (wasListed || wasVisible) droppedListed = true;
     }
+    if (droppedListed) this.inventory.invalidate();
     await this.reconcileTrackedActivity(inWorkspaceIds);
     return accepted.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
   }
@@ -7208,9 +7214,11 @@ export class ChatAdapter {
       return existing;
     }
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes, this.replayClock), (status, sourceTransition) => {
-      // Adapter-synthesized `background` status must not supersede an in-flight
-      // active-session probe for a live turn on the same conversation.
-      if (status !== "background") this.bumpStatusSequence(id);
+      // Only authoritative turn transitions advance the live-status fence;
+      // adapter-synthesized `background` and synthetic worker-completion
+      // transitions (`sourceTransition === false`) must not suppress an
+      // in-flight active-session probe for a live parent turn.
+      if (sourceTransition && status !== "background") this.bumpStatusSequence(id);
       // `background` is not a live turn: the process is up for the tasks,
       // but the conversation accepts a prompt. Retrying and compacting are.
       const stop = this.stoppingTurns.get(id);

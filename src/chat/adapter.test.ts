@@ -13400,8 +13400,32 @@ describe("workspace activity summary", () => {
     const local = fixtureSession("a");
     provider.sessions = [local];
     let changes = 0;
-    // Use a generous coalescer window so non-urgent pre-move updates stay buffered under parallel CI load.
-    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 200, onActivityChange: () => { changes += 1; } });
+    const eventWaiters = new Map<string, Array<() => void>>();
+    const waitForEvent = (eventType: string) => new Promise<void>(resolve => {
+      const list = eventWaiters.get(eventType) ?? [];
+      list.push(resolve);
+      eventWaiters.set(eventType, list);
+    });
+    const activeTimers = new Map<ReturnType<typeof setTimeout>, { name: string; work: () => void }>();
+    let nextTimer = 1;
+    const taskScheduler: import("./task-scheduler").ChatTaskScheduler = {
+      run: async (name, work) => {
+        try { return await work(); }
+        finally {
+          if (name.startsWith("stream.event:")) {
+            const eventType = name.slice("stream.event:".length);
+            eventWaiters.get(eventType)?.shift()?.();
+          }
+        }
+      },
+      setTimeout: (name, work) => {
+        const handle = nextTimer++ as unknown as ReturnType<typeof setTimeout>;
+        activeTimers.set(handle, { name, work });
+        return handle;
+      },
+      clearTimeout: timer => { if (timer != null) activeTimers.delete(timer); },
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 200, taskScheduler, onActivityChange: () => { changes += 1; } });
     expect((await adapter.listConversations()).map(c => c.id)).toEqual(["a"]);
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
@@ -13415,9 +13439,10 @@ describe("workspace activity summary", () => {
     expect(adapter.activity()).toEqual({ working: true, awaiting: true, unresolved: true });
     const lookupsBeforeForeign = lookups;
 
-    // An unrelated foreign move causes neither a lookup nor an inventory invalidation.
+    // An unrelated foreign move completes without any lookup or inventory invalidation.
     let unrelatedInvalidated = false;
     const nextSignal = inventory.next().then(result => { unrelatedInvalidated = true; return result; });
+    const foreignDone = waitForEvent("session.moved");
     provider.eventQueue.push({ normalized: {
       conversationId: "foreign_ses",
       updates: [],
@@ -13425,25 +13450,27 @@ describe("workspace activity summary", () => {
       eventType: "session.moved",
       sessionLifecycle: { kind: "moved", id: "foreign_ses", directory: `${process.cwd()}-elsewhere`, title: "", sparse: true },
     } });
-    await Bun.sleep(20);
+    await foreignDone;
     expect(unrelatedInvalidated).toBe(false);
     expect(lookups).toBe(lookupsBeforeForeign);
 
     // Push a non-urgent update while `local` is still in `provider.sessions` so requireSession accepts it
-    // and buffers it inside the 200ms coalescer window (not yet flushed to projection).
-    const lookupsBeforeBuffered = lookups;
+    // and schedules a coalescer timer (buffered, not yet flushed to projection).
+    const bufferedDone = waitForEvent("session.text.delta");
     provider.eventQueue.push({ normalized: {
       conversationId: "a",
       updates: [{ kind: "upsert", item: { id: "task:buffered", type: "background_task", taskId: "buffered", description: "Buffered worker", status: "running", createdAt: 2 } }],
       outcome: "handled",
       eventType: "session.text.delta",
     } });
-    await waitUntil(() => lookups > lookupsBeforeBuffered);
+    await bufferedDone;
     expect(adapter.projectionForTests("a").has("task:buffered")).toBe(false);
+    expect([...activeTimers.values()].some(timer => timer.name === "coalescer.window")).toBe(true);
 
-    // Move `a` out before the coalescer window elapses, carrying an attached revocation update (as V2 provider emits).
+    // Move `a` out before the coalescer window fires, carrying an attached revocation update (as V2 provider emits).
     const beforeMoveChanges = changes;
     const lookupsBeforeMove = lookups;
+    const moveDone = waitForEvent("session.moved");
     provider.eventQueue.push({ normalized: {
       conversationId: "a",
       updates: [{ kind: "upsert", item: { id: "task:bg1", type: "background_task", taskId: "bg1", description: "BG worker", status: "running", createdAt: 1, stateUncertain: true } }],
@@ -13452,12 +13479,15 @@ describe("workspace activity summary", () => {
       sessionLifecycle: { kind: "moved", id: "a", directory: `${process.cwd()}-moved`, title: "", sparse: true },
     } });
 
-    await waitUntil(() => !adapter.activity().working);
+    await moveDone;
     expect((await nextSignal).done).toBe(false);
     // Moved-out session.moved must short-circuit without calling requireSession() again.
     expect(lookups).toBe(lookupsBeforeMove);
-    // Wait past the coalescer window to confirm buffered pre-move updates were discarded and did not flush or resurrect activity.
-    await Bun.sleep(240);
+    // Fire any remaining coalescer timers; buffered pre-move updates were discarded so nothing flushes.
+    for (const [handle, timer] of [...activeTimers]) {
+      activeTimers.delete(handle);
+      timer.work();
+    }
     expect(adapter.projectionForTests("a").has("task:buffered")).toBe(false);
     expect(adapter.activity()).toEqual({ working: false, awaiting: false, unresolved: false });
     expect(adapter.projectionForTests("a").status).toBe("idle");
@@ -13713,6 +13743,54 @@ describe("workspace activity summary", () => {
     await Bun.sleep(20);
     expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
     expect(adapter.projectionForTests("arrived").status).toBe("running");
+
+    inventory.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("listConversations invalidates when dropping disappeared sessions, fences against newer move-ins, and synthetic worker completion does not block active-session probes", async () => {
+    const { adapter, provider } = activityAdapter();
+    const session = fixtureSession("ses-list");
+    provider.sessions = [session];
+    await adapter.listConversations();
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+
+    // 1. Refresh dropping a previously listed session notifies inventory subscribers.
+    provider.sessions = [];
+    await adapter.listConversations();
+    await expectInventorySignal(inventory);
+
+    // 2. Re-list, then start a stale listConversations() that omits the session while move-in arrives concurrently.
+    provider.sessions = [session];
+    await adapter.listConversations();
+    let resolveList!: (sessions: ProviderSession[]) => void;
+    provider.listSessions = () => new Promise<ProviderSession[]>(resolve => { resolveList = resolve; });
+    let resolveProbe!: (ids: string[]) => void;
+    provider.listActiveSessions = () => new Promise<string[]>(resolve => { resolveProbe = resolve; });
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    const staleList = adapter.listConversations();
+    await waitUntil(() => resolveList !== undefined);
+    provider.eventQueue.push({ normalized: {
+      conversationId: "ses-list",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "ses-list", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await waitUntil(() => resolveProbe !== undefined);
+
+    // Stale list returns empty, and synthetic background worker completion fires (`sourceTransition = false`),
+    // yet neither overwrites move-in metadata or blocks the positive active-session probe.
+    resolveList([]);
+    await staleList;
+    adapter.projectionForTests("ses-list").statusUpdate("completed", undefined, false);
+    resolveProbe(["ses-list"]);
+    await waitUntil(() => adapter.activity().working);
+    expect(adapter.projectionForTests("ses-list").status).toBe("running");
 
     inventory.cancel();
     await adapter.dispose();
