@@ -60,6 +60,7 @@ import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQue
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
 import { loginActionElement, loginActionFor, type LoginAction } from "./login-action";
 import { copyChatText } from "./copy-actions";
+import { codeBlockCopyText } from "../preview/code-block";
 import { announceConversationInventory, renderConversationInventoryAwareness, renderSelectedConversationDeleted } from "./inventory-presentation";
 import { ConversationInventoryTracker, SerializedInventoryReconciler, conversationActivitySuffix, conversationDayGroup, dedupeConversationInventory, isConversationChooserActivationKey, patchConversationOptions, retainedPresentationConversationIds } from "./inventory-reconciler";
 import { dateTime, nextLocalMidnight } from "./dates";
@@ -3967,9 +3968,10 @@ export function initChat(api = new ChatApiClient()): void {
       const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-permission-choice], [data-permission-confirm], [data-permission-cancel], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
       if (!target) return;
       if (target instanceof HTMLButtonElement && target.dataset.chatCopy) {
-        const text = target.closest("pre")?.querySelector(":scope > code")?.textContent;
-        if (text === undefined || text === null) return;
-        void copyChatText(target, text, message => { copyStatus.textContent = message; });
+        const pre = target.closest("pre");
+        const code = pre?.querySelector(":scope > code");
+        if (!pre || !code) return;
+        void copyChatText(target, codeBlockCopyText(pre, code), message => { copyStatus.textContent = message; });
         return;
       }
       const source = sourceProjection();

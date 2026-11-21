@@ -198,6 +198,15 @@ The preview pane SHALL render a copy-to-clipboard control on every `<pre><code>`
 - **THEN** the code block's textual contents are written to the system clipboard
 - **AND** the control briefly shows a confirmation label before reverting
 
+#### Scenario: Copying a Markdown code block omits the parser-synthesized trailing newline
+- **WHEN** a user activates the copy control on a rendered Markdown code block
+- **THEN** the single parser-synthesized trailing line break is omitted so single-line commands do not auto-execute when pasted into a terminal
+- **AND** internal line breaks and intentional extra trailing blank lines are preserved
+
+#### Scenario: Whole-file source views and AsciiDoc blocks copy verbatim
+- **WHEN** a user activates the copy control on a whole-file source view (`pre.uatu-source-pre`) or an AsciiDoc listing or literal block
+- **THEN** the clipboard receives the block's verbatim textual contents without stripping a trailing newline
+
 #### Scenario: Mermaid diagrams do not show a copy control
 - **WHEN** a Mermaid fenced block is rendered as a diagram
 - **THEN** no copy control is added to the diagram

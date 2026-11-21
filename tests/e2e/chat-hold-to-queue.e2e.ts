@@ -253,7 +253,7 @@ for (const touch of [false, true]) test(`side-reader SVG stays visible ordinary 
     }), { message: "the code-copy target stays in its source block below the sticky header and receives native input" }).toBe(true);
     await copy.click();
     await expect(answer.locator("pre > .code-copy")).toHaveText("Copied!");
-    expect(await readClipboardMock(page)).toBe(svg);
+    expect(await readClipboardMock(page)).toBe(svg.trimEnd());
     expect(imageRequests).toEqual([]);
     await page.locator("#chat-aside-close").click();
     await expect(reader).toBeHidden();
