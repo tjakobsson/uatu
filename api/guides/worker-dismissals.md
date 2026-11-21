@@ -28,6 +28,10 @@ write; affected marks are still retired after that write publishes. Persistence
 failure does not confirm success. Refetch and let the user review the current
 state before retrying; do not automatically retry conditional mutations.
 
+GET also reconciles fresh authoritative evidence. Hub admission, lifecycle and
+store coordination serialize reconciliation and persistence; they do not lock
+native OpenCode state across the child read and the Hub's disk write.
+
 The response is the existing version-1 dismissal state. Private live notices
 remain account-scoped invalidations, not dismissal payloads. Clients may make
 one coalesced follow-up read for queued invalidations so another device's later
@@ -65,8 +69,20 @@ projection rows, empty/failed recovery or weak launcher/result matching. The
 compact read checks source strength again before publication. Mixed evidence
 that would grant dismissal fails unavailable; a fresh current source read must
 establish a settled/weaker state. Positive recovery can still enrich or
-strengthen earlier observations. Ordinary chat-history/event-pump behavior is
-unchanged.
+strengthen earlier observations. These strength checks grant no new Stop authority.
+
+For OpenCode report-free historical outcomes, differing native observations
+during recovery withhold only the inferred outcome, not the entire parent read.
+The public worker row carries optional `outcomeWithheld: true`, is Unresolved
+and cannot authorize dismissal—even when its activity is Unavailable or Ended.
+Sparse updates cannot erase that barrier; fresh authoritative terminal evidence
+can replace or clear it. Explicit parent reports, activity and Stop retain their
+separate evidence requirements. See [the read architecture](../../docs/worker-dismissal-read-architecture.md).
+
+This optional public row field requires workspace API revision 38. Strict
+clients migrating from revision 37 must accept the boolean field and preserve
+its dismissal semantics. Hub API revision 15, bundled Web revision 4 and the
+version-1 personal-dismissal envelope are unchanged.
 
 Native providers can supply complete source coverage in one read regardless of
 display-history pagination. Providers without that coverage retain a bounded

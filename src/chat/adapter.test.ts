@@ -44,6 +44,11 @@ import { MultiAgentChatService } from "./agents";
 import { VisualReadError, VisualStore } from "./visual-store";
 import type { WorkspaceChatService } from "./service";
 import type { AssistantMessageItem } from "./types";
+import type { ChatTaskScheduler } from "./task-scheduler";
+import { compactWorkerEvidence, workerDismissalEvidence } from "./worker-dismissal-evidence";
+import { WORKER_DISMISSAL_ALIAS_LIMIT } from "./worker-dismissal-identity";
+import { compactWorkers } from "./compact-work";
+import { visibleWorkers, workerDismissible } from "./worker-dismissal-client";
 
 test("weak native text-start evidence preserves only the established timestamp, not stale message/model/usage fields", () => {
   const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
@@ -1247,6 +1252,603 @@ test("compact worker evidence reads a complete large source once without display
   } finally { reads.mockRestore(); await adapter.dispose(); }
 });
 
+test.each(["history", "recovery", "page-only", "ordinary", "different-execution",
+  "live-gap", "history-gap", "recovery-gap", "page-only-gap", "different-execution-gap", "different-child-gap",
+  "first-id-live", "first-id-covered", "first-id-missing-ref", "first-id-different-ref", "first-id-new-generation",
+  "first-id-missing-generation", "first-id-different-child", "first-id-unproven-ref", "first-id-then-disjoint",
+  "first-id-native-history", "first-id-native-ref-only", "first-id-native-ref-conflict", "first-id-native-prior-conflict",
+  "first-id-native-recovery", "first-id-native-recovery-disjoint", "first-id-native-fresh-denial",
+  "first-id-native-idless-same", "first-id-native-idless-other-ref", "first-id-native-idless-other-generation",
+  "known-id-native-idless-other-ref", "first-id-native-recovery-off-page",
+  "first-id-native-recovery-off-page-disjoint", "first-id-native-recovery-off-page-uncovered",
+  "first-id-native-equivalent-denial", "first-id-native-conflicting-own-denial"] as const)(
+  "covered dismissal evidence agrees with publication after a sparse worker restatement (%s)",
+  async mode => {
+    const parent = "parent", child = "child", call = "fixture";
+    const taskId = `v2:${parent}:${call}`;
+    const nativeRef = mode.includes("-native-");
+    const recoveryReplacement = mode.startsWith("first-id-native-recovery");
+    const offPage = mode.includes("-off-page");
+    const equivalentDenial = mode === "first-id-native-equivalent-denial";
+    const freshDenial = mode === "first-id-native-fresh-denial";
+    const identity = { executionId: "fixture-execution", executionAliases: ["fixture-execution"],
+      generation: mode === "first-id-native-ref-conflict" ? 2 : 1,
+      launchRef: nativeRef ? `v1:launch:1:${"a".repeat(64)}` : "fixture-launch" };
+    const firstId = mode.startsWith("first-id-");
+    const unavailable: BackgroundTaskItem = {
+      id: `task:${taskId}`, taskId, toolUseId: call, childConversationId: child, taskType: "agent",
+      type: "background_task", description: "Fixture", createdAt: 1, status: "running", stateUncertain: true,
+      activity: { ...identity, kind: "unavailable", observedAt: 2 },
+      control: { available: false, reason: "No current activity proof" },
+    };
+    let row: BackgroundTaskItem = mode === "ordinary" ? unavailable : {
+      ...unavailable, outcomeWithheld: true, control: { available: false, reason: "Earlier denial" },
+      ...(firstId ? { activity: { kind: "unavailable", observedAt: 2,
+        ...(mode !== "first-id-native-ref-only" ? { generation: mode === "first-id-native-prior-conflict" ? 2 : identity.generation } : {}),
+        ...(mode !== "first-id-unproven-ref" && !freshDenial && !equivalentDenial ? { launchRef: identity.launchRef } : {}) } } : {}),
+    };
+    let independentRecovery = true;
+    let recoveryRow: BackgroundTaskItem | undefined;
+    let pageReads = 0;
+    let recoveryReads = 0;
+    let firstPageCurrent = true;
+    const olderMessage: ConversationItem = { type: "user_message", id: "older", text: "Earlier message", createdAt: 0 };
+    const parentSession = fixtureSession(parent), childSession = { ...fixtureSession(child), parentId: parent };
+    const guard = (signal: AbortSignal, current: () => boolean = () => true): NonNullable<ProviderHistoryPage["workerSource"]> => ({
+      isCurrent: () => !signal.aborted && current(),
+      retain: owner => { signal.throwIfAborted(); return guard(owner, current); },
+    });
+    const provider = Object.assign(new FakeProvider(), {
+      waitForEventStream: async (_signal: AbortSignal) => {},
+      listSessions: async () => [], // No independent discovery.
+      getSession: async (id: string) => id === parent ? parentSession : id === child ? childSession : null,
+      listPendingInbox: async () => [],
+      listMessages: async (id: string, options: Parameters<ChatProvider["listMessages"]>[1]): Promise<ProviderHistoryPage> => {
+        if (id !== parent) return { items: [], completeItems: [], accounting: [] };
+        pageReads++;
+        const current = firstPageCurrent;
+        firstPageCurrent = true;
+        const workerSource = guard(options.signal!, () => current);
+        if (offPage && options.cursor) return {
+          items: [olderMessage], completeItems: [olderMessage, row], accounting: [], isWorkerSourceCurrent: workerSource.isCurrent,
+          ...(mode.endsWith("-uncovered") ? {} : { workerSource }),
+        };
+        return {
+          items: [row], completeItems: [row], accounting: [], workerSource, isWorkerSourceCurrent: workerSource.isCurrent,
+          workerOriginCoverage: [{ messageId: "launcher", toolUseId: call, childConversationId: child, taskType: "agent" }],
+          ...(!options.cursor ? { nextCursor: "older-fixture-page" } : {}),
+        };
+      },
+      reconcileBackgroundTasks: async (_id: string, options: Parameters<NonNullable<ChatProvider["reconcileBackgroundTasks"]>>[1]) => {
+        recoveryReads++;
+        options?.onSource?.({ workerSource: guard(options.signal!), workerAssociationContradictions: [], workerResultFallbacks: [] });
+        return independentRecovery ? [recoveryRow ?? row] : [];
+      },
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), coalesceWindowMs: 0 });
+    async function published() {
+      const { snapshot, events } = await adapter.subscribe(parent);
+      events.cancel();
+      return snapshot;
+    }
+    async function publishLive(item: BackgroundTaskItem) {
+      const normalized: NormalizedProviderEvent = {
+        conversationId: parent, eventType: "fixture.native", outcome: "handled", updates: [{ kind: "upsert", item }],
+      };
+      provider.eventQueue.push({ normalized } as unknown as ProviderEvent);
+      await liveEventsApplied(adapter, provider);
+      return (await published()).items;
+    }
+    const agreesWithPublication = async (snapshot: ConversationSnapshot, expected: BackgroundTaskItem) => {
+      const retained = await published();
+      expect(retained.cursor).toBe(snapshot.cursor);
+      expect(JSON.parse(JSON.stringify(snapshot.items))).toEqual([expected]);
+      expect(JSON.parse(JSON.stringify(retained.items))).toEqual([expected]);
+    };
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      const initial = await adapter.history(parent);
+      await agreesWithPublication(initial, row);
+      if (mode === "first-id-native-conflicting-own-denial") {
+        row = { ...row, activity: { ...row.activity!, generation: 2, observedAt: 3 } };
+        const denied = await adapter.history(parent);
+        expect(JSON.parse(JSON.stringify(denied.items))).toEqual([row]);
+        const subscribed = await published();
+        expect(subscribed.cursor).toBe(denied.cursor);
+        const workers = compactWorkers(subscribed.items);
+        expect(workers).toHaveLength(1);
+        const marks = new Set([workers[0]!.id]);
+        // The standalone filter can use a device-local row mark without IDs.
+        expect(workers.filter(worker => !workerDismissible(worker) || !marks.has(worker.id))).toHaveLength(1);
+        await agreesWithPublication(denied, row);
+        expect((await adapter.workerEvidence(parent)).entries).toEqual([]);
+        await agreesWithPublication(denied, row);
+
+        // Matching the ref after correcting the generation cannot qualify
+        // continuity with the conflicting denial.
+        row = { ...unavailable, activity: { ...identity, kind: "unavailable", observedAt: 4 } };
+        const evidence = await adapter.workerEvidence(parent);
+        expect(evidence.entries).toEqual([expect.objectContaining({ executionId: identity.executionId, dismissible: true })]);
+        await agreesWithPublication(await adapter.history(parent), row);
+        row = { ...row, status: "completed", stateUncertain: false, resultId: "native-result", summary: "Finished",
+          activity: { ...identity, kind: "ended" } };
+        await agreesWithPublication(await adapter.history(parent), row);
+        return;
+      }
+      const gap = mode.endsWith("-gap");
+      const differentExecution = mode === "different-execution" || mode === "different-execution-gap";
+      const differentChild = mode === "different-child-gap";
+      const veto = firstId ? mode === "first-id-live" || mode === "first-id-covered" || mode === "first-id-missing-ref"
+        || mode === "first-id-native-history" || mode === "first-id-native-ref-only"
+        || mode === "first-id-native-recovery" || mode === "first-id-native-recovery-off-page"
+        || freshDenial || equivalentDenial || mode === "first-id-native-idless-same" || mode === "first-id-native-idless-other-generation"
+        : mode !== "ordinary" && !differentExecution && !differentChild && mode !== "known-id-native-idless-other-ref";
+      if (equivalentDenial) {
+        const sparse: BackgroundTaskItem = { ...unavailable, activity: { kind: "unavailable", launchRef: identity.launchRef, observedAt: 2 } };
+        await publishLive(sparse);
+        const inherited = await published();
+        expect(JSON.parse(JSON.stringify(inherited.items))).toEqual([{ ...sparse, outcomeWithheld: true }]);
+        // An independent denial with exactly the same wire representation.
+        row = { ...JSON.parse(JSON.stringify(inherited.items[0])), outcomeWithheld: true };
+        independentRecovery = false;
+        const before = [pageReads, recoveryReads];
+        expect((await adapter.workerEvidence(parent)).entries).toEqual([]);
+        expect([pageReads, recoveryReads]).toEqual([before[0]! + 1, before[1]! + 1]);
+        await agreesWithPublication(inherited, row); // An internal change must not advance the cursor.
+      }
+      if (gap || mode === "first-id-live" || mode === "first-id-unproven-ref") {
+        const sparse: BackgroundTaskItem = { ...unavailable, activity: { kind: "unavailable", observedAt: 3,
+          ...(mode === "first-id-unproven-ref" ? { launchRef: identity.launchRef, generation: 1 } : {}) } };
+        const [publishedSparse] = await publishLive(sparse);
+        // No old identity or Stop readiness is restored to the public row.
+        expect(JSON.parse(JSON.stringify(publishedSparse))).toEqual({ ...sparse, outcomeWithheld: true });
+      }
+      if (freshDenial || mode.includes("-idless-")) {
+        const activity: BackgroundTaskItem["activity"] = { kind: "unavailable", observedAt: 3,
+          ...(mode.endsWith("-other-generation") ? { generation: 2 }
+            : { launchRef: mode.endsWith("-other-ref") ? `v1:launch:1:${"b".repeat(64)}` : identity.launchRef }) };
+        const sparse = { ...unavailable, activity, ...(freshDenial ? { outcomeWithheld: true as const } : {}) };
+        expect(JSON.parse(JSON.stringify(await publishLive(sparse)))).toEqual(
+          [veto ? { ...sparse, outcomeWithheld: true } : sparse]);
+      }
+      if (mode === "live-gap" || mode === "different-execution-gap") {
+        const working: BackgroundTaskItem = {
+          ...unavailable, stateUncertain: false, control: { available: true },
+          activity: { ...identity, kind: "working", observedAt: 4,
+            ...(differentExecution ? { executionId: "new-execution", executionAliases: ["new-execution"] } : {}) },
+        };
+        const [publishedWorking] = await publishLive(working);
+        expect(JSON.parse(JSON.stringify(publishedWorking))).toEqual(veto ? { ...working, outcomeWithheld: true } : working);
+      }
+      independentRecovery = recoveryReplacement || mode !== "page-only" && mode !== "page-only-gap" && mode !== "first-id-covered" && !nativeRef;
+      row = { ...unavailable, activity: { ...identity, kind: "unavailable", observedAt: 3,
+        ...(differentExecution ? { executionId: "new-execution", executionAliases: ["new-execution"] } : {}),
+        ...(mode === "first-id-different-ref" ? { launchRef: "other-launch" } : {}),
+        ...(mode === "first-id-new-generation" ? { generation: 2 } : {}) },
+        ...(differentChild || mode === "first-id-different-child" ? { childConversationId: "other-child" } : {}) };
+      if (mode === "first-id-missing-ref") delete row.activity!.launchRef;
+      if (mode === "first-id-missing-generation" || mode === "first-id-native-history"
+        || mode === "first-id-native-ref-only" || mode === "first-id-native-prior-conflict" || recoveryReplacement) delete row.activity!.generation;
+      if (recoveryReplacement) {
+        const { launchRef: _ref, ...activity } = row.activity!;
+        recoveryRow = { ...row, activity: { ...activity, generation: 1, observedAt: 4,
+          ...(mode.endsWith("-disjoint") ? { executionId: "other-execution", executionAliases: ["other-execution"] } : {}) } };
+      }
+      if (mode === "first-id-live" || mode === "first-id-then-disjoint") {
+        expect(JSON.parse(JSON.stringify(await publishLive(row)))).toEqual([{ ...row, outcomeWithheld: true }]);
+        row = { ...row, activity: { ...row.activity!, observedAt: 4 } };
+        if (mode === "first-id-live") {
+          // Once qualified, the native ID is sufficient without the launch reference.
+          delete row.activity!.launchRef;
+        } else {
+          // The reference cannot bridge disjoint known IDs.
+          row.activity!.executionId = "other-execution";
+          row.activity!.executionAliases = ["other-execution"];
+        }
+      }
+      const publishedSource = recoveryRow ?? row;
+      // An uncovered page cannot bind the veto, but the unresolved recovery
+      // row stays visible until there is affirmative counterproof.
+      const protectedRow = veto || mode === "first-id-native-recovery-off-page-uncovered" || mode === "first-id-unproven-ref";
+      const expected = protectedRow ? { ...publishedSource, outcomeWithheld: true } : publishedSource;
+      if (offPage) {
+        expect(initial.olderCursor).toBeDefined();
+        if (veto) firstPageCurrent = false; // A stale first attempt must not publish its witness.
+        const before = [pageReads, recoveryReads];
+        const older = await adapter.history(parent, { cursor: initial.olderCursor });
+        expect([pageReads, recoveryReads]).toEqual([before[0]! + (veto ? 2 : 1), before[1]! + 1]);
+        expect(older.olderCursor).toBeUndefined();
+        const retained = await published();
+        expect(retained.cursor).toBe(older.cursor);
+        expect(JSON.parse(JSON.stringify(older.items))).toEqual([olderMessage, expected]);
+        expect(JSON.parse(JSON.stringify(retained.items))).toEqual([olderMessage, expected]);
+        expect(compactWorkerEvidence(older.items)).toEqual([expect.objectContaining({
+          executionId: publishedSource.activity!.executionId, active: false, dismissible: !protectedRow,
+        })]);
+        if (mode === "first-id-native-recovery-off-page-uncovered") {
+          const differentLaunch = { ...publishedSource, activity: { ...publishedSource.activity!, launchRef: `v1:launch:1:${"b".repeat(64)}` } };
+          expect(JSON.parse(JSON.stringify(await publishLive(differentLaunch)))).toEqual([olderMessage, differentLaunch]);
+        }
+        return;
+      }
+      if (mode === "history" || mode === "history-gap") await agreesWithPublication(await adapter.history(parent), expected);
+      const evidence = await adapter.workerEvidence(parent);
+      expect(evidence.entries).toEqual([expect.objectContaining({
+        executionId: publishedSource.activity!.executionId, active: false, dismissible: !protectedRow,
+      })]);
+      expect(row).not.toHaveProperty("outcomeWithheld");
+      independentRecovery = true;
+      const latest = await adapter.history(parent);
+      await agreesWithPublication(latest, expected);
+      expect(latest.olderCursor).toBe(initial.olderCursor);
+      if (mode === "first-id-unproven-ref") {
+        const another = { ...row, activity: { kind: "unavailable" as const, executionId: "other-execution", generation: 1, launchRef: "other-launch" } };
+        // Two unproved observations didn't qualify either launch or bind the
+        // original denial to the first ID.
+        expect(JSON.parse(JSON.stringify(await publishLive(another)))).toEqual([{ ...another, outcomeWithheld: true }]);
+      }
+      if (!veto) return;
+
+      const older = await adapter.history(parent, { cursor: latest.olderCursor });
+      await agreesWithPublication(older, expected);
+      expect(older.olderCursor).toBeUndefined();
+
+      // Fresh same-execution terminal evidence clears the veto even from an
+      // older cursor; an unavailable first attempt cannot publish or clear it.
+      firstPageCurrent = false;
+      independentRecovery = false;
+      recoveryRow = undefined;
+      row = { ...row, status: "completed", stateUncertain: false,
+        activity: { ...identity, kind: "ended", observedAt: 4, endedAt: 4 }, resultId: "native-result", summary: "Done" };
+      const readsBefore = [pageReads, recoveryReads];
+      const terminal = await adapter.history(parent, { cursor: latest.olderCursor });
+      expect([pageReads, recoveryReads]).toEqual([readsBefore[0]! + 2, readsBefore[1]! + 1]);
+      expect(terminal.olderCursor).toBeUndefined();
+      await agreesWithPublication(terminal, row);
+      expect((await adapter.workerEvidence(parent)).entries).toEqual([expect.objectContaining({
+        executionId: identity.executionId, active: false, dismissible: true,
+      })]);
+    } finally { await adapter.dispose(); }
+  },
+);
+
+test.each(["matching", "three-folds", "different-ref", "no-ref", "disjoint-id", "different-generation",
+  "different-child", "terminal", "remove", "aliases-overlap", "aliases-return", "aliases-return-replaced",
+  "aliases-replaced", "aliases-other-child", "aliases-terminal",
+  "generation-advance", "generation-old-gap", "generation-replay", "generation-conflict", "generation-invalid-ids",
+  "learn-ref-conflict", "learn-ref-missing", "learn-ref-known", "learn-ref-idless",
+  "generation-old-gap-disjoint", "generation-old-gap-terminal", "generation-old-gap-remove",
+  "generation-new-gap", "generation-new-gap-continued", "generation-new-gap-distinct-launch", "generation-new-gap-conflict",
+  "generation-new-gap-disjoint", "generation-new-gap-same-generation-ref",
+  "generation-new-gap-held", "generation-new-gap-ordinary",
+  "generation-new-gap-launch-only-held", "generation-new-gap-unanchored-held",
+  "generation-new-gap-launch-only-unproven", "generation-new-gap-launch-only-terminal",
+  "generation-new-gap-first-id-missing", "generation-new-gap-first-id-unanchored",
+  "generation-new-gap-first-id-ref", "generation-new-gap-first-id-conflict", "generation-new-gap-first-id-malformed",
+  "generation-new-gap-first-id-counterproof", "generation-new-gap-first-id-original-witness",
+  "generation-new-gap-first-id-known-disjoint",
+  "launch-gap", "launch-gap-repeated", "launch-gap-wrong-ref", "launch-gap-conflict", "launch-gap-wrong-child",
+  "launch-gap-held", "launch-gap-confirmed-sparse", "launch-gap-contradicted-sparse",
+  "launch-gap-unanchored-held", "launch-gap-unanchored-replaced",
+  "own-denial-fresh", "own-denial-inherited", "own-denial-missing", "own-denial-invalid", "own-denial-continuous"] as const)(
+  "live dismissal evidence is invariant to batching (%s)", async scenario => {
+  const parent = "parent", child = "child", taskId = `v2:${parent}:fixture`;
+  const executionId = "fixture-execution", launchRef = `v1:launch:1:${"a".repeat(64)}`;
+  const generation = scenario.startsWith("generation-");
+  const aliases = scenario.startsWith("aliases-");
+  const learnRef = scenario.startsWith("learn-ref-");
+  const ownDenial = scenario.startsWith("own-denial-");
+  const oldGap = scenario.startsWith("generation-old-gap");
+  const newGap = scenario.startsWith("generation-new-gap");
+  const heldReconnect = newGap && scenario.endsWith("-held") || scenario === "generation-new-gap-ordinary";
+  const firstIdGap = scenario.includes("-first-id-");
+  const idlessInitial = scenario.includes("launch-only") || scenario === "generation-new-gap-unanchored-held"
+    || firstIdGap && !scenario.endsWith("-known-disjoint");
+  const initiallyWithheld = scenario !== "generation-new-gap-ordinary";
+  const launchGap = scenario.startsWith("launch-gap");
+  const unanchored = scenario.startsWith("launch-gap-unanchored");
+  const endsWithSparse = scenario.endsWith("-held") || scenario.endsWith("-sparse") || unanchored;
+  const remove = scenario === "remove" || scenario === "generation-old-gap-remove";
+  const settles = scenario.endsWith("terminal");
+  const otherRef = `v1:launch:1:${"b".repeat(64)}`;
+  const initialGeneration = generation ? 2 : 1;
+  const returnsAlias = scenario.startsWith("aliases-return");
+  const nextExecution = aliases && !returnsAlias || scenario.endsWith("-disjoint") && (oldGap || newGap) || ownDenial && scenario !== "own-denial-continuous"
+    ? "qualified-alias" : executionId;
+  const initial: BackgroundTaskItem = {
+    id: `task:${taskId}`, taskId, type: "background_task", childConversationId: child, taskType: "agent", createdAt: 1,
+    description: "Fixture", status: "running", stateUncertain: true, ...(initiallyWithheld ? { outcomeWithheld: true as const } : {}),
+    control: { available: false }, activity: { kind: "unavailable", ...(unanchored ? {} : { generation: initialGeneration }),
+      ...(unanchored || scenario === "generation-new-gap-unanchored-held" || scenario.endsWith("-first-id-unanchored")
+        || learnRef && scenario !== "learn-ref-known" || ownDenial && scenario !== "own-denial-continuous"
+        ? {} : { launchRef: generation ? launchRef.replace(":1:", ":2:") : launchRef }),
+      ...(!idlessInitial && (aliases || generation || learnRef || ownDenial) ? { executionId } : {}) },
+  };
+  const { outcomeWithheld: _withheld, ...restatement } = initial;
+  const originalWitness = scenario.endsWith("-original-witness");
+  const finalGeneration = (scenario === "generation-advance" || oldGap || newGap) && !originalWitness ? 3 : initialGeneration;
+  const sparse: BackgroundTaskItem = { ...restatement, activity: { kind: "unavailable", generation: finalGeneration, observedAt: 4,
+    ...(!heldReconnect ? { executionId: nextExecution } : {}),
+    ...(scenario === "generation-new-gap-launch-only-unproven" ? { launchRef: otherRef.replace(":1:", ":3:") }
+      : originalWitness ? { launchRef: initial.activity!.launchRef } : {}),
+    ...(launchGap && !endsWithSparse ? { launchRef } : {}),
+    ...(ownDenial ? { launchRef: scenario === "own-denial-continuous" ? launchRef : otherRef } : {}) } };
+  const overlapAlias = returnsAlias ? "qualified-alias" : nextExecution;
+  const enriched: BackgroundTaskItem = { ...sparse, activity: { ...sparse.activity!, launchRef, observedAt: 2,
+    ...(aliases ? { executionId: overlapAlias, executionAliases: [executionId, overlapAlias] } : {}) } };
+  const upsert = (item: BackgroundTaskItem): NormalizedProviderUpdate => ({ kind: "upsert", item });
+  const terminal: BackgroundTaskItem = { ...sparse, status: "stopped", stateUncertain: false, resultId: "native-result", summary: "Stopped",
+    activity: { ...sparse.activity!, kind: "ended", endedAt: 3 } };
+  const inputs: NormalizedProviderUpdate[] = [
+    upsert(firstIdGap ? { ...restatement, activity: { kind: "unavailable", generation: scenario.endsWith("-counterproof") ? 2 : 3,
+      executionId: scenario.endsWith("-known-disjoint") ? "different-execution" : executionId, observedAt: 2,
+      ...(scenario.endsWith("-counterproof") ? { launchRef: otherRef.replace(":1:", ":2:") }
+        : scenario.endsWith("-first-id-ref") ? { launchRef: otherRef.replace(":1:", ":3:") }
+        : scenario.endsWith("-first-id-malformed") ? { launchRef: "v1:launch:3:not-a-digest" }
+        : scenario.endsWith("-first-id-conflict") ? { launchRef: initial.activity!.launchRef } : {}),
+    } } : launchGap ? { ...restatement, activity: { kind: "unavailable", generation: 1, executionId, observedAt: 2 } }
+      : newGap ? { ...restatement, activity: { kind: "unavailable", generation: scenario.endsWith("-same-generation-ref") ? 2 : 3, observedAt: 2,
+      ...(scenario === "generation-new-gap-distinct-launch" || scenario === "generation-new-gap-disjoint" || scenario.includes("launch-only")
+        ? { launchRef: otherRef.replace(":1:", ":3:") }
+        : scenario.endsWith("-same-generation-ref") ? { launchRef: otherRef.replace(":1:", ":2:") }
+        : scenario === "generation-new-gap-conflict" ? { launchRef: initial.activity!.launchRef } : {}),
+    } } : ownDenial ? { ...restatement,
+      ...(scenario === "own-denial-inherited" ? {} : { outcomeWithheld: true as const }),
+      activity: { kind: "unavailable", generation: 1, observedAt: 2,
+        ...(scenario === "own-denial-missing" ? {} : { launchRef: scenario === "own-denial-invalid"
+          ? otherRef.replace(":1:", ":2:") : scenario === "own-denial-continuous" ? launchRef : otherRef }),
+      } } : scenario === "learn-ref-known" || scenario === "learn-ref-idless" ? { ...enriched, activity: {
+      kind: "unavailable", observedAt: 2, generation: 1, launchRef: scenario === "learn-ref-known" ? otherRef : launchRef,
+      ...(scenario === "learn-ref-known" ? { executionId } : {}),
+    } } : generation ? { ...enriched, activity: { ...sparse.activity!, executionId, observedAt: 2, generation: scenario === "generation-replay" ? 1 : 3,
+      ...(scenario === "generation-conflict" ? { launchRef: initial.activity!.launchRef } : {}),
+      ...(scenario === "generation-invalid-ids" ? { executionAliases: ["not-the-primary"] } : {}) } }
+      : scenario === "aliases-replaced" ? { ...enriched, activity: { ...sparse.activity!, executionId: "disjoint" } }
+      : scenario === "aliases-other-child" ? { ...enriched, childConversationId: "other-child" }
+      : scenario === "different-ref" ? { ...enriched, activity: { ...enriched.activity!, launchRef: `v1:launch:1:${"b".repeat(64)}` } }
+      : scenario === "no-ref" ? { ...sparse, activity: { ...sparse.activity!, observedAt: 2 } } : enriched),
+    ...launchGap && scenario !== "launch-gap" && !scenario.endsWith("-held") ? [upsert({
+      ...restatement, ...(scenario === "launch-gap-wrong-child" || scenario === "launch-gap-unanchored-replaced" ? { childConversationId: "other-child" } : {}),
+      activity: { kind: "unavailable", generation: 1, executionId, observedAt: 3,
+        ...(scenario === "launch-gap-wrong-ref" || scenario === "launch-gap-contradicted-sparse" ? { launchRef: otherRef }
+          : scenario === "launch-gap-confirmed-sparse" ? { launchRef }
+          : scenario === "launch-gap-conflict" ? { launchRef: launchRef.replace(":1:", ":2:") } : {}),
+      },
+    })] : newGap ? (scenario === "generation-new-gap-continued"
+      ? [upsert({ ...restatement, activity: { kind: "unavailable", observedAt: 3 } })] : [])
+      : learnRef ? [upsert({ ...restatement, activity: { kind: "unavailable", generation: 1, observedAt: 3,
+      ...(scenario === "learn-ref-known" ? { launchRef } : scenario === "learn-ref-missing" ? {} : { launchRef: otherRef }),
+    } })] : generation ? [upsert({ ...restatement, activity: { kind: "unavailable", observedAt: 3,
+      generation: oldGap ? 2 : finalGeneration } })]
+      : scenario === "three-folds" ? [upsert({ ...sparse, activity: { ...sparse.activity!, observedAt: 3 } })]
+      : scenario === "disjoint-id" ? [upsert({ ...enriched, activity: { ...enriched.activity!, executionId: "other-execution" } })]
+      : scenario === "different-generation" ? [upsert({ ...restatement, activity: { kind: "unavailable", generation: 2 } })]
+      : scenario === "different-child" ? [upsert({ ...enriched, childConversationId: "other-child" })]
+      : settles ? [upsert(terminal)]
+      : remove ? [{ kind: "remove" as const, itemId: initial.id }] : [],
+    ...(oldGap || newGap) && settles ? [upsert(terminal)] : oldGap && remove ? [{ kind: "remove" as const, itemId: initial.id }] : [],
+    ...returnsAlias ? [upsert({ ...sparse, activity: { ...sparse.activity!, observedAt: 3, executionId: overlapAlias } }),
+      ...scenario.endsWith("-replaced") ? [upsert({ ...sparse, activity: { ...sparse.activity!, executionId: "different-execution" } })] : []] : [],
+    upsert(sparse),
+  ];
+  const protectedFinal = scenario === "launch-gap" || scenario === "launch-gap-repeated" || scenario.endsWith("-held")
+    || scenario === "launch-gap-confirmed-sparse" || firstIdGap
+      && !scenario.endsWith("-conflict") && !scenario.endsWith("-malformed")
+      && !scenario.endsWith("-counterproof") && !scenario.endsWith("-known-disjoint");
+  const expectStandaloneVisibility = (items: readonly ConversationItem[], visible: boolean) => {
+    const workers = compactWorkers(items);
+    expect(workers).toHaveLength(1);
+    expect(workers[0]!.activity?.executionId).toBeUndefined();
+    const dismissed = new Set([workers[0]!.id]); // Existing device-local row mark.
+    // Pure reproduction of ui.ts's standalone fallback, not a browser E2E.
+    expect(workers.filter(worker => !workerDismissible(worker)
+      || !(dismissed.has(worker.id) || worker.references.some(id => dismissed.has(id))))).toHaveLength(visible ? 1 : 0);
+  };
+  const run = async (batch: boolean) => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession(parent), { ...fixtureSession(child), parentId: parent }];
+    let window: (() => void) | undefined, finished: Promise<unknown> | undefined;
+    let flushes = 0, consumed: (() => void) | undefined;
+    const scheduler: ChatTaskScheduler = {
+      async run(name, work) {
+        const result = Promise.resolve(work());
+        if (name.startsWith("stream.event:fixture.")) void result.then(consumed);
+        if (name === `coalescer.flush:${parent}`) { flushes++; finished = result; }
+        return result;
+      },
+      setTimeout(name, callback) {
+        expect(name).toBe("coalescer.window");
+        expect(window).toBeUndefined();
+        window = callback;
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimeout() { window = undefined; },
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), taskScheduler: scheduler });
+    const pump = adapter.startEventPump();
+    const send = (update: NormalizedProviderUpdate) => new Promise<void>(resolve => {
+      consumed = resolve;
+      const normalized: NormalizedProviderEvent = { conversationId: parent, eventType: "fixture.worker", outcome: "handled", updates: [structuredClone(update)] };
+      provider.eventQueue.push({ normalized } as unknown as ProviderEvent);
+    });
+    const read = async () => {
+      const { snapshot, events } = await adapter.subscribe(parent);
+      events.cancel();
+      return snapshot;
+    };
+    const flush = async () => {
+      expect(window).toBeDefined();
+      const callback = window!;
+      window = undefined;
+      finished = undefined;
+      callback();
+      await Promise.resolve(); // The actual coalescer hands the flush to the scheduler.
+      if (finished) await finished;
+    };
+    try {
+      await send(upsert(initial));
+      await flush();
+      const before = await read();
+      expect(JSON.parse(JSON.stringify(before.items))).toEqual([initial]);
+      expect(compactWorkerEvidence(before.items)).toEqual(!idlessInitial && (aliases || generation || learnRef || ownDenial)
+        ? [expect.objectContaining({ executionId, active: false, dismissible: !initiallyWithheld })] : []);
+      for (const update of inputs) {
+        await send(update);
+        if (!batch && update.kind !== "remove") {
+          await flush();
+          if (update.kind === "upsert" && ((oldGap || scenario === "different-generation") && update === inputs[1]
+            || newGap && !firstIdGap && update === inputs[0] || scenario === "generation-new-gap-continued" && update === inputs[1])) {
+            const replay = await read();
+            const protectedRow = initiallyWithheld && scenario !== "generation-new-gap-conflict" && !scenario.endsWith("-same-generation-ref");
+            expectStandaloneVisibility(replay.items, protectedRow);
+            expect(JSON.parse(JSON.stringify(replay.items))).toEqual(
+              [protectedRow ? { ...update.item, outcomeWithheld: true } : update.item]);
+            expect(compactWorkerEvidence(replay.items)).toEqual([]);
+          }
+          if ((launchGap || firstIdGap) && update.kind === "upsert" && update !== inputs.at(-1)) {
+            const unproven = await read();
+            const shownId = update.item.type === "background_task" ? update.item.activity!.executionId! : executionId;
+            const protectedRow = firstIdGap ? protectedFinal
+              : update === inputs[0] || scenario === "launch-gap-repeated" || scenario === "launch-gap-confirmed-sparse";
+            const workers = compactWorkers(unproven.items);
+            expect(compactWorkerEvidence(unproven.items)).toEqual([expect.objectContaining({
+              executionId: shownId, active: false, dismissible: !protectedRow,
+            })]);
+            expect(visibleWorkers(workers, new Set([shownId]))).toHaveLength(protectedRow ? 1 : 0);
+            expect(JSON.parse(JSON.stringify(unproven.items))).toEqual(
+              [protectedRow ? { ...update.item, outcomeWithheld: true } : update.item]);
+          }
+          if (returnsAlias && update.kind === "upsert" && update.item.type === "background_task" && update !== inputs.at(-1)) {
+            const overlap = await read();
+            const activity = update.item.activity!;
+            const replacement = activity.executionId === "different-execution";
+            expect(JSON.parse(JSON.stringify(overlap.items))).toEqual([replacement ? update.item : { ...update.item, outcomeWithheld: true }]);
+            expect(compactWorkerEvidence(overlap.items)).toEqual(
+              [activity.executionId!, ...(activity.executionAliases ?? []).filter(id => id !== activity.executionId)].map(id =>
+                expect.objectContaining({ executionId: id, active: false, dismissible: replacement })));
+          }
+        }
+      }
+      if (batch) {
+        if (!remove) expect((await read()).cursor).toBe(before.cursor);
+        await flush();
+      }
+      expect(flushes).toBe(batch ? (remove ? 3 : 2) : 1 + inputs.length);
+      const final = await read();
+      expect(final.cursor).not.toBe(before.cursor);
+      expect(final.items).toHaveLength(1);
+      if (heldReconnect) expectStandaloneVisibility(final.items, initiallyWithheld);
+      if (launchGap || firstIdGap) expect(visibleWorkers(compactWorkers(final.items), new Set([nextExecution]))).toHaveLength(protectedFinal ? 1 : 0);
+      return { items: JSON.parse(JSON.stringify(final.items)), evidence: compactWorkerEvidence(final.items) };
+    } finally { await adapter.dispose(); await pump; }
+  };
+  const expected = scenario === "matching" || scenario === "three-folds" || scenario === "aliases-overlap"
+    || scenario === "aliases-return"
+    || scenario === "different-generation"
+    || generation && !oldGap && !newGap || scenario === "generation-old-gap"
+    || scenario === "generation-new-gap" || scenario === "generation-new-gap-continued" || scenario === "generation-new-gap-distinct-launch"
+    // A reference from the new stream still doesn't settle continuity with
+    // the original ID-less denial, so this row remains protected, not bound.
+    || scenario === "generation-new-gap-launch-only-unproven"
+    || learnRef && scenario !== "learn-ref-conflict" || protectedFinal
+    || scenario === "no-ref"
+    || scenario === "own-denial-fresh" || scenario === "own-denial-continuous";
+  const final = settles
+    ? { ...sparse, status: "stopped", resultId: terminal.resultId, summary: terminal.summary }
+    : expected ? { ...sparse, outcomeWithheld: true } : sparse;
+  const separate = await run(false);
+  expect(separate.items).toEqual([final]);
+  expect(separate.evidence).toEqual(heldReconnect ? [] : [expect.objectContaining({ executionId: nextExecution, active: false, dismissible: !expected })]);
+  expect(await run(true)).toEqual(separate);
+});
+
+for (const saturates of [false, true]) test(`a vetoed execution's remembered aliases are bounded and fail closed at saturation (saturates: ${saturates})`, () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const withheld: BackgroundTaskItem = { id: "task:v2:parent:fixture", taskId: "v2:parent:fixture", type: "background_task",
+    childConversationId: "child", taskType: "agent", createdAt: 1, description: "Fixture", status: "running", stateUncertain: true,
+    outcomeWithheld: true, control: { available: false }, activity: { kind: "unavailable", generation: 1, executionId: "execution:0" } };
+  const { outcomeWithheld: _withheld, ...row } = withheld;
+  const restate = (executionId: string, executionAliases?: string[]) => {
+    projection.apply({ kind: "upsert", item: { ...row, activity: { kind: "unavailable", generation: 1, executionId,
+      ...(executionAliases ? { executionAliases } : {}) } } });
+    const item = projection.get(row.id) as BackgroundTaskItem;
+    const evidence = compactWorkerEvidence([item]);
+    expect(evidence.map(entry => entry.executionId)).toContain(executionId);
+    expect(evidence.every(entry => entry.dismissible === (item.outcomeWithheld !== true))).toBe(true);
+    return item.outcomeWithheld === true;
+  };
+  projection.apply({ kind: "upsert", item: withheld });
+  // Two overlapping cohorts prove LIMIT aliases, or one past it.
+  const first = Array.from({ length: saturates ? WORKER_DISMISSAL_ALIAS_LIMIT : WORKER_DISMISSAL_ALIAS_LIMIT - 1 }, (_, i) => `execution:${i}`);
+  expect(restate("execution:0", first)).toBe(true);
+  expect(restate("unrecorded", ["execution:0", "unrecorded"])).toBe(true);
+  // Partial restatements of either cohort stay vetoed: remembered, or unprovably disjoint at saturation.
+  expect(restate("unrecorded")).toBe(true);
+  expect(restate("execution:1")).toBe(true);
+  // Below the bound a disjoint execution is proven different; at saturation it is not.
+  expect(restate("different-execution")).toBe(saturates);
+  // Fresh terminal evidence still discharges a saturated veto.
+  projection.apply({ kind: "upsert", item: { ...row, status: "stopped", stateUncertain: false, resultId: "native-result", summary: "Stopped",
+    activity: { kind: "ended", generation: 1, executionId: "different-execution", endedAt: 2 } } });
+  expect(projection.get(row.id)).not.toHaveProperty("outcomeWithheld");
+});
+
+for (const saturates of [false, true]) test(`a fresh denial overlapping a remembered execution keeps the proven alias union (saturates: ${saturates})`, () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  // Bound to [A, B], or to a cohort which the fresh alias pushes past the bound.
+  const first = Array.from({ length: saturates ? WORKER_DISMISSAL_ALIAS_LIMIT : 2 }, (_, i) => `execution:${i}`);
+  const withheld: BackgroundTaskItem = { id: "task:v2:parent:fixture", taskId: "v2:parent:fixture", type: "background_task",
+    childConversationId: "child", taskType: "agent", createdAt: 1, description: "Fixture", status: "running", stateUncertain: true,
+    outcomeWithheld: true, control: { available: false }, activity: { kind: "unavailable", generation: 1, executionId: "execution:0", executionAliases: first } };
+  const { outcomeWithheld: _withheld, ...row } = withheld;
+  const restate = (executionId: string, childConversationId = "child") => {
+    projection.apply({ kind: "upsert", item: { ...row, childConversationId, activity: { kind: "unavailable", generation: 1, executionId } } });
+    return (projection.get(row.id) as BackgroundTaskItem).outcomeWithheld === true;
+  };
+  projection.apply({ kind: "upsert", item: withheld });
+  // A later recovery withholds the same execution afresh, exposing [B, C].
+  projection.apply({ kind: "upsert", item: { ...withheld, activity: { kind: "unavailable", generation: 1, executionId: "fresh", executionAliases: ["execution:1", "fresh"] } } });
+  expect(restate("execution:0")).toBe(true);
+  expect(restate("fresh")).toBe(true);
+  expect(restate("different-execution")).toBe(saturates);
+  if (saturates) return;
+  // A fresh denial never adopts a disjoint or different-scope binding.
+  projection.apply({ kind: "upsert", item: withheld });
+  projection.apply({ kind: "upsert", item: { ...withheld, activity: { kind: "unavailable", generation: 1, executionId: "disjoint", executionAliases: ["disjoint", "other"] } } });
+  expect(restate("execution:0")).toBe(false);
+  projection.apply({ kind: "upsert", item: withheld });
+  projection.apply({ kind: "upsert", item: { ...withheld, childConversationId: "other-child", activity: { kind: "unavailable", generation: 1, executionId: "fresh", executionAliases: ["execution:1", "fresh"] } } });
+  expect(restate("execution:0", "other-child")).toBe(false);
+});
+
+test("a fresh same-scope denial keeps a saturated veto even when it exposes only an alias that never fit", () => {
+  const projection = new ConversationProjection(new ConversationReplay("g", "c", 100_000));
+  const first = Array.from({ length: WORKER_DISMISSAL_ALIAS_LIMIT }, (_, i) => `execution:${i}`);
+  const withheld: BackgroundTaskItem = { id: "task:v2:parent:fixture", taskId: "v2:parent:fixture", type: "background_task",
+    childConversationId: "child", taskType: "agent", createdAt: 1, description: "Fixture", status: "running", stateUncertain: true,
+    outcomeWithheld: true, control: { available: false }, activity: { kind: "unavailable", generation: 1, executionId: "execution:0", executionAliases: first } };
+  const { outcomeWithheld: _withheld, ...row } = withheld;
+  const restate = (executionId: string, childConversationId = "child") => {
+    projection.apply({ kind: "upsert", item: { ...row, childConversationId, activity: { kind: "unavailable", generation: 1, executionId } } });
+    return (projection.get(row.id) as BackgroundTaskItem).outcomeWithheld === true;
+  };
+  const deny = (executionId: string, childConversationId = "child") => projection.apply({ kind: "upsert",
+    item: { ...withheld, childConversationId, activity: { kind: "unavailable", generation: 1, executionId } } });
+  projection.apply({ kind: "upsert", item: withheld });
+  // One alias past the bound saturates the veto; "unrecorded" never fits.
+  projection.apply({ kind: "upsert", item: { ...row, activity: { kind: "unavailable", generation: 1, executionId: "unrecorded", executionAliases: ["execution:0", "unrecorded"] } } });
+  expect((projection.get(row.id) as BackgroundTaskItem).outcomeWithheld).toBe(true);
+  // The next source withholds the same execution afresh, exposing only that alias.
+  deny("unrecorded");
+  expect(restate("execution:1")).toBe(true);
+  expect(restate("execution:0")).toBe(true);
+  expect(restate("different-execution")).toBe(true);
+  // A different-scope denial still builds its own binding.
+  deny("unrecorded", "other-child");
+  expect(restate("unrecorded", "other-child")).toBe(true);
+  expect(restate("execution:0", "other-child")).toBe(false);
+});
+
 test("compact worker evidence retains the real V2 covered-source owner for long history and large output", async () => {
   const directory = process.cwd(), fake = startOpenCodeV2Fake({ directory });
   const provider = createOpenCodeV2Provider({ endpoint: fake.url, password: fake.password, directory });
@@ -1591,17 +2193,31 @@ describe("production recovery Checking presentation", () => {
     activity: { kind: "unavailable", executionId: "execution:checking", executionAliases: ["launch:checking"], generation: 7, observedAt: 1234 },
     control: { available: false, reason: "No current proof" } };
 
-  test("a hanging real read publishes Checking, expires despite unrelated updates, and accepts a late current result", async () => {
+  for (const startup of ["normal", "held-session"] as const)
+  test(`a hanging real read publishes Checking, expires despite unrelated updates, and accepts a late current result${startup === "held-session" ? " (held session lookup)" : ""}`, async () => {
     const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let sessionEntered!: () => void, releaseSession!: () => void, readEntered!: () => void;
+    const sessionPending = new Promise<void>(resolve => { sessionEntered = resolve; }), sessionGate = new Promise<void>(resolve => { releaseSession = resolve; });
+    const reading = new Promise<void>(resolve => { readEntered = resolve; });
+    const getSession = provider.getSession.bind(provider);
+    if (startup === "held-session") provider.getSession = async id => { sessionEntered(); await sessionGate; return getSession(id); };
     let release!: () => void, reads = 0;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const working: BackgroundTaskItem = { ...unavailable, stateUncertain: false, activity: { ...unavailable.activity!, kind: "working", observedAt: 2345 } };
-    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; await gate; return [working]; } });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; readEntered(); await gate; return [working]; } });
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
     const projection = adapter.projectionForTests("session"); projection.upsert(unavailable);
     jest.useFakeTimers(); const pump = adapter.startEventPump();
     try {
-      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIo();
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      if (startup === "held-session") {
+        await sessionPending;
+        // Unrelated IO completions cannot prove recovery passed session lookup
+        // and workspace confinement. Keep that startup order deterministic.
+        await flushRecoveryIo(); expect(reads).toBe(0);
+        releaseSession();
+      }
+      await reading;
       expect(reads).toBe(1);
       expect(projection.get(unavailable.id)).toMatchObject({ activity: { ...unavailable.activity!, kind: "checking" }, control: unavailable.control });
       const activityBefore = adapter.activity();
@@ -1617,7 +2233,7 @@ describe("production recovery Checking presentation", () => {
       expect(reads).toBe(1); // Presentation expiry did not invalidate its read fence.
       expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
       expect(provider.permissionReplies).toEqual([]); expect(provider.questionReplies).toEqual([]);
-    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+    } finally { releaseSession(); release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
   });
 
   for (const result of ["failed", "inconclusive"] as const) test(`${result} read ends Checking without resetting on retry reads`, async () => {
@@ -1644,6 +2260,107 @@ describe("production recovery Checking presentation", () => {
       expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
       jest.advanceTimersByTime(2000); await flushRecoveryIo(); expect(reads).toBe(3);
       expect(projection.get(unavailable.id)).toMatchObject({ activity: unavailable.activity });
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  // An omitting read counts as inconclusive; it proves nothing about the row's execution.
+  for (const before of ["session-active", "unavailable"] as const) test(`an inconclusive read omitting a Checking ${before} row restores its pre-check evidence`, async () => {
+    const original: BackgroundTaskItem = before === "unavailable" ? unavailable
+      : { ...unavailable, activity: { ...unavailable.activity!, kind: "session-active", executionAliases: ["execution:checking", "launch:checking"] } };
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, readEntered!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { readEntered = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; readEntered(); await gate; return []; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(original);
+    const eligible = workerDismissalEvidence(original)?.dismissible ?? false;
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await reading; expect(reads).toBe(1);
+      expect(projection.get(original.id)).toMatchObject({ activity: { kind: "checking" } });
+      release(); await flushRecoveryIo();
+      const settled = projection.get(original.id) as BackgroundTaskItem;
+      expect(settled.activity).toEqual(original.activity);
+      expect(settled).toMatchObject({ stateUncertain: true, control: { available: false } });
+      expect(workerDismissalEvidence(settled)?.dismissible ?? false).toBe(eligible);
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  // OpenCode 2.x answers a failed active-inventory request with the same row,
+  // now `unavailable` + uncertain (V2 readBackgroundTasks: `confirmed` false).
+  // That read is inconclusive and must end Checking like an omitting read.
+  for (const incoming of ["same execution unverified", "new execution", "working"] as const) test(`an inconclusive read returning a Checking session-active row as ${incoming}`, async () => {
+    const original: BackgroundTaskItem = { ...unavailable, activity: { ...unavailable.activity!, kind: "session-active", executionAliases: ["execution:checking", "launch:checking"], launchRef: "launch-ref" } };
+    expect(workerDismissalEvidence(original)?.dismissible ?? false).toBe(false);
+    const unverified: BackgroundTaskItem = { ...original, stateUncertain: true, control: { available: false, reason: "Worker control is unverified" },
+      activity: { kind: "unavailable", executionId: "execution:checking", executionAliases: ["execution:checking", "launch:checking"], generation: 8, observedAt: 1234 } };
+    // The non-vacuous control: the read's own shape is save-eligible.
+    expect(workerDismissalEvidence(unverified)?.dismissible).toBe(true);
+    const read: BackgroundTaskItem = incoming === "same execution unverified" ? unverified
+      : incoming === "new execution" ? { ...unverified, activity: { ...unverified.activity!, executionId: "execution:next", executionAliases: ["execution:next"] } }
+        : { ...original, stateUncertain: false, activity: { ...original.activity!, kind: "working", observedAt: 2345 } };
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, readEntered!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { readEntered = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; readEntered(); await gate; return [structuredClone(read)]; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(original);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await reading; expect(reads).toBe(1);
+      expect(projection.get(original.id)).toMatchObject({ activity: { kind: "checking" } });
+      release(); await flushRecoveryIo();
+      const settled = projection.get(original.id) as BackgroundTaskItem;
+      if (incoming === "same execution unverified") {
+        expect(settled.activity).toEqual(original.activity);
+        expect(settled).toMatchObject({ stateUncertain: true, control: { available: false } });
+        expect(workerDismissalEvidence(settled)?.dismissible ?? false).toBe(false);
+      } else expect(settled.activity).toEqual(read.activity);
+      // The read stays inconclusive: an uncertain row schedules its retry.
+      jest.advanceTimersByTime(1000); await flushRecoveryIo();
+      expect(reads).toBe(incoming === "working" ? 1 : 2);
+      expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+    } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
+  // Checking is presentation only: an expired window restores the evidence the
+  // row had before the check and never grants saved-dismissal eligibility.
+  for (const before of ["session-active", "no activity"] as const) test(`an expired Checking window restores ${before} without making the row save-eligible`, async () => {
+    const { activity: _activity, ...bare } = unavailable;
+    // Valid aliases (they include the primary) give the row authoritative identity.
+    const busy: BackgroundTaskItem = { ...unavailable, activity: { ...unavailable.activity!, kind: "session-active", executionAliases: ["execution:checking", "launch:checking"] } };
+    const original: BackgroundTaskItem = before === "session-active" ? busy : bare;
+    expect(workerDismissalEvidence(original)?.dismissible ?? false).toBe(false);
+    // The non-vacuous control: the same execution as `unavailable` may be saved.
+    if (before === "session-active") expect(workerDismissalEvidence({ ...busy, activity: { ...busy.activity!, kind: "unavailable" } })?.dismissible).toBe(true);
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let release!: () => void, readEntered!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { readEntered = resolve; });
+    // The late read reports the same evidence; an omitted row would be a read result, not expiry.
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; readEntered(); await gate; return [original]; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const projection = adapter.projectionForTests("session"); projection.upsert(original);
+    jest.useFakeTimers(); const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      await reading; expect(reads).toBe(1);
+      expect(projection.get(original.id)).toMatchObject({ activity: { kind: "checking" } });
+      jest.advanceTimersByTime(10_000); await flushRecoveryIo();
+      const expired = projection.get(original.id) as BackgroundTaskItem;
+      expect(expired.activity).toEqual(original.activity);
+      expect(workerDismissalEvidence(expired)?.dismissible ?? false).toBe(false);
+      expect(reads).toBe(1);
+      release(); await flushRecoveryIo();
+      const settled = projection.get(original.id) as BackgroundTaskItem;
+      expect(settled.activity).toEqual(original.activity);
+      expect(workerDismissalEvidence(settled)?.dismissible ?? false).toBe(false);
       expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
     } finally { release(); await adapter.dispose(); await pump; jest.useRealTimers(); }
   });
@@ -4905,6 +5622,14 @@ async function flushRecoveryIo(): Promise<void> {
   for (let turn = 0; turn < 32; turn++) await realpath(process.cwd());
 }
 
+// Wait for the owned recovery boundary, not a fixed number of unrelated IO
+// completions. Fake deadlines stay frozen, so an inherited retry timer cannot
+// satisfy this condition by elapsing while workspace confinement settles.
+async function flushRecoveryIoUntil(predicate: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 1_000 && !predicate(); turn++) await realpath(process.cwd());
+  expect(predicate()).toBe(true);
+}
+
 async function admissionsApplied(adapter: ChatAdapter): Promise<void> {
   const admissions = (adapter as unknown as { promptAdmissions: Map<string, Promise<void>> }).promptAdmissions;
   await Promise.all([...admissions.values()]);
@@ -7181,6 +7906,73 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect(adapter.projectionForTests("session").items().filter(item => item.type === "background_task")).toEqual([canonical]);
     } finally { await adapter.dispose(); await pump; }
   });
+  // Recovery can discover an earlier launcher for a withheld worker: the
+  // canonical row id changes while its aliases still name the prior execution.
+  // The prior row's denial must move to that row, never to another execution.
+  for (const path of ["snapshot", "stream"] as const) for (const recovered of ["overlap", "disjoint", "other-child", "terminal", "cohorts", "cohorts-unqualified", "retained-canonical"] as const) test(`${path} alias supersession carries a withheld veto to the canonical row (${recovered})`, async () => {
+    // Connected, so history and worker evidence take the covered read.
+    const provider = Object.assign(new FakeProvider(), { waitForEventStream: async (_signal: AbortSignal) => {} });
+    provider.sessions = [fixtureSession("session")];
+    const cohorts = recovered.startsWith("cohorts");
+    // Retained canonical: the canonical row is already withheld as [A,B]; a
+    // withheld [C,D] predecessor folds into it as [A,C]; B alone restates it.
+    const retainedCanonical = recovered === "retained-canonical";
+    const prior: BackgroundTaskItem = { id: "task:joined", type: "background_task", taskId: "joined", toolUseId: "joined", childConversationId: "child",
+      taskType: "agent", createdAt: 2, description: "Worker", status: "running", stateUncertain: true, outcomeWithheld: true,
+      control: { available: false }, activity: retainedCanonical
+        ? { kind: "unavailable", generation: 1, executionId: "execution-c", executionAliases: ["execution-c", "execution-d"] }
+        : { kind: "unavailable", generation: 1, executionId: "execution-b", ...(cohorts ? { executionAliases: ["execution-b", "execution-c"] } : {}) } };
+    // Cohorts: two withheld predecessors, [B,C] and [D,E], recovered as one
+    // canonical [B,D] row and later restated by E alone. Unqualified: the
+    // canonical row names only B, so the second cohort proves nothing.
+    const second: BackgroundTaskItem = { ...prior, id: "task:second", taskId: "second", toolUseId: "second", createdAt: 3,
+      activity: { kind: "unavailable", generation: 1, executionId: "execution-d", executionAliases: ["execution-d", "execution-e"] } };
+    const canonical: BackgroundTaskItem = { ...prior, id: "task:first", taskId: "first", toolUseId: "first", createdAt: 1,
+      toolUseIds: cohorts ? ["first", "joined", "second"] : ["first", "joined"],
+      ...(recovered === "other-child" ? { childConversationId: "other-child" } : {}),
+      activity: cohorts ? { kind: "unavailable", generation: 1, executionId: "execution-b",
+        executionAliases: recovered === "cohorts" ? ["execution-b", "execution-d"] : ["execution-b"] }
+        : { kind: "unavailable", generation: 1, executionId: "execution-a",
+          executionAliases: recovered === "disjoint" ? ["execution-a"] : retainedCanonical ? ["execution-a", "execution-c"] : ["execution-a", "execution-b"] } };
+    delete canonical.outcomeWithheld;
+    const withheldCanonical: BackgroundTaskItem = { ...canonical, outcomeWithheld: true,
+      activity: { kind: "unavailable", generation: 1, executionId: "execution-a", executionAliases: ["execution-a", "execution-b"] } };
+    let current: BackgroundTaskItem = recovered === "terminal" ? { ...canonical, status: "failed", stateUncertain: false, resultId: "result", summary: "Failed",
+      activity: { ...canonical.activity!, kind: "ended", endedAt: 3 } } : canonical;
+    // The snapshot path keeps stream recovery empty until the covered history
+    // read starts, so that read itself performs the supersession.
+    let reads = 0, recovering = path === "stream";
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; return recovering ? [structuredClone(current)] : []; } });
+    provider.listMessages = async () => ({ items: [structuredClone(current)], completeItems: [structuredClone(current)], accounting: [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    adapter.projectionForTests("session").apply({ kind: "upsert", item: prior });
+    if (cohorts) adapter.projectionForTests("session").apply({ kind: "upsert", item: second });
+    if (retainedCanonical) adapter.projectionForTests("session").apply({ kind: "upsert", item: withheldCanonical });
+    const pump = adapter.startEventPump();
+    let vetoed = recovered === "overlap" || cohorts || retainedCanonical;
+    const expectVeto = async () => {
+      const workers = (await adapter.history("session")).items.filter((item): item is BackgroundTaskItem => item.type === "background_task");
+      expect(workers.map(item => item.id)).toEqual([canonical.id]);
+      expect(workers[0]!.outcomeWithheld).toBe(vetoed ? true : undefined);
+      expect((adapter.projectionForTests("session").get(canonical.id) as BackgroundTaskItem).outcomeWithheld).toBe(vetoed ? true : undefined);
+      const evidence = (await adapter.workerEvidence("session")).entries;
+      expect(evidence.length).toBeGreaterThan(0);
+      for (const entry of evidence) expect(entry.dismissible).toBe(!vetoed);
+    };
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} });
+      if (path === "stream") await waitUntil(() => !adapter.projectionForTests("session").has(prior.id));
+      else { await waitUntil(() => reads >= 1); recovering = true; }
+      await expectVeto();
+      if (cohorts || retainedCanonical) {
+        // A partial restatement naming only one remembered alias: the second
+        // predecessor's E, or the canonical row's own B.
+        current = { ...canonical, activity: { kind: "unavailable", generation: 1, executionId: retainedCanonical ? "execution-b" : "execution-e" } };
+        vetoed = recovered !== "cohorts-unqualified";
+        await expectVeto();
+      }
+    } finally { await adapter.dispose(); await pump; }
+  });
   for (const evict of [false, true]) test(`idle-parent snapshot recovers an out-of-page worker and its pending result${evict ? " after projection eviction" : ""}`, async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session"), fixtureSession("other")];
@@ -8227,6 +9019,29 @@ describe("prompt, abort, permission, and question mutations", () => {
     }
   });
 
+  test("connected generation rearms after owned workspace IO without advancing fake deadlines", async () => {
+    const provider = new FakeProvider(); provider.sessions = [fixtureSession("session")];
+    let reads = 0, classifications = 0, entered = false, releaseRead!: () => void, releaseScope!: () => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; }), scopeGate = new Promise<void>(resolve => { releaseScope = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      if (++reads === 1) await readGate;
+      return [{ id: "task:unknown", type: "background_task", taskId: "unknown", description: "Unknown", createdAt: 1, status: "running", stateUncertain: true }];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const scope = adapter as unknown as { requireSession(id: string): Promise<unknown> };
+    const requireSession = scope.requireSession.bind(adapter);
+    scope.requireSession = async id => { if (++classifications === 2) { entered = true; await scopeGate; } return requireSession(id); };
+    const pump = adapter.startEventPump();
+    try {
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await waitUntil(() => reads === 1);
+      jest.useFakeTimers(); releaseRead(); await flushRecoveryIo();
+      provider.eventQueue.push({ type: "server.connected", data: {} }); await flushRecoveryIoUntil(() => entered);
+      await flushRecoveryIo(); expect(reads).toBe(1); // Unrelated IO turns cannot authorize this held read.
+      releaseScope(); await flushRecoveryIoUntil(() => reads === 2);
+      expect(reads).toBe(2); // No fake timer was advanced to admit the new generation.
+    } finally { releaseRead(); releaseScope(); await adapter.dispose(); await pump; jest.useRealTimers(); }
+  });
+
   test("a new connected generation immediately rearms the inconclusive cycle instead of inheriting its old timer", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -8244,7 +9059,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await waitUntil(() => reads === 1);
       jest.useFakeTimers(); release(); await flushRecoveryIo();
       provider.eventQueue.push({ type: "server.connected", data: {} });
-      await flushRecoveryIo();
+      await flushRecoveryIoUntil(() => reads === 2);
       expect(reads).toBe(2);
       for (let retry = 0; retry < 5; retry++) { jest.advanceTimersByTime(30_000); await flushRecoveryIo(); }
       expect(reads).toBe(4);
@@ -12848,6 +13663,58 @@ describe("workspace activity summary", () => {
     expect(adapter.projectionForTests("unobserved").status).toBe("idle");
     expect(adapter.projectionForTests("foreign-active").status).toBe("idle");
 
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("requireSession null miss invalidates listed inventory and fences stale lookups against newer move-in events", async () => {
+    const { adapter, provider } = activityAdapter();
+    const listed = fixtureSession("listed");
+    provider.sessions = [listed];
+    await adapter.listConversations();
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+
+    // Lookup miss on a previously listed session notifies inventory subscribers immediately.
+    provider.getSession = async () => null;
+    await adapter.getConversation("listed").catch(() => undefined);
+    await expectInventorySignal(inventory);
+
+    // A deferred lookup that started before move-in must not clear the moved-in session's activity when it later resolves to null.
+    let resolveStaleLookup!: (session: ProviderSession | null) => void;
+    let first = true;
+    const arrived = fixtureSession("arrived");
+    provider.sessions = [arrived];
+    provider.listActiveSessions = async () => ["arrived"];
+    provider.getSession = async id => {
+      if (id === "arrived" && first) {
+        first = false;
+        return new Promise<ProviderSession | null>(resolve => { resolveStaleLookup = resolve; });
+      }
+      return id === "arrived" ? arrived : null;
+    };
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+    const staleLookup = adapter.getConversation("arrived").catch(() => undefined);
+    await waitUntil(() => resolveStaleLookup !== undefined);
+
+    provider.eventQueue.push({ normalized: {
+      conversationId: "arrived",
+      updates: [],
+      outcome: "handled",
+      eventType: "session.moved",
+      sessionLifecycle: { kind: "moved", id: "arrived", directory: process.cwd(), title: "", sparse: true },
+    } });
+    await expectInventorySignal(inventory);
+    await waitUntil(() => adapter.activity().working);
+
+    resolveStaleLookup(null);
+    await staleLookup;
+    await Bun.sleep(20);
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false, unresolved: false });
+    expect(adapter.projectionForTests("arrived").status).toBe("running");
+
+    inventory.cancel();
     await adapter.dispose();
     await pump;
   });
