@@ -3,6 +3,7 @@
 // rendering-time DOM massaging lives with the rest of the preview pipeline.
 
 import { writeClipboardText } from "../shared/clipboard";
+import { codeBlockCopyText } from "../shared/code-copy";
 import { splitHighlightedLines } from "./highlight-lines";
 
 // Restructure each <pre><code> in the container into one `.uatu-cl` block per
@@ -78,26 +79,7 @@ export function applySourceWrap(container: HTMLElement, wrap: boolean): void {
   });
 }
 
-export type CodeCopyOptions = {
-  /** Strip the single parser-synthesized trailing line break from Markdown code blocks. */
-  markdown?: boolean;
-};
-
-// Markdown fenced and indented code blocks end with a parser-synthesized
-// trailing line break inside `<code>`. Strip that single terminator when
-// copying Markdown output so a copied command does not execute on paste,
-// while preserving internal line breaks, intentional blank trailing lines,
-// verbatim whole-file source views (`pre.uatu-source-pre`), and AsciiDoc
-// documents (including the large-file fallback).
-export function codeBlockCopyText(pre: HTMLPreElement, code: Element, options: CodeCopyOptions = {}): string {
-  const raw = code.textContent ?? "";
-  if (options.markdown === false || pre.classList.contains("uatu-source-pre") || pre.closest(".listingblock, .literalblock")) {
-    return raw;
-  }
-  return raw.replace(/\r?\n$/, "");
-}
-
-export function attachCopyButtons(container: HTMLElement, options: CodeCopyOptions = {}) {
+export function attachCopyButtons(container: HTMLElement) {
   const blocks = container.querySelectorAll<HTMLPreElement>("pre");
   blocks.forEach(pre => {
     const code = pre.querySelector<HTMLElement>("code");
@@ -117,7 +99,7 @@ export function attachCopyButtons(container: HTMLElement, options: CodeCopyOptio
 
     button.addEventListener("click", async event => {
       event.preventDefault();
-      const text = codeBlockCopyText(pre, code, options);
+      const text = codeBlockCopyText(pre, code);
       if (await writeClipboardText(text)) {
         flashCopyButton(button, "Copied!", "is-copied");
       } else {

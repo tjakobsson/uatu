@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { renderCodeAsHtml, renderMarkdownToHtml } from "../render/markdown";
-import { attachCopyButtons, attachLineNumbers, codeBlockCopyText } from "./code-block";
+import { codeBlockCopyText } from "../shared/code-copy";
+import { attachCopyButtons, attachLineNumbers } from "./code-block";
 
 type ParsedWindow = ReturnType<typeof parseHTML>["window"];
 
@@ -70,7 +71,7 @@ describe("codeBlockCopyText", () => {
   });
 
   test("handles CRLF endings and code blocks without a trailing newline", () => {
-    withDom("<pre><code>echo hi\r\n</code></pre><pre><code>echo bare</code></pre><pre><code>\n</code></pre>", container => {
+    withDom("<pre data-uatu-markdown-code><code>echo hi\r\n</code></pre><pre data-uatu-markdown-code><code>echo bare</code></pre><pre data-uatu-markdown-code><code>\n</code></pre>", container => {
       const blocks = Array.from(container.querySelectorAll<HTMLPreElement>("pre"));
       expect(codeBlockCopyText(blocks[0]!, blocks[0]!.querySelector("code")!)).toBe("echo hi");
       expect(codeBlockCopyText(blocks[1]!, blocks[1]!.querySelector("code")!)).toBe("echo bare");
@@ -115,14 +116,21 @@ describe("attachCopyButtons", () => {
     });
   });
 
-  test("preserves the real trailing newline for non-Markdown rendered fallbacks such as oversized AsciiDoc", async () => {
-    const html = '<pre><code class="hljs">= Title\n\nBody\n</code></pre>';
+  test("preserves the real trailing newline for unmarked blocks (source views, AsciiDoc fallback, raw HTML) by default", async () => {
+    const html = '<pre><code class="hljs">= Title\n\nBody\n</code></pre>'
+      + renderCodeAsHtml("key: value\nport: 4321\n", "yaml")
+      + renderMarkdownToHtml('<pre><code>raw html\n</code></pre>').html;
     await withDom(html, async (container, window, nextWrite) => {
-      attachCopyButtons(container, { markdown: false });
-      const button = container.querySelector<HTMLButtonElement>("pre > .code-copy")!;
-      const write = nextWrite();
-      button.dispatchEvent(new window.Event("click", { bubbles: true, cancelable: true }));
-      expect(await write).toBe("= Title\n\nBody\n");
+      attachLineNumbers(container);
+      attachCopyButtons(container);
+      const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>("pre > .code-copy"));
+      expect(buttons).toHaveLength(3);
+      const writes = buttons.map(button => {
+        const promise = nextWrite();
+        button.dispatchEvent(new window.Event("click", { bubbles: true, cancelable: true }));
+        return promise;
+      });
+      expect(await Promise.all(writes)).toEqual(["= Title\n\nBody\n", "key: value\nport: 4321\n", "raw html\n"]);
     });
   });
 });

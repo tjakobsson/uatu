@@ -34,7 +34,7 @@ Visit https://example.com and ~~remove~~ text.`);
   test("highlights known languages with github-style tokens", () => {
     const { html } = renderMarkdownToHtml("```js\nconst answer = 42;\n```");
 
-    expect(html).toContain('<pre><code class="hljs language-js">');
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
     expect(html).toContain("hljs-keyword");
     expect(html).toContain("hljs-number");
   });
@@ -42,9 +42,18 @@ Visit https://example.com and ~~remove~~ text.`);
   test("falls back gracefully for unknown languages", () => {
     const { html } = renderMarkdownToHtml("```madeuplang\nnot a real language\n```");
 
-    expect(html).toContain('<pre><code class="hljs');
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs');
     expect(html).toContain("not a real language");
     expect(html).not.toContain("hljs-keyword");
+  });
+
+  test("marks indented Markdown code blocks but never raw HTML pre blocks (even with forged attributes)", () => {
+    const indented = renderMarkdownToHtml("    indented line\n").html;
+    expect(indented).toContain('<pre data-uatu-markdown-code><code class="hljs">');
+
+    const rawHtml = renderMarkdownToHtml('<pre data-uatu-markdown-code><code>raw line\n</code></pre>').html;
+    expect(rawHtml).toContain('<pre><code class="hljs">');
+    expect(rawHtml).not.toContain("data-uatu-markdown-code");
   });
 
   test("passes through GitHub-style inline HTML blocks (e.g. centered README hero)", () => {
@@ -60,7 +69,7 @@ Visit https://example.com and ~~remove~~ text.`);
   test("still escapes HTML inside fenced code blocks", () => {
     const { html } = renderMarkdownToHtml("```html\n<script>alert(1)</script>\n```");
 
-    expect(html).toContain('<pre><code class="hljs');
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs');
     expect(html).not.toContain("<script>alert(1)</script>");
     // Either named (&lt;) or numeric (&#x3C;) — both are valid HTML escapes.
     expect(html).toMatch(/&(lt;|#x3[Cc];)/);

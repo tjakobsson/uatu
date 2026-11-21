@@ -60,7 +60,7 @@ import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQue
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
 import { loginActionElement, loginActionFor, type LoginAction } from "./login-action";
 import { copyChatText } from "./copy-actions";
-import { codeBlockCopyText } from "../preview/code-block";
+import { codeBlockCopyText } from "../shared/code-copy";
 import { announceConversationInventory, renderConversationInventoryAwareness, renderSelectedConversationDeleted } from "./inventory-presentation";
 import { ConversationInventoryTracker, SerializedInventoryReconciler, conversationActivitySuffix, conversationDayGroup, dedupeConversationInventory, isConversationChooserActivationKey, patchConversationOptions, retainedPresentationConversationIds } from "./inventory-reconciler";
 import { dateTime, nextLocalMidnight } from "./dates";

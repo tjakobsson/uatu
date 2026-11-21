@@ -298,7 +298,7 @@ export async function renderSinglePayload(
     attachLineNumbers(previewElement);
     applySourceWrap(previewElement, appState.wrap);
   }
-  attachCopyButtons(previewElement, { markdown: payload.kind === "markdown" && payload.view === "rendered" });
+  attachCopyButtons(previewElement);
   // Rebuild the outline + action bar from the freshly-mounted content. In
   // Source view this hides the outline (a `<pre>` has no heading elements);
   // in Rendered view it enumerates the headings under #preview.
@@ -421,8 +421,8 @@ export async function renderSplitPayloads(
   if (!isCurrent()) return;
   attachLineNumbers(sourcePane);
   applySourceWrap(sourcePane, appState.wrap);
-  attachCopyButtons(sourcePane, { markdown: false });
-  attachCopyButtons(renderedPane, { markdown: renderedPayload.kind === "markdown" });
+  attachCopyButtons(sourcePane);
+  attachCopyButtons(renderedPane);
 
   // Apply persisted ratio for the active orientation. The auto-stack
   // ResizeObserver may further override the orientation visually, but the

@@ -2,7 +2,7 @@ import { fromHtml } from "hast-util-from-html";
 import { defaultSchema, sanitize, type Schema } from "hast-util-sanitize";
 import { toHtml } from "hast-util-to-html";
 import hljs from "highlight.js/lib/common";
-import { micromark } from "micromark";
+import { compile, parse, postprocess, preprocess } from "micromark";
 import { frontmatter, frontmatterHtml } from "micromark-extension-frontmatter";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
 
@@ -12,9 +12,20 @@ import {
   parseSimpleToml,
   parseSimpleYaml,
 } from "../document/metadata";
+import { MARKDOWN_CODE_ATTRIBUTE } from "../shared/code-copy";
 import { markExternalAnchors } from "./external-links";
 
-const CODE_BLOCK_PATTERN = /<pre><code(?:\s+class="language-([^"]+)")?>([\s\S]*?)<\/code><\/pre>/g;
+declare module "micromark-util-types" {
+  interface TokenTypeMap { markdownCodeOrigin: "markdownCodeOrigin" }
+}
+declare module "hast" {
+  interface ElementData { markdownCodeBlock?: boolean }
+}
+
+const CODE_BLOCK_PATTERN = new RegExp(
+  `<pre((?:\\s+${MARKDOWN_CODE_ATTRIBUTE}(?:="")?)?)><code(?:\\s+class="language-([^"]+)")?>([\\s\\S]*?)<\\/code><\\/pre>`,
+  "g",
+);
 
 export const SYNTAX_HIGHLIGHT_BYTES_LIMIT = 1_048_576;
 
@@ -74,16 +85,104 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
   // pass the original source through so micromark sees the leading delimiter
   // it knows how to consume; downstream we only surface metadata when our own
   // parser succeeded.
-  const rawHtml = micromark(source, {
-    allowDangerousHtml: true,
-    extensions: [gfm(), frontmatter(["yaml", "toml"])],
-    htmlExtensions: [gfmHtml(), frontmatterHtml(["yaml", "toml"])],
-  });
+  const { html: rawHtml, attribute } = compileMarkedMarkdown(source);
 
   const tree = fromHtml(rawHtml, { fragment: true });
+  extractMarkdownCodeMarkers(tree, attribute);
   const safe = sanitize(tree, markdownSanitizeSchema);
+  if (safe.type === "root") applyMarkdownCodeAttribute(safe);
   markExternalAnchors(safe);
   return { html: highlightCodeBlocks(toHtml(safe)), metadata };
+}
+
+type HtmlNode = ReturnType<typeof fromHtml>["children"][number];
+type MarkdownEvent = ReturnType<typeof postprocess>[number];
+
+function compileMarkedMarkdown(source: string): { html: string; attribute: string } {
+  const events = postprocess(
+    parse({ extensions: [gfm(), frontmatter(["yaml", "toml"])] })
+      .document()
+      .write(preprocess()(source, undefined, true)),
+  );
+  // Pick a temporary attribute absent from `source` so raw HTML `<pre>` blocks
+  // cannot forge a Markdown code-block marker before sanitization.
+  const prefix = "uatu-md-code-";
+  const width = String(source.length).length;
+  const used = new Set<number>();
+  for (const match of source.matchAll(new RegExp(`${prefix}([0-9]{${width}})`, "gi"))) {
+    used.add(Number(match[1]));
+  }
+  let suffix = 0;
+  while (used.has(suffix)) suffix += 1;
+  const attribute = prefix + String(suffix).padStart(width, "0");
+
+  const wrapped: MarkdownEvent[] = [];
+  const wrappers = new Map<MarkdownEvent[1], MarkdownEvent[1]>();
+  for (const [event, token, context] of events) {
+    if (event === "enter" && (token.type === "codeFenced" || token.type === "codeIndented")) {
+      const wrapper = { ...token, type: "markdownCodeOrigin" as const };
+      wrappers.set(token, wrapper);
+      wrapped.push(["enter", wrapper, context]);
+    }
+    wrapped.push([event, token, context]);
+    if (event === "exit" && wrappers.has(token)) {
+      wrapped.push(["exit", wrappers.get(token)!, context]);
+    }
+  }
+  const html = compile({
+    allowDangerousHtml: true,
+    htmlExtensions: [gfmHtml(), frontmatterHtml(["yaml", "toml"]), {
+      enter: {
+        markdownCodeOrigin() {
+          this.lineEndingIfNeeded();
+          this.buffer();
+        },
+      },
+      exit: {
+        markdownCodeOrigin() {
+          let chunk = this.resume();
+          const position = chunk.indexOf("<pre");
+          if (position !== -1) {
+            chunk = `${chunk.slice(0, position + 4)} ${attribute}="1"${chunk.slice(position + 4)}`;
+          }
+          const lastWasTag = this.getData("lastWasTag");
+          this.raw(chunk);
+          this.setData("lastWasTag", lastWasTag);
+        },
+      },
+    }],
+  })(wrapped);
+  return { html, attribute };
+}
+
+function extractMarkdownCodeMarkers(parent: { children: HtmlNode[] }, attribute: string): void {
+  for (const node of parent.children) {
+    if (node.type !== "element") continue;
+    if (node.tagName === "pre" && node.properties[attribute] !== undefined) {
+      node.data ??= { position: {} };
+      node.data.markdownCodeBlock = true;
+    }
+    delete node.properties[attribute];
+    extractMarkdownCodeMarkers(node, attribute);
+  }
+}
+
+export function isMermaidPre(node: HtmlNode): boolean {
+  if (node.type !== "element" || node.tagName !== "pre") return false;
+  const code = node.children.find(child => child.type === "element" && child.tagName === "code");
+  return code?.type === "element"
+    && Array.isArray(code.properties.className)
+    && code.properties.className.some(name => String(name) === "language-mermaid");
+}
+
+function applyMarkdownCodeAttribute(parent: { children: HtmlNode[] }): void {
+  for (const node of parent.children) {
+    if (node.type !== "element") continue;
+    if (node.tagName === "pre" && node.data?.markdownCodeBlock && !isMermaidPre(node)) {
+      node.properties[MARKDOWN_CODE_ATTRIBUTE] = true;
+    }
+    applyMarkdownCodeAttribute(node);
+  }
 }
 
 function extractMarkdownMetadata(source: string): DocumentMetadata | undefined {
@@ -102,7 +201,7 @@ function extractMarkdownMetadata(source: string): DocumentMetadata | undefined {
 }
 
 export function highlightCodeBlocks(html: string): string {
-  return html.replaceAll(CODE_BLOCK_PATTERN, (match, language: string | undefined, body: string) => {
+  return html.replaceAll(CODE_BLOCK_PATTERN, (match, preAttrs: string, language: string | undefined, body: string) => {
     if (language === "mermaid") {
       return match;
     }
@@ -113,7 +212,7 @@ export function highlightCodeBlocks(html: string): string {
       ? ` class="hljs language-${escapeAttribute(highlighted.language)}"`
       : ' class="hljs"';
 
-    return `<pre><code${classAttribute}>${highlighted.value}</code></pre>`;
+    return `<pre${preAttrs}><code${classAttribute}>${highlighted.value}</code></pre>`;
   });
 }
 
