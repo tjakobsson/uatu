@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import { installClipboardMock, readClipboardMock } from "./chat-helpers";
 import { chatWorkload } from "../fixtures/chat-performance";
+import { settleScroll } from "./chat-shell-helpers";
 
 for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation`, () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -45,7 +46,7 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     expect(Math.abs(await page.locator("#chat-timeline").evaluate(el => el.scrollTop) - beforeTop)).toBeLessThan(3);
   });
 
-  test("pinned viewport resize avoids measuring transcript items", async ({ page, request }) => {
+  test("pinned viewport resize avoids measuring transcript items", async ({ page, request }, testInfo) => {
     await request.post("/__e2e/reset");
     await request.post("/__e2e/chat", { data: { action: "agents", count: 2 } });
     await request.post("/__e2e/chat", { data: { action: "seed", agent, items: chatWorkload(50) } });
@@ -54,12 +55,37 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     await page.goto(`/?t=${encodeURIComponent(token)}`);
     await page.locator("#touch-tab-chat").click();
     await expect(page.locator('[data-chat-item-id="bench:49"]')).toBeVisible();
-    await page.waitForTimeout(100);
+    const timeline = page.locator("#chat-timeline");
+    const distanceFromBottom = () => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
+    await expect.poll(distanceFromBottom).toBeLessThan(1);
+    await settleScroll(timeline);
     const before = await page.evaluate(() => globalThis.__uatuChatPerformance?.counts["item-geometry"] ?? 0);
+    await timeline.evaluate(el => {
+      const trace = { recording: true, samples: [] as Array<{ time: number; top: number; extent: number; height: number }> };
+      Reflect.set(window, "__pinnedResizeTrace", trace);
+      const sample = () => {
+        trace.samples.push({ time: performance.now(), top: el.scrollTop, extent: el.scrollHeight, height: el.clientHeight });
+        if (trace.recording) requestAnimationFrame(sample);
+      };
+      sample();
+    });
     await page.setViewportSize({ width: 390, height: 744 });
-    await page.waitForTimeout(150);
-    expect(await page.evaluate(() => globalThis.__uatuChatPerformance?.counts["item-geometry"] ?? 0)).toBe(before);
-    const distance = await page.locator("#chat-timeline").evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
+    await expect.poll(distanceFromBottom).toBeLessThan(1);
+    await settleScroll(timeline);
+    const after = await page.evaluate(() => globalThis.__uatuChatPerformance?.counts["item-geometry"] ?? 0);
+    const samples = await page.evaluate(() => {
+      const trace = Reflect.get(window, "__pinnedResizeTrace"); trace.recording = false;
+      return trace.samples as Array<{ time: number; top: number; extent: number; height: number }>;
+    });
+    let lastLayout = 0;
+    for (let index = 1; index < samples.length; index++) {
+      if (samples[index]!.extent !== samples[index - 1]!.extent || samples[index]!.height !== samples[index - 1]!.height) lastLayout = index;
+    }
+    const arrived = samples.slice(lastLayout).find(sample => sample.extent - sample.height - sample.top < 1);
+    await testInfo.attach("pinned-resize-catchup.json", { contentType: "application/json", body: JSON.stringify({ before, after,
+      catchupMs: arrived ? arrived.time - samples[lastLayout]!.time : null, samples }) });
+    expect(after).toBe(before);
+    const distance = await distanceFromBottom();
     expect(distance).toBeLessThan(3);
   });
   test("optional catalogs and a hidden preview cannot block restored Chat", async ({ page, request }) => {

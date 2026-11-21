@@ -4,6 +4,7 @@ import type { ConversationItem } from "../../src/chat/types";
 import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
 import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
+import { settleScroll } from "./chat-shell-helpers";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   await request.post("/__e2e/reset");
@@ -893,7 +894,7 @@ test.describe("timeline reading position", () => {
     return seeded.conversation.id;
   };
 
-  test("a small upward wheel scroll during streaming is not pulled back to the end", async ({ page, request }) => {
+  test("a small upward wheel scroll during streaming is not pulled back to the end", async ({ page, request }, testInfo) => {
     const id = await seedLong(page, request);
     const timeline = page.locator("#chat-timeline");
     await timeline.evaluate(el => { el.scrollTop = el.scrollHeight; });
@@ -902,7 +903,21 @@ test.describe("timeline reading position", () => {
     await expect(page.locator("#chat-items")).toContainText("Streaming");
     await timeline.evaluate(el => {
       (window as any).__scrollTops = [] as number[];
-      el.addEventListener("scroll", () => (window as any).__scrollTops.push(el.scrollTop));
+      (window as any).__scrollIntentTrace = [];
+      (window as any).__upwardWheelSeen = false;
+      el.addEventListener("wheel", event => {
+        (window as any).__scrollIntentTrace.push({ kind: "wheel", top: el.scrollTop, time: performance.now(), deltaY: event.deltaY, trusted: event.isTrusted });
+        if (event.isTrusted && event.deltaY < 0 && !(window as any).__upwardWheelSeen) {
+          (window as any).__upwardWheelSeen = true;
+          // Pending smooth follow before reader intent is legitimate. From
+          // this capture-phase baseline onward, every positive move counts.
+          (window as any).__scrollTops.push(el.scrollTop);
+        }
+      }, { capture: true, passive: true });
+      el.addEventListener("scroll", () => {
+        if ((window as any).__upwardWheelSeen) (window as any).__scrollTops.push(el.scrollTop);
+        (window as any).__scrollIntentTrace.push({ kind: "scroll", top: el.scrollTop, time: performance.now() });
+      });
     });
     await timeline.hover();
     // Trackpad-sized steps, each well inside the 48px near-end threshold,
@@ -918,22 +933,29 @@ test.describe("timeline reading position", () => {
       await page.waitForTimeout(30);
     }
     await streaming;
+    await expect(page.locator("#chat-items")).toContainText("word29");
+    await settleScroll(timeline);
     const tops = await page.evaluate(() => (window as any).__scrollTops as number[]);
+    await testInfo.attach("scroll-intent-ordering.json", { contentType: "application/json", body: JSON.stringify(await page.evaluate(() => (window as any).__scrollIntentTrace)) });
+    expect(await page.evaluate(() => (window as any).__upwardWheelSeen)).toBe(true);
+    expect(tops.length).toBeGreaterThan(1);
     const pulledBack = tops.filter((top, index) => index > 0 && top > tops[index - 1]! + 1);
     expect(pulledBack).toEqual([]);
     expect(await timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(150);
     await expect(page.locator("#chat-latest")).toBeVisible();
   });
 
-  test("sending a message returns the reader to the end", async ({ page, request }) => {
+  test("sending a message preserves a paused reading position", async ({ page, request }) => {
     await seedLong(page, request);
     const timeline = page.locator("#chat-timeline");
     await timeline.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 150; el.dispatchEvent(new Event("scroll")); });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const readingTop = await timeline.evaluate(el => el.scrollTop);
     await page.locator("#chat-input").fill("hello there");
     await page.locator("#chat-input").press("Enter");
     await expect(page.locator("#chat-items")).toContainText("hello there");
-    await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
-    await expect(page.locator("#chat-latest")).toBeHidden();
+    await expect(page.locator("#chat-latest")).toBeVisible();
+    await expect.poll(() => timeline.evaluate((el, top) => Math.abs(el.scrollTop - top), readingTop)).toBeLessThan(2);
   });
 
   test("a reading position saved just above the end survives a reload and the next update", async ({ page, request }) => {

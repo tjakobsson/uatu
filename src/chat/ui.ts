@@ -2,7 +2,6 @@ import { boundedSet } from "../shared/bounded-map";
 import { Composer, type PendingQueueAction } from "./composer";
 import { escapeHtml } from "../shared/html";
 import { createLoadingSignal } from "../preview/loading-signal";
-import { measureChatWork } from "./performance";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { onUiModeChange } from "../shell/ui-mode";
@@ -11,8 +10,11 @@ import { liveChannel, onManualRecovery, registerLiveTeardown, registerRecoveryWo
 import { isHubPage } from "../shared/app-url";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
-import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
+import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type TimelinePosition } from "./anchor";
 import { CoordinatedScrollOwner, type RevealOptions } from "./coordinated-scroll";
+import { reducedMotion, scrollFollowMotion } from "./scroll-motion";
+import { timelineGeometry } from "./scroll-geometry";
+import { parseMarkdownAnchorKey } from "./markdown-anchor-key";
 import { ChatViewportController } from "./viewport";
 import { notificationAwaiting, notificationConversation } from "./notification-navigation";
 import { setActiveTab } from "../shell/tab-bar";
@@ -73,7 +75,7 @@ type Presentation = {
   selectedId?: string;
   drafts: Record<string, string>;
   expanded: string[];
-  anchors: Record<string, TimelineAnchor>;
+  anchors: Record<string, TimelineAnchor | Extract<TimelinePosition, { kind: "paused" }>>;
   workingSince: Record<string, number>;
   // Standalone saved worker entry IDs, per conversation — dismissal is a
   // user statement that must survive reload.
@@ -422,6 +424,7 @@ export function initChat(api = new ChatApiClient()): void {
   const childRenderer = new TimelineRenderer();
   childRenderer.deferClosedActivity = true;
   const childAnchor = new TimelineAnchorController();
+  const childReadingAnchors = new Map<string, TimelinePosition>();
   const childReadSignal = drilldownTimeline ? createLoadingSignal({ segment: null, barHost: drilldownTimeline, busyHost: drilldownTimeline, visibleLabel: true }) : null;
   const childReadError = document.createElement("div");
   childReadError.className = "chat-read-error";
@@ -483,6 +486,8 @@ export function initChat(api = new ChatApiClient()): void {
     return true;
   });
   let rendering = false;
+  // Proof of focus loss caused by this renderer, not by a newer focus choice.
+  let renderedRequestFocusLoss = new WeakMap<Element, string>();
   let renderFrame: number | null = null;
   let renderDirty = false;
   let pendingNewContent = false;
@@ -862,29 +867,12 @@ export function initChat(api = new ChatApiClient()): void {
   const questionOwnershipKey = (source: ChatProjection, item: Extract<ConversationItem, { type: "question" }>) =>
     `${item.conversationId ?? source.conversationId}\u0000${item.requestId}`;
 
-  const geometryOf = (scroller: HTMLElement, container: HTMLElement): AnchorGeometry => {
-    const bounds = scroller.getBoundingClientRect();
-    return {
-      scrollTop: scroller.scrollTop,
-      clientHeight: scroller.clientHeight,
-      scrollHeight: scroller.scrollHeight,
-      items: Array.from(container.querySelectorAll<HTMLElement>("[data-chat-item-id]")).map(element => {
-        const finish = measureChatWork("item-geometry");
-        const rect = element.getBoundingClientRect();
-        finish();
-        return { id: element.dataset.chatItemId!, top: rect.top - bounds.top, bottom: rect.bottom - bounds.top };
-      // Members of a collapsed activity group are not rendered and report
-      // zero-size rects; anchoring to one would pin the viewport to nothing.
-      }).filter(entry => entry.bottom > entry.top),
-    };
-  };
-
-  const geometry = (): AnchorGeometry => geometryOf(timeline, items);
+  const geometry = (preserveAnchor = true, preferredItemId?: string): AnchorGeometry => timelineGeometry(timeline, items, preserveAnchor ? anchor.currentAnchor() : null, preferredItemId);
   // Every caller sits behind a guard on the drill-down elements existing
   // (renderChild and the wiring at the bottom), so the assertions cannot
   // fire — and a fallback to the parent's scroller would anchor the child
   // against the wrong geometry if they somehow did.
-  const childGeometry = (): AnchorGeometry => geometryOf(drilldownTimeline!, drilldownItems!);
+  const childGeometry = (preserveAnchor = true, preferredItemId?: string): AnchorGeometry => timelineGeometry(drilldownTimeline!, drilldownItems!, preserveAnchor ? childAnchor.currentAnchor() : null, preferredItemId);
   // The pinned fast path. Pinned means "keep the end in view", which needs
   // the scroll extents and nothing per item — and the per-item pass is a
   // forced layout of the whole transcript (a rect per item). During a
@@ -896,18 +884,24 @@ export function initChat(api = new ChatApiClient()): void {
   const extentsOf = (scroller: HTMLElement): AnchorGeometry =>
     ({ scrollTop: scroller.scrollTop, clientHeight: scroller.clientHeight, scrollHeight: scroller.scrollHeight, items: [] });
   const parentScroll = new CoordinatedScrollOwner(timeline, {
-    anchor, measure: includeItems => includeItems ? geometry() : extentsOf(timeline), active: chatSurfaceActive,
+    anchor, position: anchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? geometry(preserveAnchor, preferredItemId) : extentsOf(timeline), active: chatSurfaceActive,
+    pendingRender: () => renderFrame !== null ? "frame" : incrementalTimer !== null ? "timer" : undefined,
+    followMotion: scrollFollowMotion,
     onChange: () => {
-      if (projection) {
-        const current = anchor.currentAnchor();
-        if (current) presentation.anchors[projection.conversationId] = current;
-        else delete presentation.anchors[projection.conversationId];
+      const id = projection?.conversationId ?? (hasSelectedConversation ? presentation.selectedId : undefined);
+      if (id) {
+        retainParentPosition(id);
         save();
       }
       latestButton.hidden = !anchor.hasUnseen();
       syncPromptRailActive();
     },
   });
+  function retainParentPosition(id: string): void {
+    const position = parentScroll.capturePosition();
+    if (position.kind === "following") delete presentation.anchors[id];
+    else presentation.anchors[id] = position.kind === "anchor" ? position.anchor : position;
+  }
   const childLatest = drilldownTimeline ? document.createElement("button") : null;
   if (childLatest && drilldownTimeline) {
     childLatest.id = "chat-drilldown-latest";
@@ -918,9 +912,13 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownTimeline.after(childLatest);
   }
   const childScroll = drilldownTimeline ? new CoordinatedScrollOwner(drilldownTimeline, {
-    anchor: childAnchor, measure: includeItems => includeItems ? childGeometry() : extentsOf(drilldownTimeline),
+    anchor: childAnchor, position: childAnchor, measure: (includeItems, preserveAnchor, preferredItemId) => includeItems ? childGeometry(preserveAnchor, preferredItemId) : extentsOf(drilldownTimeline),
     active: () => chatSurfaceActive() && !!child,
-    onChange: () => { if (childLatest) childLatest.hidden = !childAnchor.hasUnseen(); },
+    pendingRender: () => childRenderFrame !== null ? "frame" : childIncrementalTimer !== null ? "timer" : undefined,
+    followMotion: scrollFollowMotion,
+    onChange: () => {
+      if (childLatest) childLatest.hidden = !childAnchor.hasUnseen();
+    },
   }) : null;
   childLatest?.addEventListener("click", () => childScroll?.latest());
   /**
@@ -1596,15 +1594,35 @@ export function initChat(api = new ChatApiClient()): void {
   // close performs the parked jump instead, after its own scroll restore.
   let pendingRequestJump: string | null = null;
   const jumpToRequestCard = (id: string) => {
-    const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
-    if (!(card instanceof HTMLElement)) return;
-    for (let parent = card.parentElement; parent && parent !== items; parent = parent.parentElement) {
-      if (parent instanceof HTMLDetailsElement) parent.open = true;
-    }
-    if (card instanceof HTMLDetailsElement) card.open = true;
-    if (!card.hasAttribute("tabindex")) card.tabIndex = -1;
-    card.scrollIntoView({ block: "center" });
-    card.focus?.();
+    const conversationId = projection?.conversationId, selection = selectionGeneration;
+    const focus = document.activeElement;
+    parentScroll.reveal(() => {
+      if (!projection || projection.conversationId !== conversationId || selection !== selectionGeneration
+        || child || !chatSurfaceActive()) return null;
+      const retainedFocus = document.activeElement === focus || (focus && document.activeElement === document.body
+        && renderedRequestFocusLoss.get(focus) === id);
+      if (!retainedFocus) return null;
+      const item = projection.items.find(item => item.id === id);
+      if (!item || ((item.type === "permission" || item.type === "question")
+        && (item.status !== "pending" || activeInteractionRequests(projection.items, projection.conversationId)[0]?.id !== id))) return null;
+      // The owner can run before an already queued transcript render. Retain
+      // only the logical id until that render has reconciled request roots.
+      if (renderDirty) return undefined;
+      const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
+      if (!(card instanceof HTMLElement)) return null;
+      for (let parent = card.parentElement; parent && parent !== items; parent = parent.parentElement) {
+        if (parent instanceof HTMLDetailsElement) parent.open = true;
+      }
+      const disclosure = card.localName === "details";
+      if (disclosure) card.setAttribute("open", "");
+      // WebKit skips the descendants of a programmatically focused <details>
+      // on Tab. Start at its native summary while positioning the whole card.
+      const focusTarget = (disclosure ? card.querySelector<HTMLElement>(":scope > summary") : null) ?? card;
+      if (focusTarget === card && !card.hasAttribute("tabindex")) card.tabIndex = -1;
+      focusTarget.focus?.({ preventScroll: true });
+      return projection?.conversationId === conversationId && selection === selectionGeneration
+        && items.contains(focusTarget) && document.activeElement === focusTarget ? card : null;
+    }, { align: "center" });
   };
   requestsJump?.addEventListener("click", () => {
     const id = requestsJump.dataset.requestTarget;
@@ -1911,7 +1929,15 @@ export function initChat(api = new ChatApiClient()): void {
     renderer.loginAction = contextLoginAction();
     const conversation = conversations.find(value => value.id === projection?.conversationId);
     renderer.conversationTitle = conversation ? displayConversationTitle(conversation) : chatHeading();
+    const focusedBeforeRender = document.activeElement;
+    const focusLossBeforeRender = renderedRequestFocusLoss;
+    const focusedRequestId = focusedBeforeRender && items.contains(focusedBeforeRender)
+      ? focusedBeforeRender.closest(".chat-request[data-chat-item-id]")?.getAttribute("data-chat-item-id") : null;
     const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
+    if (focusedBeforeRender && focusedRequestId && focusLossBeforeRender === renderedRequestFocusLoss
+      && !focusedBeforeRender.isConnected && document.activeElement === document.body) {
+      renderedRequestFocusLoss.set(focusedBeforeRender, focusedRequestId);
+    }
     // Reconcile the current snapshot before revealing a retained output window.
     renderer.setShellOutputsHidden(false);
     revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
@@ -2000,7 +2026,7 @@ export function initChat(api = new ChatApiClient()): void {
       const content = pendingNewContent;
       pendingNewContent = false;
       renderNow(content);
-      parentScroll.flush(timestamp);
+      parentScroll.flush(timestamp, { rendered: projection !== null });
     });
   };
 
@@ -2130,7 +2156,6 @@ export function initChat(api = new ChatApiClient()): void {
       if (change === "attachments" || change === "submit" || (change === "edit" || change === "history" || change === "restored") && activeConversationId() === id) renderAttachments();
       if (change === "accepted" && projection?.conversationId === id) renderConfiguration();
       syncControls();
-      if (change === "submit") { parentScroll.latest(); latestButton.hidden = true; }
       if (change === "submit" || change === "accepted" || change === "pending" || change === "projection" || change === "restored") scheduleRender(change === "submit" || change === "accepted");
       if ((change === "edit" || change === "history") && activeConversationId() === id) input.focus();
     },
@@ -2946,7 +2971,7 @@ export function initChat(api = new ChatApiClient()): void {
     });
   };
 
-  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number, readingAnchor: TimelineAnchor | null = presentation.anchors[snapshot.conversation.id] ?? null) => {
+  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number) => {
     resetWorkerView();
     projection = composer.acceptSnapshot(snapshot, acceptedDrafts);
     const carried = removedRows.get(snapshot.conversation.id);
@@ -2957,7 +2982,6 @@ export function initChat(api = new ChatApiClient()): void {
     renderAttachments();
     announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
     cancelForSnapshot(parentScroll);
-    anchor.restore(readingAnchor);
     scheduleRender(false, false);
     stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
   };
@@ -3106,7 +3130,7 @@ export function initChat(api = new ChatApiClient()): void {
         if (!read?.isCurrent()) return false;
         const snapshot = composer.checkedSnapshot(id, read.snapshot, pendingEntry);
         const previousStream = stream;
-        installConversationSnapshot(snapshot, projection!.acceptedDrafts, token, anchor.currentAnchor());
+        installConversationSnapshot(snapshot, projection!.acceptedDrafts, token);
         if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
           stopConversationRefreshRecovery();
         }
@@ -3118,7 +3142,10 @@ export function initChat(api = new ChatApiClient()): void {
     }
   }
 
-  const selectConversation = async (id: string, deferredStartup = false): Promise<boolean> => {
+  const selectConversation = async (id: string, deferredStartup = false, outgoingSelectionId: string | undefined = presentation.selectedId): Promise<boolean> => {
+    // The displayed view owns departure. New supplies the prior selection when
+    // it publishes its incoming identity before a pending snapshot has loaded.
+    const outgoingId = hasSelectedConversation ? projection?.conversationId ?? outgoingSelectionId : undefined;
     const openingStartup = deferredStartup || isUnestablishedStartup(id);
     supersedeStartupSelection();
     hasSelectedConversation = true;
@@ -3127,6 +3154,7 @@ export function initChat(api = new ChatApiClient()): void {
     // Navigation ends the outgoing hold before a fast snapshot can arrive
     // ahead of its clearing paint. Only an in-place refresh may renew it;
     // otherwise removing A's field could resume A's follow intent over B.
+    if (outgoingId) retainParentPosition(outgoingId);
     parentScroll.cancel();
     renderer.closeShellOutputWindow();
     childRenderer.closeShellOutputWindow();
@@ -3145,8 +3173,6 @@ export function initChat(api = new ChatApiClient()): void {
     const acceptedDrafts = projection?.conversationId === id ? projection.acceptedDrafts : composer.acceptedDrafts(id);
     if (projection) {
       presentation.drafts[projection.conversationId] = input.value;
-      const currentAnchor = anchor.currentAnchor();
-      if (currentAnchor) presentation.anchors[projection.conversationId] = currentAnchor;
     }
     presentation.selectedId = id;
     if (window.location && new URLSearchParams(window.location.search).has("conversation")) {
@@ -3172,6 +3198,7 @@ export function initChat(api = new ChatApiClient()): void {
     save();
     resetWorkerView();
     projection = null;
+    parentScroll.restorePosition(positionFromStored(presentation.anchors[id]));
     scheduleRender(false, false);
     // Not a clear: the incoming conversation may hold a refusal that landed
     // while it was deselected, and it surfaces now.
@@ -3319,10 +3346,7 @@ export function initChat(api = new ChatApiClient()): void {
     const selectedId = presentation.selectedId;
     if (selectedId) {
       presentation.drafts[selectedId] = input.value;
-      if (projection?.conversationId === selectedId) {
-        const currentAnchor = anchor.currentAnchor();
-        if (currentAnchor) presentation.anchors[selectedId] = currentAnchor;
-      }
+      if (hasSelectedConversation) retainParentPosition(selectedId);
     }
     // The projection remains in memory so its draft, attachments,
     // configuration, and active turn survive until an explicit selection.
@@ -3538,10 +3562,11 @@ export function initChat(api = new ChatApiClient()): void {
       if (inventoryTracker.noteLocalCreation(snapshot.conversation.id)) syncInventoryAwareness();
       void inventoryReconciler.supersede();
       conversations = dedupeConversationInventory([snapshot.conversation, ...conversations]);
+      const outgoingSelectionId = presentation.selectedId;
       presentation.selectedId = snapshot.conversation.id;
       selectedConversationDeleted = false;
       patchChooser(snapshot.conversation.id);
-      if (await selectConversation(snapshot.conversation.id)) {
+      if (await selectConversation(snapshot.conversation.id, undefined, outgoingSelectionId)) {
         input.focus();
         announce(newConversationAnnouncement(projection?.configuration ?? snapshot.configuration));
       }
@@ -3852,6 +3877,18 @@ export function initChat(api = new ChatApiClient()): void {
     container: HTMLElement,
     scroll: CoordinatedScrollOwner,
   ) => {
+    // A native summary activation (pointer or keyboard) chooses the row
+    // before layout changes. An open node can emit toggle when the renderer
+    // creates or reveals it, so toggle alone is not proof of reader intent.
+    container.addEventListener("click", event => {
+      if (event.defaultPrevented || !(event.target instanceof Element)) return;
+      const summary = event.target.closest("summary");
+      if (!summary || event.target.closest("a, button, input, select, textarea, label")) return;
+      const details = summary.parentElement;
+      if (!details?.matches("details[data-chat-item-id]") || details.firstElementChild !== summary) return;
+      scroll.beforeMutation(details.dataset.chatItemId);
+      scroll.request();
+    });
     container.addEventListener("toggle", event => {
       const details = event.target as HTMLDetailsElement;
       if (!details.matches("details[data-chat-item-id]")) return;
@@ -3864,7 +3901,6 @@ export function initChat(api = new ChatApiClient()): void {
       // The reader can only ever close an already-open row (open=false, which
       // passes) or open an unmarked one, so no real interaction is lost.
       if (details.open && details.hasAttribute("data-auto-open")) return;
-      scroll.beforeMutation(details.dataset.chatItemId);
       // The reader has spoken, so the row is theirs from here. Clearing the
       // stream's auto-open marker stops the next render from undoing an
       // expansion they made on a row that had opened itself; recording a close
@@ -4278,11 +4314,14 @@ export function initChat(api = new ChatApiClient()): void {
     childRenderFrame = requestAnimationFrame(timestamp => {
       childRenderFrame = null;
       if (!chatSurfaceActive()) return;
+      // Visibility may return while the read is unresolved. Empty loading UI
+      // cannot consume the actual transcript's saved/initial placement.
+      if (!child?.projection) return;
       const content = childNewContent;
       childNewContent = false;
       childRenderDirty = false;
       renderChildNow(content);
-      childScroll?.flush(timestamp);
+      childScroll?.flush(timestamp, { rendered: true });
     });
   };
 
@@ -4323,9 +4362,6 @@ export function initChat(api = new ChatApiClient()): void {
    * no-op.
    */
   const closeChildConversation = (popped = false) => {
-    childRenderer.closeShellOutputWindow();
-    childScroll?.cancel();
-    if (childLatest) childLatest.hidden = true;
     const open = child;
     if (!open) return;
     if (!popped && drilldownClosePending) return;
@@ -4338,6 +4374,10 @@ export function initChat(api = new ChatApiClient()): void {
       history.back();
       return;
     }
+    if (childScroll) boundedSet(childReadingAnchors, open.conversationId, childScroll.capturePosition(), 200);
+    childRenderer.closeShellOutputWindow();
+    childScroll?.cancel();
+    if (childLatest) childLatest.hidden = true;
     drilldownClosePending = false;
     // The entry remains somewhere in history in both cases: buried below a
     // direct close, or in the Forward stack after its Back pop. Retire it so
@@ -4446,6 +4486,7 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownClosePending = false;
     silentRun.stop();
     const previous = child;
+    if (previous && childScroll) boundedSet(childReadingAnchors, previous.conversationId, childScroll.capturePosition(), 200);
     if (!previous) {
       childInvoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const attribute = ["data-worker-item", "data-inspect-task", "data-open-conversation"].find(name => childInvoker?.hasAttribute(name));
@@ -4455,7 +4496,7 @@ export function initChat(api = new ChatApiClient()): void {
     previous?.stream?.close();
     previous?.read?.controller.abort();
     const retainedProjection = previous?.conversationId === id ? previous.projection : null;
-    const retainedAnchor = retainedProjection ? childAnchor.currentAnchor() : null;
+    const retainedPosition = childReadingAnchors.get(id) ?? { kind: "following" as const };
     // The task behind this layer: named by the caller (a composer row), kept
     // from the layer being refreshed, or — for a transcript opened from the
     // subagents track or the launching row — found by the child id on a
@@ -4529,9 +4570,14 @@ export function initChat(api = new ChatApiClient()): void {
       drilldownOlder.hidden = !retainedProjection?.olderCursor;
       drilldownOlder.disabled = retainedProjection !== null;
     }
-    if (automaticRefresh && retainedProjection && childScroll) cancelForSnapshot(childScroll);
-    else childScroll?.cancel();
-    childAnchor.restore(retainedAnchor);
+    if (automaticRefresh && retainedProjection && childScroll) {
+      cancelForSnapshot(childScroll);
+      // A painted transcript has no pending restore: capture its latest
+      // reader position when the response paints. A hidden first paint may
+      // still owe a navigation restore; only that actual paint consumes it.
+    } else {
+      childScroll?.restorePosition(retainedPosition);
+    }
     announceChild("");
     if (!automaticRefresh) drilldownBack?.focus();
     if (outputView) return;
@@ -4568,10 +4614,8 @@ export function initChat(api = new ChatApiClient()): void {
       }
       if (signal.aborted || generation !== childGeneration || child !== next) return;
       if (!snapshot) return;
-      const readingAnchor = childAnchor.currentAnchor();
       next.projection = projectionFromSnapshot(snapshot, []);
       if (childScroll) cancelForSnapshot(childScroll);
-      childAnchor.restore(readingAnchor);
       announceChild(snapshot.items.length ? "" : "This subagent has not reported anything yet.");
       renderChild(false);
       next.stream = openChildStream(next, id, label, snapshot.cursor, generation);
@@ -4720,9 +4764,10 @@ export function initChat(api = new ChatApiClient()): void {
   const cancelForSnapshot = (owner: CoordinatedScrollOwner) => {
     const field = heldAnswerField;
     const restore = field && owner.isHolding(field);
-    // cancel restores the hold's original follow intent without scheduling;
-    // the replacement hold must inherit that rather than a reveal's pause.
-    owner.cancel();
+    // An active replacement hold inherits its original intent, not a reveal's
+    // pause. After blur, snapshot cancellation leaves live reading in place
+    // while retaining the separate durable position used on actual departure.
+    owner.cancel("snapshot");
     if (restore && field.isConnected && document.activeElement === field && chatSurfaceActive()) {
       holdInOwningTimeline(field);
     }
@@ -4750,6 +4795,10 @@ export function initChat(api = new ChatApiClient()): void {
     if (heldAnswerField && !surface.contains(heldAnswerField)) syncEditingFocus();
   };
   surface.addEventListener("focusin", syncEditingFocus);
+  // A focus choice anywhere invalidates a prior renderer-owned body fallback.
+  // Detached-node focusout is not reliable across engines; capture the actual
+  // focused removal in renderNow instead of inferring it from blur events.
+  document.addEventListener("focusin", () => { renderedRequestFocusLoss = new WeakMap(); });
   surface.addEventListener("focusout", () => queueMicrotask(syncEditingFocus));
   send.addEventListener("mousedown", keepTouchComposerFocus);
   attachButton?.addEventListener("mousedown", keepTouchComposerFocus);
@@ -5734,6 +5783,11 @@ export function initChat(api = new ChatApiClient()): void {
     if (!chatSurfaceActive()) return;
     parentScroll.beforeMutation();
     childScroll?.beforeMutation();
+    // Queue the correction with the capture, before ResizeObserver delivery.
+    // Further divider steps must not recapture already-reflowed text while
+    // the first layout change is still waiting for its correction frame.
+    parentScroll.request();
+    childScroll?.request();
   };
   document.addEventListener("uatu:before-surface-change", captureSurfaceAnchors);
   const handleChatSurfaceState = () => {
@@ -5748,8 +5802,8 @@ export function initChat(api = new ChatApiClient()): void {
     if (!active) {
       renderer.setShellOutputsHidden(true);
       childRenderer.setShellOutputsHidden(true);
-      parentScroll.cancel();
-      childScroll?.cancel();
+      parentScroll.cancel("hidden");
+      childScroll?.cancel("hidden");
       heldAnswerField = null;
       readSignal.cancel();
       childReadSignal?.cancel();
@@ -5858,6 +5912,37 @@ function autosize(input: HTMLTextAreaElement): void {
   input.style.height = `${Math.min(input.scrollHeight, 192)}px`;
 }
 
+function positionFromStored(value: Presentation["anchors"][string] | undefined): TimelinePosition {
+  if (!value) return { kind: "following" };
+  return "kind" in value ? value : { kind: "anchor", anchor: value };
+}
+
+/** Keep the legacy anchored write format; only an unanchored pause needs a new variant. */
+function parseStoredPositions(value: unknown): Presentation["anchors"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const positions = Object.create(null) as Presentation["anchors"];
+  for (const [id, raw] of Object.entries(value)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    if (entry.kind === "paused") {
+      if (typeof entry.top === "number" && Number.isFinite(entry.top)) positions[id] = { kind: "paused", top: entry.top };
+      continue;
+    }
+    if (typeof entry.itemId !== "string" || !entry.itemId || typeof entry.offset !== "number" || !Number.isFinite(entry.offset)) continue;
+    const anchor: TimelineAnchor = { itemId: entry.itemId, offset: entry.offset };
+    const content = entry.content as Record<string, unknown> | null | undefined;
+    // Only the existing opaque fingerprint format may enter presentation state.
+    // Unknown/invalid fine anchors still retain their valid coarse item anchor.
+    if (content && typeof content === "object" && typeof content.key === "string"
+      && parseMarkdownAnchorKey(content.key) !== null
+      && typeof content.offset === "number" && Number.isFinite(content.offset)) {
+      anchor.content = { key: content.key, offset: content.offset };
+    }
+    positions[id] = anchor;
+  }
+  return positions;
+}
+
 function readPresentation(storage: Storage | null): Presentation {
   try {
     const raw = storage?.getItem(PRESENTATION_KEY);
@@ -5869,7 +5954,7 @@ function readPresentation(storage: Storage | null): Presentation {
       receiptView: parseReceiptView(value.receiptView),
       drafts: value.drafts && typeof value.drafts === "object" ? value.drafts : {},
       expanded: Array.isArray(value.expanded) ? value.expanded.filter(item => typeof item === "string") : [],
-      anchors: value.anchors && typeof value.anchors === "object" ? value.anchors : {},
+      anchors: parseStoredPositions(value.anchors),
       workingSince: parseStoredTimestamps(value.workingSince),
       dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
@@ -5912,8 +5997,4 @@ function messageOf(error: unknown): string {
 
 function displayConversationTitle(conversation: ConversationSummary): string {
   return /^New session - /.test(conversation.title) ? "New conversation" : conversation.title || "Untitled conversation";
-}
-
-function reducedMotion(): boolean {
-  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 }

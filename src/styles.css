@@ -6342,10 +6342,10 @@ html[data-ui-mode="desktop"][data-notification-chat] .chat-expand-strip {
   margin: 0 0 1rem;
 }
 
-/* Let the browser skip distant bodies, using remembered heights as anchors.
+/* Loaded assistant text keeps real geometry; deferred activity can still skip
+   distant bodies using remembered heights.
    Nodes stay in reading order for find, copy, selection and accessibility.
    User actions extend outside their bubble; pending forms stay fully laid out. */
-.chat-assistant-message,
 .chat-activity,
 .chat-activity-group {
   content-visibility: auto;
