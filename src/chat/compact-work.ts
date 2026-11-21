@@ -68,6 +68,7 @@ export type CompactWorker = {
   taskId?: string;
   stoppable?: boolean;
   activity?: WorkerActivity;
+  outcomeWithheld?: true;
   dismissalIds?: string[];
   controlAvailable?: boolean;
   controlReason?: string;
@@ -80,6 +81,14 @@ export type CompactWorker = {
 };
 
 /** A projection fold, not another worker lifecycle or a task-id tombstone map. */
+/** The row's launch time, or undefined when it is not known. A provisional
+ * result has a row timestamp, not a known launch. In particular its local
+ * display fallback must not become a worker clock.
+ */
+export function workerLaunchClock(item: BackgroundTaskItem): number | undefined {
+  return item.resultId && !item.toolUseId && !item.toolUseIds?.length ? undefined : item.createdAt;
+}
+
 export function compactWorkers(items: readonly ConversationItem[]): CompactWorker[] {
   const shellTask = (type?: string) => /^(shell|local_bash|bash)$/i.test(type ?? "");
   // Launcher lookup uses the first match; session metadata uses the last
@@ -102,12 +111,11 @@ export function compactWorkers(items: readonly ConversationItem[]): CompactWorke
     if (item.type !== "background_task") continue;
     if (item.foreground && shellTask(item.taskType)) continue;
     const terminalReportedAt = item.terminalReportedAt !== undefined && Number.isFinite(item.terminalReportedAt) && item.terminalReportedAt >= 0 ? item.terminalReportedAt : undefined;
-    // A provisional result has a row timestamp, not a known launch. In
-    // particular its local display fallback must not become a worker clock.
-    const since = item.resultId && !item.toolUseId && !item.toolUseIds?.length ? 0 : item.createdAt;
+    const since = workerLaunchClock(item) ?? 0;
     workers.set(item.id, {
       id: item.id, state: workerState(item.status, item.stateUncertain, item.activity), references: [],
       activity: item.activity, controlAvailable: workerCanStop(item), controlReason: item.control?.reason,
+      ...(item.outcomeWithheld === true ? { outcomeWithheld: item.outcomeWithheld } : {}),
       dismissalIds: workerDismissalIdentities(item),
       clockRunning: workerExecutionClockRuns(item),
       name: item.description, kind: shellTask(item.taskType) ? "shell" : "agent", agent: item.subagentType,

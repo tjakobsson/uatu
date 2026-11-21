@@ -171,8 +171,8 @@ function prepareV2Event(value: unknown, memory?: OpenCodeV2Memory, controls?: Ba
   }) };
 }
 
-export function createOpenCodeV2Memory(options: { backgroundEntries?: number; backgroundBytes?: number; controls?: BackgroundControls } = {}): OpenCodeV2Memory {
-  return { ...createProviderEventMemory(), workers: new BackgroundWorkers({ entries: options.backgroundEntries, bytes: options.backgroundBytes,
+export function createOpenCodeV2Memory(options: { backgroundEntries?: number; backgroundBytes?: number; controls?: BackgroundControls; workers?: BackgroundWorkers } = {}): OpenCodeV2Memory {
+  return { ...createProviderEventMemory(), workers: options.workers ?? new BackgroundWorkers({ entries: options.backgroundEntries, bytes: options.backgroundBytes,
     ...(options.controls ? { retained: () => options.controls!.usage, onSaturation: () => options.controls!.projectionSaturated() } : {}) }), toolNames: new Map(), toolInputs: new Map(), steps: new Map(), forms: new Map(), failures: new Map(), inbox: new Map() };
 }
 

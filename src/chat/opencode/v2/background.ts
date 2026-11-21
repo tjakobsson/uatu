@@ -17,6 +17,7 @@ export type LauncherEvidence = Readonly<{
 }>;
 export type WorkerOccurrenceEvidence = Readonly<{ key: string; parent: string; worker: string; kind?: "agent" | "shell"; taskId: string; launches: readonly LauncherEvidence[]; executionStart?: NativeProof; executionEnd?: NativeProof; uncertain?: boolean }>;
 export type WorkerRequestSource = Readonly<{ message: string; tool: string }>;
+export type WorkerHistoryOutcome = Readonly<{ at: number; status: "completed" | "failed" | "stopped" }>;
 type RequestTool = { source: WorkerRequestSource; proof: NativeProof; execution: NativeProof };
 type PrelaunchRequests = { tools: readonly RequestTool[]; request?: { id: string; kind: "permission" | "question"; source: WorkerRequestSource };
   resolved?: readonly { id: string; kind: "permission" | "question" }[]; closed?: true };
@@ -67,6 +68,7 @@ export function prepareNotification(payload: unknown): PreparedNotification | un
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const startProofKey = (proof: NativeProof) => createHash("sha256").update(JSON.stringify(proof)).digest("base64url");
 /** Exact native command association, without retaining another command body.
  * No trimming, shell parsing or guessed equivalence supplies missing proof.
  */
@@ -201,7 +203,12 @@ export class BackgroundControls {
   private readonly sizes = new Map<object, Map<string | number, { bytes: number; entries: number }>>();
   private tupleBytes = 0;
   private entryCount = 0;
-  constructor(private readonly budget: { bytes?: number; entries?: number; changed?: () => void } = {}) {}
+  constructor(private readonly budget: { bytes?: number; entries?: number; changed?: () => void;
+    /** An agent worker's boundaries from before it was known to be one. They
+     * are not noted here, so admission applies them as main applied its turn
+     * notes: a consumed or historical proof is skipped, any other revokes, and
+     * an unknown count leaves admission unresolved. */
+    preOwnership?: (worker: string) => PreOwnershipBoundaries | undefined } = {}) {}
 
   // A full ledger must still admit fresh reads for its retained targets.
   // Leave room for sixteen guards, each with a <=512-code-unit parent and
@@ -367,6 +374,10 @@ export class BackgroundControls {
   observationGap(): void {
     // Transport loss retires the covered cohort, not all future cohorts.
     // Capacity closure remains sticky and is never reset by reconnect.
+    // A saturated worker projection belonged to the retired cohort: the next
+    // subscription replaces that ledger, and admission from here on needs a
+    // birth and exact launcher observed after this gap (see `projectEvidence`).
+    this.projectionLost = false;
     this.gapSequence = this.sequence;
     for (const record of this.records.values()) this.retire(record);
     for (const read of this.reads.values()) { read.failed = true; this.write(this.reads, read.id, read); }
@@ -447,7 +458,11 @@ export class BackgroundControls {
       && sameLauncherIdentity(previous, next) && ![...this.records.values()].some(record => record.parent === parent
         && (record.taskId === `v2:${parent}:${previous.call}` || record.aliases?.includes(previous.call) || record.evidence?.launches.some(launch => launch.call === previous.call)));
   }
-  observe(event: V2Evidence, own: boolean, report?: PreparedNotification, reportProof?: NativeProof): Array<{ parent: string; item: BackgroundTaskItem }> {
+  /** `worker` says whether a session is a known or possible worker. Other
+   * sessions' turns are not recorded as execution observations and use none of
+   * this budget; their pre-ownership boundaries reach admission through
+   * `unobserved` instead. */
+  observe(event: V2Evidence, own: boolean, report?: PreparedNotification, reportProof?: NativeProof, worker?: (session: string) => boolean): Array<{ parent: string; item: BackgroundTaskItem }> {
     this.sequence++;
     const updates: Array<{ parent: string; item: BackgroundTaskItem }> = [];
     const lifecycle = event.lifecycle?.id;
@@ -513,7 +528,7 @@ export class BackgroundControls {
       if (!observation.birthContradicted && observation.lifecycle?.kind === "shell.created" && observation.child === event.userShell.id
         && observation.lifecycle.parent === event.userShell.parent) this.remove(this.observations, key);
     }
-    if (event.execution && !event.execution.historical && event.session) updates.push(...this.note(JSON.stringify(["change", event.session, event.execution.proof]), { child: event.session,
+    if (event.execution && !event.execution.historical && event.session && worker?.(event.session) !== false) updates.push(...this.note(JSON.stringify(["change", event.session, event.execution.proof]), { child: event.session,
       ...(event.execution.proof ? { witness: { kind: event.execution.phase, proof: event.execution.proof } } : {}) }));
     if (event.session && report?.valid && report.status && report.worker && !report.userShell && !this.historical("notification", reportProof)) updates.push(...this.note(JSON.stringify(["report", event.session, report.worker, reportProof]), { parent: event.session, child: report.worker,
       ...(reportProof ? { witness: { kind: "notification", proof: reportProof } } : {}) }));
@@ -664,8 +679,13 @@ export class BackgroundControls {
       }
       if (!selected && (!fact.selectedOnly && fact.child === candidate.worker || !fact.requestedSelectedOnly && fact.requestedChild === candidate.worker)) unresolved = true;
     }
+    const prior = !record && candidate?.kind === "agent" ? this.budget.preOwnership?.(candidate.worker) : undefined;
+    if (prior && (prior.starts === null || prior.ends === null)) unresolved = true;
+    const unconsumed = (count: number | null | undefined, kind: "started" | "ended", proof?: NativeProof) => !!count && (count > 1 || !proof
+      || !this.historical(kind, proof) && !witnesses.some(witness => witness.kind === kind && sameProof(witness.proof, proof)));
     if (!record) {
-      let revoked = candidate?.uncertain === true || this.closed || this.projectionLost || this.scopes.get(candidate?.parent ?? read?.parent ?? "") === "gap";
+      let revoked = candidate?.uncertain === true || this.closed || this.projectionLost || this.scopes.get(candidate?.parent ?? read?.parent ?? "") === "gap"
+        || !!prior && (unconsumed(prior.starts, "started", prior.start) || unconsumed(prior.ends, "ended", prior.end));
       const births: ControlWitness[] = [];
       const initialChild = candidate && [...this.observations.values()].some(observation => observation.child === candidate.worker
         && observation.lifecycle?.kind === "session.created" && observation.lifecycle.own && observation.lifecycle.parent === candidate.parent);
@@ -745,8 +765,35 @@ function identity(value: unknown): value is string {
 
 /** V2 worker facts, separate from the successful tool which launched them.
  * Session parentage is established by a scoped session record, never by text.
- * This projection is disposable; complete provider history reconstructs it.
+ * Positive projection is disposable; complete provider history reconstructs it.
+ * Deny-only execution continuity remains bounded across subscription gaps.
  */
+/** Transcript idles plus retained native ends, each clock once. */
+function outcomeEnds(transcript: readonly number[], retained: readonly number[]): number[] {
+  const ends = [...transcript];
+  for (const end of retained) if (!ends.includes(end)) ends.push(end);
+  return ends;
+}
+
+/** A visible, recognized outcome at `at` that history can settle from: one
+ * boundary at that clock and no conflicting status. */
+function settlingOutcome(results: readonly WorkerHistoryOutcome[], ends: readonly number[], at: number): boolean {
+  const status = results.find(result => result.at === at)?.status;
+  return status !== undefined && ends.filter(end => end === at).length === 1
+    && !results.some(other => other.at === at && other.status !== status);
+}
+
+// The pre-ownership store sits outside the shared budget, so it carries its own
+// bound, the size of the provider-lifetime control cohort. A full session costs
+// about 1.5 KB after one turn and peaks near 32 KB at 128 turns (5 KB once its
+// own caps overflow), so bytes bind first for busy sessions. Over the byte cap,
+// the least recently active session is compacted to an unknown marker (a few
+// hundred bytes), which stays exact, fail-closed evidence. 4,096 sessions is
+// about the number of markers 1 MiB holds; only dropping a marker loses evidence.
+const PRE_OWNERSHIP_SESSIONS = 4_096;
+export type PreOwnershipBoundaries = { starts: number | null; start?: NativeProof; ends: number | null; end?: NativeProof };
+const PRE_OWNERSHIP_BYTES = 1024 * 1024;
+
 export class BackgroundWorkers {
   private recoveryOnly = false;
   constructor(private readonly budget: { entries?: number; bytes?: number; retained?: () => { bytes: number; entries: number }; onSaturation?: () => void;
@@ -754,17 +801,54 @@ export class BackgroundWorkers {
      * Group occurrences before later idle boundaries revoke unresolved work.
      * Boundary order is irrelevant: consumers scan predicates, not positions. */
     executionHistory?: ReadonlyMap<string, readonly number[]>;
+    /** Per-read exact canonical response proof, checked against ALL parent
+     * invocations before either visible or complete history starts folding.
+     * `at` is the report's delivery clock: deny-only, never a selector.
+     * `contradicted` denies correlation inside an otherwise exact interval. */
+    reportInterval?: (child: string, summary: string, at?: number) => { after?: number; end: number; responseAt: number } | { contradicted: true } | undefined;
+    reportLaunches?: readonly LauncherEvidence[];
+    /** Scoped retained native ends for a history fold; undefined means unknown. */
+    observedEnds?: (child: string) => readonly number[] | undefined;
+    /** Scoped distinct-start veto for a history fold (`intervalStartsContradicted`). */
+    startsContradicted?: (child: string, launches: readonly LauncherEvidence[], at: number, previous?: number) => boolean;
+    /** The visible, recognized idle outcomes `finishHistory()` settles from. */
+    executionOutcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>;
+    /** A visible canonical child response inside [start, end]. */
+    visibleResponse?: (child: string, start: number, end: number) => boolean;
+    /** This instance is a pre-ownership store: it records every session. */
+    store?: true;
   } = {}) {}
   private readonly parents = new Map<string, string>();
   private readonly births = new Map<string, { parent?: string; proof?: NativeProof; shellCommand?: string; shellIdentity?: ShellBirthIdentity; shellEnd?: NativeProof; contradicted?: true }>();
   private readonly tasks = new Map<string, WorkerTask>();
   private readonly notices = new Map<string, { proof?: NativeProof; occurrence?: string; discarded?: { parent: string; worker: string; at?: number } }>();
   private readonly invocations = new Map<string, { fact: LauncherEvidence; occurrence?: string }>();
-  private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string }; prelaunch?: PrelaunchRequests }>();
+  private readonly terminalProofs = new Map<string, { proof?: NativeProof; shellExit?: NativeProof; occurrences: readonly string[]; started?: { proof: NativeProof; occurrence?: string; pending?: string; retired?: true }; prelaunch?: PrelaunchRequests;
+    /** Greatest known distinct-start clock; null means its clock is unknown.
+     * Negative evidence only, never a positive execution start/end timestamp. */
+    startCounterproof?: number | null; startClocks?: readonly number[] | null; startKeys?: readonly string[]; terminalKeys?: readonly string[]; undatedEnd?: true;
+    /** This session's end identities overflowed or went unrecorded: its own
+     * ends are unknown. Sticky, scoped negative evidence for this session only. */
+    endsUnknown?: true;
+    /** Boundaries arrived before ownership: Stop admission stays unresolved,
+     * as those unrecorded control turns would have revoked it. */
+    preOwnership?: true;
+    /** A boundary before ownership had no usable native proof. Main noted it
+     * for Stop only: it makes Stop's counts unknown, never activity or ends. */
+    unprovenStart?: true; unprovenEnd?: true }>();
   private readonly unmatched = new Map<string, { parent: string; worker: string; item: BackgroundTaskItem; correlatable: boolean; published: boolean }>();
   private readonly ended = new Map<string, number[]>();
   private readonly aliases = new Map<string, string>();
   private readonly userShells = new Map<string, true>();
+  // Native boundaries of sessions not yet known to be workers (task 5.30), in
+  // the ledger's own per-session form, outside the shared budget. It retires and
+  // is replaced with this ledger. Least recently active first, full sessions are
+  // compacted to unknown markers and then markers are dropped. A drop sets the
+  // sticky `preOwnershipLost`, which only replacing this ledger clears.
+  private preOwnership?: BackgroundWorkers;
+  private readonly preOwnershipFull = new Set<string>();
+  private readonly preOwnershipCompacted = new Set<string>();
+  private preOwnershipLost = false;
   // Empty outer array and ten collections. Each retained entry adds its
   // complete serialized tuple plus a conservative comma allowance.
   private bytes = 62;
@@ -884,9 +968,104 @@ export class BackgroundWorkers {
    * Saturation cannot prove that discarded contradictions never referred to a
    * candidate. None of these negative facts supplies activity or clocks. */
   hasRetainedReference(candidate: WorkerOccurrenceEvidence): boolean {
-    return this.recoveryOnly || this.births.get(candidate.worker)?.contradicted === true || candidate.launches.some(launch => {
+    return this.recoveryOnly || candidate.kind === "agent" && this.ownEndsUnknown(candidate.worker)
+      || this.births.get(candidate.worker)?.contradicted === true || candidate.launches.some(launch => {
       const task = this.retainedTask(`v2:${candidate.parent}:${launch.call}`);
       return task?.parent === candidate.parent;
+    });
+  }
+
+  /** Read-only negative evidence for history-only activity. A reverted child
+   * transcript cannot erase an already observed end across this admission.
+   * This neither attributes the end to this task nor supplies an outcome. */
+  coldActivityContradicted(candidate: WorkerOccurrenceEvidence, intervalStart?: number): boolean {
+    if (candidate.kind !== "agent") return false;
+    const source = this.boundarySource(candidate.worker);
+    if (source !== this) return this.recoveryOnly || this.preOwnershipUnknown(candidate.worker) || source.coldActivityContradicted(candidate, intervalStart);
+    const boundary = this.terminalProofs.get(candidate.worker);
+    if (this.endsUnknown(candidate.worker)) return true;
+    const ends = this.ended.get(candidate.worker) ?? [];
+    if (ends.some(end => candidate.launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || end >= window.start;
+    }))) return true;
+    if (this.recoveryOnly || boundary?.startClocks === null) return true;
+    // Missing admission clocks cannot contradict activity by themselves.
+    // Require scoped observed start evidence before comparing its interval;
+    // fresh owned history + active inventory supplies activity independently.
+    // Unknown starts, retention gaps and observed ends still fail closed.
+    if (!boundary?.started && !boundary?.startClocks?.length && boundary?.startCounterproof === undefined) return false;
+    const previous = this.historyIntervalStart(candidate, intervalStart === undefined ? [] : [intervalStart]);
+    return candidate.launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || this.distinctStartContradicted(candidate.worker, window, Infinity, previous);
+    });
+  }
+
+  /** Veto-only lower bound from scoped native/transcript ends, not a start
+   * timestamp, ownership witness or Stop basis. */
+  historyIntervalStart(candidate: WorkerOccurrenceEvidence, transcriptEnds: readonly number[] = []): number | undefined {
+    const windows = candidate.launches.map(launch => this.admissionWindow(launch));
+    if (!windows.length || windows.some(window => !window)) return;
+    const start = Math.min(...windows.map(window => window!.start));
+    let previous: number | undefined;
+    for (const end of [...this.boundarySource(candidate.worker).ended.get(candidate.worker) ?? [], ...transcriptEnds])
+      if (end < start && (previous === undefined || end > previous)) previous = end;
+    return previous;
+  }
+
+  /** Undated starts or a saturated start set leave start clocks unknown. */
+  startClocksUnknown(child: string): boolean {
+    const boundary = this.boundarySource(child).terminalProofs.get(child);
+    return boundary?.startCounterproof === null || boundary?.startClocks === null || this.preOwnershipUnknown(child);
+  }
+
+  private distinctStartContradicted(child: string, window: { start: number; end: number }, at: number, previous?: number): boolean {
+    const boundary = this.boundarySource(child).terminalProofs.get(child), start = boundary?.startCounterproof;
+    // `start === null` is already unknown; restated so the compiler narrows it.
+    if (this.startClocksUnknown(child) || start === null) return true;
+    const clocks = (boundary?.startClocks ?? []).filter(clock => (previous === undefined || clock > previous) && clock <= at);
+    // Admission is a window, not proof of one execution inside it. Multiple
+    // distinct starts in this candidate interval veto uniqueness even before
+    // acceptance returns. With no enclosing end, prior-admission starts alone
+    // do not compete with a later candidate; retain the conservative scalar.
+    return clocks.filter(clock => previous !== undefined || clock >= window.start).length > 1
+      // A pre-admission start plus a distinct intervening start is still reuse
+      // after a later event moves the scalar maximum beyond this outcome.
+      // An enclosing end excludes prior executions; one delayed first start
+      // alone remains admissible under the existing interval rules.
+      || previous === undefined && clocks.length > 1 && clocks.some(clock => clock > window.end)
+      // The old scalar remains conservative where no enclosing interval can
+      // exclude a prior execution. It cannot make an interval's first start reuse.
+      || previous === undefined && start !== undefined && start <= at && start > window.end;
+  }
+
+  /** Scoped observed ends constrain intervals, but never supply outcomes.
+   * Undefined means a retention gap/unknown clock cannot prove an interval. */
+  observedExecutionEnds(child: string): readonly number[] | undefined {
+    if (this.recoveryOnly || this.endsUnknown(child)) return;
+    const source = this.boundarySource(child);
+    if (source !== this) return source.observedExecutionEnds(child);
+    return this.ended.get(child) ?? [];
+  }
+
+  historyOutcomeContradicted(candidate: WorkerOccurrenceEvidence, at: number, transcriptEnds: readonly number[] = []): boolean {
+    if (candidate.kind !== "agent") return false;
+    const ends = this.observedExecutionEnds(candidate.worker);
+    if (!ends) return true;
+    return candidate.launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || ends.some(end => end >= window.start && end < at);
+    }) || this.intervalStartsContradicted(candidate.worker, candidate.launches, at, this.historyIntervalStart(candidate, transcriptEnds));
+  }
+
+  /** Deny-only: distinct retained starts after `previous` and by `at` mean
+   * these admissions' outcome may belong to another execution. Shared by
+   * report-free inference and exact-response report correlation. */
+  intervalStartsContradicted(child: string, launches: readonly LauncherEvidence[], at: number, previous?: number): boolean {
+    return launches.some(launch => {
+      const window = this.admissionWindow(launch);
+      return !window || this.distinctStartContradicted(child, window, at, previous);
     });
   }
 
@@ -897,7 +1076,8 @@ export class BackgroundWorkers {
   /** Activity uses the scoped projection, never the Stop ledger. */
   activityEvidence(candidate: WorkerOccurrenceEvidence): WorkerOccurrenceEvidence | undefined {
     const live = this.matchingTask(candidate)?.evidence;
-    if (this.recoveryOnly || !live || live.kind !== "shell" && this.parents.get(live.worker) !== live.parent
+    if (this.recoveryOnly || !live || live.kind !== "shell" && this.ownEndsUnknown(live.worker)
+      || live.kind !== "shell" && this.parents.get(live.worker) !== live.parent
       || live.parent !== candidate.parent || live.worker !== candidate.worker || live.kind !== candidate.kind) return;
     if ([...this.invocations.values()].some(invocation => invocation.occurrence !== live.key
       && (!invocation.fact.requestedSelectedOnly && invocation.fact.requestedChild === live.worker
@@ -1164,6 +1344,38 @@ export class BackgroundWorkers {
 
   enforceBudget(): void { this.bound(); }
 
+  /** Subscription retirement keeps deny-only execution continuity in this
+   * same accounted ledger. Replay proofs have no occurrence/pending binding;
+   * no ownership, live activity, request or control witness survives the gap. */
+  retainExecutionCounterproof(): void {
+    for (const collection of [this.parents, this.births, this.tasks, this.notices, this.unmatched, this.aliases, this.invocations, this.userShells]) {
+      if (!this.unlimited) for (const key of collection.keys()) this.account(collection, key, 0);
+      collection.clear();
+    }
+    for (const [child, boundary] of this.terminalProofs) {
+      if (!boundary.proof && !boundary.started && boundary.startCounterproof === undefined && boundary.startClocks === undefined && !boundary.undatedEnd && !boundary.endsUnknown && boundary.terminalKeys === undefined) {
+        this.terminalProofs.delete(child); if (!this.unlimited) this.account(this.terminalProofs, child, 0); continue;
+      }
+      this.set(this.terminalProofs, child, { occurrences: [],
+        ...(boundary.proof ? { proof: boundary.proof } : {}),
+        ...(boundary.started ? { started: { proof: boundary.started.proof, retired: true as const } } : {}),
+        ...(boundary.startCounterproof === undefined ? {} : { startCounterproof: boundary.startCounterproof }),
+        ...(boundary.startClocks === undefined ? {} : { startClocks: boundary.startClocks }),
+        ...(boundary.startKeys === undefined ? {} : { startKeys: boundary.startKeys }),
+        ...(boundary.terminalKeys === undefined ? {} : { terminalKeys: boundary.terminalKeys }),
+        ...(boundary.undatedEnd ? { undatedEnd: true as const } : {}),
+        ...(boundary.endsUnknown ? { endsUnknown: true as const } : {}) });
+    }
+    // The pre-ownership store retires with this ledger and carries over.
+    this.preOwnership?.retainExecutionCounterproof();
+    for (const order of [this.preOwnershipFull, this.preOwnershipCompacted]) for (const session of order) if (!this.preOwnership?.holds(session)) order.delete(session);
+    // Saturation stays recovery-only for the rest of this ledger's life: dropping
+    // positive state must not certify that counterproof lost to the aggregate
+    // budget never concerned this child. The provider replaces a saturated
+    // ledger on the next subscription instead of retaining it.
+    this.bound();
+  }
+
   // Recovery can rebuild presentation after saturation, but cannot prove that
   // a discarded contradiction never referred to the requested old identity.
   get controlEvidenceAvailable(): boolean { return !this.recoveryOnly; }
@@ -1193,20 +1405,33 @@ export class BackgroundWorkers {
   }
 
   terminalReplay(child: string, proof?: NativeProof): boolean {
+    const source = this.boundarySource(child);
+    if (source !== this) return source.terminalReplay(child, proof);
     const previous = this.terminalProofs.get(child);
-    return !!previous?.occurrences.length && sameProof(previous.proof, proof)
+    return !!proof && previous?.terminalKeys?.includes(startProofKey(proof)) === true || sameProof(previous?.proof, proof)
       || [...this.tasks.values()].some(task => task.worker === child && sameProof(task.evidence.executionEnd, proof));
   }
 
   startReplay(child: string, proof?: NativeProof): boolean {
-    const previous = this.terminalProofs.get(child)?.started;
-    return !!(previous?.occurrence || previous?.pending) && sameProof(previous.proof, proof)
+    const source = this.boundarySource(child);
+    if (source !== this) return source.startReplay(child, proof);
+    const boundary = this.terminalProofs.get(child), previous = boundary?.started;
+    return !!proof && boundary?.startKeys?.includes(startProofKey(proof)) === true || sameProof(previous?.proof, proof)
       || [...this.tasks.values()].some(task => task.worker === child && sameProof(task.evidence.executionStart, proof));
   }
 
   executionStarted(child: string, proof?: NativeProof): void {
-    if (this.recoveryOnly || !identity(child) || this.startReplay(child, proof)) return;
+    if (this.recoveryOnly || !identity(child)) return;
+    if (!this.mayBeWorker(child)) {
+      if (proof) this.beforeOwnership(child, store => store.executionStarted(child, proof));
+      else if (!this.budget.executionHistory) this.beforeOwnership(child, store => store.unprovenBoundary(child, "started"));
+      return;
+    }
+    if (this.startReplay(child, proof)) return;
     const birth = this.births.get(child), previous = this.terminalProofs.get(child);
+    // An unbound start replay is not another run and must not close the cold
+    // first-execution window or discard its pending request evidence.
+    if (proof && sameProof(previous?.started?.proof, proof)) return;
     const candidates = [...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent");
     const initial = candidates.length === 1 ? candidates[0] : undefined;
     // Only a covered newborn's first execution can enrich a pending launch.
@@ -1216,18 +1441,43 @@ export class BackgroundWorkers {
       && proof.created >= birth.proof.created && initial.evidence.launches.every(launch => (launch.created === undefined || launch.created <= birth.proof?.created!)
         && (launch.completed ?? launch.reportedCompletion) !== undefined && birth.proof?.created! <= (launch.completed ?? launch.reportedCompletion)!)
       && ![...this.invocations.values()].some(invocation => invocation.fact.requestedChild === child && invocation.occurrence !== initial.evidence.key)) {
-      this.set(this.terminalProofs, child, { occurrences: [], started: { proof, pending: initial.evidence.key } });
+      this.set(this.terminalProofs, child, { occurrences: [], started: { proof, pending: initial.evidence.key }, startClocks: [proof.created], startKeys: [startProofKey(proof)] });
       this.bindInitialStart(initial);
       this.bound();
       return;
     }
+    let startCounterproof = previous?.startCounterproof;
+    // Keep bounded distinct native proof identities and their clocks together.
+    // A later maximum cannot erase an intervening start for an older outcome.
+    // The earliest start alone is not proof of reuse; exact replays coalesce.
+    let startClocks = previous?.startClocks === null ? null : [...previous?.startClocks ?? []];
+    let startKeys = startClocks ? [...previous?.startKeys ?? []] : undefined;
+    if (startClocks && proof) {
+      if (startClocks.length === 128 || proof.created === undefined) { startClocks = null; startKeys = undefined; }
+      else { startClocks.push(proof.created); startKeys!.push(startProofKey(proof)); }
+    }
+    if (proof && previous && !candidates.length) {
+      // Arrival order can regress on an older replay. Preserve the greatest
+      // already observed distinct-start clock in one budgeted scalar, without
+      // changing the current proof's positive binding/ownership semantics.
+      const priorStart = previous.started?.proof;
+      startCounterproof = startCounterproof === null || proof.created === undefined || priorStart && priorStart.created === undefined
+        ? null : Math.max(startCounterproof ?? -Infinity, priorStart?.created ?? -Infinity, proof.created);
+    }
     if (proof) this.set(this.terminalProofs, child, { ...(previous ?? { occurrences: [] }), started: { proof },
+      startClocks,
+      startKeys,
+      ...(startCounterproof === undefined ? {} : { startCounterproof }),
       // A second native execution before launcher admission is reuse, not a
       // newborn's first execution. Do not start another provisional window.
       prelaunch: previous && !candidates.length ? { tools: [], closed: true } : undefined });
     else if (previous?.prelaunch) this.set(this.terminalProofs, child, { ...previous, prelaunch: { tools: [], closed: true } });
-    for (const task of this.tasks.values()) if (task.worker === child && task.item.taskType === "agent" && task.item.status === "running") this.uncertain(task, false);
+    for (const task of this.runningAgents(child)) this.uncertain(task, false);
     this.bound();
+  }
+
+  private runningAgents(child: string): WorkerTask[] {
+    return [...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent" && task.item.status === "running");
   }
 
   private bindInitialStart(task: { parent: string; worker: string; item: BackgroundTaskItem; evidence: WorkerOccurrenceEvidence }): void {
@@ -1253,10 +1503,15 @@ export class BackgroundWorkers {
     return !!previous?.occurrence && sameProof(previous.proof, proof);
   }
 
-  observeNotification(parent: string, id: string, prepared: PreparedNotification | undefined, proof?: NativeProof): void {
+  observeNotification(parent: string, id: string, prepared: PreparedNotification | undefined, proof?: NativeProof, terminalReportedAt?: number | null): void {
     if (this.recoveryOnly || !prepared?.valid || !prepared.status || this.notificationReplay(parent, id, proof)) return;
     for (const task of this.tasks.values()) if (task.parent === parent && task.worker === prepared.worker
-      && task.item.taskType === (prepared.source === "shell" ? "shell" : "agent") && task.item.status === "running") this.uncertain(task, false);
+      && task.item.taskType === (prepared.source === "shell" ? "shell" : "agent") && task.item.status === "running"
+      // Pending reports are folded after stored history, even when they belong
+      // to an earlier execution. Their native clock cannot invalidate a launch
+      // that had not yet begun. Live observation keeps its existing fences.
+      && !(this.budget.executionHistory && terminalReportedAt != null && task.item.createdAt > terminalReportedAt)
+      && !(prepared.source === "subagent" && this.historicalReportSeparated(task.worker, task.evidence.launches, prepared.summary, terminalReportedAt ?? undefined))) this.uncertain(task, false);
     this.bound();
   }
 
@@ -1278,14 +1533,136 @@ export class BackgroundWorkers {
     }
   }
 
+  /** A known or possible worker: a verified parent, an observed birth with a
+   * parent, a task, or retained boundary evidence. Only these sessions'
+   * execution boundaries enter either ledger; other sessions' go to the
+   * bounded pre-ownership store. A start alone never makes a possible worker. */
+  mayBeWorker(session: string): boolean {
+    return this.budget.store === true || this.parents.has(session) || this.births.get(session)?.parent !== undefined || this.terminalProofs.has(session)
+      || this.ended.has(session) || [...this.tasks.values()].some(task => task.worker === session);
+  }
+
+  private beforeOwnership(session: string, record: (store: BackgroundWorkers) => void): void {
+    const store = this.preOwnership ??= new BackgroundWorkers({ entries: Number.MAX_SAFE_INTEGER, bytes: Number.MAX_SAFE_INTEGER, store: true });
+    record(store);
+    const order = this.preOwnershipCompacted.has(session) ? this.preOwnershipCompacted : this.preOwnershipFull;
+    order.delete(session);
+    if (store.holds(session)) order.add(session);
+    for (;;) {
+      const count = this.preOwnershipFull.size + this.preOwnershipCompacted.size;
+      if (count <= PRE_OWNERSHIP_SESSIONS && store.bytes <= PRE_OWNERSHIP_BYTES) break;
+      // Compaction always comes first and loses nothing. Over the byte cap it
+      // may suffice; over the session count only a dropped marker helps.
+      const full = this.preOwnershipFull.values().next().value;
+      if (full !== undefined && (count <= PRE_OWNERSHIP_SESSIONS || !this.preOwnershipCompacted.size)) {
+        store.compactSession(full); this.preOwnershipFull.delete(full); this.preOwnershipCompacted.add(full);
+        continue;
+      }
+      const dropped = this.preOwnershipCompacted.values().next().value!;
+      store.forget(dropped); this.preOwnershipCompacted.delete(dropped);
+      this.preOwnershipLost = true;
+    }
+  }
+
+  /** An owned record without a parent is a top-level session, never a worker:
+   * its stored boundaries are irrelevant and leave without any loss. O(1). */
+  forgetTopLevel(session: string): void {
+    if (!this.preOwnership?.holds(session)) return;
+    this.preOwnership.forget(session); this.preOwnershipFull.delete(session); this.preOwnershipCompacted.delete(session);
+  }
+
+  private holds(session: string): boolean { return this.terminalProofs.has(session) || this.ended.has(session); }
+
+  /** Store side: this session's boundaries become unknown, in a few hundred
+   * accounted bytes. Exact, fail-closed evidence for the session itself. */
+  private compactSession(session: string): void {
+    this.forget(session);
+    this.set(this.terminalProofs, session, { occurrences: [], startClocks: null, endsUnknown: true });
+  }
+
+  /** Store side: a boundary without a usable native proof is an unknown count
+   * for Stop admission only, as main's witness-less control note was. */
+  private unprovenBoundary(session: string, phase: "started" | "ended"): void {
+    const previous = this.terminalProofs.get(session) ?? { occurrences: [] };
+    this.set(this.terminalProofs, session, { ...previous, ...(phase === "started" ? { unprovenStart: true as const } : { unprovenEnd: true as const }) });
+  }
+
+  /** History reconciliation verified this child's ownership: its stored
+   * boundaries move into this ledger under the shared budget. Ownership itself
+   * stays subscription-scoped and is not asserted here. */
+  adoptVerifiedChild(child: string): void {
+    if (this.recoveryOnly || !identity(child)) return;
+    this.becomeWorker(child);
+    this.bound();
+  }
+
+  private forget(session: string): void {
+    this.boundaries -= this.ended.get(session)?.length ?? 0;
+    for (const collection of [this.terminalProofs, this.ended]) if (collection.delete(session) && !this.unlimited) this.account(collection, session, 0);
+  }
+
+  /** Whose boundary evidence answers for `child`: this ledger's, or the
+   * pre-ownership store's for a session this ledger does not hold. */
+  private boundarySource(child: string): BackgroundWorkers {
+    return !this.holds(child) && this.preOwnership?.holds(child) ? this.preOwnership : this;
+  }
+
+  /** Pre-ownership evidence was dropped in this ledger's life: an agent
+   * worker without a birth observed in this subscription has unknown ends and
+   * starts. Shells have no execution boundaries and are never affected. */
+  private preOwnershipUnknown(child: string): boolean {
+    return this.preOwnershipLost && this.births.get(child)?.proof === undefined;
+  }
+
+  /** The boundaries a session had before ownership, which the control ledger
+   * no longer notes: distinct counts plus the latest proofs. `null` counts are
+   * unknown (overflow, an undated proof, or evidence dropped in this
+   * subscription). Undefined when there are none. */
+  preOwnershipBoundaries(session: string): PreOwnershipBoundaries | undefined {
+    const held = this.preOwnership?.holds(session) ? this.preOwnership : undefined;
+    const own = this.terminalProofs.get(session), boundary = held ? held.terminalProofs.get(session) : own?.preOwnership ? own : undefined;
+    if (!held && !boundary) return this.preOwnershipUnknown(session) ? { starts: null, ends: null } : undefined;
+    const lost = this.preOwnershipUnknown(session);
+    return {
+      starts: lost || boundary?.unprovenStart || boundary?.startClocks === null || boundary?.startCounterproof === null ? null : boundary?.startKeys?.length ?? (boundary?.started ? 1 : 0),
+      ...(boundary?.started ? { start: boundary.started.proof } : {}),
+      ends: lost || boundary?.unprovenEnd || boundary?.endsUnknown || boundary?.undatedEnd ? null : boundary?.terminalKeys?.length ?? (boundary?.proof ? 1 : 0),
+      ...(boundary?.proof ? { end: boundary.proof } : {}),
+    };
+  }
+
+  /** On becoming a worker, stored boundaries move into this ledger, and count
+   * against its budget from then on. The overflow flag is applied lazily, so a
+   * birth observed later in this subscription still counts. */
+  private becomeWorker(child: string): void {
+    if (this.mayBeWorker(child) || !this.preOwnership?.holds(child)) return;
+    const store = this.preOwnership, boundary = store.terminalProofs.get(child), ends = store.ended.get(child);
+    store.forget(child); this.preOwnershipFull.delete(child); this.preOwnershipCompacted.delete(child);
+    this.set(this.terminalProofs, child, { ...boundary ?? { occurrences: [] }, preOwnership: true });
+    if (ends) { this.boundaries += ends.length; this.set(this.ended, child, [...ends]); }
+  }
+
+  /** This session's own ends overflowed, were compacted or may have been
+   * dropped before ownership. Undated ends are a separate, narrower fact. */
+  private ownEndsUnknown(child: string): boolean {
+    return this.boundarySource(child).terminalProofs.get(child)?.endsUnknown === true || this.preOwnershipUnknown(child);
+  }
+
+  private endsUnknown(child: string): boolean {
+    const boundary = this.terminalProofs.get(child);
+    return boundary?.undatedEnd === true || boundary?.endsUnknown === true || this.preOwnershipUnknown(child);
+  }
+
   verifyChild(child: string, parent: string): void {
     if (this.recoveryOnly || !identity(child) || !identity(parent)) return;
+    this.becomeWorker(child);
     this.set(this.parents, child, parent);
     this.bound();
   }
 
   observeBirth(child: string, parent: string, proof?: NativeProof, shellCommand?: string, shellIdentity?: ShellBirthIdentity): void {
     if (this.recoveryOnly || !identity(child) || !identity(parent) || !proof) return;
+    this.becomeWorker(child);
     const previous = this.births.get(child);
     if (sameProof(previous?.proof, proof) && !(previous?.shellIdentity && shellIdentity && shellIdentityContradicts(previous.shellIdentity, shellIdentity))
       && !(previous?.shellCommand !== undefined && shellCommand !== undefined && previous.shellCommand !== shellCommand)) {
@@ -1305,14 +1682,47 @@ export class BackgroundWorkers {
   }
 
   executionEnded(child: string, at: number, proof?: NativeProof): void {
-    if (this.recoveryOnly || !this.parents.has(child)) return;
+    // A scoped native end can precede the first ownership/launcher read. For a
+    // session not yet known to be a worker, it goes to the pre-ownership store.
+    // A history callback without native proof still needs verified ownership.
+    if (this.recoveryOnly || !identity(child)) return;
+    if (!this.mayBeWorker(child)) {
+      // A live end without a usable proof still contradicts a later Stop basis,
+      // as main's control turn note did: keep it as an unknown count.
+      if (proof) this.beforeOwnership(child, store => store.executionEnded(child, at, proof));
+      else if (!this.budget.executionHistory) this.beforeOwnership(child, store => store.unprovenBoundary(child, "ended"));
+      return;
+    }
+    if (!this.parents.has(child) && !proof) return;
     if (this.terminalReplay(child, proof)) return;
-    if (proof) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child), proof, prelaunch: undefined, occurrences: Object.freeze([...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent").map(task => task.evidence.key)) });
+    const previous = this.terminalProofs.get(child), terminalKeys = [...previous?.terminalKeys ?? []];
+    // Live retention keeps one tally of distinct end identities: proof keys and
+    // proofless clocks (`#<clock>`, never a base64url digest). Reaching 128
+    // fails closed and keeps per-session memory bounded. A complete-history fold
+    // keeps every transcript end and no tally.
+    const live = !this.budget.executionHistory, fresh = !!proof || !(this.ended.get(child) ?? []).includes(at);
+    if (previous?.endsUnknown || live && fresh && terminalKeys.length >= 128) {
+      // Replay identities share this ledger's serialized aggregate budget.
+      // Per-session overflow is sticky uncertainty for this session only, never
+      // silent proof loss: its ends become unknown, it stops growing, and no
+      // end binds positively. Other sessions keep their evidence.
+      if (!previous?.endsUnknown) this.set(this.terminalProofs, child, { ...previous ?? { occurrences: [] }, terminalKeys: undefined, endsUnknown: true });
+      for (const task of this.runningAgents(child)) this.uncertain(task, false);
+      this.bound();
+      return;
+    }
+    if (proof) terminalKeys.push(startProofKey(proof));
+    else if (live && fresh) terminalKeys.push(`#${at}`);
+    if (proof) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child), proof, prelaunch: undefined,
+      terminalKeys,
+      ...(proof.created === undefined ? { undatedEnd: true as const } : {}),
+      occurrences: Object.freeze([...this.tasks.values()].filter(task => task.worker === child && task.item.taskType === "agent").map(task => task.evidence.key)) });
     else {
       const boundary = this.terminalProofs.get(child);
-      if (boundary?.prelaunch) this.set(this.terminalProofs, child, { ...boundary, prelaunch: undefined });
+      if (boundary?.prelaunch || live && fresh) this.set(this.terminalProofs, child, { ...boundary ?? { occurrences: [] }, prelaunch: undefined,
+        ...(live && fresh ? { terminalKeys } : {}) });
     }
-    for (const task of this.tasks.values()) if (task.worker === child && task.item.taskType === "agent" && task.item.status === "running") {
+    for (const task of this.runningAgents(child)) {
       if (proof && !task.evidence.uncertain && task.evidence.executionStart && !task.evidence.executionEnd) task.evidence = Object.freeze({ ...task.evidence, executionEnd: proof });
       this.uncertain(task, false);
     }
@@ -1324,10 +1734,43 @@ export class BackgroundWorkers {
     this.bound();
   }
 
-  /** End the transient history fold without treating an idle as a result. */
-  finishHistory(): NormalizedProviderUpdate[] {
+  /** A typed native outcome may settle one proven interval. A bare idle only
+   * fences activity; missing/straddling windows never identify its execution. */
+  finishHistory(outcomes?: ReadonlyMap<string, readonly WorkerHistoryOutcome[]>, competitors: ReadonlyMap<string, WorkerOccurrenceEvidence> = this.evidenceSnapshot(), counterInvocations: readonly LauncherEvidence[] = [], observed?: { contradicted(candidate: WorkerOccurrenceEvidence, at: number): boolean; ends(child: string): readonly number[] | undefined }): NormalizedProviderUpdate[] {
     if (!this.budget.executionHistory) return [];
     const updates: NormalizedProviderUpdate[] = [];
+    for (const [child, results] of outcomes ?? []) {
+      const transcriptEnds = this.budget.executionHistory.get(child), observedEnds = observed ? observed.ends(child) : [];
+      if (!transcriptEnds || !observedEnds) continue;
+      // Retained boundaries constrain outcomes only. Feeding them back into
+      // the control/admission fold would revoke independently valid controls
+      // and compatible ended activity, including after unrelated saturation.
+      const ends = outcomeEnds(transcriptEnds, observedEnds);
+      for (const result of results) {
+        if (!settlingOutcome(results, ends, result.at)) continue;
+        const previous = ends.filter(end => end < result.at).reduce<number | undefined>((latest, end) => latest === undefined || end > latest ? end : latest, undefined);
+        const overlaps = (launch: LauncherEvidence) => {
+          const window = this.admissionWindow(launch), start = launch.ran ?? launch.created;
+          return !window ? start === undefined || start <= result.at : window.start <= result.at && (previous === undefined || window.end >= previous);
+        };
+        // Foreground and requested-child calls can veto an owned interval, but
+        // never establish ownership, worker rows, aliases or outcome targets.
+        if (counterInvocations.some(launch => (launch.reportedChild ?? launch.requestedChild) === child && overlaps(launch))) continue;
+        // Every potentially overlapping occurrence competes, including unknown
+        // windows and already reported results. Uncertainty is not exclusion.
+        const candidates = [...competitors.values()].filter(occurrence => occurrence.worker === child && occurrence.kind === "agent"
+          && occurrence.launches.some(overlaps));
+        const occurrence = candidates.length === 1 ? candidates[0] : undefined;
+        const task = occurrence && this.tasks.get(occurrence.taskId);
+        if (!occurrence || !task || task.item.status !== "running" || occurrence.uncertain || task.evidence.uncertain || task.item.stateUncertain || observed?.contradicted(occurrence, result.at) || !occurrence.launches.every(launch => {
+          const window = this.admissionWindow(launch);
+          return window && window.end < result.at && (previous === undefined || window.start > previous);
+        })) continue;
+        task.item = { ...task.item, status: result.status, stateUncertain: false };
+        this.set(this.tasks, task.item.taskId, task);
+        updates.push({ kind: "upsert", item: task.item });
+      }
+    }
     for (const task of this.tasks.values()) if (task.item.taskType === "agent" && task.item.status === "running"
       && this.ended.get(task.worker)?.some(end => end >= task.item.createdAt)) {
       this.uncertain(task);
@@ -1348,21 +1791,89 @@ export class BackgroundWorkers {
     return ends !== undefined && window && !ends.some(end => end >= window.start && end <= window.end) ? window : undefined;
   }
 
+  /** Scoped retained native ends in this fold; undefined while unknown. */
+  private retainedEnds(child: string): readonly number[] | undefined {
+    return this.budget.observedEnds ? this.budget.observedEnds(child) : [];
+  }
+
   private sameHistoricalInterval(child: string, previous: LauncherEvidence, next: LauncherEvidence): boolean {
     if (!this.budget.executionHistory) return true;
-    const ends = this.budget.executionHistory.get(child), left = this.historicalAdmission(child, previous), right = this.historicalAdmission(child, next);
+    // A revert can remove an idle, not its observed native end: known retained
+    // ends separate admissions too. Unknown ones keep transcript aliasing (Stop
+    // recovery after saturation relies on it); settlement fails closed below.
+    const transcript = this.budget.executionHistory.get(child), left = this.historicalAdmission(child, previous), right = this.historicalAdmission(child, next);
+    const ends = transcript && [...transcript, ...this.retainedEnds(child) ?? []];
     return ends !== undefined && left !== undefined && right !== undefined && left.start !== right.start
       && !ends.some(end => end >= Math.min(left.start, right.start) && end <= Math.max(left.end, right.end));
   }
 
   private separateHistoricalIntervals(child: string, previous: LauncherEvidence, next: LauncherEvidence): boolean {
     const ends = this.budget.executionHistory?.get(child), left = this.historicalAdmission(child, previous), right = this.historicalAdmission(child, next);
-    return ends !== undefined && left !== undefined && right !== undefined
-      && ends.some(end => end > left.end && end < right.start || end > right.end && end < left.start);
+    const leftStart = previous.ran ?? previous.created, rightStart = next.ran ?? next.created;
+    // Excluding a later invocation from an earlier interval needs its native
+    // lower bound, not a future acceptance clock. This does not prove aliasing.
+    return ends !== undefined && ends.some(end => left !== undefined && rightStart !== undefined && end > left.end && end < rightStart
+      || right !== undefined && leftStart !== undefined && end > right.end && end < leftStart);
   }
 
-  private historicalReportCompatible(child: string, launches: readonly LauncherEvidence[], at?: number): boolean {
+  /** Exact-response proof for this fold. A revert can remove an execution's
+   * equal response, so an unresolved admission outside the interval may be
+   * the report's source: an earlier one, or a later one that ran (an end by
+   * the report's delivery) before its response vanished. Deny-only. */
+  private exactReportInterval(child: string, summary: string, at?: number): ReturnType<NonNullable<typeof this.budget.reportInterval>> {
+    const interval = this.budget.reportInterval?.(child, summary, at);
+    if (!interval || "contradicted" in interval) return interval;
+    const ends = [...this.budget.executionHistory?.get(child) ?? [], ...this.retainedEnds(child) ?? []];
+    return [...this.tasks.values()].some(task => task.worker === child && task.item.taskType === "agent" && task.item.status === "running"
+      && task.evidence.launches.some(launch => {
+        const anchor = launch.ran ?? launch.created ?? launch.completed ?? launch.reportedCompletion, start = launch.ran ?? launch.created;
+        return anchor !== undefined && interval.after !== undefined && anchor <= interval.after
+          || start !== undefined && start > interval.end && ends.some(end => end >= start && (at === undefined || end <= at));
+      }) && !this.ownHistoryOutcome(child, task.evidence.launches)) ? { contradicted: true } : interval;
+  }
+
+  /** Each admission's first execution end is a visible idle with a recognized
+   * outcome that `finishHistory()` can settle from, or a surviving idle after
+   * the run's own visible canonical response (its report would carry that
+   * text, not the uniquely matched one). A retained-only (reverted), unknown,
+   * untyped or staged-hidden end without such a response cannot, nor can an
+   * idle the distinct-start veto leaves unresolved (a reverted intermediate
+   * execution). Only ever withholds the exemption. */
+  private ownHistoryOutcome(child: string, launches: readonly LauncherEvidence[]): boolean {
+    const transcript = this.budget.executionHistory?.get(child), retained = this.retainedEnds(child);
+    const ends = transcript && retained && outcomeEnds(transcript, retained), results = this.budget.executionOutcomes?.get(child) ?? [];
+    if (!transcript || !ends) return false;
+    const starts = launches.map(launch => this.admissionWindow(launch)?.start).filter(start => start !== undefined);
+    const previous = ends.filter(end => end < Math.min(...starts)).sort((a, b) => b - a)[0];
+    return launches.every(launch => {
+      const window = this.admissionWindow(launch);
+      const first = window && ends.filter(end => end >= window.start).sort((a, b) => a - b)[0];
+      return !!window && first !== undefined && first > window.end && (settlingOutcome(results, ends, first)
+          || transcript.includes(first) && this.budget.visibleResponse?.(child, window.start, first) === true)
+        && !this.budget.startsContradicted?.(child, [launch], first, previous);
+    });
+  }
+
+  private historicalReportCompatible(child: string, launches: readonly LauncherEvidence[], at?: number, summary = ""): boolean {
     if (!this.budget.executionHistory) return true;
+    const interval = this.exactReportInterval(child, summary, at);
+    if (interval) return !("contradicted" in interval) && launches.every(launch => this.launchInReportInterval(child, launch, interval));
+    // Complete native competitors prevent an early/terminal/hidden occurrence
+    // from disappearing merely because it has not been folded yet.
+    const possible = this.budget.reportLaunches?.filter(launch => launch.background === true && launch.reportedChild === child
+      && (at === undefined || (launch.ran ?? launch.created) === undefined || (launch.ran ?? launch.created)! <= at)
+      // Preserve sequential explicit-report recovery: an independently joined
+      // native result delivered BEFORE this admission already names the older
+      // occurrence. Mere terminal status or elapsed child ends cannot do this.
+      && ![...this.tasks.values()].some(task => task.worker === child && task.item.resultId
+        && task.item.terminalReportedAt !== undefined && task.item.status !== "running"
+        && task.evidence.launches.some(own => own.call === launch.call && own.message === launch.message)
+        && launches.every(target => (target.ran ?? target.created) !== undefined
+          && task.item.terminalReportedAt! < (target.ran ?? target.created)!)));
+    // Several possible admissions are one interval only while every retained
+    // end that could separate them is known.
+    if (possible && possible.length > 1 && (!this.retainedEnds(child) || !possible.every(launch => launch === possible[0]
+      || this.sameHistoricalInterval(child, possible[0]!, launch)))) return false;
     return at !== undefined && launches.every(launch => {
       // A unique explicit report can settle a legacy clock-sparse launch, but
       // cannot contradict a known acceptance bound or an ambiguous window.
@@ -1371,6 +1882,23 @@ export class BackgroundWorkers {
       const window = this.admissionWindow(launch);
       return window !== undefined && at > window.end
         && !this.ended.get(child)?.some(end => end >= window.start && end <= window.end);
+    });
+  }
+
+  private launchInReportInterval(child: string, launch: LauncherEvidence, interval: { after?: number; end: number; responseAt: number }): boolean {
+    const window = this.historicalAdmission(child, launch);
+    return !launch.conflicted && !!window && window.end < interval.responseAt
+      && (interval.after === undefined || window.start > interval.after);
+  }
+
+  /** Delivery time is not execution evidence. Exclusion requires a unique
+   * exact terminal response in a verified interval, never two elapsed idles. */
+  private historicalReportSeparated(child: string, launches: readonly LauncherEvidence[], summary: string, at?: number): boolean {
+    const interval = this.exactReportInterval(child, summary, at);
+    return !!interval && !("contradicted" in interval) && launches.length > 0 && launches.every(launch => {
+      const window = this.historicalAdmission(child, launch);
+      return !launch.conflicted && !!window && (window.start > interval.end
+        || interval.after !== undefined && window.end < interval.after);
     });
   }
 
@@ -1436,7 +1964,8 @@ export class BackgroundWorkers {
       ...(prepared.agent ? { subagentType: prepared.agent } : {}),
       ...(prepared.prompt ? { prompt: prepared.prompt } : {}),
       status: "running",
-      ...(this.births.get(child)?.contradicted || !this.budget.executionHistory?.has(child) && this.ended.get(child)?.some(end => end >= startedAt) || [...this.notices.values()].some(notice => notice.discarded?.parent === parent
+      // A session whose own ends are unknown cannot verify a launch on it.
+      ...(this.births.get(child)?.contradicted || !shell && this.ownEndsUnknown(child) || !this.budget.executionHistory?.has(child) && this.ended.get(child)?.some(end => end >= startedAt) || [...this.notices.values()].some(notice => notice.discarded?.parent === parent
         && notice.discarded.worker === child && (notice.discarded.at === undefined || notice.discarded.at >= startedAt)) ? { stateUncertain: true } : {}),
     };
     const superseded: NormalizedProviderUpdate[] = [];
@@ -1449,7 +1978,10 @@ export class BackgroundWorkers {
       this.uncertain(previous);
       superseded.push({ kind: "upsert", item: previous.item });
     }
-    const started = !shell ? this.terminalProofs.get(child)?.started : undefined;
+    // Retained starts recognize replay/counterproof but cannot bind positive
+    // activity to a launcher observed on a later subscription.
+    const boundaryStart = !shell ? this.terminalProofs.get(child)?.started : undefined;
+    const started = boundaryStart?.retired ? undefined : boundaryStart;
     const evidence: WorkerOccurrenceEvidence = Object.freeze({ key: digest(JSON.stringify([parent, child, taskId, fact.workerType, fact.message, fact.created, fact.ran, fact.completed, fact.reportedCompletion])), parent, worker: child, kind: fact.workerType, taskId, launches: Object.freeze([fact]),
       ...(started && !started.occurrence ? { executionStart: started.proof } : {}), ...(item.stateUncertain ? { uncertain: true } : {}) });
     if (started && !started.occurrence) this.set(this.terminalProofs, child, { ...this.terminalProofs.get(child)!, started: { ...started, occurrence: evidence.key } });
@@ -1462,7 +1994,7 @@ export class BackgroundWorkers {
     }
     const reports = [...this.unmatched.entries()].filter(([, result]) => result.parent === parent && result.worker === child && result.item.taskType === item.taskType);
     const pending = reports.filter(([, result]) => result.correlatable && result.item.createdAt >= item.createdAt
-      && (shell || this.historicalReportCompatible(child, [fact], result.item.terminalReportedAt)));
+      && (shell || this.historicalReportCompatible(child, [fact], result.item.terminalReportedAt, result.item.summary)));
     // Shell reports alone cannot establish background membership. Once a
     // scoped launch proves it, reveal any reports which cannot safely join it.
     const revealed: NormalizedProviderUpdate[] = [];
@@ -1497,7 +2029,7 @@ export class BackgroundWorkers {
     if (this.recoveryOnly) {
       return prepared ? [] : undefined;
     }
-    this.observeNotification(parent, id, prepared, proof);
+    this.observeNotification(parent, id, prepared, proof, terminalReportedAt);
     if (this.recoveryOnly) return prepared ? [] : undefined;
     if (prepared?.userShell && prepared.worker && this.isUserShell(parent, prepared.worker)) return [];
     const result = prepared ? this.foldNotification(parent, id, prepared, at, terminalReportedAt, proof) : undefined;
@@ -1520,8 +2052,9 @@ export class BackgroundWorkers {
     if (this.notices.has(key)) return [];
     const occurrences = [...this.tasks.values()].filter(task => task.parent === parent && task.worker === child && task.item.taskType === (shell ? "shell" : "agent"));
     const undatedReuse = shell && reportClock.terminalReportedAt === undefined && occurrences.length > 1;
-    const candidates = occurrences.filter(task => task.item.status === "running" && (undatedReuse || task.item.createdAt <= at));
-    const ambiguousAdmission = !shell && candidates.some(task => !this.historicalReportCompatible(child, task.evidence.launches, reportClock.terminalReportedAt));
+    const candidates = occurrences.filter(task => task.item.status === "running" && (undatedReuse || task.item.createdAt <= at)
+      && (shell || !this.historicalReportSeparated(child, task.evidence.launches, summary, reportClock.terminalReportedAt)));
+    const ambiguousAdmission = !shell && candidates.some(task => !this.historicalReportCompatible(child, task.evidence.launches, reportClock.terminalReportedAt, summary));
     if (candidates.length !== 1 || undatedReuse || ambiguousAdmission) {
       const taskId = notificationTaskId;
       // This names the admitted native inbox record, not a launch occurrence.
@@ -1561,9 +2094,12 @@ export class BackgroundWorkers {
     if (entries <= maxEntries && this.bytes <= maxBytes) return;
     // Never evict only an old occurrence or its notice tombstone: the next
     // delayed result could then settle a newer run. On saturation the stream
-    // becomes a trigger for scoped authoritative recovery until reconnect.
-    // No provider mutation or polling is introduced by this fallback.
+    // becomes a trigger for scoped authoritative recovery until reconnect; the
+    // next subscription starts a fresh ledger and recovery reads supply
+    // authority from then on. No provider mutation or polling is introduced.
     collections.forEach(values => values.clear());
+    this.preOwnership = undefined;
+    this.preOwnershipFull.clear(); this.preOwnershipCompacted.clear();
     this.sizes.clear();
     this.bytes = 62;
     this.boundaries = 0;
