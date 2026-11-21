@@ -61,3 +61,39 @@ test("non-Markdown code views show line numbers; Markdown fenced blocks do not",
   await expect(page.locator("#preview pre .uatu-cl")).toHaveCount(0);
   await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(0);
 });
+
+test("Markdown code block copy omits the trailing newline while preserving multiline breaks", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        "commands.md": [
+          "# Commands",
+          "",
+          "```bash",
+          "git status",
+          "```",
+          "",
+          "```bash",
+          "git add .",
+          "git commit -m \"save\"",
+          "```",
+          "",
+        ].join("\n"),
+      },
+    },
+  });
+  await page.goto("/");
+  await installClipboardMock(page);
+  await openTreeFile(page, "commands.md");
+
+  const buttons = page.locator("#preview pre .code-copy");
+  await expect(buttons).toHaveCount(2);
+
+  await buttons.nth(0).click();
+  await expect(buttons.nth(0)).toHaveText("Copied!");
+  expect(await readClipboardMock(page)).toBe("git status");
+
+  await buttons.nth(1).click();
+  await expect(buttons.nth(1)).toHaveText("Copied!");
+  expect(await readClipboardMock(page)).toBe("git add .\ngit commit -m \"save\"");
+});

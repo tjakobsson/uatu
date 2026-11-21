@@ -78,6 +78,20 @@ export function applySourceWrap(container: HTMLElement, wrap: boolean): void {
   });
 }
 
+// Markdown fenced and indented code blocks end with a parser-synthesized
+// trailing line break inside `<code>`. Strip that single terminator so
+// copying a command does not execute it on paste, while preserving internal
+// line breaks, intentional blank trailing lines, verbatim whole-file source
+// views (`pre.uatu-source-pre`), and AsciiDoc blocks (`.listingblock` /
+// `.literalblock`, where Asciidoctor does not synthesize a trailing newline).
+export function codeBlockCopyText(pre: HTMLPreElement, code: Element): string {
+  const raw = code.textContent ?? "";
+  if (pre.classList.contains("uatu-source-pre") || pre.closest(".listingblock, .literalblock")) {
+    return raw;
+  }
+  return raw.replace(/\r?\n$/, "");
+}
+
 export function attachCopyButtons(container: HTMLElement) {
   const blocks = container.querySelectorAll<HTMLPreElement>("pre");
   blocks.forEach(pre => {
@@ -98,7 +112,7 @@ export function attachCopyButtons(container: HTMLElement) {
 
     button.addEventListener("click", async event => {
       event.preventDefault();
-      const text = code.textContent ?? "";
+      const text = codeBlockCopyText(pre, code);
       if (await writeClipboardText(text)) {
         flashCopyButton(button, "Copied!", "is-copied");
       } else {
