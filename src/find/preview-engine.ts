@@ -30,7 +30,6 @@ export function createPreviewEngine(
   config: {
     label?: string;
     revealSurface?: () => void;
-    scrollRoot?: () => HTMLElement;
     prepareIndex?: () => void;
     prepareReveal?: (range: Range) => void;
     target?: () => HTMLElement;
@@ -53,7 +52,7 @@ export function createPreviewEngine(
   const revealMatch = (range: Range): void => {
     config.prepareReveal?.(range);
     if (!config.revealMatch?.(range)) {
-      revealRange(range, config.scrollRoot?.() ?? previewScrollRoot());
+      revealRange(range, previewScrollRoot());
     }
   };
 

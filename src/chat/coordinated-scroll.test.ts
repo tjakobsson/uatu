@@ -2141,13 +2141,59 @@ describe("coordinated scrolling", () => {
     f.event("scroll");
     expect(f.anchor.isPinned()).toBe(true);
   });
-  test("revealBy(0) preserves following when idle at the bottom with no catch-up", () => {
+  test("revealBy(0) preserves following when idle at the bottom with no catch-up, including fractional DPR", () => {
     const f = fixture(() => "smooth");
     f.owner.request(); f.flush(0);
     expect(f.element.scrollTop).toBe(300);
     expect(f.anchor.isPinned()).toBe(true);
-    f.owner.revealBy(0);
+    expect(f.owner.revealBy(0)).toBe(true);
     expect(f.anchor.isPinned()).toBe(true);
     expect(f.element.scrollTop).toBe(300);
+
+    // Browser zoom or fractional DPR can leave settled scrollTop slightly under integer limit.
+    f.grow(1000);
+    f.move(699.1);
+    expect(f.owner.revealBy(0)).toBe(true);
+    expect(f.anchor.isPinned()).toBe(true);
+    expect(f.element.scrollTop).toBe(699.1);
+  });
+  test("revealBy skips writing during elastic overscroll when clamping opposes delta, but moves toward the match", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.grow(1000); // limit = 700
+    f.move(710);
+    f.writes.length = 0;
+
+    // Overscrolled past bottom, match slightly below: clamping to 700 would move upward.
+    expect(f.owner.revealBy(2)).toBe(true);
+    expect(f.writes).toEqual([]);
+    expect(f.element.scrollTop).toBe(710);
+    expect(f.anchor.isPinned()).toBe(true);
+
+    // Overscrolled above top, match further above: clamping to 0 would move downward.
+    f.move(-10);
+    f.owner.pause();
+    f.writes.length = 0;
+    expect(f.owner.revealBy(-2)).toBe(true);
+    expect(f.writes).toEqual([]);
+    expect(f.element.scrollTop).toBe(-10);
+
+    // Overscrolled past bottom, match genuinely above: moves toward the match and pauses.
+    f.owner.latest(); f.flush(20);
+    f.move(710);
+    f.writes.length = 0;
+    expect(f.owner.revealBy(-20)).toBe(true);
+    expect(f.writes).toEqual([690]);
+    expect(f.element.scrollTop).toBe(690);
+    expect(f.anchor.isPinned()).toBe(false);
+  });
+  test("revealBy returns false without mutating when the owner is inactive", () => {
+    const f = fixture(() => "smooth");
+    f.owner.request(); f.flush(0);
+    f.hide();
+    f.writes.length = 0;
+    expect(f.owner.revealBy(-100)).toBe(false);
+    expect(f.writes).toEqual([]);
+    expect(f.anchor.isPinned()).toBe(true);
   });
 });
