@@ -50,6 +50,10 @@ type RevealResolver = () => HTMLElement | null | undefined;
 
 const owners = new WeakMap<HTMLElement, CoordinatedScrollOwner>();
 
+export function coordinatedScrollOwner(scroller: HTMLElement): CoordinatedScrollOwner | undefined {
+  return owners.get(scroller);
+}
+
 /** The only automatic position writer for a managed scroller. */
 export class CoordinatedScrollOwner {
   private frame: number | null = null;
@@ -526,9 +530,39 @@ export class CoordinatedScrollOwner {
   pause(): void {
     if (!this.active()) return;
     this.cancel();
+    this.pauseAtCurrent(true);
+  }
+
+  /**
+   * Apply a deliberate navigation scroll (such as Find revealing a match)
+   * through this owner so any active catch-up animation stops immediately,
+   * following pauses at the revealed position, and the resulting native
+   * scroll event is recognized as our own placement rather than downward
+   * catch-up or near-bottom arrival.
+   *
+   * When the match is already in view and no catch-up is pending or in flight,
+   * leaves follow state untouched (matching `resolveReveal`).
+   */
+  revealBy(delta: number): void {
+    if (!this.active()) return;
+    const limit = Math.max(0, this.scroller.scrollHeight - this.scroller.clientHeight);
+    const catchingUp = this.motion !== null
+      || (this.options.anchor.isPinned() && limit - this.scroller.scrollTop > 0.5);
+    const next = Math.abs(delta) > 0.5
+      ? Math.max(0, Math.min(this.scroller.scrollTop + delta, limit))
+      : this.scroller.scrollTop;
+    const moved = Math.abs(this.scroller.scrollTop - next) > 0.5;
+    if (!moved && !catchingUp) return;
+    this.cancel();
+    this.positioned = true;
+    if (moved) this.scroller.scrollTop = next;
+    this.pauseAtCurrent(false);
+  }
+
+  private pauseAtCurrent(upwardPending: boolean): void {
     const geometry = this.options.measure(!this.pendingPosition, false);
     this.options.anchor.pause(geometry);
-    this.upwardPending = true;
+    this.upwardPending = upwardPending;
     this.previous = geometry;
     this.readerChose();
     this.options.onChange?.();
