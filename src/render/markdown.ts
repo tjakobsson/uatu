@@ -76,6 +76,19 @@ export type RenderedMarkdown = {
   metadata: DocumentMetadata | undefined;
 };
 
+const RAW_TEXT_CONTAINERS = new Set([
+  "script",
+  "style",
+  "textarea",
+  "title",
+  "xmp",
+  "iframe",
+  "noembed",
+  "noframes",
+  "plaintext",
+  "noscript",
+]);
+
 export function renderMarkdownToHtml(source: string): RenderedMarkdown {
   const metadata = extractMarkdownMetadata(source);
 
@@ -87,8 +100,24 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
   // parser succeeded.
   const { html: rawHtml, attribute } = compileMarkedMarkdown(source);
 
-  const tree = fromHtml(rawHtml, { fragment: true });
-  extractMarkdownCodeMarkers(tree, attribute);
+  let tree = fromHtml(rawHtml, { fragment: true });
+  const inertAnnotation = new RegExp(` ${attribute}="1"`, "g");
+  const inertInsertions: { start: number; end: number }[] = [];
+  extractMarkdownCodeMarkers(tree, attribute, rawHtml, inertAnnotation, inertInsertions);
+  if (inertInsertions.length) {
+    // Raw-text spans do not overlap. One bounded reparse restores their exact
+    // literal/decoded text without temporary markers, including inside <noscript>.
+    const segments: string[] = [];
+    let previous = 0;
+    for (const insertion of inertInsertions.sort((a, b) => a.start - b.start)) {
+      if (insertion.start < previous) continue;
+      segments.push(rawHtml.slice(previous, insertion.start));
+      previous = insertion.end;
+    }
+    segments.push(rawHtml.slice(previous));
+    tree = fromHtml(segments.join(""), { fragment: true });
+    extractMarkdownCodeMarkers(tree, attribute, rawHtml, inertAnnotation);
+  }
   const safe = sanitize(tree, markdownSanitizeSchema);
   if (safe.type === "root") applyMarkdownCodeAttribute(safe);
   markExternalAnchors(safe);
@@ -155,15 +184,31 @@ function compileMarkedMarkdown(source: string): { html: string; attribute: strin
   return { html, attribute };
 }
 
-function extractMarkdownCodeMarkers(parent: { children: HtmlNode[] }, attribute: string): void {
+function extractMarkdownCodeMarkers(
+  parent: { children: HtmlNode[]; tagName?: string },
+  attribute: string,
+  rawHtml: string,
+  inertAnnotation: RegExp,
+  inertInsertions?: { start: number; end: number }[],
+): void {
   for (const node of parent.children) {
+    // Separate HTML tokens can land inside a raw-text container such as
+    // <noscript>. Remove temporary markers from raw source spans, not decoded
+    // text, so authored character references remain untouched.
+    if (inertInsertions && node.type === "text" && RAW_TEXT_CONTAINERS.has(parent.tagName ?? "")
+      && node.position?.start.offset !== undefined && node.position.end.offset !== undefined) {
+      const start = node.position.start.offset;
+      for (const match of rawHtml.slice(start, node.position.end.offset).matchAll(inertAnnotation)) {
+        inertInsertions.push({ start: start + match.index!, end: start + match.index! + match[0].length });
+      }
+    }
     if (node.type !== "element") continue;
     if (node.tagName === "pre" && node.properties[attribute] !== undefined) {
       node.data ??= { position: {} };
       node.data.markdownCodeBlock = true;
     }
     delete node.properties[attribute];
-    extractMarkdownCodeMarkers(node, attribute);
+    extractMarkdownCodeMarkers(node, attribute, rawHtml, inertAnnotation, inertInsertions);
   }
 }
 

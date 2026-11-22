@@ -56,6 +56,12 @@ Visit https://example.com and ~~remove~~ text.`);
     expect(rawHtml).not.toContain("data-uatu-markdown-code");
   });
 
+  test("strips temporary code-block markers inside raw-text HTML spans like <noscript>", () => {
+    const { html } = renderMarkdownToHtml("<noscript>\n\n```js\nconst x = 1;\n```\n\n</noscript>\n\n```js\nconst y = 2;\n```\n");
+    expect(html).not.toContain("uatu-md-code-");
+    expect(html).toContain('<pre data-uatu-markdown-code><code class="hljs language-js">');
+  });
+
   test("passes through GitHub-style inline HTML blocks (e.g. centered README hero)", () => {
     const { html } = renderMarkdownToHtml(
       `<p align="center">\n  <img src="./uatu-logo.svg" alt="uatu logo" width="128" />\n</p>\n\n# uatu\n`,
